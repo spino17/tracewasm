@@ -2,6 +2,7 @@ use crate::parser::TraceWasmParser;
 use anyhow::Result;
 use std::fs;
 
+pub mod instruction;
 pub mod parser;
 
 fn main() -> Result<(), anyhow::Error> {
