@@ -1,0 +1,7 @@
+[workspace]
+members = ["tracewasm-core", "tracewasm-scratch"]
+
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1.0.103"

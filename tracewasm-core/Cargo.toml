@@ -1,0 +1,9 @@
+[package]
+name = "tracewasm-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wasmparser = "0.253.0"
+anyhow = { workspace = true }
+walrus = "0.26.4"
