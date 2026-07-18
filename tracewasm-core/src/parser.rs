@@ -21,26 +21,48 @@ pub struct MemoryIndex(pub u32);
 pub struct TagIndex(pub u32);
 
 pub struct Module {
-    pub func_types: Box<[FuncType]>, // ordering of type indices
-    pub func_decls: Box<[FuncDecl]>, // ordering of func indices. Imports are included
+    pub func_types: Box<[FuncType]>,
+    pub func_decls: Box<[FuncDecl]>,
+    pub tables: Box<[Table]>,
+    pub memories: Box<[MemoryType]>,
     pub globals: Box<[Global]>,
     pub exports: Box<[Export]>,
-    pub memories: Box<[MemoryType]>,
     pub start_section: FuncIndex,
+    pub elements: Box<[Element]>,
+    pub data_count: u32,
+    pub code_sec_count: u32,
+    pub code_sec_size: u32,
+    pub imported_func_count: u32,
+    pub func_bodies: Box<[Box<[Instruction]>]>,
+}
+
+pub struct FuncBody(pub Box<[Instruction]>);
+
+pub struct Data {
+    pub kind: DataKind,
+    pub data: Box<[u8]>,
+}
+
+pub enum DataKind {
+    Passive,
+    Active {
+        memory_index: MemoryIndex,
+        offset_expr: Box<[Instruction]>,
+    },
 }
 
 pub enum ElementKind {
     Passive,
     Active {
         table_index: Option<TableIndex>,
-        offset_expr: Instruction,
+        offset_expr: Box<[Instruction]>,
     },
     Declared,
 }
 
 pub enum ElementItems {
     Functions(Box<[FuncIndex]>),
-    Expressions(RefType, Box<[Instruction]>),
+    Expressions(RefType, Box<[Box<[Instruction]>]>),
 }
 
 pub struct Element {
@@ -50,7 +72,7 @@ pub struct Element {
 
 pub enum TableInit {
     RefNull,
-    Expr(Instruction),
+    Expr(Box<[Instruction]>),
 }
 
 pub struct Table {
@@ -74,7 +96,7 @@ pub struct Export {
 
 pub struct Global {
     pub ty: GlobalType,
-    pub val: Instruction,
+    pub val: Box<[Instruction]>,
 }
 
 pub struct FuncType {
@@ -90,7 +112,6 @@ pub enum FuncKind {
     },
 }
 
-// e.g. (import "env" "_call" (func $_ZN13async_weil_rs6future5_call17hfde84aebd9442f2fE (;0;) (type 5)))
 pub struct FuncDecl {
     pub kind: FuncKind,
     pub ty_index: FuncTyIndex,
@@ -100,12 +121,18 @@ impl TraceWasmParser {
     pub fn parse(buf: &[u8]) -> Result<Module, anyhow::Error> {
         let mut func_types = vec![];
         let mut func_decls = vec![];
-        let mut globals = vec![];
-        let mut exports = vec![];
         let mut tables = vec![];
         let mut memories = vec![];
+        let mut globals = vec![];
+        let mut exports = vec![];
         let mut elements = vec![];
+        let mut datas = vec![];
         let mut start_section = FuncIndex(0);
+        let mut imported_func_count = 0;
+        let mut data_count = 0;
+        let mut code_sec_count = 0;
+        let mut code_sec_size = 0;
+        let mut func_bodies = vec![];
 
         for payload in Parser::new(0).parse_all(buf) {
             let payload = payload?;
@@ -149,6 +176,8 @@ impl TraceWasmParser {
                             ty_index,
                         });
                     }
+
+                    imported_func_count = func_decls.len() as u32;
                 }
                 FunctionSection(func_sec) => {
                     let indices = func_sec.into_iter();
@@ -172,11 +201,12 @@ impl TraceWasmParser {
 
                         let table_init = match init {
                             wasmparser::TableInit::RefNull => TableInit::RefNull,
-                            wasmparser::TableInit::Expr(const_expr) => {
-                                TableInit::Expr(Instruction::from_operator(
-                                    const_expr.get_operators_reader().read()?,
-                                )?)
-                            }
+                            wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
+                                Instruction::emit_instruction_from_operator_reader(
+                                    const_expr.get_operators_reader(),
+                                )?
+                                .into_boxed_slice(),
+                            ),
                         };
 
                         tables.push(Table {
@@ -200,12 +230,13 @@ impl TraceWasmParser {
                     for global in global_iter {
                         let global = global?;
                         let global_ty = global.ty;
-                        let mut operator_reader = global.init_expr.get_operators_reader();
-                        let operator = operator_reader.read()?;
 
                         globals.push(Global {
                             ty: global_ty,
-                            val: Instruction::from_operator(operator)?,
+                            val: Instruction::emit_instruction_from_operator_reader(
+                                global.init_expr.get_operators_reader(),
+                            )?
+                            .into_boxed_slice(),
                         });
                     }
                 }
@@ -252,9 +283,11 @@ impl TraceWasmParser {
                                     offset_expr,
                                 } => ElementKind::Active {
                                     table_index: table_index.map(|i| TableIndex(i)),
-                                    offset_expr: Instruction::from_operator(
-                                        offset_expr.get_operators_reader().read()?,
-                                    )?,
+                                    offset_expr:
+                                        Instruction::emit_instruction_from_operator_reader(
+                                            offset_expr.get_operators_reader(),
+                                        )?
+                                        .into_boxed_slice(),
                                 },
                             },
                             items: match elem.items {
@@ -275,9 +308,12 @@ impl TraceWasmParser {
 
                                     for expr in iter {
                                         let expr = expr?;
-                                        exprs.push(Instruction::from_operator(
-                                            expr.get_operators_reader().read()?,
-                                        )?);
+                                        exprs.push(
+                                            Instruction::emit_instruction_from_operator_reader(
+                                                expr.get_operators_reader(),
+                                            )?
+                                            .into_boxed_slice(),
+                                        );
                                     }
 
                                     ElementItems::Expressions(ref_ty, exprs.into_boxed_slice())
@@ -286,6 +322,53 @@ impl TraceWasmParser {
                         });
                     }
                 }
+                DataCountSection {
+                    count,
+                    range: _range,
+                } => {
+                    data_count = count;
+                }
+                DataSection(data_sec) => {
+                    let data_iter = data_sec.into_iter();
+
+                    for data in data_iter {
+                        let data = data?;
+
+                        datas.push(Data {
+                            kind: match data.kind {
+                                wasmparser::DataKind::Passive => DataKind::Passive,
+                                wasmparser::DataKind::Active {
+                                    memory_index,
+                                    offset_expr,
+                                } => DataKind::Active {
+                                    memory_index: MemoryIndex(memory_index),
+                                    offset_expr:
+                                        Instruction::emit_instruction_from_operator_reader(
+                                            offset_expr.get_operators_reader(),
+                                        )?
+                                        .into_boxed_slice(),
+                                },
+                            },
+                            data: data.data.to_vec().into_boxed_slice(),
+                        });
+                    }
+                }
+                CodeSectionStart {
+                    count,
+                    range: _range,
+                    size,
+                } => {
+                    code_sec_count = count;
+                    code_sec_size = size;
+                }
+                CodeSectionEntry(code_sec_entry) => {
+                    let instructions = Instruction::emit_instruction_from_operator_reader(
+                        code_sec_entry.get_operators_reader()?,
+                    )?
+                    .into_boxed_slice();
+
+                    func_bodies.push(instructions);
+                }
                 _ => continue,
             }
         }
@@ -293,10 +376,17 @@ impl TraceWasmParser {
         Ok(Module {
             func_types: func_types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
+            tables: tables.into_boxed_slice(),
+            memories: memories.into_boxed_slice(),
             globals: globals.into_boxed_slice(),
             exports: exports.into_boxed_slice(),
-            memories: memories.into_boxed_slice(),
+            elements: elements.into_boxed_slice(),
             start_section,
+            data_count,
+            code_sec_count,
+            code_sec_size,
+            imported_func_count,
+            func_bodies: func_bodies.into_boxed_slice(),
         })
     }
 }

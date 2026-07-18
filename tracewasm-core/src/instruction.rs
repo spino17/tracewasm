@@ -1,5 +1,5 @@
 use crate::parser::{FuncIndex, GlobalIndex};
-use wasmparser::{Ieee32, Ieee64, Operator};
+use wasmparser::{Ieee32, Ieee64, Operator, OperatorsReader};
 
 pub enum Instruction {
     I32Const { value: i32 },
@@ -12,7 +12,7 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    pub fn from_operator(operator: Operator<'_>) -> Result<Instruction, anyhow::Error> {
+    pub(crate) fn from_operator(operator: Operator<'_>) -> Result<Instruction, anyhow::Error> {
         let instruction = match operator {
             Operator::I32Const { value } => Instruction::I32Const { value },
             Operator::I64Const { value } => Instruction::I64Const { value },
@@ -29,5 +29,18 @@ impl Instruction {
         };
 
         Ok(instruction)
+    }
+
+    pub(crate) fn emit_instruction_from_operator_reader(
+        mut operator_reader: OperatorsReader<'_>,
+    ) -> Result<Vec<Instruction>, anyhow::Error> {
+        let mut instructions = vec![];
+
+        while !operator_reader.eof() {
+            let operator = operator_reader.read()?;
+            instructions.push(Instruction::from_operator(operator)?);
+        }
+
+        Ok(instructions)
     }
 }
