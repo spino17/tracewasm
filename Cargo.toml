@@ -6,3 +6,4 @@ resolver = "3"
 [workspace.dependencies]
 anyhow = "1.0.103"
 thiserror = "2.0.19"
+rustc-hash = "2.1.3"

@@ -1,4 +1,4 @@
-use crate::parser::{FuncIndex, GlobalIndex};
+use crate::ast::{FuncIndex, GlobalIndex};
 use wasmparser::{Ieee32, Ieee64, Operator, OperatorsReader};
 
 pub enum Instruction {

@@ -1,152 +1,31 @@
-use crate::{error::TraceWasmError, instruction::Instruction};
-use anyhow::Result;
-use wasmparser::{
-    Encoding, ExternalKind, GlobalType, MemoryType, Parser, Payload::*, RefType, TableType,
-    TypeRef, ValType,
+use crate::{
+    ast::{
+        CustomSection, CustomSectionKind, Data, DataKind, Element, ElementItems, ElementKind,
+        Export, ExportKind, FuncDecl, FuncExactIndex, FuncIndex, FuncKind, FuncType, Global,
+        GlobalIndex, IndirectNameMap, MemoryIndex, Module, Name, NameMap, Table, TableIndex,
+        TableInit, TagIndex, TyIndex,
+    },
+    error::TraceWasmError,
+    instruction::Instruction,
 };
+use anyhow::Result;
+use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef};
 
 pub struct TraceWasmParser;
 
-#[derive(Clone, Copy)]
-pub struct FuncIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct FuncExactIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct FuncTyIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct GlobalIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct TableIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct MemoryIndex(pub u32);
-#[derive(Clone, Copy)]
-pub struct TagIndex(pub u32);
-
-pub struct Module {
-    pub func_types: Box<[FuncType]>,
-    pub func_decls: Box<[FuncDecl]>,
-    pub tables: Box<[Table]>,
-    pub memories: Box<[MemoryType]>,
-    pub globals: Box<[Global]>,
-    pub exports: Box<[Export]>,
-    pub start_section: FuncIndex,
-    pub elements: Box<[Element]>,
-    pub data_count: u32,
-    pub code_sec_count: u32,
-    pub code_sec_size: u32,
-    pub imported_func_count: u32,
-    pub func_bodies: Box<[Box<[Instruction]>]>,
-    pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
-    pub custom_sections: Box<[CustomSection]>,
-}
-
-pub struct Name {}
-
-pub enum CustomSectionKind {
-    Name(Box<[Name]>),
-    Others(Box<[u8]>),
-    Unknown(Box<[u8]>),
-}
-
-pub struct CustomSection {
-    pub name: String,
-    pub kind: CustomSectionKind,
-}
-
-pub struct FuncBody(pub Box<[Instruction]>);
-
-pub struct Data {
-    pub kind: DataKind,
-    pub data: Box<[u8]>,
-}
-
-pub enum DataKind {
-    Passive,
-    Active {
-        memory_index: MemoryIndex,
-        offset_expr: Box<[Instruction]>,
-    },
-}
-
-pub enum ElementKind {
-    Passive,
-    Active {
-        table_index: Option<TableIndex>,
-        offset_expr: Box<[Instruction]>,
-    },
-    Declared,
-}
-
-pub enum ElementItems {
-    Functions(Box<[FuncIndex]>),
-    Expressions(RefType, Box<[Box<[Instruction]>]>),
-}
-
-pub struct Element {
-    pub kind: ElementKind,
-    pub items: ElementItems,
-}
-
-pub enum TableInit {
-    RefNull,
-    Expr(Box<[Instruction]>),
-}
-
-pub struct Table {
-    pub ty: TableType,
-    pub init: TableInit,
-}
-
-pub enum ExportKind {
-    Func(FuncIndex),
-    Table(TableIndex),
-    Memory(MemoryIndex),
-    Global(GlobalIndex),
-    Tag(TagIndex),
-    FuncExact(FuncExactIndex),
-}
-
-pub struct Export {
-    pub name: String,
-    pub kind: ExportKind,
-}
-
-pub struct Global {
-    pub ty: GlobalType,
-    pub val: Box<[Instruction]>,
-}
-
-pub struct FuncType {
-    pub params: Box<[ValType]>,
-    pub results: Box<[ValType]>,
-}
-
-pub enum FuncKind {
-    Local,
-    Imported {
-        module_name: String,
-        imported_func_name: String,
-    },
-}
-
-pub struct FuncDecl {
-    pub kind: FuncKind,
-    pub ty_index: FuncTyIndex,
-}
-
 impl TraceWasmParser {
     pub fn parse(buf: &[u8]) -> Result<Module, TraceWasmError> {
-        let mut func_types = vec![];
+        let mut types = vec![];
         let mut func_decls = vec![];
         let mut tables = vec![];
         let mut memories = vec![];
         let mut globals = vec![];
         let mut exports = vec![];
         let mut elements = vec![];
-        let mut datas = vec![];
         let mut start_section = FuncIndex(0);
         let mut imported_func_count = 0;
         let mut data_count = 0;
+        let mut datas = vec![];
         let mut code_sec_count = 0;
         let mut code_sec_size = 0;
         let mut func_bodies = vec![];
@@ -167,14 +46,14 @@ impl TraceWasmParser {
                     }
                 }
                 TypeSection(ty_sec) => {
-                    let func_types_iter = ty_sec.into_iter_err_on_gc_types();
+                    let types_iter = ty_sec.into_iter_err_on_gc_types();
 
-                    for ty in func_types_iter {
+                    for ty in types_iter {
                         let ty = ty?;
                         let params = ty.params();
                         let results = ty.results();
 
-                        func_types.push(FuncType {
+                        types.push(FuncType {
                             params: params.to_vec().into_boxed_slice(),
                             results: results.to_vec().into_boxed_slice(),
                         });
@@ -189,7 +68,7 @@ impl TraceWasmParser {
                         let imported_func_name = import.name.to_string();
 
                         let ty_index = if let TypeRef::Func(ty) = import.ty {
-                            FuncTyIndex(ty)
+                            TyIndex(ty)
                         } else {
                             return Err(TraceWasmError::Unsupported(
                                 "non-function imports".to_string(),
@@ -215,7 +94,7 @@ impl TraceWasmParser {
 
                         func_decls.push(FuncDecl {
                             kind: FuncKind::Local,
-                            ty_index: FuncTyIndex(index),
+                            ty_index: TyIndex(index),
                         });
                     }
                 }
@@ -403,13 +282,60 @@ impl TraceWasmParser {
 
                     let kind = match custom_sec.as_known() {
                         wasmparser::KnownCustom::Name(reader) => {
-                            let names: Vec<Name> = vec![];
+                            let mut names: Vec<Name> = vec![];
 
                             for name in reader {
                                 let name = name?;
 
-                                // construct from name to Name
-                                todo!()
+                                let name = match name {
+                                    wasmparser::Name::Module {
+                                        name,
+                                        name_range: _name_range,
+                                    } => Name::Module(name.to_string()),
+                                    wasmparser::Name::Function(seq) => {
+                                        Name::Function(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Local(seq) => Name::Local(
+                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
+                                    ),
+                                    wasmparser::Name::Label(seq) => Name::Label(
+                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
+                                    ),
+                                    wasmparser::Name::Type(seq) => {
+                                        Name::Type(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Table(seq) => {
+                                        Name::Table(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Memory(seq) => {
+                                        Name::Memory(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Global(seq) => {
+                                        Name::Global(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Element(seq) => {
+                                        Name::Element(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Data(seq) => {
+                                        Name::Data(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Field(seq) => Name::Field(
+                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
+                                    ),
+                                    wasmparser::Name::Tag(seq) => {
+                                        Name::Tag(NameMap::from_wasmparser_name_map(seq)?)
+                                    }
+                                    wasmparser::Name::Unknown {
+                                        ty,
+                                        data,
+                                        range: _range,
+                                    } => Name::Unknown {
+                                        ty,
+                                        data: data.to_vec().into_boxed_slice(),
+                                    },
+                                };
+
+                                names.push(name);
                             }
 
                             CustomSectionKind::Name(names.into_boxed_slice())
@@ -437,7 +363,7 @@ impl TraceWasmParser {
         }
 
         Ok(Module {
-            func_types: func_types.into_boxed_slice(),
+            types: types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
             tables: tables.into_boxed_slice(),
             memories: memories.into_boxed_slice(),
@@ -446,6 +372,7 @@ impl TraceWasmParser {
             elements: elements.into_boxed_slice(),
             start_section,
             data_count,
+            datas: datas.into_boxed_slice(),
             code_sec_count,
             code_sec_size,
             imported_func_count,
