@@ -1,8 +1,10 @@
-use crate::instruction::Instruction;
+use crate::{error::TraceWasmError, instruction::Instruction};
 use anyhow::Result;
 use wasmparser::{
-    ExternalKind, GlobalType, MemoryType, Parser, Payload::*, RefType, TableType, TypeRef, ValType,
+    Encoding, ExternalKind, GlobalType, MemoryType, Parser, Payload::*, RefType, TableType,
+    TypeRef, ValType,
 };
+
 pub struct TraceWasmParser;
 
 #[derive(Clone, Copy)]
@@ -34,6 +36,21 @@ pub struct Module {
     pub code_sec_size: u32,
     pub imported_func_count: u32,
     pub func_bodies: Box<[Box<[Instruction]>]>,
+    pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
+    pub custom_sections: Box<[CustomSection]>,
+}
+
+pub struct Name {}
+
+pub enum CustomSectionKind {
+    Name(Box<[Name]>),
+    Others(Box<[u8]>),
+    Unknown(Box<[u8]>),
+}
+
+pub struct CustomSection {
+    pub name: String,
+    pub kind: CustomSectionKind,
 }
 
 pub struct FuncBody(pub Box<[Instruction]>);
@@ -118,7 +135,7 @@ pub struct FuncDecl {
 }
 
 impl TraceWasmParser {
-    pub fn parse(buf: &[u8]) -> Result<Module, anyhow::Error> {
+    pub fn parse(buf: &[u8]) -> Result<Module, TraceWasmError> {
         let mut func_types = vec![];
         let mut func_decls = vec![];
         let mut tables = vec![];
@@ -133,11 +150,22 @@ impl TraceWasmParser {
         let mut code_sec_count = 0;
         let mut code_sec_size = 0;
         let mut func_bodies = vec![];
+        let mut unknown_sections = vec![];
+        let mut custom_sections = vec![];
 
         for payload in Parser::new(0).parse_all(buf) {
             let payload = payload?;
 
             match payload {
+                Version {
+                    num: _num,
+                    encoding,
+                    range: _range,
+                } => {
+                    if encoding == Encoding::Module {
+                        return Err(TraceWasmError::Unsupported("component model".to_string()));
+                    }
+                }
                 TypeSection(ty_sec) => {
                     let func_types_iter = ty_sec.into_iter_err_on_gc_types();
 
@@ -163,8 +191,8 @@ impl TraceWasmParser {
                         let ty_index = if let TypeRef::Func(ty) = import.ty {
                             FuncTyIndex(ty)
                         } else {
-                            return Err(anyhow::Error::msg(
-                                "non-function imports are not allowed in TraceWasm",
+                            return Err(TraceWasmError::Unsupported(
+                                "non-function imports".to_string(),
                             ));
                         };
 
@@ -224,6 +252,7 @@ impl TraceWasmParser {
                         memories.push(mem);
                     }
                 }
+                TagSection(_) => {}
                 GlobalSection(global_sec) => {
                     let global_iter = global_sec.into_iter();
 
@@ -369,7 +398,41 @@ impl TraceWasmParser {
 
                     func_bodies.push(instructions);
                 }
-                _ => continue,
+                CustomSection(custom_sec) => {
+                    let name = custom_sec.name().to_string();
+
+                    let kind = match custom_sec.as_known() {
+                        wasmparser::KnownCustom::Name(reader) => {
+                            let names: Vec<Name> = vec![];
+
+                            for name in reader {
+                                let name = name?;
+
+                                // construct from name to Name
+                                todo!()
+                            }
+
+                            CustomSectionKind::Name(names.into_boxed_slice())
+                        }
+                        wasmparser::KnownCustom::Unknown => CustomSectionKind::Unknown(
+                            custom_sec.data().to_vec().into_boxed_slice(),
+                        ),
+                        _ => {
+                            CustomSectionKind::Others(custom_sec.data().to_vec().into_boxed_slice())
+                        }
+                    };
+
+                    custom_sections.push(CustomSection { name, kind });
+                }
+                UnknownSection {
+                    id,
+                    contents,
+                    range: _range,
+                } => {
+                    unknown_sections.push((id, contents.to_vec().into_boxed_slice()));
+                }
+                End(_final_offset) => break,
+                _ => return Err(TraceWasmError::Unsupported(format!("{:?}", payload))),
             }
         }
 
@@ -387,6 +450,8 @@ impl TraceWasmParser {
             code_sec_size,
             imported_func_count,
             func_bodies: func_bodies.into_boxed_slice(),
+            unknown_sections: unknown_sections.into_boxed_slice(),
+            custom_sections: custom_sections.into_boxed_slice(),
         })
     }
 }
