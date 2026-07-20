@@ -2,8 +2,8 @@ use crate::{
     ast::{
         CustomSection, CustomSectionKind, Data, DataKind, Element, ElementItems, ElementKind,
         Export, ExportKind, FuncBody, FuncDecl, FuncExactIndex, FuncIndex, FuncKind, FuncType,
-        Global, GlobalIndex, IndirectNameMap, LocalIndex, MemoryIndex, Module, Name, NameMap,
-        Table, TableIndex, TableInit, TagIndex, TyIndex,
+        Global, GlobalIndex, IndirectNameMap, MemoryIndex, Module, Name, NameMap, Table,
+        TableIndex, TableInit, TagIndex, TyIndex,
     },
     error::TraceWasmError,
     instruction::Instruction,
@@ -117,6 +117,7 @@ impl TraceWasmParser {
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
                                 Instruction::emit_instruction_from_operator_reader(
                                     const_expr.get_operators_reader(),
+                                    false,
                                 )?
                                 .into_boxed_slice(),
                             ),
@@ -153,6 +154,7 @@ impl TraceWasmParser {
                             ty: global_ty,
                             val: Instruction::emit_instruction_from_operator_reader(
                                 global.init_expr.get_operators_reader(),
+                                false,
                             )?
                             .into_boxed_slice(),
                         });
@@ -204,6 +206,7 @@ impl TraceWasmParser {
                                     offset_expr:
                                         Instruction::emit_instruction_from_operator_reader(
                                             offset_expr.get_operators_reader(),
+                                            false,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -230,6 +233,7 @@ impl TraceWasmParser {
                                         exprs.push(
                                             Instruction::emit_instruction_from_operator_reader(
                                                 expr.get_operators_reader(),
+                                                false,
                                             )?
                                             .into_boxed_slice(),
                                         );
@@ -264,6 +268,7 @@ impl TraceWasmParser {
                                     offset_expr:
                                         Instruction::emit_instruction_from_operator_reader(
                                             offset_expr.get_operators_reader(),
+                                            false,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -305,6 +310,7 @@ impl TraceWasmParser {
 
                     let instructions = Instruction::emit_instruction_from_operator_reader(
                         code_sec_entry.get_operators_reader()?,
+                        true,
                     )?
                     .into_boxed_slice();
 
