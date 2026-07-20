@@ -9,12 +9,17 @@ use crate::{
     instruction::Instruction,
 };
 use anyhow::Result;
-use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef};
+use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
 pub struct TraceWasmParser;
 
 impl TraceWasmParser {
     pub fn parse(buf: &[u8]) -> Result<Module, TraceWasmError> {
+        // The parser alone only checks structure; validate semantics (section
+        // order, index bounds, types) up front so the AST is built from wasm
+        // that is known to be well-formed.
+        Validator::new().validate_all(buf)?;
+
         let mut types = vec![];
         let mut func_decls = vec![];
         let mut tables = vec![];
@@ -22,13 +27,14 @@ impl TraceWasmParser {
         let mut globals = vec![];
         let mut exports = vec![];
         let mut elements = vec![];
-        let mut start_section = FuncIndex(0);
+        let mut start_section: Option<FuncIndex> = None;
         let mut imported_func_count = 0;
-        let mut data_count = 0;
+        let mut data_count = None;
         let mut datas = vec![];
         let mut code_sec_count = 0;
         let mut code_sec_size = 0;
         let mut func_bodies = vec![];
+        let mut tags = vec![];
         let mut unknown_sections = vec![];
         let mut custom_sections = vec![];
 
@@ -41,7 +47,7 @@ impl TraceWasmParser {
                     encoding,
                     range: _range,
                 } => {
-                    if encoding == Encoding::Module {
+                    if encoding == Encoding::Component {
                         return Err(TraceWasmError::Unsupported("component model".to_string()));
                     }
                 }
@@ -131,7 +137,11 @@ impl TraceWasmParser {
                         memories.push(mem);
                     }
                 }
-                TagSection(_) => {}
+                TagSection(tag_sec) => {
+                    for tag in tag_sec {
+                        tags.push(tag?);
+                    }
+                }
                 GlobalSection(global_sec) => {
                     let global_iter = global_sec.into_iter();
 
@@ -174,7 +184,7 @@ impl TraceWasmParser {
                     func,
                     range: _range,
                 } => {
-                    start_section = FuncIndex(func);
+                    start_section = Some(FuncIndex(func));
                 }
                 ElementSection(elem_sec) => {
                     let elem_iter = elem_sec.into_iter();
@@ -190,7 +200,7 @@ impl TraceWasmParser {
                                     table_index,
                                     offset_expr,
                                 } => ElementKind::Active {
-                                    table_index: table_index.map(|i| TableIndex(i)),
+                                    table_index: table_index.map(TableIndex),
                                     offset_expr:
                                         Instruction::emit_instruction_from_operator_reader(
                                             offset_expr.get_operators_reader(),
@@ -216,6 +226,7 @@ impl TraceWasmParser {
 
                                     for expr in iter {
                                         let expr = expr?;
+
                                         exprs.push(
                                             Instruction::emit_instruction_from_operator_reader(
                                                 expr.get_operators_reader(),
@@ -234,7 +245,7 @@ impl TraceWasmParser {
                     count,
                     range: _range,
                 } => {
-                    data_count = count;
+                    data_count = Some(count);
                 }
                 DataSection(data_sec) => {
                     let data_iter = data_sec.into_iter();
@@ -285,7 +296,9 @@ impl TraceWasmParser {
                             let mut names: Vec<Name> = vec![];
 
                             for name in reader {
-                                let name = name?;
+                                let Ok(name) = name else {
+                                    continue;
+                                };
 
                                 let name = match name {
                                     wasmparser::Name::Module {
@@ -367,6 +380,7 @@ impl TraceWasmParser {
             func_decls: func_decls.into_boxed_slice(),
             tables: tables.into_boxed_slice(),
             memories: memories.into_boxed_slice(),
+            tags: tags.into_boxed_slice(),
             globals: globals.into_boxed_slice(),
             exports: exports.into_boxed_slice(),
             elements: elements.into_boxed_slice(),

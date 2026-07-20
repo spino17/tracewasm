@@ -1,7 +1,7 @@
 use crate::{error::TraceWasmError, instruction::Instruction};
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
-use wasmparser::{GlobalType, MemoryType, RefType, TableType, ValType};
+use wasmparser::{GlobalType, MemoryType, RefType, TableType, TagType, ValType};
 
 pub trait EntityIndex: From<u32> {}
 
@@ -131,11 +131,12 @@ pub struct Module {
     pub func_decls: Box<[FuncDecl]>,
     pub tables: Box<[Table]>,
     pub memories: Box<[MemoryType]>,
+    pub tags: Box<[TagType]>,
     pub globals: Box<[Global]>,
     pub exports: Box<[Export]>,
-    pub start_section: FuncIndex,
+    pub start_section: Option<FuncIndex>,
     pub elements: Box<[Element]>,
-    pub data_count: u32,
+    pub data_count: Option<u32>,
     pub datas: Box<[Data]>,
     pub code_sec_count: u32,
     pub code_sec_size: u32,
