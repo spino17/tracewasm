@@ -128,7 +128,7 @@ impl EntityIndex for FieldIndex {}
 
 pub struct Module {
     pub types: Box<[FuncType]>, // we error for GC proposal types like struct, so it's only function types
-    pub func_decls: Box<[FuncDecl]>,
+    pub func_decls: Box<[FuncDecl]>, // imports + local functions. First comes the imports and then local functions
     pub tables: Box<[Table]>,
     pub memories: Box<[MemoryType]>,
     pub tags: Box<[TagType]>,
@@ -141,9 +141,14 @@ pub struct Module {
     pub code_sec_count: u32,
     pub code_sec_size: u32,
     pub imported_func_count: u32,
-    pub func_bodies: Box<[Box<[Instruction]>]>,
+    pub func_bodies: Box<[FuncBody]>,
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     pub custom_sections: Box<[CustomSection]>,
+}
+
+pub struct FuncBody {
+    pub locals: Box<[ValType]>, // params + declared locals inside the function body
+    pub instructions: Box<[Instruction]>,
 }
 
 pub enum Name {
@@ -172,8 +177,6 @@ pub struct CustomSection {
     pub name: String,
     pub kind: CustomSectionKind,
 }
-
-pub struct FuncBody(pub Box<[Instruction]>);
 
 pub struct Data {
     pub kind: DataKind,

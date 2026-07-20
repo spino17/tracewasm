@@ -1,9 +1,9 @@
 use crate::{
     ast::{
         CustomSection, CustomSectionKind, Data, DataKind, Element, ElementItems, ElementKind,
-        Export, ExportKind, FuncDecl, FuncExactIndex, FuncIndex, FuncKind, FuncType, Global,
-        GlobalIndex, IndirectNameMap, MemoryIndex, Module, Name, NameMap, Table, TableIndex,
-        TableInit, TagIndex, TyIndex,
+        Export, ExportKind, FuncBody, FuncDecl, FuncExactIndex, FuncIndex, FuncKind, FuncType,
+        Global, GlobalIndex, IndirectNameMap, LocalIndex, MemoryIndex, Module, Name, NameMap,
+        Table, TableIndex, TableInit, TagIndex, TyIndex,
     },
     error::TraceWasmError,
     instruction::Instruction,
@@ -281,12 +281,37 @@ impl TraceWasmParser {
                     code_sec_size = size;
                 }
                 CodeSectionEntry(code_sec_entry) => {
+                    let locals_reader = code_sec_entry.get_locals_reader()?;
+                    let mut locals = vec![];
+
+                    let func_index = func_bodies.len() as u32 + imported_func_count;
+                    let func_decl = &func_decls[func_index as usize];
+                    let ty_index = func_decl.ty_index;
+                    let ty = &types[ty_index.0 as usize];
+                    let params = &ty.params;
+
+                    // first add the params in the locals!
+                    for param in params {
+                        locals.push(param.clone());
+                    }
+
+                    for local in locals_reader {
+                        let (count, ty) = local?;
+
+                        for _ in 0..count {
+                            locals.push(ty);
+                        }
+                    }
+
                     let instructions = Instruction::emit_instruction_from_operator_reader(
                         code_sec_entry.get_operators_reader()?,
                     )?
                     .into_boxed_slice();
 
-                    func_bodies.push(instructions);
+                    func_bodies.push(FuncBody {
+                        locals: locals.into_boxed_slice(), // params + declared locals
+                        instructions,
+                    });
                 }
                 CustomSection(custom_sec) => {
                     let name = custom_sec.name().to_string();

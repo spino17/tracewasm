@@ -1,30 +1,15 @@
-use crate::ast::{FuncIndex, GlobalIndex};
-use wasmparser::{Ieee32, Ieee64, Operator, OperatorsReader};
+use wasmparser::{Operator, OperatorsReader};
 
 pub enum Instruction {
-    I32Const { value: i32 },
-    I64Const { value: i64 },
-    F32Const { value: Ieee32 },
-    F64Const { value: Ieee64 },
-    GlobalGet { index: GlobalIndex },
-    RefNull,
-    RefFunc { index: FuncIndex },
+    Unreachable,
+    Nop,
 }
 
 impl Instruction {
     pub(crate) fn from_operator(operator: Operator<'_>) -> Result<Instruction, anyhow::Error> {
         let instruction = match operator {
-            Operator::I32Const { value } => Instruction::I32Const { value },
-            Operator::I64Const { value } => Instruction::I64Const { value },
-            Operator::F32Const { value } => Instruction::F32Const { value },
-            Operator::F64Const { value } => Instruction::F64Const { value },
-            Operator::GlobalGet { global_index } => Instruction::GlobalGet {
-                index: GlobalIndex(global_index),
-            },
-            Operator::RefNull { .. } => Instruction::RefNull,
-            Operator::RefFunc { function_index } => Instruction::RefFunc {
-                index: FuncIndex(function_index),
-            },
+            Operator::Unreachable => Instruction::Unreachable,
+            Operator::Nop => Instruction::Nop,
             _ => todo!(),
         };
 
