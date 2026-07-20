@@ -1,3 +1,4 @@
+use crate::{ast::FuncType, error::TraceWasmError};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub enum Instruction {
@@ -9,46 +10,176 @@ pub enum Instruction {
     },
     Loop {
         blockty: BlockType,
-        end_index: usize,
     },
     If {
         blockty: BlockType,
         else_index: Option<usize>,
         end_index: usize,
     },
-    Else,
-    End,
+    Else {
+        if_end_index: usize,
+    },
+    End {
+        arity: u32,
+        recorded_height: u32,
+    },
     Br {
-        target_index: u32,
+        target_index: usize,
+        arity: u32,
+        recorded_height: u32,
     }, // target instruction index in the vector of instructions i.e. pc
 }
 
 enum BlockKind {
     Func,
-    Block,
-    Loop,
+    Block {
+        index: usize,
+    },
+    Loop {
+        index: usize,
+    },
     If {
         index: usize,
         else_index: Option<usize>,
     },
 }
 
+impl BlockKind {
+    fn is_loop(&self) -> Option<usize> {
+        if let BlockKind::Loop { index } = self {
+            Some(*index)
+        } else {
+            None
+        }
+    }
+}
+
 struct Block {
     kind: BlockKind,
+    recorded_height: u32,
+    params: u32,
+    results: u32,
+    is_unreachable_traversing: bool,
     attached_breaks: Vec<usize>,
+}
+
+#[derive(Default)]
+struct ControlStack {
+    inner: Vec<Block>,
+    curr_height: u32,
+}
+
+impl ControlStack {
+    fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (u32, u32) {
+        match blockty {
+            BlockType::Empty => (0, 0),
+            BlockType::Type(_) => (0, 1),
+            BlockType::FuncType(index) => {
+                let ty = &types[*index as usize];
+
+                (ty.params.len() as u32, ty.results.len() as u32)
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
+        let (params, results) = Self::params_and_results_from_blockty(&blockty, types);
+
+        let is_unreachable_traversing = self
+            .inner
+            .last()
+            .map_or(false, |b| b.is_unreachable_traversing);
+
+        if is_unreachable_traversing {
+            self.inner.push(Block {
+                kind,
+                recorded_height: 0, // this won't be used at runtime because of unreachablity
+                params,
+                results,
+                is_unreachable_traversing,
+                attached_breaks: vec![],
+            });
+
+            return;
+        }
+
+        let recorded_height = match kind {
+            BlockKind::Func => 0,
+            BlockKind::Block { .. } => self.curr_height - params,
+            BlockKind::Loop { .. } => self.curr_height - params,
+            BlockKind::If { .. } => {
+                let recorded_height = self.curr_height - params - 1;
+                self.set_height(self.curr_height - 1);
+
+                recorded_height
+            }
+        };
+
+        self.inner.push(Block {
+            kind,
+            recorded_height,
+            params,
+            results,
+            is_unreachable_traversing,
+            attached_breaks: vec![],
+        });
+    }
+
+    fn set_unreachable_traversing(&mut self) {
+        let len = self.inner.len();
+        self.inner[len - 1].is_unreachable_traversing = true;
+    }
+
+    fn end_unreachable_traversing(&mut self) {
+        let len = self.inner.len();
+        self.inner[len - 1].is_unreachable_traversing = false;
+    }
+
+    fn get_block_mut(&mut self, index: usize) -> &mut Block {
+        &mut self.inner[index]
+    }
+
+    fn set_height(&mut self, height: u32) {
+        if self.inner.is_empty() {
+            self.curr_height = height;
+
+            return;
+        }
+
+        let len = self.inner.len();
+
+        if self.inner[len - 1].is_unreachable_traversing == true {
+            return;
+        }
+
+        self.curr_height = height;
+    }
+
+    fn pop(&mut self) -> Option<Block> {
+        self.inner.pop()
+    }
 }
 
 impl Instruction {
     pub(crate) fn emit_instruction_from_operator_reader(
         mut operator_reader: OperatorsReader<'_>,
-        is_func: bool,
-    ) -> Result<Vec<Instruction>, anyhow::Error> {
+        is_func: Option<(u32, u32)>, // arity of the function
+        types: &[FuncType],
+    ) -> Result<Vec<Instruction>, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
-        let mut control_stack: Vec<Block> = vec![];
+        let mut control_stack: ControlStack = ControlStack::default();
 
-        if is_func {
-            control_stack.push(Block {
+        if let Some((params, results)) = is_func {
+            control_stack.inner.push(Block {
                 kind: BlockKind::Func,
+                recorded_height: 0,
+                params,
+                results,
+                is_unreachable_traversing: false,
                 attached_breaks: vec![],
             });
         }
@@ -57,27 +188,48 @@ impl Instruction {
             let operator = operator_reader.read()?;
 
             let instruction = match operator {
-                Operator::Unreachable => Instruction::Unreachable,
+                Operator::Unreachable => {
+                    control_stack.set_unreachable_traversing();
+
+                    Instruction::Unreachable
+                }
                 Operator::Nop => Instruction::Nop,
                 Operator::Block { blockty } => {
-                    todo!()
-                }
-                Operator::Loop { blockty } => todo!(),
-                Operator::If { blockty } => {
-                    // record the index of this if inside instructions
-                    // calls pop -> cond
-                    // then pops the params (they stay on the stack just accounts for reduced recorded height)
-                    // if cond is false then forward to else arm, so would need else + 1 index in instructions! NEEDED
-                    // if there is no else then it should forward to the end of the if! NEEDED
-                    let index = instructions.len();
+                    // add the block in control_stack with its index in the instructions for backpatching the `end_index`
+                    control_stack.add_block(
+                        BlockKind::Block {
+                            index: instructions.len(),
+                        },
+                        &blockty,
+                        types,
+                    );
 
-                    control_stack.push(Block {
-                        kind: BlockKind::If {
-                            index,
+                    Instruction::Block {
+                        blockty,
+                        end_index: 0, // dummy value! will backpath when we see END for this block
+                    }
+                }
+                Operator::Loop { blockty } => {
+                    control_stack.add_block(
+                        BlockKind::Loop {
+                            index: instructions.len(),
+                        },
+                        &blockty,
+                        types,
+                    );
+
+                    Instruction::Loop { blockty }
+                }
+                Operator::If { blockty } => {
+                    // add the `if` block in control_stack with its index in the instructions for backpatching the `end_index` and `else_index``
+                    control_stack.add_block(
+                        BlockKind::If {
+                            index: instructions.len(),
                             else_index: None,
                         },
-                        attached_breaks: vec![],
-                    });
+                        &blockty,
+                        types,
+                    );
 
                     Instruction::If {
                         blockty,
@@ -85,10 +237,43 @@ impl Instruction {
                         end_index: 0, // dummy value! will backpath when we see END for this `if`
                     }
                 }
+                Operator::Br { relative_depth } => {
+                    let block_index = control_stack.len() - 1 - relative_depth as usize;
+                    let block = control_stack.get_block_mut(block_index); // extract the block to which this `br` applies to using `relative_depth`
+                    let params = block.params;
+                    let results = block.results;
+                    let recorded_height = block.recorded_height;
+                    let index = instructions.len();
+
+                    let instr = if let Some(loop_index) = block.kind.is_loop() {
+                        control_stack.set_height(recorded_height + params);
+
+                        Instruction::Br {
+                            target_index: loop_index, // correct target index,
+                            arity: params,
+                            recorded_height,
+                        }
+                    } else {
+                        block.attached_breaks.push(index);
+                        control_stack.set_height(recorded_height + results);
+
+                        Instruction::Br {
+                            target_index: 0,
+                            arity: results,
+                            recorded_height,
+                        } // dummy value! will backpatch when we see END for the block this `br` is attached to
+                    };
+
+                    control_stack.set_unreachable_traversing();
+
+                    instr
+                }
                 Operator::Else => {
                     let index = instructions.len();
                     let curr_control_stack_len = control_stack.len();
-                    let block = &mut control_stack[curr_control_stack_len - 1];
+                    let block = control_stack.get_block_mut(curr_control_stack_len - 1);
+                    let recorded_height = block.recorded_height;
+                    let params = block.params;
 
                     let BlockKind::If {
                         index: _index,
@@ -102,41 +287,53 @@ impl Instruction {
 
                     *else_index = Some(index); // backpatching the `else` index in the `if` block
 
-                    Instruction::Else
-                }
-                Operator::Br { relative_depth } => {
-                    let block_index = control_stack.len() - 1 - relative_depth as usize;
-                    let block = &mut control_stack[block_index];
-                    let index = instructions.len();
-
-                    block.attached_breaks.push(index);
-
-                    Instruction::Br { target_index: 0 } // dummy value! will backpath when we see END for this block
-                }
-                Operator::End => {
-                    if control_stack.len() == 0 && is_func {
-                        return Ok(instructions);
+                    if block.is_unreachable_traversing {
+                        control_stack.end_unreachable_traversing();
                     }
 
-                    let block = control_stack.pop().unwrap(); // validated already by wasmparser.
+                    control_stack.set_height(recorded_height + params);
+
+                    Instruction::Else { if_end_index: 0 } // dummy value! will backpatch when we see END for the `if` of this `else`
+                }
+                Operator::End => {
+                    let block = control_stack.pop().unwrap(); // validated already by wasmparser so safe to `unwrap`
+                    let results = block.results;
+                    let recorded_height = block.recorded_height;
                     let attached_breaks = &block.attached_breaks;
                     let index = instructions.len();
 
+                    // if this block is not a `loop` then backpatch it's br instructions
                     for &br in attached_breaks {
-                        let Instruction::Br { target_index } = &mut instructions[br] else {
+                        let Instruction::Br {
+                            target_index,
+                            arity: _arity,
+                            recorded_height: _recorded_height,
+                        } = &mut instructions[br]
+                        else {
                             unreachable!(
                                 "hitting this means TraceWasm has a bug recording the instructions"
                             )
                         };
 
-                        *target_index = index as u32; // backpatching the breaks with this end's index
+                        *target_index = index; // backpatching the br with this `end` as `target_index`
                     }
 
                     // backpath the respective blocks of this `end`
                     match block.kind {
-                        BlockKind::Func => todo!(),
-                        BlockKind::Block => todo!(),
-                        BlockKind::Loop => todo!(),
+                        BlockKind::Func | BlockKind::Loop { .. } => {} // no backpatching required
+                        BlockKind::Block { index: block_index } => {
+                            let Instruction::Block {
+                                blockty: _blockty,
+                                end_index,
+                            } = &mut instructions[block_index]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *end_index = index;
+                        }
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
@@ -154,12 +351,34 @@ impl Instruction {
 
                             *else_index = ei;
                             *end_index = index;
+
+                            if let Some(else_index) = ei {
+                                let Instruction::Else { if_end_index } =
+                                    &mut instructions[else_index]
+                                else {
+                                    unreachable!(
+                                        "hitting this means TraceWasm has a bug recording the instructions"
+                                    )
+                                };
+
+                                *if_end_index = index;
+                            }
                         }
                     }
 
-                    Instruction::End
+                    control_stack.set_height(recorded_height + results);
+
+                    Instruction::End {
+                        arity: results,
+                        recorded_height,
+                    }
                 }
-                _ => todo!(),
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "instruction `{:?}`",
+                        operator
+                    )));
+                }
             };
 
             instructions.push(instruction);

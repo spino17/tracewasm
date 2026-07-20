@@ -117,7 +117,8 @@ impl TraceWasmParser {
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
                                 Instruction::emit_instruction_from_operator_reader(
                                     const_expr.get_operators_reader(),
-                                    false,
+                                    None,
+                                    &types,
                                 )?
                                 .into_boxed_slice(),
                             ),
@@ -154,7 +155,8 @@ impl TraceWasmParser {
                             ty: global_ty,
                             val: Instruction::emit_instruction_from_operator_reader(
                                 global.init_expr.get_operators_reader(),
-                                false,
+                                None,
+                                &types,
                             )?
                             .into_boxed_slice(),
                         });
@@ -206,7 +208,8 @@ impl TraceWasmParser {
                                     offset_expr:
                                         Instruction::emit_instruction_from_operator_reader(
                                             offset_expr.get_operators_reader(),
-                                            false,
+                                            None,
+                                            &types,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -233,7 +236,8 @@ impl TraceWasmParser {
                                         exprs.push(
                                             Instruction::emit_instruction_from_operator_reader(
                                                 expr.get_operators_reader(),
-                                                false,
+                                                None,
+                                                &types,
                                             )?
                                             .into_boxed_slice(),
                                         );
@@ -268,7 +272,8 @@ impl TraceWasmParser {
                                     offset_expr:
                                         Instruction::emit_instruction_from_operator_reader(
                                             offset_expr.get_operators_reader(),
-                                            false,
+                                            None,
+                                            &types,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -294,6 +299,7 @@ impl TraceWasmParser {
                     let ty_index = func_decl.ty_index;
                     let ty = &types[ty_index.0 as usize];
                     let params = &ty.params;
+                    let results = &ty.results;
 
                     // first add the params in the locals!
                     for param in params {
@@ -310,7 +316,8 @@ impl TraceWasmParser {
 
                     let instructions = Instruction::emit_instruction_from_operator_reader(
                         code_sec_entry.get_operators_reader()?,
-                        true,
+                        Some((params.len() as u32, results.len() as u32)), // arity of this function
+                        &types,
                     )?
                     .into_boxed_slice();
 
