@@ -19,7 +19,6 @@ use crate::{
     error::TraceWasmError,
     instruction::Instruction,
 };
-use anyhow::Result;
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
 /// Stateless entry point for parsing a module. See [`TraceWasmParser::parse`].
@@ -330,7 +329,7 @@ impl TraceWasmParser {
 
                     // first add the params in the locals!
                     for param in params {
-                        locals.push(param.clone());
+                        locals.push(*param);
                     }
 
                     for local in locals_reader {

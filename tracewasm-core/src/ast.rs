@@ -377,9 +377,7 @@ impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
 pub struct IndirectNameMap<
     T: PartialEq + Eq + Hash + EntityIndex,
     V: PartialEq + Eq + Hash + EntityIndex,
->(
-    pub FxHashMap<T, NameMap<V>>,
-);
+>(pub FxHashMap<T, NameMap<V>>);
 
 impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIndex>
     IndirectNameMap<T, V>

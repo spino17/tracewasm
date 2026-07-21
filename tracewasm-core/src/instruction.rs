@@ -47,6 +47,7 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// operators are rejected as unsupported by the lowering pass. Index fields
 /// (`end_index`, `else_index`, `target_index`, ...) are *absolute* positions
 /// into the containing `Vec<Instruction>`, i.e. runtime program counters.
+#[derive(Debug, Clone)]
 pub enum Instruction {
     Unreachable,
     Nop,
@@ -108,6 +109,7 @@ pub enum Instruction {
 /// `br_table` may legally mix loop and non-loop targets (validation only
 /// requires the label *types* to match); their unwind targets and heights
 /// differ even though the value counts agree.
+#[derive(Debug, Clone)]
 pub struct TargetBranch {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
@@ -125,14 +127,10 @@ enum BlockKind {
     Func,
     /// A `block`. `index` is the position of its `Instruction::Block`, so the
     /// `end_index` field can be filled in later.
-    Block {
-        index: usize,
-    },
+    Block { index: usize },
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
-    Loop {
-        index: usize,
-    },
+    Loop { index: usize },
     /// An `if`. `index` locates the `Instruction::If`; `else_index` is filled in
     /// when the `Else` operator is seen (if any) so both can be backpatched at
     /// `end`.
@@ -251,12 +249,12 @@ impl ControlStack {
     /// additionally consumes the branch condition sitting on top of the params,
     /// so it subtracts one more and pops that condition from `curr_height`.
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
-        let (params, results) = Self::params_and_results_from_blockty(&blockty, types);
+        let (params, results) = Self::params_and_results_from_blockty(blockty, types);
 
         let is_unreachable_traversing = self
             .inner
             .last()
-            .map_or(false, |b| b.is_unreachable_traversing);
+            .is_some_and(|b| b.is_unreachable_traversing);
 
         if is_unreachable_traversing {
             self.inner.push(Block {
@@ -351,7 +349,7 @@ impl ControlStack {
 
         // height is not changed by the instructions which are unreachable.
         // These instructions typically occur after unconditional br instructions.
-        if self.get_curr_block().is_unreachable_traversing == true {
+        if self.get_curr_block().is_unreachable_traversing {
             return;
         }
 

@@ -4,9 +4,9 @@ pub extern "C" fn bench_control_flow(a: i32) {
         a: Vec<i32>,
     }
 
-    let mut foo = Foo { a: vec![] };
+    let mut f = Foo { a: vec![] };
 
     if a > 0 {
-        foo.a.push(a);
+        f.a.push(a);
     }
 }
