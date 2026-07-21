@@ -2,6 +2,7 @@ use crate::{
     ast::{FuncIndex, Module},
     error::TraceWasmError,
     instruction::Instruction,
+    memory::Memory,
 };
 use wasmparser::ValType;
 
@@ -11,6 +12,7 @@ pub enum Val {
     I64(i64),
     F32(f32),
     F64(f64),
+    Ref(Option<FuncIndex>),
 }
 
 impl Val {
@@ -30,26 +32,34 @@ impl Val {
         Val::F64(0.0)
     }
 
+    fn ref_zero() -> Self {
+        Val::Ref(None)
+    }
+
     fn zero_of_ty(ty: ValType) -> Result<Self, TraceWasmError> {
         let val = match ty {
             ValType::I32 => Self::i32_zero(),
             ValType::I64 => Self::i64_zero(),
             ValType::F32 => Self::f32_zero(),
             ValType::F64 => Self::f64_zero(),
-            _ => return Err(TraceWasmError::Unsupported(format!("type `{}`", ty))),
+            ValType::Ref(_) => Self::ref_zero(),
+            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
         };
 
         Ok(val)
     }
 
-    fn is_ty(&self, ty: ValType) -> bool {
-        match ty {
+    fn is_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
+        let val = match ty {
             ValType::I32 => matches!(self, Val::I32(_)),
             ValType::I64 => matches!(self, Val::I64(_)),
             ValType::F32 => matches!(self, Val::F32(_)),
             ValType::F64 => matches!(self, Val::F64(_)),
-            _ => false,
-        }
+            ValType::Ref(_) => matches!(self, Val::Ref(_)),
+            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
+        };
+
+        Ok(val)
     }
 }
 
@@ -62,27 +72,21 @@ impl Default for Stack {
     }
 }
 
-struct Memory {}
-
-impl Default for Memory {
-    fn default() -> Self {
-        // should allocate starting size for memory according to WASM spec
-        Memory {}
-    }
-}
-
 struct Locals {
     inner: Vec<Val>, // size = params + declared locals
 }
 
-pub struct TraceVMState {
+pub struct TraceVMState<'a> {
     stack: Stack,
-    memory: Memory,
+    memory: &'a mut Memory,
     locals: Locals,
 }
 
-impl TraceVMState {
+impl<'a> TraceVMState<'a> {
     fn execute(&mut self, instruction: &Instruction) -> ExecutionResult {
+        // match on instruction
+        // mutate the state of stack, memory and locals
+        // and return the next pc or end the execution
         todo!()
     }
 }
@@ -95,10 +99,12 @@ enum ExecutionResult {
 pub struct TraceVM;
 
 impl TraceVM {
+    /// Stateless top-level API of the TraceWasm VM to execute a functio of the WASM module.
     pub fn execute(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
+        memory: &mut Memory,
     ) -> Result<Box<[Val]>, TraceWasmError> {
         // if the call is directed to TraceVM's execute then func_index is for a local function
         let imported_func_count = module.imported_func_count;
@@ -117,7 +123,7 @@ impl TraceVM {
 
         // set the params in locals
         for i in 0..params.len() {
-            debug_assert!(params[i].is_ty(locals_ty[i])); // types should match the value for params!
+            debug_assert!(params[i].is_ty(locals_ty[i])?); // types should match the value for params!
 
             locals[i] = params[i];
         }
@@ -131,7 +137,7 @@ impl TraceVM {
 
         let mut state = TraceVMState {
             stack: Stack::default(),
-            memory: Memory::default(),
+            memory,
             locals: Locals { inner: locals },
         };
 

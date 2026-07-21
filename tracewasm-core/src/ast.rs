@@ -28,7 +28,7 @@ use wasmparser::{GlobalType, MemoryType, RefType, TableType, TagType, ValType};
 pub trait EntityIndex: From<u32> {}
 
 /// Index into the function index space (imports first, then defined functions).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncIndex(pub u32);
 
 impl From<u32> for FuncIndex {
@@ -41,7 +41,7 @@ impl EntityIndex for FuncIndex {}
 
 /// Index used by the `ref.func` "exact" reference form (function-references
 /// proposal); addresses the function index space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncExactIndex(pub u32);
 
 impl From<u32> for FuncExactIndex {
@@ -53,7 +53,7 @@ impl From<u32> for FuncExactIndex {
 impl EntityIndex for FuncExactIndex {}
 
 /// Index into the type section ([`Module::types`]).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TyIndex(pub u32);
 
 impl From<u32> for TyIndex {
@@ -65,7 +65,7 @@ impl From<u32> for TyIndex {
 impl EntityIndex for TyIndex {}
 
 /// Index into the global index space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalIndex(pub u32);
 
 impl From<u32> for GlobalIndex {
@@ -77,7 +77,7 @@ impl From<u32> for GlobalIndex {
 impl EntityIndex for GlobalIndex {}
 
 /// Index into the table index space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableIndex(pub u32);
 
 impl From<u32> for TableIndex {
@@ -89,7 +89,7 @@ impl From<u32> for TableIndex {
 impl EntityIndex for TableIndex {}
 
 /// Index into the memory index space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemoryIndex(pub u32);
 
 impl From<u32> for MemoryIndex {
@@ -101,7 +101,7 @@ impl From<u32> for MemoryIndex {
 impl EntityIndex for MemoryIndex {}
 
 /// Index into the tag index space (exception-handling proposal).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TagIndex(pub u32);
 
 impl From<u32> for TagIndex {
@@ -113,7 +113,7 @@ impl From<u32> for TagIndex {
 impl EntityIndex for TagIndex {}
 
 /// Index into the element segment space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ElementIndex(pub u32);
 
 impl From<u32> for ElementIndex {
@@ -125,7 +125,7 @@ impl From<u32> for ElementIndex {
 impl EntityIndex for ElementIndex {}
 
 /// Index into the data segment space.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DataIndex(pub u32);
 
 impl From<u32> for DataIndex {
@@ -137,7 +137,7 @@ impl From<u32> for DataIndex {
 impl EntityIndex for DataIndex {}
 
 /// Index of a local within a function (params first, then declared locals).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalIndex(pub u32);
 
 impl From<u32> for LocalIndex {
@@ -149,7 +149,7 @@ impl From<u32> for LocalIndex {
 impl EntityIndex for LocalIndex {}
 
 /// Index of a field within a struct type (GC proposal).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldIndex(pub u32);
 
 impl From<u32> for FieldIndex {

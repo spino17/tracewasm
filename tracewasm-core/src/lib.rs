@@ -29,5 +29,6 @@
 pub mod ast;
 pub mod error;
 pub mod instruction;
+pub mod memory;
 pub mod parser;
 pub mod vm;

@@ -464,6 +464,38 @@ impl Instruction {
                         end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
                     }
                 }
+                Operator::Else => {
+                    let index = instructions.len();
+                    let block = control_stack.get_curr_block_mut();
+                    let recorded_height = block.recorded_height;
+                    let params = block.params;
+
+                    let BlockKind::If {
+                        index: _index,
+                        else_index,
+                    } = &mut block.kind
+                    else {
+                        unreachable!(
+                            "hitting this means TraceWasm has a bug recording the instructions"
+                        )
+                    };
+
+                    *else_index = Some(index); // backpatching the `else` index in the `if` block
+
+                    // `else` instruction ends the unreachable traversing because those instructions
+                    // at runtime can execute if the `if` branch is not taken! The else block first instruction
+                    // would see the height to be `recorded_heigh (at the if) + params` (condition is already popped).
+                    //
+                    // `end_unreachable_traversing` is a no-op when the `if` was born in dead code
+                    // (`has_inherited`), so a dead `if` correctly keeps both arms dead; and `set_height`'s
+                    // own guard then leaves `curr_height` frozen in that case.
+                    control_stack.end_unreachable_traversing();
+                    control_stack.set_height(recorded_height + params);
+
+                    Instruction::Else {
+                        if_end_index: usize::MAX,
+                    } // dummy value! will backpatch when we see END for the `if` of this `else`
+                }
                 Operator::Br { relative_depth } => {
                     // NOTE on Branching: each branch instruction will resolve to a particular block based on the relative_depth provided.
                     // This block dictates the recorded_height and arity which this branch instruction should leave the stack in.
@@ -603,37 +635,8 @@ impl Instruction {
                         recorded_height,
                     }
                 }
-                Operator::Else => {
-                    let index = instructions.len();
-                    let block = control_stack.get_curr_block_mut();
-                    let recorded_height = block.recorded_height;
-                    let params = block.params;
-
-                    let BlockKind::If {
-                        index: _index,
-                        else_index,
-                    } = &mut block.kind
-                    else {
-                        unreachable!(
-                            "hitting this means TraceWasm has a bug recording the instructions"
-                        )
-                    };
-
-                    *else_index = Some(index); // backpatching the `else` index in the `if` block
-
-                    // `else` instruction ends the unreachable traversing because those instructions
-                    // at runtime can execute if the `if` branch is not taken! The else block first instruction
-                    // would see the height to be `recorded_heigh (at the if) + params` (condition is already popped).
-                    //
-                    // `end_unreachable_traversing` is a no-op when the `if` was born in dead code
-                    // (`has_inherited`), so a dead `if` correctly keeps both arms dead; and `set_height`'s
-                    // own guard then leaves `curr_height` frozen in that case.
-                    control_stack.end_unreachable_traversing();
-                    control_stack.set_height(recorded_height + params);
-
-                    Instruction::Else {
-                        if_end_index: usize::MAX,
-                    } // dummy value! will backpatch when we see END for the `if` of this `else`
+                Operator::Call { function_index } => {
+                    todo!()
                 }
                 Operator::End => {
                     // the non-function operator stream in Table init/Global init/Element/Data ends with an extra `end` which has no matching block start
