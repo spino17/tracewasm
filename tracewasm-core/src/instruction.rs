@@ -98,7 +98,7 @@ pub enum Instruction {
     BrTable {
         /// One [`TargetBranch`] per explicit label, in order, followed by the
         /// default label as the final element.
-        targets: Vec<TargetBranch>, // (target, arity, recorded_height)
+        targets: Vec<TargetBranch>,
     },
 }
 
@@ -201,7 +201,7 @@ struct Block {
     /// Each entry is `(instruction_index, brtable_target_slot)`. The second
     /// field selects which arm of a `BrTable::targets` vec to patch; it is
     /// `usize::MAX` (unused) for `Br`/`BrIf`, which have a single `target_index`.
-    attached_breaks: Vec<(usize, usize)>, // second index is for BrTable, targets index
+    attached_breaks: Vec<(usize, usize)>,
 }
 
 /// The stack of currently-open control-flow labels, plus the running
@@ -272,8 +272,6 @@ impl ControlStack {
             return;
         }
 
-        // each block when ends leave the stack with height = recorded_height + arity (results or params in case of loops)
-        // any params or condition is not part of the recorded height because its allowed to be consumed by the block.
         let recorded_height = match kind {
             BlockKind::Func => 0,
             BlockKind::Block { .. } => self.curr_height - params,

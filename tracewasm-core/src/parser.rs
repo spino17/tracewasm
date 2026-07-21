@@ -1,3 +1,14 @@
+//! Binary WebAssembly → owned [`Module`] (the "front end").
+//!
+//! [`TraceWasmParser::parse`] runs `wasmparser`'s full validator over the bytes
+//! first, then makes a second pass over the payloads to build an owned
+//! [`Module`]. Validating up front means the build pass can assume well-formed
+//! input: section order, index bounds, and types are already checked, so it
+//! `unwrap`s / uses `unreachable!` only where validation guarantees success.
+//!
+//! Unsupported-but-valid constructs (component model, GC types, non-function
+//! imports) are turned into [`TraceWasmError::Unsupported`] rather than panics.
+
 use crate::{
     ast::{
         CustomSection, CustomSectionKind, Data, DataKind, Element, ElementItems, ElementKind,
@@ -11,9 +22,19 @@ use crate::{
 use anyhow::Result;
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
+/// Stateless entry point for parsing a module. See [`TraceWasmParser::parse`].
 pub struct TraceWasmParser;
 
 impl TraceWasmParser {
+    /// Validates `buf` as a core WebAssembly module and builds an owned
+    /// [`Module`] from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails, and
+    /// [`TraceWasmError::Unsupported`] for valid modules using features
+    /// TraceWasm does not model (components, GC types, non-function imports, or
+    /// any operator the lowering pass rejects).
     pub fn parse(buf: &[u8]) -> Result<Module, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
@@ -90,6 +111,9 @@ impl TraceWasmParser {
                         });
                     }
 
+                    // At this point `func_decls` holds only imports (the function section comes
+                    // later), and any non-function import already returned above — so this count is
+                    // exactly the number of imported functions and marks the imports/definitions split.
                     imported_func_count = func_decls.len() as u32;
                 }
                 FunctionSection(func_sec) => {
@@ -294,6 +318,9 @@ impl TraceWasmParser {
                     let locals_reader = code_sec_entry.get_locals_reader()?;
                     let mut locals = vec![];
 
+                    // Code entries correspond to defined functions in order, which live in
+                    // `func_decls` after the imported ones — so the i-th body maps to
+                    // `func_decls[imported_func_count + i]`.
                     let func_index = func_bodies.len() as u32 + imported_func_count;
                     let func_decl = &func_decls[func_index as usize];
                     let ty_index = func_decl.ty_index;
