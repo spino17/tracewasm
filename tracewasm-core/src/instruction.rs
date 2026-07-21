@@ -75,6 +75,8 @@ struct Block {
     results: u32,
     is_unreachable_traversing: bool,
     has_inherited: bool,
+    // brs which branched to this block and hence needs to be backpatched their
+    // target index with the `end` index of this block
     attached_breaks: Vec<(usize, usize)>, // second index is for BrTable, targets index
 }
 
@@ -123,13 +125,15 @@ impl ControlStack {
             return;
         }
 
+        // each block when ends leave the stack with height = recorded_height + arity (results or params in case of loops)
+        // any params or condition is not part of the recorded height because its allowed to be consumed by the block.
         let recorded_height = match kind {
             BlockKind::Func => 0,
             BlockKind::Block { .. } => self.curr_height - params,
             BlockKind::Loop { .. } => self.curr_height - params,
             BlockKind::If { .. } => {
-                let recorded_height = self.curr_height - params - 1;
-                self.set_height(self.curr_height - 1);
+                let recorded_height = self.curr_height - params - 1; // top is the `if` condition and then params
+                self.set_height(self.curr_height - 1); // if pops the condition
 
                 recorded_height
             }
@@ -183,6 +187,8 @@ impl ControlStack {
             return;
         }
 
+        // height is not changed by the instructions which are unreachable.
+        // These instructions typically occur after unconditional br instructions.
         if self.get_curr_block().is_unreachable_traversing == true {
             return;
         }
@@ -215,7 +221,7 @@ impl Instruction {
         if let Some((params, results)) = is_func {
             control_stack.inner.push(Block {
                 kind: BlockKind::Func,
-                recorded_height: 0,
+                recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
                 params,
                 results,
                 is_unreachable_traversing: false,
@@ -229,13 +235,13 @@ impl Instruction {
 
             let instruction = match operator {
                 Operator::Unreachable => {
+                    // all instructions after this is unreachable until the end of the current block
                     control_stack.set_unreachable_traversing();
 
                     Instruction::Unreachable
                 }
                 Operator::Nop => Instruction::Nop,
                 Operator::Block { blockty } => {
-                    // add the block in control_stack with its index in the instructions for backpatching the `end_index`
                     control_stack.add_block(
                         BlockKind::Block {
                             index: instructions.len(),
@@ -261,7 +267,6 @@ impl Instruction {
                     Instruction::Loop { blockty }
                 }
                 Operator::If { blockty } => {
-                    // add the `if` block in control_stack with its index in the instructions for backpatching the `end_index` and `else_index``
                     control_stack.add_block(
                         BlockKind::If {
                             index: instructions.len(),
@@ -278,6 +283,11 @@ impl Instruction {
                     }
                 }
                 Operator::Br { relative_depth } => {
+                    // NOTE on Branching: each branch instruction will resolve to a particular block based on the relative_depth provided.
+                    // This block dictates the recorded_height and arity which this branch instruction should leave the stack in.
+                    // - If the resolved block is a loop, then the target for the branch is back to the `loop` instruction (this means `continue`).
+                    // - If the resolver block is not a loop (i.e. block/if/function), then the target for the branch is `end` of that block.
+                    // Executing `end` always leave the stack with heigh = recorded_heigh + results, even for loops!
                     let block_index = control_stack.len() - 1 - relative_depth as usize;
                     let block = control_stack.get_block_mut(block_index); // extract the block to which this `br` applies to using `relative_depth`
                     let params = block.params;
@@ -285,6 +295,8 @@ impl Instruction {
                     let recorded_height = block.recorded_height;
                     let index = instructions.len();
 
+                    // brs with a depth resolved to a "loop" block targets the loop start and so the arity
+                    // will be params of the loop. For other blocks, the br targets the end of that block
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
                         Instruction::Br {
                             target_index: loop_index, // correct target index,
@@ -295,12 +307,13 @@ impl Instruction {
                         block.attached_breaks.push((index, usize::MAX));
 
                         Instruction::Br {
-                            target_index: usize::MAX,
+                            target_index: usize::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
                             arity: results,
                             recorded_height,
-                        } // dummy value! will backpatch when we see END for the block this `br` is attached to
+                        }
                     };
 
+                    // all the instructions after this till the `end` of the current block are unreachable!
                     control_stack.set_unreachable_traversing();
 
                     instr
@@ -392,6 +405,9 @@ impl Instruction {
 
                     *else_index = Some(index); // backpatching the `else` index in the `if` block
 
+                    // `else` instruction ends the unreachable traversing because those instructions
+                    // at runtime can execute if the `if` branch is not taken! The else block first instruction
+                    // would see the height to be `recorded_heigh (at the if) + params` (condition is already popped)
                     control_stack.end_unreachable_traversing();
                     control_stack.set_height(recorded_height + params);
 
