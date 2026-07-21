@@ -101,6 +101,16 @@ pub enum Instruction {
         /// default label as the final element.
         targets: Vec<TargetBranch>,
     },
+    Return {
+        /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
+        /// sentinel) — `return` is a branch to the outermost function label.
+        target_index: usize,
+        /// Number of result values the function returns.
+        arity: u32,
+        /// Stack height the function frame unwinds to before the `arity` results
+        /// are kept; always 0 for the function frame.
+        recorded_height: u32,
+    },
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -574,6 +584,25 @@ impl Instruction {
                         targets: br_targets,
                     }
                 }
+                Operator::Return => {
+                    // `return` is an unconditional branch to the outermost function label: it targets
+                    // the function's `end`, transfers the function results, and unwinds to the frame's
+                    // base (recorded_height 0). Handled like a `br` to block 0 — attached for backpatch
+                    // and, being unconditional, followed by `set_unreachable_traversing`.
+                    let func_block = control_stack.get_block_mut(0); // function is top-most block
+                    let results = func_block.results;
+                    let recorded_height = func_block.recorded_height;
+                    let index = instructions.len();
+
+                    func_block.attached_breaks.push((index, usize::MAX));
+                    control_stack.set_unreachable_traversing();
+
+                    Instruction::Return {
+                        target_index: usize::MAX,
+                        arity: results,
+                        recorded_height,
+                    }
+                }
                 Operator::Else => {
                     let index = instructions.len();
                     let block = control_stack.get_curr_block_mut();
@@ -643,6 +672,13 @@ impl Instruction {
                             }
                             Instruction::BrTable { targets } => {
                                 targets[*br_targets_index].target_index = index;
+                            }
+                            Instruction::Return {
+                                target_index,
+                                arity: _arity,
+                                recorded_height: _recorded_height,
+                            } => {
+                                *target_index = index;
                             }
                             _ => unreachable!(
                                 "hitting this means TraceWasm has a bug recording the instructions"

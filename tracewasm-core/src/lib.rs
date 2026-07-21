@@ -30,4 +30,4 @@ pub mod ast;
 pub mod error;
 pub mod instruction;
 pub mod parser;
-pub mod stack;
+pub mod vm;

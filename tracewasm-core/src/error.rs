@@ -1,5 +1,4 @@
 //! The crate-wide error type for parsing and lowering.
-
 use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
@@ -9,6 +8,9 @@ use thiserror::Error;
 /// code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
+    /// A execution error reported while executing a WASM module function
+    #[error("error occured while executing the WASM module func({0}): {1}")]
+    Execution(u32, String),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, or non-function imports). The string
     /// describes the specific unsupported feature.
