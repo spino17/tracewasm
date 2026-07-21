@@ -27,7 +27,7 @@ pub enum Instruction {
         target_index: usize,
         arity: u32,
         recorded_height: u32,
-    }, // target instruction index in the vector of instructions i.e. pc
+    },
 }
 
 enum BlockKind {
@@ -206,7 +206,7 @@ impl Instruction {
 
                     Instruction::Block {
                         blockty,
-                        end_index: 0, // dummy value! will backpath when we see END for this block
+                        end_index: usize::MAX, // dummy value! will backpath when we see END for this block
                     }
                 }
                 Operator::Loop { blockty } => {
@@ -234,7 +234,7 @@ impl Instruction {
                     Instruction::If {
                         blockty,
                         else_index: None,
-                        end_index: 0, // dummy value! will backpath when we see END for this `if`
+                        end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
                     }
                 }
                 Operator::Br { relative_depth } => {
@@ -258,7 +258,7 @@ impl Instruction {
                         control_stack.set_height(recorded_height + results);
 
                         Instruction::Br {
-                            target_index: 0,
+                            target_index: usize::MAX,
                             arity: results,
                             recorded_height,
                         } // dummy value! will backpatch when we see END for the block this `br` is attached to
@@ -293,10 +293,20 @@ impl Instruction {
 
                     control_stack.set_height(recorded_height + params);
 
-                    Instruction::Else { if_end_index: 0 } // dummy value! will backpatch when we see END for the `if` of this `else`
+                    Instruction::Else {
+                        if_end_index: usize::MAX,
+                    } // dummy value! will backpatch when we see END for the `if` of this `else`
                 }
                 Operator::End => {
-                    let block = control_stack.pop().unwrap(); // validated already by wasmparser so safe to `unwrap`
+                    // the non-function operator stream in Table init/Global init/Element/Data ends with an extra `end` which has no matching block start
+                    // so popping from the control stack might give a `None`, we just return the lowered instructions.
+                    let Some(block) = control_stack.pop() else {
+                        // this is entered only when is_func is `None` i.e. Table init/Global init/Element/Data
+                        debug_assert!(is_func.is_none());
+
+                        return Ok(instructions);
+                    };
+
                     let results = block.results;
                     let recorded_height = block.recorded_height;
                     let attached_breaks = &block.attached_breaks;

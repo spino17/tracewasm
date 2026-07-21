@@ -334,9 +334,7 @@ impl TraceWasmParser {
                             let mut names: Vec<Name> = vec![];
 
                             for name in reader {
-                                let Ok(name) = name else {
-                                    continue;
-                                };
+                                let name = name?;
 
                                 let name = match name {
                                     wasmparser::Name::Module {
