@@ -33,6 +33,15 @@ pub enum Instruction {
         arity: u32,
         recorded_height: u32,
     },
+    BrTable {
+        targets: Vec<TargetBranch>, // (target, arity, recorded_height)
+    },
+}
+
+pub struct TargetBranch {
+    pub target_index: usize,
+    pub arity: u32,
+    pub recorded_height: u32,
 }
 
 enum BlockKind {
@@ -66,7 +75,7 @@ struct Block {
     results: u32,
     is_unreachable_traversing: bool,
     has_inherited: bool,
-    attached_breaks: Vec<usize>,
+    attached_breaks: Vec<(usize, usize)>, // second index is for BrTable, targets index
 }
 
 #[derive(Default)]
@@ -185,7 +194,7 @@ impl ControlStack {
         self.set_height(self.curr_height + delta);
     }
 
-    fn decrease_heigh_by(&mut self, delta: u32) {
+    fn decrease_height_by(&mut self, delta: u32) {
         self.set_height(self.curr_height - delta);
     }
 
@@ -277,16 +286,13 @@ impl Instruction {
                     let index = instructions.len();
 
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
-                        control_stack.set_height(recorded_height + params); // for loops, `br` has arity=params
-
                         Instruction::Br {
                             target_index: loop_index, // correct target index,
                             arity: params,
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push(index);
-                        control_stack.set_height(recorded_height + results);
+                        block.attached_breaks.push((index, usize::MAX));
 
                         Instruction::Br {
                             target_index: usize::MAX,
@@ -314,7 +320,7 @@ impl Instruction {
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push(index);
+                        block.attached_breaks.push((index, usize::MAX));
 
                         Instruction::BrIf {
                             target_index: usize::MAX,
@@ -324,9 +330,49 @@ impl Instruction {
                     };
 
                     // instructions following the br_if means branch was not taken and those instruction would see the above height
-                    control_stack.decrease_heigh_by(1); // condition is popped
+                    control_stack.decrease_height_by(1); // condition is popped
 
                     instr
+                }
+                Operator::BrTable { targets: table } => {
+                    let targets = table.targets();
+                    let mut targets = targets.collect::<Result<Vec<_>, _>>()?;
+
+                    targets.push(table.default()); // default (last element) is taken when the popped index is out of range, i.e. i >= number of explicit targets
+
+                    let index = instructions.len();
+                    let mut br_targets = vec![];
+
+                    for (i, &relative_depth) in targets.iter().enumerate() {
+                        let block_index = control_stack.len() - 1 - relative_depth as usize;
+                        let block = control_stack.get_block_mut(block_index); // extract the block to which this `br` applies to using `relative_depth`
+                        let params = block.params;
+                        let results = block.results;
+                        let recorded_height = block.recorded_height;
+
+                        if let Some(loop_index) = block.kind.is_loop() {
+                            br_targets.push(TargetBranch {
+                                target_index: loop_index,
+                                arity: params,
+                                recorded_height,
+                            });
+                        } else {
+                            block.attached_breaks.push((index, i));
+
+                            // dummy value! will backpatch when we see END for the block this `br` is attached to
+                            br_targets.push(TargetBranch {
+                                target_index: usize::MAX,
+                                arity: results,
+                                recorded_height,
+                            });
+                        };
+                    }
+
+                    control_stack.set_unreachable_traversing();
+
+                    Instruction::BrTable {
+                        targets: br_targets,
+                    }
                 }
                 Operator::Else => {
                     let index = instructions.len();
@@ -369,8 +415,8 @@ impl Instruction {
                     let index = instructions.len();
 
                     // if this block is not a `loop` then backpatch it's br instructions
-                    for &br in attached_breaks {
-                        match &mut instructions[br] {
+                    for (br_index, br_targets_index) in attached_breaks {
+                        match &mut instructions[*br_index] {
                             Instruction::Br {
                                 target_index,
                                 arity: _arity,
@@ -384,6 +430,9 @@ impl Instruction {
                                 recorded_height: _recorded_height,
                             } => {
                                 *target_index = index;
+                            }
+                            Instruction::BrTable { targets } => {
+                                targets[*br_targets_index].target_index = index;
                             }
                             _ => unreachable!(
                                 "hitting this means TraceWasm has a bug recording the instructions"
