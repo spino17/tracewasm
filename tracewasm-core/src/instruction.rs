@@ -28,6 +28,11 @@ pub enum Instruction {
         arity: u32,
         recorded_height: u32,
     },
+    BrIf {
+        target_index: usize,
+        arity: u32,
+        recorded_height: u32,
+    },
 }
 
 enum BlockKind {
@@ -60,6 +65,7 @@ struct Block {
     params: u32,
     results: u32,
     is_unreachable_traversing: bool,
+    has_inherited: bool,
     attached_breaks: Vec<usize>,
 }
 
@@ -101,6 +107,7 @@ impl ControlStack {
                 params,
                 results,
                 is_unreachable_traversing,
+                has_inherited: true,
                 attached_breaks: vec![],
             });
 
@@ -124,23 +131,40 @@ impl ControlStack {
             recorded_height,
             params,
             results,
-            is_unreachable_traversing,
+            is_unreachable_traversing: false,
+            has_inherited: false,
             attached_breaks: vec![],
         });
     }
 
     fn set_unreachable_traversing(&mut self) {
-        let len = self.inner.len();
-        self.inner[len - 1].is_unreachable_traversing = true;
+        let curr_block = self.get_curr_block_mut();
+        curr_block.is_unreachable_traversing = true;
     }
 
     fn end_unreachable_traversing(&mut self) {
-        let len = self.inner.len();
-        self.inner[len - 1].is_unreachable_traversing = false;
+        let curr_block = self.get_curr_block_mut();
+
+        if curr_block.has_inherited {
+            return;
+        }
+
+        curr_block.is_unreachable_traversing = false;
     }
 
     fn get_block_mut(&mut self, index: usize) -> &mut Block {
         &mut self.inner[index]
+    }
+
+    fn get_curr_block(&self) -> &Block {
+        debug_assert!(!self.inner.is_empty());
+        &self.inner[self.inner.len() - 1]
+    }
+
+    fn get_curr_block_mut(&mut self) -> &mut Block {
+        debug_assert!(!self.inner.is_empty());
+        let len = self.inner.len();
+        &mut self.inner[len - 1]
     }
 
     fn set_height(&mut self, height: u32) {
@@ -150,13 +174,19 @@ impl ControlStack {
             return;
         }
 
-        let len = self.inner.len();
-
-        if self.inner[len - 1].is_unreachable_traversing == true {
+        if self.get_curr_block().is_unreachable_traversing == true {
             return;
         }
 
         self.curr_height = height;
+    }
+
+    fn increase_height_by(&mut self, delta: u32) {
+        self.set_height(self.curr_height + delta);
+    }
+
+    fn decrease_heigh_by(&mut self, delta: u32) {
+        self.set_height(self.curr_height - delta);
     }
 
     fn pop(&mut self) -> Option<Block> {
@@ -180,6 +210,7 @@ impl Instruction {
                 params,
                 results,
                 is_unreachable_traversing: false,
+                has_inherited: false,
                 attached_breaks: vec![],
             });
         }
@@ -246,7 +277,7 @@ impl Instruction {
                     let index = instructions.len();
 
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
-                        control_stack.set_height(recorded_height + params);
+                        control_stack.set_height(recorded_height + params); // for loops, `br` has arity=params
 
                         Instruction::Br {
                             target_index: loop_index, // correct target index,
@@ -268,10 +299,38 @@ impl Instruction {
 
                     instr
                 }
+                Operator::BrIf { relative_depth } => {
+                    let block_index = control_stack.len() - 1 - relative_depth as usize;
+                    let block = control_stack.get_block_mut(block_index); // extract the block to which this `br` applies to using `relative_depth`
+                    let params = block.params;
+                    let results = block.results;
+                    let recorded_height = block.recorded_height;
+                    let index = instructions.len();
+
+                    let instr = if let Some(loop_index) = block.kind.is_loop() {
+                        Instruction::BrIf {
+                            target_index: loop_index, // correct target index,
+                            arity: params,
+                            recorded_height,
+                        }
+                    } else {
+                        block.attached_breaks.push(index);
+
+                        Instruction::BrIf {
+                            target_index: usize::MAX,
+                            arity: results,
+                            recorded_height,
+                        } // dummy value! will backpatch when we see END for the block this `br` is attached to
+                    };
+
+                    // instructions following the br_if means branch was not taken and those instruction would see the above height
+                    control_stack.decrease_heigh_by(1); // condition is popped
+
+                    instr
+                }
                 Operator::Else => {
                     let index = instructions.len();
-                    let curr_control_stack_len = control_stack.len();
-                    let block = control_stack.get_block_mut(curr_control_stack_len - 1);
+                    let block = control_stack.get_curr_block_mut();
                     let recorded_height = block.recorded_height;
                     let params = block.params;
 
@@ -287,10 +346,7 @@ impl Instruction {
 
                     *else_index = Some(index); // backpatching the `else` index in the `if` block
 
-                    if block.is_unreachable_traversing {
-                        control_stack.end_unreachable_traversing();
-                    }
-
+                    control_stack.end_unreachable_traversing();
                     control_stack.set_height(recorded_height + params);
 
                     Instruction::Else {
@@ -314,18 +370,25 @@ impl Instruction {
 
                     // if this block is not a `loop` then backpatch it's br instructions
                     for &br in attached_breaks {
-                        let Instruction::Br {
-                            target_index,
-                            arity: _arity,
-                            recorded_height: _recorded_height,
-                        } = &mut instructions[br]
-                        else {
-                            unreachable!(
+                        match &mut instructions[br] {
+                            Instruction::Br {
+                                target_index,
+                                arity: _arity,
+                                recorded_height: _recorded_height,
+                            } => {
+                                *target_index = index;
+                            }
+                            Instruction::BrIf {
+                                target_index,
+                                arity: _arity,
+                                recorded_height: _recorded_height,
+                            } => {
+                                *target_index = index;
+                            }
+                            _ => unreachable!(
                                 "hitting this means TraceWasm has a bug recording the instructions"
-                            )
-                        };
-
-                        *target_index = index; // backpatching the br with this `end` as `target_index`
+                            ),
+                        }
                     }
 
                     // backpath the respective blocks of this `end`
