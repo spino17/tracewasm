@@ -6,6 +6,8 @@ use crate::{
 };
 use wasmparser::ValType;
 
+pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
+
 #[derive(Debug, Copy, Clone)]
 pub enum Val {
     I32(i32),
@@ -63,12 +65,41 @@ impl Val {
     }
 }
 
-struct Stack {}
+struct Stack {
+    inner: Vec<Val>,
+    stack_pointer: usize, // points to the top of the stack
+}
 
 impl Default for Stack {
     fn default() -> Self {
-        // should allocate starting size for stack according to WASM spec
-        Stack {}
+        Stack {
+            inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
+            stack_pointer: 0,
+        }
+    }
+}
+
+impl Stack {
+    fn push(&mut self, val: Val) {
+        if self.stack_pointer < self.inner.len() {
+            self.inner[self.stack_pointer] = val;
+        } else {
+            // self.stack_pointer == self.inner.len()
+            self.inner.push(val);
+        }
+
+        self.stack_pointer += 1;
+    }
+
+    fn pop(&mut self) -> Val {
+        let val = self.inner[self.stack_pointer - 1];
+        self.stack_pointer -= 1;
+
+        val
+    }
+
+    fn truncate(&mut self, new_height: usize) {
+        self.stack_pointer = new_height;
     }
 }
 
@@ -108,14 +139,21 @@ impl TraceVM {
     ) -> Result<Box<[Val]>, TraceWasmError> {
         // if the call is directed to TraceVM's execute then func_index is for a local function
         let imported_func_count = module.imported_func_count;
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let ty = &module.types[func_decl.ty_index.0 as usize];
+        let params_ty = &ty.params;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let locals_ty = &func_body.locals;
 
-        if params.len() > locals_ty.len() {
+        if params.len() != params_ty.len() {
             return Err(TraceWasmError::Execution(
                 func_index.0,
-                "provided params are more than the locals of the function".to_string(),
+                format!(
+                    "expected params `{}`, got `{}`",
+                    params_ty.len(),
+                    params.len()
+                ),
             ));
         }
 
@@ -125,14 +163,14 @@ impl TraceVM {
         for i in 0..params.len() {
             debug_assert!(params[i].is_ty(locals_ty[i])?); // types should match the value for params!
 
-            locals[i] = params[i];
+            locals.push(params[i]);
         }
 
         // WASM spec tells to set the declared locals with the zero value of their respective type
-        for i in params.len()..locals.len() {
+        for i in params.len()..locals_ty.len() {
             let ty = locals_ty[i];
 
-            locals[i] = Val::zero_of_ty(ty)?;
+            locals.push(Val::zero_of_ty(ty)?);
         }
 
         let mut state = TraceVMState {

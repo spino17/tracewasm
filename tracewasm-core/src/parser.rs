@@ -142,6 +142,7 @@ impl TraceWasmParser {
                                     const_expr.get_operators_reader(),
                                     None,
                                     &types,
+                                    &func_decls,
                                 )?
                                 .into_boxed_slice(),
                             ),
@@ -180,6 +181,7 @@ impl TraceWasmParser {
                                 global.init_expr.get_operators_reader(),
                                 None,
                                 &types,
+                                &func_decls,
                             )?
                             .into_boxed_slice(),
                         });
@@ -233,6 +235,7 @@ impl TraceWasmParser {
                                             offset_expr.get_operators_reader(),
                                             None,
                                             &types,
+                                            &func_decls,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -261,6 +264,7 @@ impl TraceWasmParser {
                                                 expr.get_operators_reader(),
                                                 None,
                                                 &types,
+                                                &func_decls,
                                             )?
                                             .into_boxed_slice(),
                                         );
@@ -297,6 +301,7 @@ impl TraceWasmParser {
                                             offset_expr.get_operators_reader(),
                                             None,
                                             &types,
+                                            &func_decls,
                                         )?
                                         .into_boxed_slice(),
                                 },
@@ -344,6 +349,7 @@ impl TraceWasmParser {
                         code_sec_entry.get_operators_reader()?,
                         Some((params.len() as u32, results.len() as u32)), // arity of this function
                         &types,
+                        &func_decls,
                     )?
                     .into_boxed_slice();
 

@@ -31,14 +31,17 @@
 //!
 //! The height model only works if **every** operator that changes the operand
 //! stack updates `curr_height`. The control operators handled below do so; any
-//! value/numeric/memory/local operator added later MUST call
-//! `ControlStack::increase_height_by` / `ControlStack::decrease_height_by`
-//! with its net stack effect. Because heights are `u32`, feeding real code
-//! through this pass *before* those updates are wired up will underflow on the
-//! `curr_height - params` computations — that is expected until value operators
-//! are implemented, not a latent bug in the control-flow logic.
+//! value/numeric/memory/local operator added later MUST record its net stack
+//! effect — normally via `ControlStack::apply_stack_effects_to_height`, or
+//! `ControlStack::set_height` where the exact resulting height is known. Both
+//! are no-ops while the current block is traversing dead code, so height updates
+//! placed in unreachable code are safely dropped rather than underflowing the
+//! `u32` height on a stack-polymorphic operand.
 
-use crate::{ast::FuncType, error::TraceWasmError};
+use crate::{
+    ast::{FuncDecl, FuncIndex, FuncType},
+    error::TraceWasmError,
+};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
@@ -110,6 +113,9 @@ pub enum Instruction {
         /// Stack height the function frame unwinds to before the `arity` results
         /// are kept; always 0 for the function frame.
         recorded_height: u32,
+    },
+    Call {
+        func_index: FuncIndex,
     },
 }
 
@@ -286,7 +292,7 @@ impl ControlStack {
             BlockKind::Loop { .. } => self.curr_height - params,
             BlockKind::If { .. } => {
                 let recorded_height = self.curr_height - params - 1; // top is the `if` condition and then params
-                self.set_height(self.curr_height - 1); // if pops the condition
+                self.apply_stack_effects_to_height(1, 0); // if pops the condition
 
                 recorded_height
             }
@@ -343,6 +349,10 @@ impl ControlStack {
         &mut self.inner[len - 1]
     }
 
+    fn pop(&mut self) -> Option<Block> {
+        self.inner.pop()
+    }
+
     /// Sets `curr_height`, unless the current block is traversing dead code.
     ///
     /// The dead-code guard is what makes it safe for branch/`end` handlers to
@@ -350,6 +360,12 @@ impl ControlStack {
     /// height is frozen until the block's `else`/`end` recomputes it from
     /// `recorded_height`, so any writes attempted by dead instructions are
     /// dropped here rather than corrupting the model (or underflowing).
+    ///
+    /// NOTE: use this when the exact resulting height is already known — e.g. at
+    /// `else`/`end`, which reset to `recorded_height + arity`. For an operator
+    /// described by its pop/push counts, prefer
+    /// [`Self::apply_stack_effects_to_height`], which derives the new height from
+    /// the current one instead of requiring the caller to compute it.
     fn set_height(&mut self, height: u32) {
         if self.inner.is_empty() {
             self.curr_height = height;
@@ -366,16 +382,25 @@ impl ControlStack {
         self.curr_height = height;
     }
 
-    fn increase_height_by(&mut self, delta: u32) {
-        self.set_height(self.curr_height + delta);
-    }
+    /// Applies an operator's net stack effect: `curr_height -= pops; curr_height += pushes`.
+    /// This is the default for ordinary operators described by their pop/push counts.
+    ///
+    /// NOTE: the dead-code guard is load-bearing, not just an optimization. The
+    /// arithmetic is skipped entirely while the current block is traversing dead
+    /// code, where `curr_height` is frozen (and may be below `pops`, since dead
+    /// code is stack-polymorphic) — evaluating `curr_height - pops` there would
+    /// underflow the `u32`. Guarding before the subtraction is why callers like
+    /// `br_if`/`call` can invoke this unconditionally.
+    fn apply_stack_effects_to_height(&mut self, pops: u32, pushes: u32) {
+        if self.inner.is_empty() {
+            return;
+        }
 
-    fn decrease_height_by(&mut self, delta: u32) {
-        self.set_height(self.curr_height - delta);
-    }
+        if self.get_curr_block().is_unreachable_traversing {
+            return;
+        }
 
-    fn pop(&mut self) -> Option<Block> {
-        self.inner.pop()
+        self.curr_height = self.curr_height - pops + pushes;
     }
 }
 
@@ -396,6 +421,7 @@ impl Instruction {
         mut operator_reader: OperatorsReader<'_>,
         is_func: Option<(u32, u32)>, // arity of the function
         types: &[FuncType],
+        func_decls: &[FuncDecl],
     ) -> Result<Vec<Instruction>, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
@@ -566,7 +592,7 @@ impl Instruction {
                     };
 
                     // instructions following the br_if means branch was not taken and those instruction would see the above height
-                    control_stack.decrease_height_by(1); // condition is popped
+                    control_stack.apply_stack_effects_to_height(1, 0); // condition is popped
 
                     instr
                 }
@@ -636,7 +662,17 @@ impl Instruction {
                     }
                 }
                 Operator::Call { function_index } => {
-                    todo!()
+                    let func_decl = &func_decls[function_index as usize];
+                    let ty = &types[func_decl.ty_index.0 as usize];
+                    let params = &ty.params;
+                    let results = &ty.results;
+
+                    control_stack
+                        .apply_stack_effects_to_height(params.len() as u32, results.len() as u32);
+
+                    Instruction::Call {
+                        func_index: FuncIndex(function_index),
+                    }
                 }
                 Operator::End => {
                     // the non-function operator stream in Table init/Global init/Element/Data ends with an extra `end` which has no matching block start
