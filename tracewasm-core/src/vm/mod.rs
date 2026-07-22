@@ -3,117 +3,18 @@ use crate::{
     error::TraceWasmError,
     instruction::Instruction,
     memory::Memory,
+    vm::stack::{Locals, Stack, Val},
 };
-use wasmparser::ValType;
 
-pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
+pub mod stack;
 
-#[derive(Debug, Copy, Clone)]
-pub enum Val {
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    Ref(Option<FuncIndex>),
-}
-
-impl Val {
-    fn i32_zero() -> Self {
-        Val::I32(0)
-    }
-
-    fn i64_zero() -> Self {
-        Val::I64(0)
-    }
-
-    fn f32_zero() -> Self {
-        Val::F32(0.0)
-    }
-
-    fn f64_zero() -> Self {
-        Val::F64(0.0)
-    }
-
-    fn ref_zero() -> Self {
-        Val::Ref(None)
-    }
-
-    fn zero_of_ty(ty: ValType) -> Result<Self, TraceWasmError> {
-        let val = match ty {
-            ValType::I32 => Self::i32_zero(),
-            ValType::I64 => Self::i64_zero(),
-            ValType::F32 => Self::f32_zero(),
-            ValType::F64 => Self::f64_zero(),
-            ValType::Ref(_) => Self::ref_zero(),
-            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
-        };
-
-        Ok(val)
-    }
-
-    fn is_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
-        let val = match ty {
-            ValType::I32 => matches!(self, Val::I32(_)),
-            ValType::I64 => matches!(self, Val::I64(_)),
-            ValType::F32 => matches!(self, Val::F32(_)),
-            ValType::F64 => matches!(self, Val::F64(_)),
-            ValType::Ref(_) => matches!(self, Val::Ref(_)),
-            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
-        };
-
-        Ok(val)
-    }
-}
-
-struct Stack {
-    inner: Vec<Val>,
-    stack_pointer: usize, // points to the top of the stack
-}
-
-impl Default for Stack {
-    fn default() -> Self {
-        Stack {
-            inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
-            stack_pointer: 0,
-        }
-    }
-}
-
-impl Stack {
-    fn push(&mut self, val: Val) {
-        if self.stack_pointer < self.inner.len() {
-            self.inner[self.stack_pointer] = val;
-        } else {
-            // self.stack_pointer == self.inner.len()
-            self.inner.push(val);
-        }
-
-        self.stack_pointer += 1;
-    }
-
-    fn pop(&mut self) -> Val {
-        let val = self.inner[self.stack_pointer - 1];
-        self.stack_pointer -= 1;
-
-        val
-    }
-
-    fn truncate(&mut self, new_height: usize) {
-        self.stack_pointer = new_height;
-    }
-}
-
-struct Locals {
-    inner: Vec<Val>, // size = params + declared locals
-}
-
-pub struct TraceVMState<'a> {
+pub struct TraceVMState<'a, M> {
     stack: Stack,
-    memory: &'a mut Memory,
+    memory: &'a mut M,
     locals: Locals,
 }
 
-impl<'a> TraceVMState<'a> {
+impl<'a, M: Memory> TraceVMState<'a, M> {
     fn execute(&mut self, instruction: &Instruction) -> ExecutionResult {
         // match on instruction
         // mutate the state of stack, memory and locals
@@ -131,11 +32,11 @@ pub struct TraceVM;
 
 impl TraceVM {
     /// Stateless top-level API of the TraceWasm VM to execute a functio of the WASM module.
-    pub fn execute(
+    pub(crate) fn execute<M: Memory>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
-        memory: &mut Memory,
+        memory: &mut M,
     ) -> Result<Box<[Val]>, TraceWasmError> {
         // if the call is directed to TraceVM's execute then func_index is for a local function
         let imported_func_count = module.imported_func_count;
@@ -176,7 +77,7 @@ impl TraceVM {
         let mut state = TraceVMState {
             stack: Stack::default(),
             memory,
-            locals: Locals { inner: locals },
+            locals: Locals::new(locals),
         };
 
         let mut pc = 0;
