@@ -219,8 +219,8 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
-    pub fn height(&self) -> usize {
-        self.stack_pointer
+    pub fn height(&self) -> u32 {
+        self.stack_pointer as u32
     }
 
     /// Pushes `val` onto the top of the stack.

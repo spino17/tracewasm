@@ -14,7 +14,7 @@ enum ExecutionResult {
 }
 
 pub struct TraceVMState<'a, M> {
-    stack: Stack<Val>,
+    stack: &'a mut Stack<Val>,
     memory: &'a mut M,
     locals: Locals,
 }
@@ -24,6 +24,7 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
         &mut self,
         instruction: &Instruction,
         func_index: FuncIndex,
+        caller_base_height: u32,
         module: &Module,
     ) -> Result<ExecutionResult, TraceWasmError> {
         let res = match instruction {
@@ -66,7 +67,9 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 arity,
                 recorded_height,
             } => {
-                debug_assert!(self.stack.height() as u32 == *recorded_height + *arity);
+                debug_assert!(
+                    self.stack.height() as u32 == *recorded_height + *arity + caller_base_height
+                );
                 ExecutionResult::Next
             }
             Instruction::Br {
@@ -75,7 +78,7 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 recorded_height,
             } => {
                 self.stack
-                    .truncate_by_preserving_arity(*recorded_height, *arity);
+                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
 
                 ExecutionResult::JumpTo(*target_index)
             }
@@ -87,8 +90,10 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 let cond = self.stack.pop().as_i32();
 
                 if cond != 0 {
-                    self.stack
-                        .truncate_by_preserving_arity(*recorded_height, *arity);
+                    self.stack.truncate_by_preserving_arity(
+                        *recorded_height + caller_base_height,
+                        *arity,
+                    );
 
                     ExecutionResult::JumpTo(*target_index)
                 } else {
@@ -105,8 +110,10 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                     &targets[index]
                 };
 
-                self.stack
-                    .truncate_by_preserving_arity(branch.recorded_height, branch.arity);
+                self.stack.truncate_by_preserving_arity(
+                    branch.recorded_height + caller_base_height,
+                    branch.arity,
+                );
 
                 ExecutionResult::JumpTo(branch.target_index)
             }
@@ -116,7 +123,7 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 recorded_height,
             } => {
                 self.stack
-                    .truncate_by_preserving_arity(*recorded_height, *arity);
+                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
 
                 ExecutionResult::JumpTo(*target_index)
             }
@@ -124,13 +131,19 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                // add support for imported functions too here!
+                // TODO: add support for imported functions too here!
+                // values uptill this height remain untouched by the callee frame
+                let caller_base_height_for_callee = self.stack.height() - *params_count;
                 let params = self.stack.pops_and_reverse(*params_count);
-                let results = TraceVM::execute(*callee_func_index, &params, module, self.memory)?;
 
-                for res in results {
-                    self.stack.push(res);
-                }
+                TraceVM::execute(
+                    *callee_func_index,
+                    &params,
+                    module,
+                    self.stack,
+                    self.memory,
+                    caller_base_height_for_callee,
+                )?;
 
                 ExecutionResult::Next
             }
@@ -148,13 +161,14 @@ impl TraceVM {
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
+        stack: &mut Stack<Val>,
         memory: &mut M,
-    ) -> Result<Box<[Val]>, TraceWasmError> {
+        caller_base_height: u32,
+    ) -> Result<(), TraceWasmError> {
         let imported_func_count = module.imported_func_count;
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty_index.0 as usize];
         let params_ty = &ty.params;
-        let results_len = ty.results.len() as u32;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let locals_ty = &func_body.locals;
@@ -187,7 +201,7 @@ impl TraceVM {
         }
 
         let mut state = TraceVMState {
-            stack: Stack::default(),
+            stack,
             memory,
             locals: Locals::new(locals),
         };
@@ -197,7 +211,7 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            match state.execute(instr, func_index, module)? {
+            match state.execute(instr, func_index, caller_base_height, module)? {
                 ExecutionResult::JumpTo(next_pc) => {
                     pc = next_pc;
 
@@ -217,6 +231,6 @@ impl TraceVM {
 
         // at this point, stack would have result values!
         // pop all the values of the stack and return
-        Ok(state.stack.pops_and_reverse(results_len).into_boxed_slice())
+        Ok(())
     }
 }
