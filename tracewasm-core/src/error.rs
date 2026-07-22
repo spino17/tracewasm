@@ -3,9 +3,8 @@ use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
 ///
-/// The `From` impls let both `wasmparser` decode/validation failures and
-/// generic [`anyhow::Error`]s propagate through `?` in the parser and lowering
-/// code.
+/// The `From<wasmparser::Error>` impl lets decode/validation failures propagate
+/// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
     /// A execution error reported while executing a WASM module function
@@ -22,19 +21,10 @@ pub enum TraceWasmError {
     /// not appear in this crate's public API.
     #[error("error occured while parsing: {0}")]
     Parsing(String),
-    /// A catch-all for errors carried as [`anyhow::Error`].
-    #[error("{0}")]
-    Generic(anyhow::Error),
 }
 
 impl From<wasmparser::Error> for TraceWasmError {
     fn from(value: wasmparser::Error) -> Self {
         TraceWasmError::Parsing(value.to_string())
-    }
-}
-
-impl From<anyhow::Error> for TraceWasmError {
-    fn from(value: anyhow::Error) -> Self {
-        TraceWasmError::Generic(value)
     }
 }

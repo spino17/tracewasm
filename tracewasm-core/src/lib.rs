@@ -24,11 +24,15 @@
 //! - [`parser`] — binary → [`ast::Module`] (validate-then-build).
 //! - [`ast`] — the owned module representation and its typed entity indices.
 //! - [`instruction`] — control-flow lowering and stack-height precomputation.
+//! - [`memory`] — the [`memory::Memory`] trait implemented by embedders.
 //! - [`error`] — the crate's error type.
+//!
+//! The interpreter lives in a crate-internal `vm` module; it is not yet part of
+//! the public API.
 
 pub mod ast;
 pub mod error;
 pub mod instruction;
 pub mod memory;
 pub mod parser;
-pub mod vm;
+pub(crate) mod vm;

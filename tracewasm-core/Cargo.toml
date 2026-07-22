@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 wasmparser = { version = "0.253.0" }
-anyhow = { workspace = true  }
 thiserror = { workspace = true }
 rustc-hash = { workspace = true }
 bytemuck = "1.25.2"

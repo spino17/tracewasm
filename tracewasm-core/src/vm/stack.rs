@@ -82,6 +82,8 @@ impl Val {
         Val::Ref(None)
     }
 
+    /// Unwraps an `i32` value. Panics if this value is not an `I32`; callers rely
+    /// on validation having already type-checked the operand.
     pub fn as_i32(&self) -> i32 {
         let Val::I32(val) = self else {
             panic!("value is not i32")
@@ -90,6 +92,7 @@ impl Val {
         *val
     }
 
+    /// Unwraps an `i64` value. Panics if this value is not an `I64`.
     pub fn as_i64(&self) -> i64 {
         let Val::I64(val) = self else {
             panic!("value is not i64")
@@ -98,6 +101,7 @@ impl Val {
         *val
     }
 
+    /// Unwraps an `f32` value. Panics if this value is not an `F32`.
     pub fn as_f32(&self) -> f32 {
         let Val::F32(val) = self else {
             panic!("value is not f32")
@@ -106,6 +110,7 @@ impl Val {
         *val
     }
 
+    /// Unwraps an `f64` value. Panics if this value is not an `F64`.
     pub fn as_f64(&self) -> f64 {
         let Val::F64(val) = self else {
             panic!("value is not f64")
@@ -114,6 +119,7 @@ impl Val {
         *val
     }
 
+    /// Unwraps a reference value. Panics if this value is not a `Ref`.
     pub fn as_ref(&self) -> Option<FuncIndex> {
         let Val::Ref(val) = self else {
             panic!("value is not ref")
@@ -291,8 +297,8 @@ impl<T: Clone> Stack<T> {
     ///
     /// Precondition: `new_height <= stack_pointer` (downward only). Raising the
     /// height would expose stale slots.
-    pub fn truncate(&mut self, new_height: usize) {
-        self.stack_pointer = new_height;
+    pub fn truncate(&mut self, new_height: u32) {
+        self.stack_pointer = new_height as usize;
     }
 
     /// Unwinds to `new_height` while preserving the top `arity` values — the
@@ -314,7 +320,7 @@ impl<T: Clone> Stack<T> {
 
         for i in 0..arity {
             self.inner[new_height as usize + i] =
-                self.inner[self.stack_pointer as usize - arity + i].clone();
+                self.inner[self.stack_pointer - arity + i].clone();
         }
 
         self.stack_pointer = new_height as usize + arity;

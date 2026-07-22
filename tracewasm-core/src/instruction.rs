@@ -205,9 +205,9 @@ struct Block {
     ///   *both* arms of such an `if` are dead. [`ControlStack::end_unreachable_traversing`]
     ///   consults this flag so an `else` does not resurrect genuinely dead code.
     has_inherited: bool,
-    /// Branches (`br`/`br_if`/`br_table` arms) that target this block's `end`
-    /// and therefore need their `target_index` backpatched once that `end` is
-    /// reached.
+    /// Branches (`br`/`br_if`/`br_table` arms, and `return` targeting the
+    /// function frame) that target this block's `end` and therefore need their
+    /// `target_index` backpatched once that `end` is reached.
     ///
     /// Each entry is `(instruction_index, brtable_target_slot)`. The second
     /// field selects which arm of a `BrTable::targets` vec to patch; it is
@@ -259,8 +259,9 @@ impl ControlStack {
     /// will never be consulted at runtime. Otherwise `recorded_height` is the
     /// height *below* the label's params (the params are allowed to be consumed
     /// by the block, so they are not part of the unwind height). An `if`
-    /// additionally consumes the branch condition sitting on top of the params,
-    /// so it subtracts one more and pops that condition from `curr_height`.
+    /// additionally has the branch condition sitting on top of the params, so it
+    /// subtracts one more for it. (The condition is popped from `curr_height` by
+    /// the `If` arm's `PopPush` stack effect, not here.)
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
         let (params, results) = Self::params_and_results_from_blockty(blockty, types);
 
@@ -305,7 +306,8 @@ impl ControlStack {
     }
 
     /// Marks the current (innermost) block's remaining body as dead code. Called
-    /// after unconditional control transfers (`unreachable`, `br`, `br_table`).
+    /// after unconditional control transfers (`unreachable`, `br`, `br_table`,
+    /// `return`).
     fn set_unreachable_traversing(&mut self) {
         let curr_block = self.get_curr_block_mut();
         curr_block.is_unreachable_traversing = true;
@@ -432,7 +434,8 @@ impl Instruction {
     /// `Operator::End` arm).
     ///
     /// `types` is the module's type section, used to resolve `BlockType::FuncType`
-    /// arities.
+    /// arities. `func_decls` is the module's function declarations, used by
+    /// `Call` to resolve a callee's parameter count.
     pub(crate) fn emit_instruction_from_operator_reader(
         mut operator_reader: OperatorsReader<'_>,
         is_func: Option<(u32, u32)>, // arity of the function

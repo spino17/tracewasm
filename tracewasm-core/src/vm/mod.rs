@@ -130,7 +130,7 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 // Both are frame-relative, so shift by this frame's base to compare
                 // against the shared stack's absolute height.
                 debug_assert!(
-                    self.stack.height() as u32 == *recorded_height + *arity + caller_base_height
+                    self.stack.height() == *recorded_height + *arity + caller_base_height
                 );
                 ExecutionResult::Next
             }
@@ -165,7 +165,10 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 }
             }
             Instruction::BrTable { targets } => {
-                let index = self.stack.pop().as_i32() as usize;
+                // the branch index is an unsigned i32; go through u32 so a
+                // high-bit-set value maps to a large index (→ default), not a
+                // sign-extended one.
+                let index = self.stack.pop().as_i32() as u32 as usize;
                 let target_count = targets.len() - 1;
 
                 let branch = if target_count <= index {
@@ -251,8 +254,17 @@ impl TraceVM {
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
-        // (Imported functions have no body; calling one is not yet supported.)
         let imported_func_count = module.imported_func_count;
+
+        // Imported functions have no body to interpret; reject rather than
+        // underflow the `func_bodies` index below. (Host calls are not yet supported.)
+        if func_index.0 < imported_func_count {
+            return Err(TraceWasmError::Execution(
+                func_index.0,
+                "cannot execute an imported function".to_string(),
+            ));
+        }
+
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty_index.0 as usize];
         let params_ty = &ty.params;
@@ -333,5 +345,33 @@ impl TraceVM {
         // The frame's results are now the top values on the shared stack, sitting
         // above `caller_base_height`; the caller reads them from there.
         Ok(())
+    }
+
+    /// Top-level entry point: runs a locally-defined function on a fresh operand
+    /// stack and returns its result values (in declaration order).
+    ///
+    /// This is the wrapper around [`Self::execute`] that owns the shared stack
+    /// and extracts the results, which `execute` itself leaves on the stack.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`TraceWasmError`] from execution (traps, argument-count
+    /// mismatch, calling an imported function, …).
+    pub(crate) fn run<M: Memory>(
+        func_index: FuncIndex,
+        params: &[Val],
+        module: &Module,
+        memory: &mut M,
+    ) -> Result<Box<[Val]>, TraceWasmError> {
+        let mut stack: Stack<Val> = Stack::default();
+
+        // A fresh stack starts at height 0, so this frame's base is 0.
+        Self::execute(func_index, params, module, &mut stack, memory, 0)?;
+
+        // How many result values the function leaves on the stack.
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let results_len = module.types[func_decl.ty_index.0 as usize].results.len() as u32;
+
+        Ok(stack.pops_and_reverse(results_len).into_boxed_slice())
     }
 }

@@ -142,7 +142,8 @@ impl TagType {
     }
 }
 
-/// This is copied directly from `wasmparser`
+// Mirrors `wasmparser::ValType`, re-declared here so the type is owned by this
+// crate rather than leaking the `wasmparser` dependency into the public API.
 /// Represents the types of values in a WebAssembly module.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValType {
