@@ -1,3 +1,44 @@
+//! The TraceWasm interpreter: a tree-walker over the flat, pre-lowered
+//! instruction list produced by [`crate::instruction`].
+//!
+//! ## Execution model
+//!
+//! Each function body is a `Vec<Instruction>` with control flow already
+//! resolved to absolute instruction indices and operand-stack heights
+//! precomputed. Execution is a simple `pc` loop: `TraceVMState::execute` runs
+//! one instruction and reports what the loop should do next via
+//! `ExecutionResult` — advance (`Next`), jump (`JumpTo`), or (implicitly, by
+//! advancing past the final `End`) return from the function.
+//!
+//! ## One shared operand stack across all frames
+//!
+//! Rather than giving every call its own operand stack, the whole call tree
+//! shares a single `Stack`. A call does not allocate a new stack; the callee
+//! simply builds its operands on top of the caller's. Recursion still uses the
+//! native Rust call stack (one `TraceVM::execute` frame per active wasm call),
+//! but the potentially-large value stack is allocated exactly once.
+//!
+//! ## Frame base height vs. recorded height
+//!
+//! Because the operand stack is shared, a frame's operands do not start at
+//! absolute height 0 — they start at the height the stack had when the frame was
+//! entered. That offset is the frame's **base height** (`caller_base_height`).
+//!
+//! The lowered instructions, however, store **frame-relative** heights
+//! (`recorded_height`), computed as if the function ran on an empty stack. The
+//! interpreter therefore converts relative → absolute at every height-sensitive
+//! operation with a single rule:
+//!
+//! ```text
+//! absolute_height = caller_base_height + recorded_height (+ arity)
+//! ```
+//!
+//! A call establishes the callee's base as "current height minus the args"
+//! (the args are popped off the shared stack and rebound as the callee's
+//! locals), so the callee's results end up exactly where the caller's arguments
+//! were. Instruction indices, by contrast, are per-function: each
+//! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
+
 use crate::{
     ast::{FuncIndex, Module},
     error::TraceWasmError,
@@ -6,20 +47,39 @@ use crate::{
     vm::stack::{Locals, Stack, Val},
 };
 
-pub mod stack;
+pub(crate) mod stack;
 
+/// What the driver loop should do after executing one instruction.
 enum ExecutionResult {
+    /// Set `pc` to this absolute (per-function) instruction index.
     JumpTo(usize),
+    /// Advance to the next instruction (`pc + 1`); falling off the end of the
+    /// function's instruction list ends the frame.
     Next,
 }
 
-pub struct TraceVMState<'a, M> {
+/// The mutable state of a single in-flight function activation.
+///
+/// `stack` and `memory` are borrowed because they are shared across the whole
+/// call tree (see the module docs); only `locals` is owned per activation.
+struct TraceVMState<'a, M> {
+    /// The operand stack, shared with every other active frame.
     stack: &'a mut Stack<Val>,
+    /// Linear memory, shared across the module.
     memory: &'a mut M,
+    /// This activation's local slots (params followed by declared locals).
     locals: Locals,
 }
 
 impl<'a, M: Memory> TraceVMState<'a, M> {
+    /// Executes a single instruction against this activation's state and returns
+    /// the control-flow decision for the driver loop.
+    ///
+    /// `func_index` identifies the running function (used only for error
+    /// reporting). `caller_base_height` is this frame's base height on the shared
+    /// stack; it is added to the instructions' frame-relative `recorded_height`
+    /// to obtain absolute stack heights (see the module docs). `module` is needed
+    /// to resolve callees on `Call`.
     fn execute(
         &mut self,
         instruction: &Instruction,
@@ -67,6 +127,10 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 arity,
                 recorded_height,
             } => {
+                // Sanity check the height model: when a block closes, the stack must
+                // hold exactly its `arity` results above the label's recorded height.
+                // Both are frame-relative, so shift by this frame's base to compare
+                // against the shared stack's absolute height.
                 debug_assert!(
                     self.stack.height() as u32 == *recorded_height + *arity + caller_base_height
                 );
@@ -77,6 +141,8 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 arity,
                 recorded_height,
             } => {
+                // Unwind to the target label's absolute height (frame base + its
+                // recorded height) while keeping the top `arity` values, then jump.
                 self.stack
                     .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
 
@@ -132,7 +198,12 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 params_count,
             } => {
                 // TODO: add support for imported functions too here!
-                // values uptill this height remain untouched by the callee frame
+
+                // The callee's frame begins just below the arguments: everything up
+                // to this height belongs to the caller and is left untouched. The
+                // args are popped off the shared stack and rebound as the callee's
+                // locals, so on return the callee's results occupy exactly the slots
+                // the arguments did.
                 let caller_base_height_for_callee = self.stack.height() - *params_count;
                 let params = self.stack.pops_and_reverse(*params_count);
 
@@ -153,11 +224,26 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
     }
 }
 
-pub struct TraceVM;
+pub(crate) struct TraceVM;
 
 impl TraceVM {
-    /// Stateless top-level API of the TraceWasm VM to execute a local function of the WASM module.
-    pub(crate) fn execute<M: Memory>(
+    /// Runs one (locally-defined) function to completion on the shared stack.
+    ///
+    /// Called both as the top-level entry (with an empty stack and
+    /// `caller_base_height == 0`) and recursively from the `Call` instruction.
+    /// Arguments arrive in `params` (declaration order); results are left on
+    /// `stack` above `caller_base_height` for the caller to consume — this
+    /// function returns `()`, not the results.
+    ///
+    /// `caller_base_height` is the height the shared stack had on entry, i.e.
+    /// this frame's base; see the module docs for how it maps the instructions'
+    /// frame-relative heights onto the shared stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Execution`] on an argument-count mismatch or a
+    /// trap (`unreachable`), and propagates errors from nested calls.
+    pub fn execute<M: Memory>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
@@ -165,14 +251,20 @@ impl TraceVM {
         memory: &mut M,
         caller_base_height: u32,
     ) -> Result<(), TraceWasmError> {
+        // `func_bodies` holds only locally-defined functions, so shift the global
+        // function index down by the number of imports to index into it.
+        // (Imported functions have no body; calling one is not yet supported.)
         let imported_func_count = module.imported_func_count;
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty_index.0 as usize];
         let params_ty = &ty.params;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
+        // `locals` in the body is laid out params-first, then declared locals,
+        // and `locals_ty[i]` is the declared type of local slot `i`.
         let locals_ty = &func_body.locals;
 
+        // The caller must supply exactly one argument per declared parameter.
         if params.len() != params_ty.len() {
             return Err(TraceWasmError::Execution(
                 func_index.0,
@@ -184,16 +276,22 @@ impl TraceVM {
             ));
         }
 
+        // Build the activation's local slots. Per the WebAssembly spec, a
+        // function's locals are the parameters (bound to the incoming arguments,
+        // in order) followed by the declared locals.
         let mut locals: Vec<Val> = Vec::with_capacity(locals_ty.len());
 
-        // set the params in locals
+        // Parameters occupy the first `params.len()` slots, taking the argument
+        // values as-is. In debug builds we assert each argument's runtime type
+        // matches the declared parameter type.
         for i in 0..params.len() {
-            debug_assert!(params[i].is_ty(locals_ty[i])?); // types should match the value for params!
+            debug_assert!(params[i].is_ty(locals_ty[i])?);
 
             locals.push(params[i]);
         }
 
-        // WASM spec tells to set the declared locals with the zero value of their respective type
+        // The remaining declared locals are default-initialized: the spec requires
+        // each to start at the zero value of its type (0 / 0.0 / null ref).
         for i in params.len()..locals_ty.len() {
             let ty = locals_ty[i];
 
@@ -206,6 +304,7 @@ impl TraceVM {
             locals: Locals::new(locals),
         };
 
+        // Driver loop. `pc` indexes this function's instruction list only.
         let mut pc = 0;
 
         loop {
@@ -220,6 +319,10 @@ impl TraceVM {
                 ExecutionResult::Next => {
                     pc += 1;
 
+                    // Advancing past the last instruction means we just executed
+                    // the function's terminating `End`: the frame is complete.
+                    // (`return` and branches out of the outermost block also land
+                    // here, since their target is that final `End`.)
                     if pc == instructions.len() {
                         break;
                     }
@@ -229,8 +332,8 @@ impl TraceVM {
             }
         }
 
-        // at this point, stack would have result values!
-        // pop all the values of the stack and return
+        // The frame's results are now the top values on the shared stack, sitting
+        // above `caller_base_height`; the caller reads them from there.
         Ok(())
     }
 }
