@@ -292,10 +292,8 @@ impl ControlStack {
             BlockKind::Block { .. } => self.curr_height - params,
             BlockKind::Loop { .. } => self.curr_height - params,
             BlockKind::If { .. } => {
-                let recorded_height = self.curr_height - params - 1; // top is the `if` condition and then params
-                self.apply_stack_effects_to_height(1, 0); // if pops the condition
-
-                recorded_height
+                // top is the `if` condition and then params
+                self.curr_height - params - 1
             }
         };
 
@@ -405,6 +403,27 @@ impl ControlStack {
     }
 }
 
+/// How an operator affects the tracked operand-stack height, returned by every
+/// match arm of the lowering pass so the effect is applied in exactly one place.
+///
+/// Requiring each arm to produce one of these makes it impossible to silently
+/// forget a height update — the compiler forces the arm to state its effect.
+enum StackEffectResult {
+    /// The operator pops `pops` values and pushes `pushes`; the net change is
+    /// applied to `curr_height` (skipped while traversing dead code).
+    PopPush { pops: u32, pushes: u32 },
+    /// The operator resets the height to a known absolute value, e.g. `else`/`end`
+    /// restoring `recorded_height + arity`.
+    SetHeight(u32),
+    /// The operator leaves the stack height unchanged.
+    NoEffect,
+    /// No height needs recording. Returned by unconditional branches
+    /// (`br`/`br_table`/`return`): the instructions following them up to the
+    /// enclosing `end` are unreachable anyway, and reaching that `end` always
+    /// resets the height correctly to the block's `recorded_height + results`.
+    Unreachable,
+}
+
 impl Instruction {
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
@@ -442,14 +461,14 @@ impl Instruction {
         while !operator_reader.eof() {
             let operator = operator_reader.read()?;
 
-            let instruction = match operator {
+            let (instruction, stack_effect): (Instruction, StackEffectResult) = match operator {
                 Operator::Unreachable => {
                     // all instructions after this is unreachable until the end of the current block
                     control_stack.set_unreachable_traversing();
 
-                    Instruction::Unreachable
+                    (Instruction::Unreachable, StackEffectResult::NoEffect)
                 }
-                Operator::Nop => Instruction::Nop,
+                Operator::Nop => (Instruction::Nop, StackEffectResult::NoEffect),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
                         BlockKind::Block {
@@ -459,10 +478,13 @@ impl Instruction {
                         types,
                     );
 
-                    Instruction::Block {
-                        blockty,
-                        end_index: usize::MAX, // dummy value! will backpath when we see END for this block
-                    }
+                    (
+                        Instruction::Block {
+                            blockty,
+                            end_index: usize::MAX, // dummy value! will backpath when we see END for this block
+                        },
+                        StackEffectResult::NoEffect,
+                    )
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
@@ -473,7 +495,7 @@ impl Instruction {
                         types,
                     );
 
-                    Instruction::Loop { blockty }
+                    (Instruction::Loop { blockty }, StackEffectResult::NoEffect)
                 }
                 Operator::If { blockty } => {
                     control_stack.add_block(
@@ -485,11 +507,14 @@ impl Instruction {
                         types,
                     );
 
-                    Instruction::If {
-                        blockty,
-                        else_index: None,
-                        end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
-                    }
+                    (
+                        Instruction::If {
+                            blockty,
+                            else_index: None,
+                            end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
+                        },
+                        StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                    )
                 }
                 Operator::Else => {
                     let index = instructions.len();
@@ -517,11 +542,13 @@ impl Instruction {
                     // (`has_inherited`), so a dead `if` correctly keeps both arms dead; and `set_height`'s
                     // own guard then leaves `curr_height` frozen in that case.
                     control_stack.end_unreachable_traversing();
-                    control_stack.set_height(recorded_height + params);
 
-                    Instruction::Else {
-                        if_end_index: usize::MAX,
-                    } // dummy value! will backpatch when we see END for the `if` of this `else`
+                    (
+                        Instruction::Else {
+                            if_end_index: usize::MAX,
+                        }, // dummy value! will backpatch when we see END for the `if` of this `else`
+                        StackEffectResult::SetHeight(recorded_height + params),
+                    )
                 }
                 Operator::Br { relative_depth } => {
                     // NOTE on Branching: each branch instruction will resolve to a particular block based on the relative_depth provided.
@@ -561,7 +588,7 @@ impl Instruction {
                     // all the instructions after this till the `end` of the current block are unreachable!
                     control_stack.set_unreachable_traversing();
 
-                    instr
+                    (instr, StackEffectResult::Unreachable)
                 }
                 Operator::BrIf { relative_depth } => {
                     // Same target/arity resolution as `Br` (see its notes), but `br_if` is *conditional*:
@@ -593,9 +620,7 @@ impl Instruction {
                     };
 
                     // instructions following the br_if means branch was not taken and those instruction would see the above height
-                    control_stack.apply_stack_effects_to_height(1, 0); // condition is popped
-
-                    instr
+                    (instr, StackEffectResult::PopPush { pops: 1, pushes: 0 })
                 }
                 Operator::BrTable { targets: table } => {
                     // `br_table` selects among N explicit labels plus a default. All arms share the same
@@ -639,9 +664,12 @@ impl Instruction {
 
                     control_stack.set_unreachable_traversing();
 
-                    Instruction::BrTable {
-                        targets: br_targets,
-                    }
+                    (
+                        Instruction::BrTable {
+                            targets: br_targets,
+                        },
+                        StackEffectResult::Unreachable,
+                    )
                 }
                 Operator::Return => {
                     // `return` is an unconditional branch to the outermost function label: it targets
@@ -656,11 +684,14 @@ impl Instruction {
                     func_block.attached_breaks.push((index, usize::MAX));
                     control_stack.set_unreachable_traversing();
 
-                    Instruction::Return {
-                        target_index: usize::MAX,
-                        arity: results,
-                        recorded_height,
-                    }
+                    (
+                        Instruction::Return {
+                            target_index: usize::MAX,
+                            arity: results,
+                            recorded_height,
+                        },
+                        StackEffectResult::Unreachable,
+                    )
                 }
                 Operator::Call { function_index } => {
                     let func_decl = &func_decls[function_index as usize];
@@ -668,13 +699,16 @@ impl Instruction {
                     let params = &ty.params;
                     let results = &ty.results;
 
-                    control_stack
-                        .apply_stack_effects_to_height(params.len() as u32, results.len() as u32);
-
-                    Instruction::Call {
-                        func_index: FuncIndex(function_index),
-                        params_count: params.len() as u32,
-                    }
+                    (
+                        Instruction::Call {
+                            func_index: FuncIndex(function_index),
+                            params_count: params.len() as u32,
+                        },
+                        StackEffectResult::PopPush {
+                            pops: params.len() as u32,
+                            pushes: results.len() as u32,
+                        },
+                    )
                 }
                 Operator::End => {
                     // the non-function operator stream in Table init/Global init/Element/Data ends with an extra `end` which has no matching block start
@@ -779,14 +813,13 @@ impl Instruction {
                         }
                     }
 
-                    // Closing a block leaves exactly its results on top of the unwind height. Guarded by
-                    // `set_height`: if the enclosing (now-current) block is dead, this is dropped.
-                    control_stack.set_height(recorded_height + results);
-
-                    Instruction::End {
-                        arity: results,
-                        recorded_height,
-                    }
+                    (
+                        Instruction::End {
+                            arity: results,
+                            recorded_height,
+                        },
+                        StackEffectResult::SetHeight(recorded_height + results),
+                    )
                 }
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
@@ -795,6 +828,14 @@ impl Instruction {
                     )));
                 }
             };
+
+            match stack_effect {
+                StackEffectResult::PopPush { pops, pushes } => {
+                    control_stack.apply_stack_effects_to_height(pops, pushes)
+                }
+                StackEffectResult::SetHeight(height) => control_stack.set_height(height),
+                StackEffectResult::NoEffect | StackEffectResult::Unreachable => {}
+            }
 
             instructions.push(instruction);
         }
