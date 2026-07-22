@@ -5,12 +5,13 @@
 //!
 //! ## Pipeline
 //!
-//! [`parser::TraceWasmParser::parse`] is the entry point. It first runs
-//! `wasmparser`'s full validator over the bytes, then walks the module a second
-//! time to build an owned [`ast::Module`]. Function bodies and constant
-//! expressions are lowered by [`instruction`] into a flat instruction list where
-//! structured control flow is resolved to absolute indices and operand-stack
-//! heights are precomputed.
+//! [`module::Module::compile`] is the entry point. It first runs `wasmparser`'s
+//! full validator over the bytes, then walks the module a second time to build
+//! an owned [`module::Module`]. Function bodies and constant expressions are
+//! lowered by [`instruction`] into a flat instruction list where structured
+//! control flow is resolved to absolute indices and operand-stack heights are
+//! precomputed. An [`instance::Instance`] then pairs a compiled module with a
+//! [`memory::Memory`] and runs its functions via [`instance::TypedFunc`].
 //!
 //! ## Scope
 //!
@@ -21,18 +22,19 @@
 //!
 //! ## Modules
 //!
-//! - [`parser`] — binary → [`ast::Module`] (validate-then-build).
-//! - [`ast`] — the owned module representation and its typed entity indices.
+//! - [`module`] — binary → owned module representation and typed entity indices.
 //! - [`instruction`] — control-flow lowering and stack-height precomputation.
+//! - [`instance`] — the runtime instance and typed-function calling API.
 //! - [`memory`] — the [`memory::Memory`] trait implemented by embedders.
 //! - [`error`] — the crate's error type.
 //!
-//! The interpreter lives in a crate-internal `vm` module; it is not yet part of
-//! the public API.
+//! The interpreter itself lives in a crate-internal `vm` module and is not part
+//! of the public API.
 
-pub mod ast;
 pub mod error;
+pub mod instance;
 pub mod instruction;
 pub mod memory;
-pub mod parser;
+pub mod module;
+pub(crate) mod utils;
 pub(crate) mod vm;

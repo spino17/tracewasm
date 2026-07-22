@@ -34,7 +34,7 @@
 //! returning an error.
 
 use crate::{
-    ast::{FuncIndex, ValType},
+    module::{FuncIndex, ValType},
     error::TraceWasmError,
 };
 
@@ -48,7 +48,7 @@ pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
 /// intentionally absent and rejected at the `Val` constructors below. `Ref`
 /// holds an optional function index — `None` is a null reference.
 #[derive(Debug, Copy, Clone)]
-pub(crate) enum Val {
+pub enum Val {
     I32(i32),
     I64(i64),
     F32(f32),
@@ -156,7 +156,7 @@ impl Val {
     /// # Errors
     ///
     /// Returns [`TraceWasmError::Unsupported`] for `V128`.
-    pub fn is_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
+    pub fn has_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
         let val = match ty {
             ValType::I32 => matches!(self, Val::I32(_)),
             ValType::I64 => matches!(self, Val::I64(_)),
@@ -756,19 +756,19 @@ mod tests {
 
     #[test]
     fn is_ty_matches_and_rejects() {
-        assert!(Val::I32(1).is_ty(ValType::I32).unwrap());
-        assert!(!Val::I32(1).is_ty(ValType::I64).unwrap());
-        assert!(!Val::I32(1).is_ty(ValType::F32).unwrap());
+        assert!(Val::I32(1).has_ty(ValType::I32).unwrap());
+        assert!(!Val::I32(1).has_ty(ValType::I64).unwrap());
+        assert!(!Val::I32(1).has_ty(ValType::F32).unwrap());
 
-        assert!(Val::F64(1.0).is_ty(ValType::F64).unwrap());
-        assert!(!Val::F64(1.0).is_ty(ValType::I32).unwrap());
+        assert!(Val::F64(1.0).has_ty(ValType::F64).unwrap());
+        assert!(!Val::F64(1.0).has_ty(ValType::I32).unwrap());
 
-        assert!(Val::Ref(None).is_ty(ValType::FUNCREF).unwrap());
-        assert!(!Val::Ref(None).is_ty(ValType::I32).unwrap());
+        assert!(Val::Ref(None).has_ty(ValType::FUNCREF).unwrap());
+        assert!(!Val::Ref(None).has_ty(ValType::I32).unwrap());
     }
 
     #[test]
     fn is_ty_rejects_v128() {
-        assert!(Val::I32(1).is_ty(ValType::V128).is_err());
+        assert!(Val::I32(1).has_ty(ValType::V128).is_err());
     }
 }

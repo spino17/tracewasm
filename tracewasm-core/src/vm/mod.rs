@@ -40,10 +40,11 @@
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
 use crate::{
-    ast::{FuncIndex, Module},
+    module::{FuncIndex, Module},
     error::TraceWasmError,
     instruction::Instruction,
     memory::Memory,
+    utils::formatted_val_types,
     vm::stack::{Locals, Stack, Val},
 };
 
@@ -274,16 +275,31 @@ impl TraceVM {
         // and `locals_ty[i]` is the declared type of local slot `i`.
         let locals_ty = &func_body.locals;
 
-        // The caller must supply exactly one argument per declared parameter.
+        // The caller must supply exactly one argument per declared parameter
         if params.len() != params_ty.len() {
-            return Err(TraceWasmError::Execution(
+            return Err(TraceWasmError::IncorrectParamsResultsStructure(
+                "params".to_string(),
                 func_index.0,
-                format!(
-                    "expected params `{}`, got `{}`",
-                    params_ty.len(),
-                    params.len()
-                ),
+                formatted_val_types(params_ty),
+                format!("{:?}", params),
             ));
+        }
+
+        // their types should also match
+        for i in 0..params_ty.len() {
+            let ty = params_ty[i];
+            let param = params[i];
+
+            if !param.has_ty(ty)? {
+                return Err(TraceWasmError::Execution(
+                    func_index.0,
+                    format!(
+                        "expected `{}`, got `{:?}`",
+                        formatted_val_types(params_ty),
+                        params
+                    ),
+                ));
+            }
         }
 
         // Build the activation's local slots. Per the WebAssembly spec, a
@@ -291,14 +307,9 @@ impl TraceVM {
         // in order) followed by the declared locals.
         let mut locals: Vec<Val> = Vec::with_capacity(locals_ty.len());
 
-        // Parameters occupy the first `params.len()` slots, taking the argument
-        // values as-is. In debug builds we assert each argument's runtime type
-        // matches the declared parameter type.
-        for i in 0..params.len() {
-            debug_assert!(params[i].is_ty(locals_ty[i])?);
-
-            locals.push(params[i]);
-        }
+        // Parameters occupy the first `params.len()` slots. Their count and types
+        // were already validated above, so take the values as-is.
+        locals.extend_from_slice(params);
 
         // The remaining declared locals are default-initialized: the spec requires
         // each to start at the zero value of its type (0 / 0.0 / null ref).

@@ -39,7 +39,7 @@
 //! `u32` height on a stack-polymorphic operand.
 
 use crate::{
-    ast::{FuncDecl, FuncIndex, FuncType},
+    module::{FuncDecl, FuncIndex, FuncType},
     error::TraceWasmError,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};

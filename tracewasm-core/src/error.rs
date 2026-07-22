@@ -20,6 +20,11 @@ pub enum TraceWasmError {
     /// describes the specific unsupported feature.
     #[error("not supported in TraceWasm: {0}")]
     Unsupported(String),
+    /// The params or results supplied to / produced by a typed call don't match
+    /// the function's signature. Fields: which side (`"params"`/`"results"`), the
+    /// function index, the expected type list, and the actual values seen.
+    #[error("incorrect {0} structure provided to func `{1}`: expected `{2}`, got `{3}`")]
+    IncorrectParamsResultsStructure(String, u32, String, String),
     /// A structural/decode error reported by `wasmparser` while reading the
     /// binary (also produced by the up-front full validation pass). The
     /// underlying error is flattened to its message so the `wasmparser` type does
