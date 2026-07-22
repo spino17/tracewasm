@@ -273,6 +273,18 @@ impl<T: Clone> Stack<T> {
 
         self.stack_pointer = new_height + arity;
     }
+
+    /// Returns a clone of the top value **without** removing it (a peek).
+    ///
+    /// This backs `local.tee`, which reads the top of the stack and writes it to
+    /// a local while leaving it in place — unlike `pop`, `stack_pointer` is
+    /// unchanged.
+    ///
+    /// Precondition: the stack is non-empty. Peeking an empty stack underflows
+    /// `stack_pointer` and panics.
+    pub fn tee(&self) -> T {
+        self.inner[self.stack_pointer - 1].clone()
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +373,29 @@ mod tests {
         // guarantees this for real modules). sp - 1 underflows usize here.
         let mut s = stack::<i32>();
         s.pop();
+    }
+
+    #[test]
+    fn tee_peeks_top_without_consuming() {
+        let mut s = stack::<i32>();
+        s.push(10);
+        s.push(20);
+
+        // repeated tees are non-destructive and observe the same top
+        assert_eq!(s.tee(), 20);
+        assert_eq!(s.tee(), 20);
+        assert_eq!(s.stack_pointer, 2, "tee must not move the pointer");
+        assert_eq!(live(&s), vec![10, 20]);
+
+        // and the peeked value is still poppable afterwards
+        assert_eq!(s.pop(), 20);
+    }
+
+    #[test]
+    #[should_panic]
+    fn tee_on_empty_panics() {
+        let s = stack::<i32>();
+        s.tee();
     }
 
     // ------------------------------------------------------------------
@@ -646,8 +681,14 @@ mod tests {
 
     #[test]
     fn zero_of_ty_produces_typed_zeroes() {
-        assert!(matches!(Val::zero_of_ty(ValType::I32).unwrap(), Val::I32(0)));
-        assert!(matches!(Val::zero_of_ty(ValType::I64).unwrap(), Val::I64(0)));
+        assert!(matches!(
+            Val::zero_of_ty(ValType::I32).unwrap(),
+            Val::I32(0)
+        ));
+        assert!(matches!(
+            Val::zero_of_ty(ValType::I64).unwrap(),
+            Val::I64(0)
+        ));
         assert!(matches!(Val::zero_of_ty(ValType::F32).unwrap(), Val::F32(x) if x == 0.0));
         assert!(matches!(Val::zero_of_ty(ValType::F64).unwrap(), Val::F64(x) if x == 0.0));
         assert!(matches!(
