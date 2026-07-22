@@ -1,8 +1,50 @@
+//! The VM's operand stack, its value representation (`Val`), and function
+//! locals.
+//!
+//! ## Operand stack design
+//!
+//! `Stack<T>` is a growable stack whose logical top is tracked by an explicit
+//! `stack_pointer` that is **decoupled from the backing `Vec`'s length**. This
+//! is the key to matching the height model precomputed in
+//! [`crate::instruction`]: a branch resets the stack to a known height in O(1)
+//! by moving the pointer, never by freeing elements.
+//!
+//! The invariant is `stack_pointer <= inner.len()`. Popping and truncating only
+//! lower `stack_pointer`, leaving the popped slots allocated; a later push
+//! overwrites a stale slot in place instead of reallocating. Consequently the
+//! live region is always `inner[..stack_pointer]`, and `inner.len()` reflects
+//! the high-water mark, not the current height. The backing storage is reserved
+//! once (`VM_STACK_INITIAL_ALLOCATION_SIZE`) so steady-state execution does not
+//! reallocate.
+//!
+//! ## Ordering conventions
+//!
+//! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
+//! in two flavors that differ only in the order of the returned `Vec`:
+//! `pops` returns top-first, `pops_and_reverse` returns push order
+//! (deepest-first). Callers pick whichever matches the consumer (e.g. branch
+//! result handling vs. binding call arguments into callee locals).
+//!
+//! ## Preconditions
+//!
+//! For speed the stack methods are unchecked: they assume the caller respects
+//! the operand-stack discipline that WebAssembly validation already guarantees
+//! (never pop below zero, never preserve more values than are present, only
+//! truncate downward). Violations panic via index/underflow rather than
+//! returning an error.
+
 use crate::{ast::FuncIndex, error::TraceWasmError};
 use wasmparser::ValType;
 
+/// Elements of backing storage reserved for a fresh operand stack, sized so a
+/// normal function's execution never has to reallocate mid-run.
 pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
 
+/// A concrete runtime value on the operand stack or in a local slot.
+///
+/// One variant per supported WebAssembly value type. `V128` (SIMD) is
+/// intentionally absent and rejected at the `Val` constructors below. `Ref`
+/// holds an optional function index — `None` is a null reference.
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum Val {
     I32(i32),
@@ -13,26 +55,38 @@ pub(crate) enum Val {
 }
 
 impl Val {
+    /// The default `i32` value (`0`).
     pub fn i32_zero() -> Self {
         Val::I32(0)
     }
 
+    /// The default `i64` value (`0`).
     pub fn i64_zero() -> Self {
         Val::I64(0)
     }
 
+    /// The default `f32` value (`+0.0`).
     pub fn f32_zero() -> Self {
         Val::F32(0.0)
     }
 
+    /// The default `f64` value (`+0.0`).
     pub fn f64_zero() -> Self {
         Val::F64(0.0)
     }
 
+    /// The default reference value (a null reference).
     pub fn ref_zero() -> Self {
         Val::Ref(None)
     }
 
+    /// Returns the zero/default value for `ty`, as used to initialize declared
+    /// locals per the WebAssembly spec.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] for `V128`, which the VM does not
+    /// model.
     pub fn zero_of_ty(ty: ValType) -> Result<Self, TraceWasmError> {
         let val = match ty {
             ValType::I32 => Self::i32_zero(),
@@ -46,6 +100,14 @@ impl Val {
         Ok(val)
     }
 
+    /// Whether this value's variant matches the WebAssembly type `ty`.
+    ///
+    /// Used in debug assertions to confirm supplied arguments match a function's
+    /// declared parameter types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] for `V128`.
     pub fn is_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
         let val = match ty {
             ValType::I32 => matches!(self, Val::I32(_)),
@@ -60,30 +122,54 @@ impl Val {
     }
 }
 
+/// A function activation's local slots: its parameters followed by its declared
+/// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {
     inner: Vec<Val>, // size = params + declared locals
 }
 
 impl Locals {
+    /// Wraps a fully-populated slot vector (params first, then zero-initialized
+    /// declared locals). The caller owns getting the length and contents right.
     pub fn new(locals: Vec<Val>) -> Self {
         Locals { inner: locals }
     }
 
+    /// Writes `val` into slot `index`.
+    ///
+    /// Panics if `index` is out of range; validation guarantees in-range indices
+    /// for well-formed modules.
     pub fn set(&mut self, index: usize, val: Val) {
         self.inner[index] = val;
     }
 
+    /// Reads the value in slot `index` (values are `Copy`).
+    ///
+    /// Panics if `index` is out of range; validation guarantees in-range indices
+    /// for well-formed modules.
     pub fn get(&self, index: usize) -> Val {
         self.inner[index]
     }
 }
 
+/// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
+/// independently of the backing vector's length. See the module docs for the
+/// invariants and rationale.
+///
+/// Generic over the element type so the same machinery can hold runtime `Val`s
+/// during execution and be unit-tested with simpler types.
 pub(crate) struct Stack<T> {
+    /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
+    /// `stack_pointer` are stale leftovers kept to avoid reallocation.
     inner: Vec<T>,
+    /// Logical height: index one past the top value. The top is
+    /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
     stack_pointer: usize, // points to the top of the stack
 }
 
 impl<T> Default for Stack<T> {
+    /// Creates an empty stack with `VM_STACK_INITIAL_ALLOCATION_SIZE` elements of
+    /// capacity reserved up front, so steady-state pushes never reallocate.
     fn default() -> Self {
         Stack {
             inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
@@ -93,6 +179,11 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    /// Pushes `val` onto the top of the stack.
+    ///
+    /// Reuses a stale slot when the pointer is below `inner.len()` (i.e. after a
+    /// prior pop/truncate), only growing the backing vector when the pointer is
+    /// already at the high-water mark. Either way `stack_pointer` advances by one.
     pub fn push(&mut self, val: T) {
         if self.stack_pointer < self.inner.len() {
             self.inner[self.stack_pointer] = val;
@@ -103,6 +194,10 @@ impl<T: Clone> Stack<T> {
         self.stack_pointer += 1;
     }
 
+    /// Removes and returns the top value.
+    ///
+    /// Precondition: the stack is non-empty. Popping an empty stack underflows
+    /// `stack_pointer` and panics.
     pub fn pop(&mut self) -> T {
         let val = self.inner[self.stack_pointer - 1].clone();
         self.stack_pointer -= 1;
@@ -110,6 +205,10 @@ impl<T: Clone> Stack<T> {
         val
     }
 
+    /// Removes the top `num` values and returns them **top-first**: the returned
+    /// `v[0]` is the former top, `v[num - 1]` the deepest popped value.
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pops(&mut self, num: u32) -> Vec<T> {
         let mut v = Vec::with_capacity(num as usize);
 
@@ -122,6 +221,13 @@ impl<T: Clone> Stack<T> {
         v
     }
 
+    /// Removes the top `num` values and returns them in **push order**: `v[0]` is
+    /// the deepest popped value, `v[num - 1]` the former top.
+    ///
+    /// This is the order arguments were pushed, convenient for binding a call's
+    /// operands into the callee's locals (arg0..argN-1).
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pops_and_reverse(&mut self, num: u32) -> Vec<T> {
         let mut v = Vec::with_capacity(num as usize);
 
@@ -134,10 +240,29 @@ impl<T: Clone> Stack<T> {
         v
     }
 
+    /// Sets the logical height to `new_height`, discarding everything above it in
+    /// O(1) (backing storage is retained).
+    ///
+    /// Precondition: `new_height <= stack_pointer` (downward only). Raising the
+    /// height would expose stale slots.
     pub fn truncate(&mut self, new_height: usize) {
         self.stack_pointer = new_height;
     }
 
+    /// Unwinds to `new_height` while preserving the top `arity` values — the
+    /// stack shape a taken branch produces.
+    ///
+    /// The top `arity` values (at `[stack_pointer - arity, stack_pointer)`) are
+    /// moved down to start at `new_height`, in order, and the height becomes
+    /// `new_height + arity`. Any values between `new_height` and the preserved
+    /// block are dropped.
+    ///
+    /// The copy runs bottom-up (`new_height + i` from `stack_pointer - arity + i`)
+    /// so that when the source and destination ranges overlap — the common case,
+    /// since a branch usually keeps a few results above a handful of block-local
+    /// operands — a destination write never clobbers a not-yet-read source slot.
+    ///
+    /// Precondition: `new_height + arity <= stack_pointer` (downward move).
     pub fn truncate_by_preserving_arity(&mut self, new_height: usize, arity: u32) {
         let arity = arity as usize;
 
