@@ -80,6 +80,46 @@ impl Val {
         Val::Ref(None)
     }
 
+    pub fn as_i32(&self) -> i32 {
+        let Val::I32(val) = self else {
+            panic!("value is not i32")
+        };
+
+        *val
+    }
+
+    pub fn as_i64(&self) -> i64 {
+        let Val::I64(val) = self else {
+            panic!("value is not i64")
+        };
+
+        *val
+    }
+
+    pub fn as_f32(&self) -> f32 {
+        let Val::F32(val) = self else {
+            panic!("value is not f32")
+        };
+
+        *val
+    }
+
+    pub fn as_f64(&self) -> f64 {
+        let Val::F64(val) = self else {
+            panic!("value is not f64")
+        };
+
+        *val
+    }
+
+    pub fn as_ref(&self) -> Option<FuncIndex> {
+        let Val::Ref(val) = self else {
+            panic!("value is not ref")
+        };
+
+        *val
+    }
+
     /// Returns the zero/default value for `ty`, as used to initialize declared
     /// locals per the WebAssembly spec.
     ///
@@ -179,6 +219,10 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    pub fn height(&self) -> usize {
+        self.stack_pointer
+    }
+
     /// Pushes `val` onto the top of the stack.
     ///
     /// Reuses a stale slot when the pointer is below `inner.len()` (i.e. after a
@@ -263,15 +307,15 @@ impl<T: Clone> Stack<T> {
     /// operands — a destination write never clobbers a not-yet-read source slot.
     ///
     /// Precondition: `new_height + arity <= stack_pointer` (downward move).
-    pub fn truncate_by_preserving_arity(&mut self, new_height: usize, arity: u32) {
+    pub fn truncate_by_preserving_arity(&mut self, new_height: u32, arity: u32) {
         let arity = arity as usize;
 
         for i in 0..arity {
-            self.inner[new_height + i] =
+            self.inner[new_height as usize + i] =
                 self.inner[self.stack_pointer as usize - arity + i].clone();
         }
 
-        self.stack_pointer = new_height + arity;
+        self.stack_pointer = new_height as usize + arity;
     }
 
     /// Returns a clone of the top value **without** removing it (a peek).
