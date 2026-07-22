@@ -78,12 +78,12 @@ impl Locals {
     }
 }
 
-pub(crate) struct Stack {
-    inner: Vec<Val>,
+pub(crate) struct Stack<T> {
+    inner: Vec<T>,
     stack_pointer: usize, // points to the top of the stack
 }
 
-impl Default for Stack {
+impl<T> Default for Stack<T> {
     fn default() -> Self {
         Stack {
             inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
@@ -92,8 +92,8 @@ impl Default for Stack {
     }
 }
 
-impl Stack {
-    pub fn push(&mut self, val: Val) {
+impl<T: Clone> Stack<T> {
+    pub fn push(&mut self, val: T) {
         if self.stack_pointer < self.inner.len() {
             self.inner[self.stack_pointer] = val;
         } else {
@@ -103,11 +103,35 @@ impl Stack {
         self.stack_pointer += 1;
     }
 
-    pub fn pop(&mut self) -> Val {
-        let val = self.inner[self.stack_pointer - 1];
+    pub fn pop(&mut self) -> T {
+        let val = self.inner[self.stack_pointer - 1].clone();
         self.stack_pointer -= 1;
 
         val
+    }
+
+    pub fn pops(&mut self, num: u32) -> Vec<T> {
+        let mut v = Vec::with_capacity(num as usize);
+
+        for i in 0..(num as usize) {
+            v.push(self.inner[self.stack_pointer - 1 - i].clone());
+        }
+
+        self.stack_pointer -= num as usize;
+
+        v
+    }
+
+    pub fn pops_and_reverse(&mut self, num: u32) -> Vec<T> {
+        let mut v = Vec::with_capacity(num as usize);
+
+        for i in 0..(num as usize) {
+            v.push(self.inner[self.stack_pointer - num as usize + i].clone());
+        }
+
+        self.stack_pointer -= num as usize;
+
+        v
     }
 
     pub fn truncate(&mut self, new_height: usize) {
@@ -118,8 +142,8 @@ impl Stack {
         let arity = arity as usize;
 
         for i in 0..arity {
-            self.inner[new_height + arity as usize - 1 - i] =
-                self.inner[self.stack_pointer as usize - 1 - i];
+            self.inner[new_height + i] =
+                self.inner[self.stack_pointer as usize - arity + i].clone();
         }
 
         self.stack_pointer = new_height + arity;

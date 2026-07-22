@@ -9,7 +9,7 @@ use crate::{
 pub mod stack;
 
 pub struct TraceVMState<'a, M> {
-    stack: Stack,
+    stack: Stack<Val>,
     memory: &'a mut M,
     locals: Locals,
 }
@@ -31,14 +31,13 @@ enum ExecutionResult {
 pub struct TraceVM;
 
 impl TraceVM {
-    /// Stateless top-level API of the TraceWasm VM to execute a functio of the WASM module.
+    /// Stateless top-level API of the TraceWasm VM to execute a local function of the WASM module.
     pub(crate) fn execute<M: Memory>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
         memory: &mut M,
     ) -> Result<Box<[Val]>, TraceWasmError> {
-        // if the call is directed to TraceVM's execute then func_index is for a local function
         let imported_func_count = module.imported_func_count;
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty_index.0 as usize];
