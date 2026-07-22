@@ -13,8 +13,9 @@ use crate::{
     ast::{
         CustomSection, CustomSectionKind, Data, DataKind, Element, ElementItems, ElementKind,
         Export, ExportKind, FuncBody, FuncDecl, FuncExactIndex, FuncIndex, FuncKind, FuncType,
-        Global, GlobalIndex, IndirectNameMap, MemoryIndex, Module, Name, NameMap, Table,
-        TableIndex, TableInit, TagIndex, TyIndex,
+        Global, GlobalIndex, GlobalType, IndirectNameMap, MemoryIndex, MemoryType, Module, Name,
+        NameMap, RefType, Table, TableIndex, TableInit, TableType, TagIndex, TagType, TyIndex,
+        ValType,
     },
     error::TraceWasmError,
     instruction::Instruction,
@@ -80,8 +81,14 @@ impl TraceWasmParser {
                         let results = ty.results();
 
                         types.push(FuncType {
-                            params: params.to_vec().into_boxed_slice(),
-                            results: results.to_vec().into_boxed_slice(),
+                            params: params
+                                .iter()
+                                .map(|v| ValType::from_wasmparser(*v))
+                                .collect(),
+                            results: results
+                                .iter()
+                                .map(|v| ValType::from_wasmparser(*v))
+                                .collect(),
                         });
                     }
                 }
@@ -149,7 +156,7 @@ impl TraceWasmParser {
                         };
 
                         tables.push(Table {
-                            ty,
+                            ty: TableType::from_wasmparser(ty),
                             init: table_init,
                         });
                     }
@@ -176,7 +183,7 @@ impl TraceWasmParser {
                         let global_ty = global.ty;
 
                         globals.push(Global {
-                            ty: global_ty,
+                            ty: GlobalType::from_wasmparser(global_ty),
                             val: Instruction::emit_instruction_from_operator_reader(
                                 global.init_expr.get_operators_reader(),
                                 None,
@@ -270,7 +277,10 @@ impl TraceWasmParser {
                                         );
                                     }
 
-                                    ElementItems::Expressions(ref_ty, exprs.into_boxed_slice())
+                                    ElementItems::Expressions(
+                                        RefType::from_wasmparser(ref_ty),
+                                        exprs.into_boxed_slice(),
+                                    )
                                 }
                             },
                         });
@@ -320,7 +330,7 @@ impl TraceWasmParser {
                 }
                 CodeSectionEntry(code_sec_entry) => {
                     let locals_reader = code_sec_entry.get_locals_reader()?;
-                    let mut locals = vec![];
+                    let mut locals: Vec<ValType> = vec![];
 
                     // Code entries correspond to defined functions in order, which live in
                     // `func_decls` after the imported ones — so the i-th body maps to
@@ -341,7 +351,7 @@ impl TraceWasmParser {
                         let (count, ty) = local?;
 
                         for _ in 0..count {
-                            locals.push(ty);
+                            locals.push(ValType::from_wasmparser(ty));
                         }
                     }
 
@@ -447,8 +457,11 @@ impl TraceWasmParser {
             types: types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
             tables: tables.into_boxed_slice(),
-            memories: memories.into_boxed_slice(),
-            tags: tags.into_boxed_slice(),
+            memories: memories
+                .into_iter()
+                .map(MemoryType::from_wasmparser)
+                .collect(),
+            tags: tags.into_iter().map(TagType::from_wasmparser).collect(),
             globals: globals.into_boxed_slice(),
             exports: exports.into_boxed_slice(),
             elements: elements.into_boxed_slice(),

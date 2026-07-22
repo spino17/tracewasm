@@ -55,16 +55,12 @@ pub enum Instruction {
     Unreachable,
     Nop,
     Block {
-        blockty: BlockType,
         /// Absolute index of this block's matching `End`. Backpatched; a branch
         /// that targets this block jumps here.
         end_index: usize,
     },
-    Loop {
-        blockty: BlockType,
-    },
+    Loop,
     If {
-        blockty: BlockType,
         /// Absolute index of the matching `Else`, if one exists. Backpatched at
         /// `End`.
         else_index: Option<usize>,
@@ -480,7 +476,6 @@ impl Instruction {
 
                     (
                         Instruction::Block {
-                            blockty,
                             end_index: usize::MAX, // dummy value! will backpath when we see END for this block
                         },
                         StackEffectResult::NoEffect,
@@ -495,7 +490,7 @@ impl Instruction {
                         types,
                     );
 
-                    (Instruction::Loop { blockty }, StackEffectResult::NoEffect)
+                    (Instruction::Loop, StackEffectResult::NoEffect)
                 }
                 Operator::If { blockty } => {
                     control_stack.add_block(
@@ -509,7 +504,6 @@ impl Instruction {
 
                     (
                         Instruction::If {
-                            blockty,
                             else_index: None,
                             end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
                         },
@@ -766,10 +760,7 @@ impl Instruction {
                     match block.kind {
                         BlockKind::Func | BlockKind::Loop { .. } => {} // no backpatching required
                         BlockKind::Block { index: block_index } => {
-                            let Instruction::Block {
-                                blockty: _blockty,
-                                end_index,
-                            } = &mut instructions[block_index]
+                            let Instruction::Block { end_index } = &mut instructions[block_index]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
@@ -784,7 +775,6 @@ impl Instruction {
                         } => {
                             // Fill the `if`'s `else_index` and `end_index` ...
                             let Instruction::If {
-                                blockty: _blockty,
                                 else_index,
                                 end_index,
                             } = &mut instructions[if_index]

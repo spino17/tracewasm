@@ -33,8 +33,10 @@
 //! truncate downward). Violations panic via index/underflow rather than
 //! returning an error.
 
-use crate::{ast::FuncIndex, error::TraceWasmError};
-use wasmparser::ValType;
+use crate::{
+    ast::{FuncIndex, ValType},
+    error::TraceWasmError,
+};
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.

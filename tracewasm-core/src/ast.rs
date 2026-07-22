@@ -17,9 +17,213 @@
 //! (see [`Module::func_decls`] and [`Module::imported_func_count`]).
 
 use crate::{error::TraceWasmError, instruction::Instruction};
+use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
-use wasmparser::{GlobalType, MemoryType, RefType, TableType, TagType, ValType};
+
+/// The type of a WebAssembly global: its value type plus mutability.
+///
+/// An owned wrapper that keeps the underlying `wasmparser` representation
+/// private so it does not leak into this crate's public API.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct GlobalType(wasmparser::GlobalType);
+
+impl GlobalType {
+    pub(crate) fn from_wasmparser(value: wasmparser::GlobalType) -> Self {
+        GlobalType(value)
+    }
+
+    /// The value type stored by this global.
+    pub fn content_type(&self) -> ValType {
+        ValType::from_wasmparser(self.0.content_type)
+    }
+
+    /// Whether the global is mutable (`global.set` is allowed).
+    pub fn is_mutable(&self) -> bool {
+        self.0.mutable
+    }
+
+    /// Whether the global is shared across threads (threads proposal).
+    pub fn is_shared(&self) -> bool {
+        self.0.shared
+    }
+}
+
+/// The type of a WebAssembly linear memory: its index width and page limits.
+///
+/// An owned wrapper that keeps the underlying `wasmparser` representation
+/// private so it does not leak into this crate's public API.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct MemoryType(wasmparser::MemoryType);
+
+impl MemoryType {
+    pub(crate) fn from_wasmparser(value: wasmparser::MemoryType) -> Self {
+        MemoryType(value)
+    }
+
+    /// Whether this is a 64-bit memory (indexed by `i64`); `false` means a
+    /// 32-bit memory indexed by `i32` (memory64 proposal).
+    pub fn is_64(&self) -> bool {
+        self.0.memory64
+    }
+
+    /// Whether this memory is shared across threads (threads proposal).
+    pub fn is_shared(&self) -> bool {
+        self.0.shared
+    }
+
+    /// Initial size, in pages.
+    pub fn initial(&self) -> u64 {
+        self.0.initial
+    }
+
+    /// Optional maximum size, in pages.
+    pub fn maximum(&self) -> Option<u64> {
+        self.0.maximum
+    }
+
+    /// Log base 2 of the memory's page size (16 for the default 64 KiB page,
+    /// per the custom-page-sizes proposal).
+    pub fn page_size_log2(&self) -> u32 {
+        self.0.page_size_log2()
+    }
+}
+
+/// The type of a WebAssembly table: its element reference type and size limits.
+///
+/// An owned wrapper that keeps the underlying `wasmparser` representation
+/// private so it does not leak into this crate's public API.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct TableType(wasmparser::TableType);
+
+impl TableType {
+    pub(crate) fn from_wasmparser(value: wasmparser::TableType) -> Self {
+        TableType(value)
+    }
+
+    /// The reference type of the table's elements.
+    pub fn element_type(&self) -> RefType {
+        RefType::from_wasmparser(self.0.element_type)
+    }
+
+    /// Whether this is a 64-bit table (indexed by `i64`); `false` means 32-bit
+    /// (memory64 proposal).
+    pub fn is_64(&self) -> bool {
+        self.0.table64
+    }
+
+    /// Initial size, in elements.
+    pub fn initial(&self) -> u64 {
+        self.0.initial
+    }
+
+    /// Optional maximum size, in elements.
+    pub fn maximum(&self) -> Option<u64> {
+        self.0.maximum
+    }
+}
+
+/// The type of a WebAssembly tag (exception-handling proposal).
+///
+/// An owned wrapper that keeps the underlying `wasmparser` representation
+/// private so it does not leak into this crate's public API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TagType(wasmparser::TagType);
+
+impl TagType {
+    pub(crate) fn from_wasmparser(value: wasmparser::TagType) -> Self {
+        TagType(value)
+    }
+
+    /// Index into the type section of the function type describing this tag's
+    /// payload.
+    pub fn func_type_index(&self) -> TyIndex {
+        TyIndex(self.0.func_type_idx)
+    }
+}
+
+/// This is copied directly from `wasmparser`
+/// Represents the types of values in a WebAssembly module.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValType {
+    /// The value type is i32.
+    I32,
+    /// The value type is i64.
+    I64,
+    /// The value type is f32.
+    F32,
+    /// The value type is f64.
+    F64,
+    /// The value type is v128.
+    V128,
+    /// The value type is a reference.
+    Ref(RefType),
+}
+
+impl ValType {
+    /// Alias for the wasm `funcref` type.
+    pub const FUNCREF: ValType = ValType::Ref(RefType(wasmparser::RefType::FUNCREF));
+
+    /// Alias for the wasm `externref` type.
+    pub const EXTERNREF: ValType = ValType::Ref(RefType(wasmparser::RefType::EXTERNREF));
+
+    /// Alias for the wasm `exnref` type.
+    pub const EXNREF: ValType = ValType::Ref(RefType(wasmparser::RefType::EXNREF));
+
+    /// Alias for the wasm `contref` type.
+    pub const CONTREF: ValType = ValType::Ref(RefType(wasmparser::RefType::CONTREF));
+
+    pub(crate) fn from_wasmparser(value: wasmparser::ValType) -> Self {
+        match value {
+            wasmparser::ValType::I32 => ValType::I32,
+            wasmparser::ValType::I64 => ValType::I64,
+            wasmparser::ValType::F32 => ValType::F32,
+            wasmparser::ValType::F64 => ValType::F64,
+            wasmparser::ValType::V128 => ValType::V128,
+            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r)),
+        }
+    }
+}
+
+/// A WebAssembly reference type (e.g. `funcref`, `externref`).
+///
+/// An owned wrapper that keeps the underlying `wasmparser` representation
+/// private so it does not leak into this crate's public API.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RefType(wasmparser::RefType);
+
+impl RefType {
+    pub(crate) fn from_wasmparser(value: wasmparser::RefType) -> Self {
+        RefType(value)
+    }
+
+    /// Whether the reference may be null.
+    pub fn is_nullable(&self) -> bool {
+        self.0.is_nullable()
+    }
+
+    /// Whether this is a `funcref` (a reference to a function).
+    pub fn is_func_ref(&self) -> bool {
+        self.0.is_func_ref()
+    }
+
+    /// Whether this is an `externref` (an opaque host reference).
+    pub fn is_extern_ref(&self) -> bool {
+        self.0.is_extern_ref()
+    }
+}
+
+impl fmt::Debug for RefType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for RefType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
 
 /// Marker trait for the typed `u32` index newtypes.
 ///

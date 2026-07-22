@@ -17,9 +17,11 @@ pub enum TraceWasmError {
     #[error("not supported in TraceWasm: {0}")]
     Unsupported(String),
     /// A structural/decode error reported by `wasmparser` while reading the
-    /// binary (also produced by the up-front full validation pass).
+    /// binary (also produced by the up-front full validation pass). The
+    /// underlying error is flattened to its message so the `wasmparser` type does
+    /// not appear in this crate's public API.
     #[error("error occured while parsing: {0}")]
-    Parsing(wasmparser::Error),
+    Parsing(String),
     /// A catch-all for errors carried as [`anyhow::Error`].
     #[error("{0}")]
     Generic(anyhow::Error),
@@ -27,7 +29,7 @@ pub enum TraceWasmError {
 
 impl From<wasmparser::Error> for TraceWasmError {
     fn from(value: wasmparser::Error) -> Self {
-        TraceWasmError::Parsing(value)
+        TraceWasmError::Parsing(value.to_string())
     }
 }
 

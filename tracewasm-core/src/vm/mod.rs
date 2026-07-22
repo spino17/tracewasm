@@ -98,12 +98,10 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
             }
             Instruction::Nop => ExecutionResult::Next,
             Instruction::Block {
-                blockty: _blockty,
                 end_index: _end_index,
             } => ExecutionResult::Next,
-            Instruction::Loop { blockty: _blockty } => ExecutionResult::Next,
+            Instruction::Loop => ExecutionResult::Next,
             Instruction::If {
-                blockty: _blockty,
                 else_index,
                 end_index,
             } => {
