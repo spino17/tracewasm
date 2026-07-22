@@ -10,6 +10,11 @@ pub enum TraceWasmError {
     /// A execution error reported while executing a WASM module function
     #[error("error occured while executing the WASM module func({0}): {1}")]
     Execution(u32, String),
+    /// A linear-memory access that ran past the memory's bounds (a wasm trap).
+    /// Fields: a description of the access, the byte offset attempted, and the
+    /// current memory length in bytes.
+    #[error("out of bound memory access: {0} at offset `{1}` on memory with len `{2}`")]
+    OutOfBoundMemoryAccess(String, usize, usize),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, or non-function imports). The string
     /// describes the specific unsupported feature.
