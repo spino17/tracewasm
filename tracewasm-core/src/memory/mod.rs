@@ -2,6 +2,8 @@
 
 use crate::error::TraceWasmError;
 
+pub mod linear;
+
 /// A module's linear memory, supplied by the embedder.
 ///
 /// The interpreter is generic over this trait so the backing store (a plain
