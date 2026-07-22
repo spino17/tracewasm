@@ -116,6 +116,7 @@ pub enum Instruction {
     },
     Call {
         func_index: FuncIndex,
+        params_count: u32,
     },
 }
 
@@ -672,6 +673,7 @@ impl Instruction {
 
                     Instruction::Call {
                         func_index: FuncIndex(function_index),
+                        params_count: params.len() as u32,
                     }
                 }
                 Operator::End => {

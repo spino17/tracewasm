@@ -24,6 +24,7 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
         &mut self,
         instruction: &Instruction,
         func_index: FuncIndex,
+        module: &Module,
     ) -> Result<ExecutionResult, TraceWasmError> {
         let res = match instruction {
             // TODO - give complete stack trace! - with range information of the
@@ -82,14 +83,57 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 target_index,
                 arity,
                 recorded_height,
-            } => todo!(),
-            Instruction::BrTable { targets } => todo!(),
+            } => {
+                let cond = self.stack.pop().as_i32();
+
+                if cond != 0 {
+                    self.stack
+                        .truncate_by_preserving_arity(*recorded_height, *arity);
+
+                    ExecutionResult::JumpTo(*target_index)
+                } else {
+                    ExecutionResult::Next
+                }
+            }
+            Instruction::BrTable { targets } => {
+                let index = self.stack.pop().as_i32() as usize;
+                let target_count = targets.len() - 1;
+
+                let branch = if target_count <= index {
+                    &targets[target_count] // always the last element of targets
+                } else {
+                    &targets[index]
+                };
+
+                self.stack
+                    .truncate_by_preserving_arity(branch.recorded_height, branch.arity);
+
+                ExecutionResult::JumpTo(branch.target_index)
+            }
             Instruction::Return {
                 target_index,
                 arity,
                 recorded_height,
-            } => todo!(),
-            Instruction::Call { func_index } => todo!(),
+            } => {
+                self.stack
+                    .truncate_by_preserving_arity(*recorded_height, *arity);
+
+                ExecutionResult::JumpTo(*target_index)
+            }
+            Instruction::Call {
+                func_index: callee_func_index,
+                params_count,
+            } => {
+                // add support for imported functions too here!
+                let params = self.stack.pops_and_reverse(*params_count);
+                let results = TraceVM::execute(*callee_func_index, &params, module, self.memory)?;
+
+                for res in results {
+                    self.stack.push(res);
+                }
+
+                ExecutionResult::Next
+            }
         };
 
         Ok(res)
@@ -153,7 +197,7 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            match state.execute(instr, func_index)? {
+            match state.execute(instr, func_index, module)? {
                 ExecutionResult::JumpTo(next_pc) => {
                     pc = next_pc;
 
