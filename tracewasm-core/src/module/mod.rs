@@ -548,7 +548,7 @@ pub enum Export {
 impl Export {
     pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
         let Export::Func(func_index) = self else {
-            todo!() // TODO - raise error
+            return Err(TraceWasmError::ExportNotA("function".to_string()));
         };
 
         Ok(*func_index)
@@ -1111,6 +1111,8 @@ impl Module {
     ) -> Result<Instance<M, I>, TraceWasmError> {
         // TODO: take this from the module itself if specified! and make it tunable
         let memory = M::allocate_initial_memory(WASM_MEMORY_INITIAL_ALLOCATION_SIZE);
+
+        // TODO: run the instantiation routines on tables globals ... etc.
 
         // Validate the registry against the module's declared imports: the counts
         // must agree, and every imported function must exist in the registry with

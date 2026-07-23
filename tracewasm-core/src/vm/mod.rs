@@ -231,6 +231,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                         self.import_registry
                             .execute(module_name, imported_func_name, &params)?;
 
+                    // push results to the stack
                     for res in results {
                         self.stack.push(res);
                     }

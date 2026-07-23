@@ -41,6 +41,10 @@ pub enum TraceWasmError {
         "import `{0}::{1}` signature mismatch in {2}: module expects `{3}`, registry provides `{4}`"
     )]
     ImportSignatureMismatch(String, String, String, String, String),
+    /// An export was requested as a particular kind but is something else; the
+    /// string names the expected kind (e.g. `"function"`).
+    #[error("export is not a {0}")]
+    ExportNotA(String),
     /// A structural/decode error reported by `wasmparser` while reading the
     /// binary (also produced by the up-front full validation pass). The
     /// underlying error is flattened to its message so the `wasmparser` type does
