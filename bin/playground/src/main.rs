@@ -8,8 +8,6 @@ pub struct ImportedFunctions {}
 
 #[imports]
 impl ImportedFunctions {
-    // `#[module("...")]` is a helper attribute consumed by `#[imports]`; it must
-    // be written bare (not path-qualified) so the macro can strip it.
     #[module("env")]
     fn host1(&mut self, a: i32, b: i32) -> (i32,) {
         (a.wrapping_add(b),)
@@ -26,7 +24,13 @@ fn main() -> Result<(), anyhow::Error> {
     let module = Module::compile(&buf)?;
     let registry = ImportedFunctions {};
 
+    let func = module
+        .export("bench_control_flow")
+        .ok_or(anyhow::Error::msg("export not found!"))?
+        .to_typed_func::<(i32,), ()>()?;
+
     let mut instance = module.instantiate::<LinearMemory, _>(registry)?;
+    let _ = func.call((1,), &mut instance)?;
 
     Ok(())
 }

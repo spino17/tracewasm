@@ -19,7 +19,10 @@
 
 use crate::{
     error::TraceWasmError,
-    instance::{Instance, traits::ImportRegistry},
+    instance::{
+        Instance, TypedFunc,
+        traits::{ImportRegistry, Params, Results},
+    },
     instruction::Instruction,
     memory::Memory,
     utils::formatted_val_types,
@@ -395,7 +398,7 @@ pub struct Module {
     pub memories: Box<[MemoryType]>,
     pub tags: Box<[TagType]>,
     pub globals: Box<[Global]>,
-    pub exports: Box<[Export]>,
+    pub exports: FxHashMap<String, Export>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
     pub elements: Box<[Element]>,
@@ -416,6 +419,16 @@ pub struct Module {
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     pub custom_sections: Box<[CustomSection]>,
+}
+
+impl Module {
+    pub fn exports(&self) -> &FxHashMap<String, Export> {
+        &self.exports
+    }
+
+    pub fn export(&self, name: &str) -> Option<Export> {
+        self.exports.get(name).cloned()
+    }
 }
 
 /// A locally-defined function's locals and lowered instruction list.
@@ -521,8 +534,9 @@ pub struct Table {
     pub init: TableInit,
 }
 
-/// What an export refers to.
-pub enum ExportKind {
+/// A named export and the entity it exposes.
+#[derive(Debug, Clone, Copy)]
+pub enum Export {
     Func(FuncIndex),
     Table(TableIndex),
     Memory(MemoryIndex),
@@ -531,10 +545,18 @@ pub enum ExportKind {
     FuncExact(FuncExactIndex),
 }
 
-/// A named export and the entity it exposes.
-pub struct Export {
-    pub name: String,
-    pub kind: ExportKind,
+impl Export {
+    pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
+        let Export::Func(func_index) = self else {
+            todo!() // TODO - raise error
+        };
+
+        Ok(*func_index)
+    }
+
+    pub fn to_typed_func<P: Params, R: Results>(&self) -> Result<TypedFunc<P, R>, TraceWasmError> {
+        Ok(TypedFunc::new(self.to_func()?))
+    }
 }
 
 /// A global definition: its type plus the constant expression for its initial
@@ -641,7 +663,7 @@ impl Module {
         let mut tables = vec![];
         let mut memories = vec![];
         let mut globals = vec![];
-        let mut exports = vec![];
+        let mut exports: FxHashMap<String, Export> = FxHashMap::default();
         let mut elements = vec![];
         let mut start_section: Option<FuncIndex> = None;
         let mut imported_func_count = 0;
@@ -796,19 +818,17 @@ impl Module {
                         let export = export?;
                         let index = export.index;
 
-                        exports.push(Export {
-                            name: export.name.to_string(),
-                            kind: match export.kind {
-                                ExternalKind::Func => ExportKind::Func(FuncIndex(index)),
-                                ExternalKind::Table => ExportKind::Table(TableIndex(index)),
-                                ExternalKind::Memory => ExportKind::Memory(MemoryIndex(index)),
-                                ExternalKind::Global => ExportKind::Global(GlobalIndex(index)),
-                                ExternalKind::Tag => ExportKind::Tag(TagIndex(index)),
-                                ExternalKind::FuncExact => {
-                                    ExportKind::FuncExact(FuncExactIndex(index))
-                                }
+                        exports.insert(
+                            export.name.to_string(),
+                            match export.kind {
+                                ExternalKind::Func => Export::Func(FuncIndex(index)),
+                                ExternalKind::Table => Export::Table(TableIndex(index)),
+                                ExternalKind::Memory => Export::Memory(MemoryIndex(index)),
+                                ExternalKind::Global => Export::Global(GlobalIndex(index)),
+                                ExternalKind::Tag => Export::Tag(TagIndex(index)),
+                                ExternalKind::FuncExact => Export::FuncExact(FuncExactIndex(index)),
                             },
-                        });
+                        );
                     }
                 }
                 StartSection {
@@ -1058,7 +1078,7 @@ impl Module {
                 .collect(),
             tags: tags.into_iter().map(TagType::from_wasmparser).collect(),
             globals: globals.into_boxed_slice(),
-            exports: exports.into_boxed_slice(),
+            exports,
             elements: elements.into_boxed_slice(),
             start_section,
             data_count,

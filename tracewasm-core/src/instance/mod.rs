@@ -44,12 +44,20 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
 ///
 /// The type parameters let [`Self::call`] accept native Rust values and return
 /// native Rust values, converting to/from runtime `Val`s internally.
+#[derive(Clone, Copy)]
 pub struct TypedFunc<P, R> {
     func_index: FuncIndex,
     phantom: PhantomData<(P, R)>,
 }
 
 impl<P: Params, R: Results> TypedFunc<P, R> {
+    pub(crate) fn new(func_index: FuncIndex) -> Self {
+        TypedFunc {
+            func_index,
+            phantom: PhantomData,
+        }
+    }
+
     /// Calls the function on `instance` with `params`, returning its results.
     ///
     /// # Errors
