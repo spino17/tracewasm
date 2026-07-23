@@ -3,7 +3,10 @@
 
 use crate::{
     error::TraceWasmError,
-    instance::traits::{ImportRegistry, Params, Results},
+    instance::{
+        config::Config,
+        traits::{ImportRegistry, Params, Results},
+    },
     memory::Memory,
     module::{FuncIndex, Module},
     utils::formatted_val_types,
@@ -11,6 +14,7 @@ use crate::{
 };
 use std::{marker::PhantomData, sync::Arc};
 
+pub mod config;
 pub mod traits;
 
 /// A compiled module paired with the mutable state needed to run it: its linear
@@ -23,6 +27,7 @@ pub struct Instance<M, I> {
     memory: M,
     import_registry: I,
     module: Arc<Module>,
+    config: Config,
 }
 
 impl<M: Memory, I: ImportRegistry> Instance<M, I> {
@@ -30,11 +35,12 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
     /// the registry against the module's imports first.
-    pub(crate) fn new(memory: M, import_registry: I, module: Arc<Module>) -> Self {
+    pub(crate) fn new(memory: M, import_registry: I, module: Arc<Module>, config: Config) -> Self {
         Instance {
             memory,
             import_registry,
             module,
+            config,
         }
     }
 }

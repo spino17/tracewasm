@@ -250,6 +250,16 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            // Operators the lowering pass can emit but the interpreter does not
+            // yet execute (e.g. the const/arithmetic instructions currently only
+            // reached via the const-expr evaluator). Surface an error rather than
+            // panic so an unhandled instruction can't take the process down.
+            _ => {
+                return Err(TraceWasmError::Unsupported(format!(
+                    "instruction `{:?}` is not yet supported by the interpreter",
+                    instruction
+                )));
+            }
         };
 
         Ok(res)
@@ -275,8 +285,9 @@ impl TraceVM {
     ///
     /// Returns [`TraceWasmError::IncorrectParamsResultsStructure`] if `params`
     /// don't match the function's signature, [`TraceWasmError::Execution`] on a
-    /// trap (`unreachable`), and propagates errors from nested calls (including
-    /// imported-function calls).
+    /// trap (`unreachable`), [`TraceWasmError::Unsupported`] if the body contains
+    /// an instruction the interpreter does not yet execute, and propagates errors
+    /// from nested calls (including imported-function calls).
     pub fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -418,5 +429,81 @@ impl TraceVM {
         let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
 
         Ok(stack.pops_and_reverse(results_len).into_boxed_slice())
+    }
+
+    pub(crate) fn const_expr_evaluator(
+        instructions: &[Instruction],
+        globals: &[Val],
+    ) -> Result<Val, TraceWasmError> {
+        let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
+
+        for instr in instructions {
+            match instr {
+                Instruction::I32Const { value } => {
+                    stack.push(Val::I32(*value));
+                }
+                Instruction::I64Const { value } => {
+                    stack.push(Val::I64(*value));
+                }
+                Instruction::F32Const { value } => {
+                    stack.push(Val::F32(*value));
+                }
+                Instruction::F64Const { value } => stack.push(Val::F64(*value)),
+                Instruction::GlobalGet { global_index } => {
+                    stack.push(globals[global_index.0 as usize]);
+                }
+                Instruction::RefNull => stack.push(Val::Ref(None)),
+                Instruction::RefFunc { function_index } => {
+                    stack.push(Val::Ref(Some(*function_index)));
+                }
+                Instruction::I32Add => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_add(b)));
+                }
+                Instruction::I32Sub => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_sub(b)));
+                }
+                Instruction::I32Mul => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_mul(b)));
+                }
+                Instruction::I64Add => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_add(b)));
+                }
+                Instruction::I64Sub => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_sub(b)));
+                }
+                Instruction::I64Mul => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_mul(b)));
+                }
+                Instruction::End { .. } => {}
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "instruction `{:?}` in const expression evaluator",
+                        instr
+                    )));
+                }
+            }
+        }
+
+        let val = stack.pop();
+
+        Ok(val)
     }
 }

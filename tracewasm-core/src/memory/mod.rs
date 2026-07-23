@@ -10,6 +10,7 @@ pub mod linear;
 /// `Vec<u8>`, an mmap, a guarded region, …) is the embedder's choice.
 pub trait Memory {
     /// Creates a memory pre-allocated to `size` bytes.
+    /// Per the WebAssembly spec, this should be completely zeroed.
     fn allocate_initial_memory(size: usize) -> Self;
 
     /// Reads `data.len()` bytes starting from the `offset`.

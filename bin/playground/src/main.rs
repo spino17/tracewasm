@@ -20,17 +20,17 @@ impl ImportedFunctions {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    let buf = fs::read("<PATH TO WASM file>")?;
+    let buf = fs::read(
+        "/Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/release/tracewasm_scratch.wasm",
+    )?;
+
     let module = Module::compile(&buf)?;
     let registry = ImportedFunctions {};
 
-    let func = module
-        .export("bench_control_flow")
-        .ok_or(anyhow::Error::msg("export not found!"))?
-        .to_typed_func::<(i32,), ()>()?;
+    let func = module.get_typed_func::<(i32, i64), (i64,)>("bench_bits")?;
 
-    let mut instance = module.instantiate::<LinearMemory, _>(registry)?;
-    let _ = func.call((1,), &mut instance)?;
+    let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
+    // let _ = func.call((1,), &mut instance)?;
 
     Ok(())
 }

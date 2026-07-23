@@ -81,11 +81,15 @@ impl WasmTy for f64 {
     }
 }
 
-/// Shared conversion for a function-signature tuple: turns the Rust values into
-/// the runtime `Val`s pushed as arguments.
+/// Conversions and type info shared by a function's parameter and result tuples:
+/// value ↔ `Val` marshalling, arity, and the tuple's value types.
 pub trait FuncSignatureEntity: Sized {
     /// Converts the tuple into runtime values, in declaration order.
     fn to_vals(&self) -> Vec<Val>;
+    /// The number of values in the tuple.
+    fn len() -> usize;
+    /// The value types, in order.
+    fn types() -> Vec<ValType>;
 }
 
 /// A function's parameter list, expressed as a tuple of [`WasmTy`] types.
@@ -93,15 +97,9 @@ pub trait Params: FuncSignatureEntity {}
 
 /// A function's result list, expressed as a tuple of [`WasmTy`] types.
 pub trait Results: FuncSignatureEntity {
-    /// The number of result values.
-    fn len() -> usize;
-
     /// Rebuilds the tuple from runtime values, returning `None` if the count or
     /// types do not match.
     fn from_vals(vals: &[Val]) -> Option<Self>;
-
-    /// The result value types, in order.
-    fn types() -> Vec<ValType>;
 }
 
 /// The empty signature: a function taking no parameters, or returning no results.
@@ -109,21 +107,21 @@ impl FuncSignatureEntity for () {
     fn to_vals(&self) -> Vec<Val> {
         Vec::new()
     }
+
+    fn len() -> usize {
+        0
+    }
+
+    fn types() -> Vec<ValType> {
+        vec![]
+    }
 }
 
 impl Params for () {}
 
 impl Results for () {
-    fn len() -> usize {
-        0
-    }
-
     fn from_vals(vals: &[Val]) -> Option<Self> {
         vals.is_empty().then_some(())
-    }
-
-    fn types() -> Vec<ValType> {
-        Vec::new()
     }
 }
 
@@ -142,15 +140,19 @@ macro_rules! impl_tuple {
                 let ($($ty,)+) = self;
                 vec![$($ty.to_val()),+]
             }
+
+            fn len() -> usize {
+                Self::types().len()
+            }
+
+            fn types() -> Vec<ValType> {
+                vec![$($ty::ty()),+]
+            }
         }
 
         impl<$($ty: WasmTy),+> Params for ($($ty,)+) {}
 
         impl<$($ty: WasmTy),+> Results for ($($ty,)+) {
-            fn len() -> usize {
-                Self::types().len()
-            }
-
             fn from_vals(vals: &[Val]) -> Option<Self> {
                 let mut iter = vals.iter();
                 // Pull one value per element, in field order; too few → `None`.
@@ -161,10 +163,6 @@ macro_rules! impl_tuple {
                 }
 
                 Some(tuple)
-            }
-
-            fn types() -> Vec<ValType> {
-                vec![$($ty::ty()),+]
             }
         }
     };

@@ -16,7 +16,7 @@ impl LinearMemory {
     /// for a fresh WebAssembly memory).
     pub fn new(size: usize) -> Self {
         LinearMemory {
-            inner: vec![0; size],
+            inner: vec![0; size], // Per the WebAssembly spec, its completely zeroed
         }
     }
 }

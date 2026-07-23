@@ -1,8 +1,9 @@
 //! Lowering of a WebAssembly operator stream into TraceWasm's flat instruction list.
 //!
-//! `Instruction::emit_instruction_from_operator_reader` consumes a
-//! [`wasmparser::OperatorsReader`] (one function body, or one constant
-//! expression) and produces a `Vec<Instruction>` in which **structured control
+//! `Instruction::emit_instruction_for_func` (function bodies) and
+//! `Instruction::emit_instruction_for_const_expr` (constant expressions) each
+//! consume a [`wasmparser::OperatorsReader`] and produce a `Vec<Instruction>` in
+//! which **structured control
 //! flow has been resolved into absolute indices** and **operand-stack heights
 //! have been precomputed**. The goal is that a downstream interpreter never has
 //! to re-scan for matching `end`s or rebuild block types at runtime: every
@@ -40,14 +41,17 @@
 
 use crate::{
     error::TraceWasmError,
-    module::{FuncDecl, FuncIndex, FuncType},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// Only structured control flow is modelled today; value/numeric/memory
-/// operators are rejected as unsupported by the lowering pass. Index fields
+/// Structured control flow, `call`, and the constant-expression operators
+/// (`*.const`, `global.get`, `ref.null`/`ref.func`, and the `i32`/`i64`
+/// add/sub/mul used in init expressions) are modelled. General value/numeric/
+/// memory operators in function bodies are not yet lowered and are rejected as
+/// unsupported by [`Instruction::emit_instruction_for_func`]. Index fields
 /// (`end_index`, `else_index`, `target_index`, ...) are *absolute* positions
 /// into the containing `Vec<Instruction>`, i.e. runtime program counters.
 #[derive(Debug, Clone)]
@@ -114,6 +118,31 @@ pub enum Instruction {
         func_index: FuncIndex,
         params_count: u32,
     },
+    I32Const {
+        value: i32,
+    },
+    I64Const {
+        value: i64,
+    },
+    F32Const {
+        value: f32,
+    },
+    F64Const {
+        value: f64,
+    },
+    GlobalGet {
+        global_index: GlobalIndex,
+    },
+    RefNull,
+    RefFunc {
+        function_index: FuncIndex,
+    },
+    I32Add,
+    I32Sub,
+    I32Mul,
+    I64Add,
+    I64Sub,
+    I64Mul,
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -423,6 +452,51 @@ enum StackEffectResult {
 }
 
 impl Instruction {
+    pub(crate) fn emit_instruction_for_const_expr(
+        mut operator_reader: OperatorsReader<'_>,
+    ) -> Result<Vec<Instruction>, TraceWasmError> {
+        let mut instructions = vec![];
+
+        while !operator_reader.eof() {
+            let operator = operator_reader.read()?;
+
+            let instr = match operator {
+                Operator::I32Const { value } => Instruction::I32Const { value },
+                Operator::I64Const { value } => Instruction::I64Const { value },
+                Operator::F32Const { value } => Instruction::F32Const {
+                    value: f32::from_bits(value.bits()),
+                },
+                Operator::F64Const { value } => Instruction::F64Const {
+                    value: f64::from_bits(value.bits()),
+                },
+                Operator::GlobalGet { global_index } => Instruction::GlobalGet {
+                    global_index: GlobalIndex(global_index),
+                },
+                Operator::RefNull { hty: _hty } => Instruction::RefNull,
+                Operator::RefFunc { function_index } => Instruction::RefFunc {
+                    function_index: FuncIndex(function_index),
+                },
+                Operator::I32Add => Instruction::I32Add,
+                Operator::I32Sub => Instruction::I32Sub,
+                Operator::I32Mul => Instruction::I32Mul,
+                Operator::I64Add => Instruction::I64Add,
+                Operator::I64Sub => Instruction::I64Sub,
+                Operator::I64Mul => Instruction::I64Mul,
+                Operator::End => break,
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "operator `{:?}` in const expression stream",
+                        operator
+                    )));
+                }
+            };
+
+            instructions.push(instr);
+        }
+
+        Ok(instructions)
+    }
+
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
@@ -436,26 +510,25 @@ impl Instruction {
     /// `types` is the module's type section, used to resolve `BlockType::FuncType`
     /// arities. `func_decls` is the module's function declarations, used by
     /// `Call` to resolve a callee's parameter count.
-    pub(crate) fn emit_instruction_from_operator_reader(
+    pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
-        is_func: Option<(u32, u32)>, // arity of the function
+        params: u32,
+        results: u32,
         types: &[FuncType],
         func_decls: &[FuncDecl],
     ) -> Result<Vec<Instruction>, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
 
-        if let Some((params, results)) = is_func {
-            control_stack.inner.push(Block {
-                kind: BlockKind::Func,
-                recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
-                params,
-                results,
-                is_unreachable_traversing: false,
-                has_inherited: false,
-                attached_breaks: vec![],
-            });
-        }
+        control_stack.inner.push(Block {
+            kind: BlockKind::Func,
+            recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
+            params,
+            results,
+            is_unreachable_traversing: false,
+            has_inherited: false,
+            attached_breaks: vec![],
+        });
 
         while !operator_reader.eof() {
             let operator = operator_reader.read()?;
@@ -708,13 +781,10 @@ impl Instruction {
                     )
                 }
                 Operator::End => {
-                    // the non-function operator stream in Table init/Global init/Element/Data ends with an extra `end` which has no matching block start
-                    // so popping from the control stack might give a `None`, we just return the lowered instructions.
                     let Some(block) = control_stack.pop() else {
-                        // this is entered only when is_func is `None` i.e. Table init/Global init/Element/Data
-                        debug_assert!(is_func.is_none());
-
-                        return Ok(instructions);
+                        unreachable!(
+                            "unbalanced block calculation! getting this means block tracking logic of TraceWasm is not correct"
+                        )
                     };
 
                     let results = block.results;

@@ -7,7 +7,7 @@ use thiserror::Error;
 /// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
-    /// A execution error reported while executing a WASM module function
+    /// An execution error reported while executing a WASM module function
     #[error("error occured while executing the WASM module func({0}): {1}")]
     Execution(u32, String),
     /// A linear-memory access that ran past the memory's bounds (a wasm trap).
@@ -41,6 +41,10 @@ pub enum TraceWasmError {
         "import `{0}::{1}` signature mismatch in {2}: module expects `{3}`, registry provides `{4}`"
     )]
     ImportSignatureMismatch(String, String, String, String, String),
+    /// A named export was requested but the module declares no export with that
+    /// name. The string is the requested export name.
+    #[error("export `{0}` not found in the module")]
+    ExportNotFound(String),
     /// An export was requested as a particular kind but is something else; the
     /// string names the expected kind (e.g. `"function"`).
     #[error("export is not a {0}")]

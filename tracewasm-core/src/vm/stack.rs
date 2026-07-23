@@ -227,6 +227,13 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    pub(crate) fn for_const_expr_evaluation() -> Self {
+        Stack {
+            inner: Vec::with_capacity(2), // needs very small stack
+            stack_pointer: 0,
+        }
+    }
+
     pub fn height(&self) -> u32 {
         self.stack_pointer as u32
     }

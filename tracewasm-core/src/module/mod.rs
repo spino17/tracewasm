@@ -21,6 +21,7 @@ use crate::{
     error::TraceWasmError,
     instance::{
         Instance, TypedFunc,
+        config::Config,
         traits::{ImportRegistry, Params, Results},
     },
     instruction::Instruction,
@@ -32,11 +33,15 @@ use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
-/// Bytes of linear memory allocated for a fresh instance (one 64 KiB wasm page).
+/// Size in bytes of one WebAssembly linear-memory page (64 KiB).
 ///
-/// TODO: derive this from the module's declared memory limits instead of a fixed
-/// default.
-pub const WASM_MEMORY_INITIAL_ALLOCATION_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
+/// A fresh instance allocates `initial_pages * WASM_MEMORY_PAGE_SIZE` bytes,
+/// where `initial_pages` comes from the module's declared memory limits (see
+/// [`Module::instantiate`]).
+///
+/// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB, and
+/// cap the initial allocation against the instance [`Config`].
+pub const WASM_MEMORY_PAGE_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
@@ -429,6 +434,57 @@ impl Module {
     pub fn export(&self, name: &str) -> Option<Export> {
         self.exports.get(name).cloned()
     }
+
+    /// Looks up an exported function by name and returns a typed handle to it,
+    /// checking that the typed signature `P` -> `R` matches the module's
+    /// declared signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::ExportNotFound`] if no export has that name,
+    /// [`TraceWasmError::ExportNotA`] if the export exists but is not a function,
+    /// and [`TraceWasmError::IncorrectParamsResultsStructure`] if the parameter
+    /// or result types of `P`/`R` disagree with the function's signature (in
+    /// count or in the type at any position).
+    pub fn get_typed_func<P: Params, R: Results>(
+        &self,
+        name: &str,
+    ) -> Result<TypedFunc<P, R>, TraceWasmError> {
+        let Some(export) = self.export(name) else {
+            return Err(TraceWasmError::ExportNotFound(name.to_string()));
+        };
+
+        let func_index = export.to_func()?;
+        let func_decl = &self.func_decls[func_index.0 as usize];
+        let ty_index = func_decl.ty;
+        let ty = &self.types[ty_index.0 as usize];
+
+        // Full type-list equality subsumes the arity check: a difference in
+        // length or in the type at any position is reported the same way, with
+        // the declared signature as "expected" and the typed handle as "got".
+        let param_types = P::types();
+        let result_types = R::types();
+
+        if ty.params.as_ref() != param_types.as_slice() {
+            return Err(TraceWasmError::IncorrectParamsResultsStructure(
+                "params".to_string(),
+                func_index.0,
+                formatted_val_types(&ty.params),
+                formatted_val_types(&param_types),
+            ));
+        }
+
+        if ty.results.as_ref() != result_types.as_slice() {
+            return Err(TraceWasmError::IncorrectParamsResultsStructure(
+                "results".to_string(),
+                func_index.0,
+                formatted_val_types(&ty.results),
+                formatted_val_types(&result_types),
+            ));
+        }
+
+        Ok(TypedFunc::new(func_index))
+    }
 }
 
 /// A locally-defined function's locals and lowered instruction list.
@@ -552,10 +608,6 @@ impl Export {
         };
 
         Ok(*func_index)
-    }
-
-    pub fn to_typed_func<P: Params, R: Results>(&self) -> Result<TypedFunc<P, R>, TraceWasmError> {
-        Ok(TypedFunc::new(self.to_func()?))
     }
 }
 
@@ -762,11 +814,8 @@ impl Module {
                         let table_init = match init {
                             wasmparser::TableInit::RefNull => TableInit::RefNull,
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
-                                Instruction::emit_instruction_from_operator_reader(
+                                Instruction::emit_instruction_for_const_expr(
                                     const_expr.get_operators_reader(),
-                                    None,
-                                    &types,
-                                    &func_decls,
                                 )?
                                 .into_boxed_slice(),
                             ),
@@ -801,11 +850,8 @@ impl Module {
 
                         globals.push(Global {
                             ty: GlobalType::from_wasmparser(global_ty),
-                            val: Instruction::emit_instruction_from_operator_reader(
+                            val: Instruction::emit_instruction_for_const_expr(
                                 global.init_expr.get_operators_reader(),
-                                None,
-                                &types,
-                                &func_decls,
                             )?
                             .into_boxed_slice(),
                         });
@@ -852,14 +898,10 @@ impl Module {
                                     offset_expr,
                                 } => ElementKind::Active {
                                     table_index: table_index.map(TableIndex),
-                                    offset_expr:
-                                        Instruction::emit_instruction_from_operator_reader(
-                                            offset_expr.get_operators_reader(),
-                                            None,
-                                            &types,
-                                            &func_decls,
-                                        )?
-                                        .into_boxed_slice(),
+                                    offset_expr: Instruction::emit_instruction_for_const_expr(
+                                        offset_expr.get_operators_reader(),
+                                    )?
+                                    .into_boxed_slice(),
                                 },
                             },
                             items: match elem.items {
@@ -882,11 +924,8 @@ impl Module {
                                         let expr = expr?;
 
                                         exprs.push(
-                                            Instruction::emit_instruction_from_operator_reader(
+                                            Instruction::emit_instruction_for_const_expr(
                                                 expr.get_operators_reader(),
-                                                None,
-                                                &types,
-                                                &func_decls,
                                             )?
                                             .into_boxed_slice(),
                                         );
@@ -921,14 +960,10 @@ impl Module {
                                     offset_expr,
                                 } => DataKind::Active {
                                     memory_index: MemoryIndex(memory_index),
-                                    offset_expr:
-                                        Instruction::emit_instruction_from_operator_reader(
-                                            offset_expr.get_operators_reader(),
-                                            None,
-                                            &types,
-                                            &func_decls,
-                                        )?
-                                        .into_boxed_slice(),
+                                    offset_expr: Instruction::emit_instruction_for_const_expr(
+                                        offset_expr.get_operators_reader(),
+                                    )?
+                                    .into_boxed_slice(),
                                 },
                             },
                             data: data.data.to_vec().into_boxed_slice(),
@@ -970,9 +1005,10 @@ impl Module {
                         }
                     }
 
-                    let instructions = Instruction::emit_instruction_from_operator_reader(
+                    let instructions = Instruction::emit_instruction_for_func(
                         code_sec_entry.get_operators_reader()?,
-                        Some((params.len() as u32, results.len() as u32)), // arity of this function
+                        params.len() as u32,
+                        results.len() as u32,
                         &types,
                         &func_decls,
                     )?
@@ -1068,6 +1104,14 @@ impl Module {
             }
         }
 
+        // checking restrictions of TraceWasm
+        // Below checks are unsupported features right now in TraceWasm.
+        if memories.len() > 1 {
+            return Err(TraceWasmError::Unsupported(
+                "more than one memory".to_string(),
+            ));
+        }
+
         Ok(Arc::new(Module {
             types: types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
@@ -1108,11 +1152,15 @@ impl Module {
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: Arc<Module>,
         import_registry: I,
+        config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
-        // TODO: take this from the module itself if specified! and make it tunable
-        let memory = M::allocate_initial_memory(WASM_MEMORY_INITIAL_ALLOCATION_SIZE);
+        let initial_pages = if !self.memories.is_empty() {
+            self.memories[0].initial()
+        } else {
+            0
+        };
 
-        // TODO: run the instantiation routines on tables globals ... etc.
+        let config = config.unwrap_or_default();
 
         // Validate the registry against the module's declared imports: the counts
         // must agree, and every imported function must exist in the registry with
@@ -1173,6 +1221,13 @@ impl Module {
             }
         }
 
-        Ok(Instance::new(memory, import_registry, self.clone()))
+        // TODO: use config to validate the module against it! including below TODO.
+
+        // TODO - cap this if the initial pages are beyond what we can materialize.
+        let memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
+
+        // TODO: run the instantiation routines on tables globals ... etc.
+
+        Ok(Instance::new(memory, import_registry, self.clone(), config))
     }
 }

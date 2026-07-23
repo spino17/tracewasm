@@ -138,7 +138,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                     #( <#param_types as ::tracewasm_core::instance::traits::WasmTy>::ty() ),*
                 ]
                 .into_boxed_slice(),
-                <#ret_type as ::tracewasm_core::instance::traits::Results>::types().into_boxed_slice(),
+                <#ret_type as ::tracewasm_core::instance::traits::FuncSignatureEntity>::types().into_boxed_slice(),
             )),
         });
 
