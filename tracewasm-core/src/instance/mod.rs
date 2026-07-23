@@ -26,7 +26,11 @@ pub struct Instance<M, I> {
 }
 
 impl<M: Memory, I: ImportRegistry> Instance<M, I> {
-    pub fn new(memory: M, import_registry: I, module: Arc<Module>) -> Self {
+    /// Internal constructor assembling an instance from its parts. Crate-private
+    /// because it performs no validation; the public path is
+    /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
+    /// the registry against the module's imports first.
+    pub(crate) fn new(memory: M, import_registry: I, module: Arc<Module>) -> Self {
         Instance {
             memory,
             import_registry,

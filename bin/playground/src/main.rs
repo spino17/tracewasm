@@ -1,12 +1,12 @@
 use std::fs;
-use tracewasm_core::{memory::linear::LinearMemory, module::Module};
+use tracewasm_core::{imports, memory::linear::LinearMemory, module::Module};
 
 /// Example host module. The `#[imports]` macro reads the `#[module("...")]`-tagged
 /// methods below and generates the entire [`ImportRegistry`] impl (`execute`,
 /// `signature`, `size`) — the embedder writes only the function bodies.
 pub struct ImportedFunctions {}
 
-#[tracewasm_macros::imports]
+#[imports]
 impl ImportedFunctions {
     // `#[module("...")]` is a helper attribute consumed by `#[imports]`; it must
     // be written bare (not path-qualified) so the macro can strip it.

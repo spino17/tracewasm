@@ -1,8 +1,9 @@
 //! The owned, in-memory representation of a parsed WebAssembly module.
 //!
-//! [`Module::compile`] builds a [`Module`] from a binary; every section is
+//! [`Module::compile`] builds an `Arc<Module>` from a binary; every section is
 //! converted from `wasmparser`'s borrowing views into owned data (boxed slices,
-//! `String`s) so the module outlives the input bytes.
+//! `String`s) so the module outlives the input bytes. The `Arc` lets one
+//! compiled module back several [`Instance`]s.
 //!
 //! ## Typed entity indices
 //!
@@ -28,6 +29,10 @@ use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
+/// Bytes of linear memory allocated for a fresh instance (one 64 KiB wasm page).
+///
+/// TODO: derive this from the module's declared memory limits instead of a fixed
+/// default.
 pub const WASM_MEMORY_INITIAL_ALLOCATION_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The type of a WebAssembly global: its value type plus mutability.
@@ -616,7 +621,8 @@ impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIn
 
 impl Module {
     /// Validates `buf` as a core WebAssembly module and builds an owned
-    /// [`Module`] from it.
+    /// [`Module`] from it, wrapped in an `Arc` so it can be shared across
+    /// instances.
     ///
     /// # Errors
     ///
@@ -1066,6 +1072,19 @@ impl Module {
         }))
     }
 
+    /// Instantiates the module against an import registry, producing a runnable
+    /// [`Instance`].
+    ///
+    /// Allocates the instance's linear memory and validates the registry against
+    /// the module's declared imports: the function counts must agree, and every
+    /// imported function must exist in the registry with a matching signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::ImportCountMismatch`] if the counts differ,
+    /// [`TraceWasmError::ImportedFunctionNotFound`] if the registry lacks a
+    /// declared import, and [`TraceWasmError::ImportSignatureMismatch`] if an
+    /// import's signature disagrees with the module.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: Arc<Module>,
         import_registry: I,

@@ -176,6 +176,12 @@ impl_tuple!(A1, A2, A3);
 impl_tuple!(A1, A2, A3, A4);
 impl_tuple!(A1, A2, A3, A4, A5);
 
+/// A host function usable as a wasm import: a callable taking `&mut Ctx` and a
+/// [`Params`] tuple, returning a [`Results`] tuple.
+///
+/// Blanket-implemented for every matching closure/`fn`; used by
+/// [`assert_imported_func_trait`] to statically check that a `#[module]`-tagged
+/// method has a valid import signature.
 pub trait ImportedFunc<Ctx, P, R>: Fn(&mut Ctx, P) -> R {}
 impl<P: Params, R: Results, Ctx, F: Fn(&mut Ctx, P) -> R> ImportedFunc<Ctx, P, R> for F {}
 

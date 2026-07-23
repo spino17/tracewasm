@@ -62,8 +62,9 @@ enum ExecutionResult {
 
 /// The mutable state of a single in-flight function activation.
 ///
-/// `stack` and `memory` are borrowed because they are shared across the whole
-/// call tree (see the module docs); only `locals` is owned per activation.
+/// `stack`, `memory`, and `import_registry` are borrowed because they are shared
+/// across the whole call tree (see the module docs); only `locals` is owned per
+/// activation.
 struct TraceVMState<'a, M, I> {
     /// The operand stack, shared with every other active frame.
     stack: &'a mut Stack<Val>,
@@ -71,6 +72,7 @@ struct TraceVMState<'a, M, I> {
     memory: &'a mut M,
     /// This activation's local slots (params followed by declared locals).
     locals: Locals,
+    /// The registry resolving imported-function calls, shared across the call tree.
     import_registry: &'a mut I,
 }
 
@@ -270,8 +272,10 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::Execution`] on an argument-count mismatch or a
-    /// trap (`unreachable`), and propagates errors from nested calls.
+    /// Returns [`TraceWasmError::IncorrectParamsResultsStructure`] if `params`
+    /// don't match the function's signature, [`TraceWasmError::Execution`] on a
+    /// trap (`unreachable`), and propagates errors from nested calls (including
+    /// imported-function calls).
     pub fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -386,8 +390,8 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Propagates any [`TraceWasmError`] from execution (traps, argument-count
-    /// mismatch, calling an imported function, …).
+    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
+    /// mismatches, errors returned by imported functions, …).
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
