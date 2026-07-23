@@ -3,11 +3,11 @@
 
 use crate::{
     error::TraceWasmError,
-    instance::traits::{ImportRegistry, Params, Results, assert_imported_func_trait},
+    instance::traits::{ImportRegistry, Params, Results},
     memory::Memory,
-    module::{FuncIndex, Module, ValType},
+    module::{FuncIndex, Module},
     utils::formatted_val_types,
-    vm::{TraceVM, stack::Val},
+    vm::TraceVM,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -78,93 +78,5 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         };
 
         Ok(res)
-    }
-}
-
-pub struct ImportedFunctions {}
-
-impl ImportRegistry for ImportedFunctions {
-    fn execute(
-        &mut self,
-        module_name: &str,
-        func_name: &str,
-        params: &[Val],
-    ) -> Result<Box<[Val]>, TraceWasmError> {
-        match (module_name, func_name) {
-            ("env", "host1") => {
-                // check the types of params first! whether they match the signature!
-                // parse params here!
-                let params: (i32, i32) = (params[0].as_i32(), params[1].as_i32()); // this should come from params
-                let results = self.host1(params.0, params.1);
-                let res: Vec<Val> = vec![Val::I32(results)];
-
-                Ok(res.into_boxed_slice())
-            }
-            ("env", "host2") => {
-                // parse params here!
-                let params: (i32, i32, i64) =
-                    (params[0].as_i32(), params[1].as_i32(), params[2].as_i64()); // this should come from params
-                let results = self.host2(params.0, params.1, params.2);
-                let res: Vec<Val> = vec![Val::I32(results)];
-
-                Ok(res.into_boxed_slice())
-            }
-            _ => Err(TraceWasmError::ImportedFunctionNotFound(
-                module_name.to_string(),
-                func_name.to_string(),
-            )),
-        }
-    }
-
-    fn signature(
-        &self,
-        module_name: &str,
-        func_name: &str,
-    ) -> Option<(Box<[ValType]>, Box<[ValType]>)> {
-        let sig = match (module_name, func_name) {
-            ("env", "host1") => {
-                let params = [ValType::I32, ValType::I32].to_vec();
-                let results = [ValType::I32].to_vec();
-
-                (params.into_boxed_slice(), results.into_boxed_slice())
-            }
-            ("env", "host2") => {
-                let params = [ValType::I32, ValType::I32, ValType::I64].to_vec();
-                let results = [ValType::I32].to_vec();
-
-                (params.into_boxed_slice(), results.into_boxed_slice())
-            }
-            _ => return None,
-        };
-
-        Some(sig)
-    }
-
-    fn size(&self) -> u32 {
-        2 // number of functions in imports impl block
-    }
-}
-
-// #[imports] imports macro. identifies the module name of the function with what is specified in the `module` macro!
-// This macro makes sure all the functions inside this impl has ctx of exactly same type!
-impl ImportedFunctions {
-    // #[module("env")] // specifies the module name
-    pub fn host1(&mut self, _a: i32, _b: i32) -> i32 {
-        // constructed from the signature
-        let inner = |_ctx: &mut ImportedFunctions, _params: (i32, i32)| (0,);
-
-        assert_imported_func_trait(inner); // type-check it!
-
-        todo!() // user implemented logic
-    }
-
-    // #[module("env")] // specifies the module name
-    pub fn host2(&mut self, _a: i32, _b: i32, _c: i64) -> i32 {
-        // constructed from the signature
-        let inner = |_ctx: &mut ImportedFunctions, _params: (i32, i32, i64)| (0,);
-
-        assert_imported_func_trait(inner); // type-check it!
-
-        todo!()
     }
 }

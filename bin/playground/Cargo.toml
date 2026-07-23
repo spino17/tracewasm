@@ -1,0 +1,9 @@
+[package]
+name = "playground"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracewasm-core = { path = "../../tracewasm-core" }
+tracewasm-macros = { path = "../../tracewasm-macros" }
+anyhow = { version = "1" }

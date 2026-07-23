@@ -6,7 +6,12 @@
 //! types, so [`crate::instance::TypedFunc`] can convert arguments and results
 //! without the caller touching raw `Val`s.
 
-use crate::{error::TraceWasmError, module::ValType, vm::stack::Val};
+use crate::{error::TraceWasmError, module::ValType};
+
+// The runtime value type lives in the crate-internal `vm` module; re-export it
+// here so it has a public path (`instance::traits::Val`) for the `ImportRegistry`
+// signatures and the `#[imports]`-generated code, without exposing the VM.
+pub use crate::vm::stack::Val;
 
 /// A Rust type corresponding to a single WebAssembly value type.
 pub trait WasmTy: Sized {
@@ -200,7 +205,7 @@ pub trait ImportRegistry {
     fn size(&self) -> u32;
 }
 
-pub(crate) fn assert_imported_func_trait<P: Params, R: Results, Ctx, F: ImportedFunc<Ctx, P, R>>(
-    _f: F,
-) {
-}
+/// Compile-time assertion helper used by the `#[imports]` macro: instantiating
+/// it forces `F` to satisfy [`ImportedFunc`], i.e. that a host function's params
+/// form a [`Params`] tuple and its results a [`Results`] tuple.
+pub fn assert_imported_func_trait<P: Params, R: Results, Ctx, F: ImportedFunc<Ctx, P, R>>(_f: F) {}

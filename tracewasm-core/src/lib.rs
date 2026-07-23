@@ -31,6 +31,10 @@
 //! The interpreter itself lives in a crate-internal `vm` module and is not part
 //! of the public API.
 
+// Lets the `#[imports]` proc-macro's generated code refer to this crate as
+// `::tracewasm_core::…` even when expanded inside the crate itself.
+extern crate self as tracewasm_core;
+
 pub mod error;
 pub mod instance;
 pub mod instruction;
@@ -38,3 +42,7 @@ pub mod memory;
 pub mod module;
 pub(crate) mod utils;
 pub(crate) mod vm;
+
+/// Attribute macro that generates an [`instance::traits::ImportRegistry`] impl
+/// from an `impl` block of `#[module("...")]`-tagged host functions.
+pub use tracewasm_macros::imports;
