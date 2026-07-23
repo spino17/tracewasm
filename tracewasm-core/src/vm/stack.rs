@@ -34,8 +34,8 @@
 //! returning an error.
 
 use crate::{
-    module::{FuncIndex, ValType},
     error::TraceWasmError,
+    module::{FuncIndex, ValType},
 };
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a

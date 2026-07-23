@@ -6,7 +6,7 @@
 //! types, so [`crate::instance::TypedFunc`] can convert arguments and results
 //! without the caller touching raw `Val`s.
 
-use crate::{module::ValType, vm::stack::Val};
+use crate::{error::TraceWasmError, module::ValType, vm::stack::Val};
 
 /// A Rust type corresponding to a single WebAssembly value type.
 pub trait WasmTy: Sized {
@@ -170,3 +170,37 @@ impl_tuple!(A1, A2);
 impl_tuple!(A1, A2, A3);
 impl_tuple!(A1, A2, A3, A4);
 impl_tuple!(A1, A2, A3, A4, A5);
+
+pub trait ImportedFunc<Ctx, P, R>: Fn(&mut Ctx, P) -> R {}
+impl<P: Params, R: Results, Ctx, F: Fn(&mut Ctx, P) -> R> ImportedFunc<Ctx, P, R> for F {}
+
+/// An imported function's signature as `(params, results)` value-type lists.
+pub type ImportSignature = (Box<[ValType]>, Box<[ValType]>);
+
+/// Resolves a module's imported functions to host implementations.
+///
+/// Supplied by the embedder at [`Module::instantiate`](crate::module::Module::instantiate),
+/// which cross-checks it against the module's declared imports before running.
+pub trait ImportRegistry {
+    /// Invokes the imported function `module_name::func_name` with `params`,
+    /// returning its results.
+    fn execute(
+        &mut self,
+        module_name: &str,
+        func_name: &str,
+        params: &[Val],
+    ) -> Result<Box<[Val]>, TraceWasmError>;
+
+    /// Returns the `(params, results)` signature of `module_name::func_name`, or
+    /// `None` if the registry has no such function.
+    fn signature(&self, module_name: &str, func_name: &str) -> Option<ImportSignature>;
+
+    /// The number of functions the registry provides (checked against the
+    /// module's import count at instantiation).
+    fn size(&self) -> u32;
+}
+
+pub(crate) fn assert_imported_func_trait<P: Params, R: Results, Ctx, F: ImportedFunc<Ctx, P, R>>(
+    _f: F,
+) {
+}

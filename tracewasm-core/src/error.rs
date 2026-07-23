@@ -25,6 +25,22 @@ pub enum TraceWasmError {
     /// function index, the expected type list, and the actual values seen.
     #[error("incorrect {0} structure provided to func `{1}`: expected `{2}`, got `{3}`")]
     IncorrectParamsResultsStructure(String, u32, String, String),
+    /// An imported function declared by the module (module name, function name)
+    /// has no matching entry in the supplied import registry.
+    #[error("WASM module import `{0}::{1}` not found in the registry")]
+    ImportedFunctionNotFound(String, String),
+    /// The import registry declares a different number of functions than the
+    /// module imports. Fields: the module's import count, the registry's count.
+    #[error("import count mismatch: module imports `{0}` functions, registry provides `{1}`")]
+    ImportCountMismatch(u32, u32),
+    /// An imported function's registry signature does not match the module's
+    /// declared import type. Fields: module name, function name, which side
+    /// (`"params"`/`"results"`), the module's expected type list, and the
+    /// registry's provided type list.
+    #[error(
+        "import `{0}::{1}` signature mismatch in {2}: module expects `{3}`, registry provides `{4}`"
+    )]
+    ImportSignatureMismatch(String, String, String, String, String),
     /// A structural/decode error reported by `wasmparser` while reading the
     /// binary (also produced by the up-front full validation pass). The
     /// underlying error is flattened to its message so the `wasmparser` type does

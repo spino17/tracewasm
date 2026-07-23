@@ -40,10 +40,11 @@
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
 use crate::{
-    module::{FuncIndex, Module},
     error::TraceWasmError,
+    instance::traits::ImportRegistry,
     instruction::Instruction,
     memory::Memory,
+    module::{FuncIndex, FuncKind, Module},
     utils::formatted_val_types,
     vm::stack::{Locals, Stack, Val},
 };
@@ -63,16 +64,17 @@ enum ExecutionResult {
 ///
 /// `stack` and `memory` are borrowed because they are shared across the whole
 /// call tree (see the module docs); only `locals` is owned per activation.
-struct TraceVMState<'a, M> {
+struct TraceVMState<'a, M, I> {
     /// The operand stack, shared with every other active frame.
     stack: &'a mut Stack<Val>,
     /// Linear memory, shared across the module.
     memory: &'a mut M,
     /// This activation's local slots (params followed by declared locals).
     locals: Locals,
+    import_registry: &'a mut I,
 }
 
-impl<'a, M: Memory> TraceVMState<'a, M> {
+impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// Executes a single instruction against this activation's state and returns
     /// the control-flow decision for the driver loop.
     ///
@@ -199,8 +201,6 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                // TODO: add support for imported functions too here!
-
                 // The callee's frame begins just below the arguments: everything up
                 // to this height belongs to the caller and is left untouched. The
                 // args are popped off the shared stack and rebound as the callee's
@@ -208,15 +208,42 @@ impl<'a, M: Memory> TraceVMState<'a, M> {
                 // the arguments did.
                 let caller_base_height_for_callee = self.stack.height() - *params_count;
                 let params = self.stack.pops_and_reverse(*params_count);
+                let imported_func_count = module.imported_func_count;
 
-                TraceVM::execute(
-                    *callee_func_index,
-                    &params,
-                    module,
-                    self.stack,
-                    self.memory,
-                    caller_base_height_for_callee,
-                )?;
+                // Route on the *callee*: an imported callee is dispatched to the
+                // registry; a local one is interpreted recursively.
+                if callee_func_index.0 < imported_func_count {
+                    let func_decl = &module.func_decls[callee_func_index.0 as usize];
+
+                    debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
+
+                    let FuncKind::Imported {
+                        module_name,
+                        imported_func_name,
+                    } = &func_decl.kind
+                    else {
+                        unreachable!()
+                    };
+
+                    let results =
+                        self.import_registry
+                            .execute(module_name, imported_func_name, &params)?;
+
+                    for res in results {
+                        self.stack.push(res);
+                    }
+                } else {
+                    // local function execution
+                    TraceVM::execute(
+                        *callee_func_index,
+                        &params,
+                        module,
+                        self.stack,
+                        self.memory,
+                        caller_base_height_for_callee,
+                        self.import_registry,
+                    )?;
+                }
 
                 ExecutionResult::Next
             }
@@ -245,29 +272,23 @@ impl TraceVM {
     ///
     /// Returns [`TraceWasmError::Execution`] on an argument-count mismatch or a
     /// trap (`unreachable`), and propagates errors from nested calls.
-    pub fn execute<M: Memory>(
+    pub fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
         stack: &mut Stack<Val>,
         memory: &mut M,
         caller_base_height: u32,
+        import_registry: &mut I,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
 
-        // Imported functions have no body to interpret; reject rather than
-        // underflow the `func_bodies` index below. (Host calls are not yet supported.)
-        if func_index.0 < imported_func_count {
-            return Err(TraceWasmError::Execution(
-                func_index.0,
-                "cannot execute an imported function".to_string(),
-            ));
-        }
+        debug_assert!(func_index.0 >= imported_func_count);
 
         let func_decl = &module.func_decls[func_index.0 as usize];
-        let ty = &module.types[func_decl.ty_index.0 as usize];
+        let ty = &module.types[func_decl.ty.0 as usize];
         let params_ty = &ty.params;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
@@ -291,13 +312,11 @@ impl TraceVM {
             let param = params[i];
 
             if !param.has_ty(ty)? {
-                return Err(TraceWasmError::Execution(
+                return Err(TraceWasmError::IncorrectParamsResultsStructure(
+                    "params".to_string(),
                     func_index.0,
-                    format!(
-                        "expected `{}`, got `{:?}`",
-                        formatted_val_types(params_ty),
-                        params
-                    ),
+                    formatted_val_types(params_ty),
+                    format!("{:?}", params),
                 ));
             }
         }
@@ -323,6 +342,7 @@ impl TraceVM {
             stack,
             memory,
             locals: Locals::new(locals),
+            import_registry,
         };
 
         // Driver loop. `pc` indexes this function's instruction list only.
@@ -368,20 +388,29 @@ impl TraceVM {
     ///
     /// Propagates any [`TraceWasmError`] from execution (traps, argument-count
     /// mismatch, calling an imported function, …).
-    pub(crate) fn run<M: Memory>(
+    pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
         memory: &mut M,
+        import_registry: &mut I,
     ) -> Result<Box<[Val]>, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 
         // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(func_index, params, module, &mut stack, memory, 0)?;
+        Self::execute(
+            func_index,
+            params,
+            module,
+            &mut stack,
+            memory,
+            0,
+            import_registry,
+        )?;
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
-        let results_len = module.types[func_decl.ty_index.0 as usize].results.len() as u32;
+        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
 
         Ok(stack.pops_and_reverse(results_len).into_boxed_slice())
     }

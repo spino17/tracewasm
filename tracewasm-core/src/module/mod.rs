@@ -16,13 +16,19 @@
 //! `n`-th function counting imported functions first, then locally-defined ones
 //! (see [`Module::func_decls`] and [`Module::imported_func_count`]).
 
-use crate::{error::TraceWasmError, instance::Instance, instruction::Instruction, memory::Memory};
+use crate::{
+    error::TraceWasmError,
+    instance::{Instance, traits::ImportRegistry},
+    instruction::Instruction,
+    memory::Memory,
+    utils::formatted_val_types,
+};
 use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
-pub const WASM_MEMORY_INITIAL_ALLOCATION_SIZE: usize = 64 * 1024; // 512Kib
+pub const WASM_MEMORY_INITIAL_ALLOCATION_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
@@ -552,7 +558,7 @@ pub enum FuncKind {
 pub struct FuncDecl {
     pub kind: FuncKind,
     /// Index into [`Module::types`] giving this function's signature.
-    pub ty_index: TyIndex,
+    pub ty: TyIndex,
 }
 
 /// A `name`-section map from a typed entity index to its name.
@@ -696,7 +702,7 @@ impl Module {
                                 module_name,
                                 imported_func_name,
                             },
-                            ty_index,
+                            ty: ty_index,
                         });
                     }
 
@@ -713,7 +719,7 @@ impl Module {
 
                         func_decls.push(FuncDecl {
                             kind: FuncKind::Local,
-                            ty_index: TyIndex(index),
+                            ty: TyIndex(index),
                         });
                     }
                 }
@@ -920,7 +926,7 @@ impl Module {
                     // `func_decls[imported_func_count + i]`.
                     let func_index = func_bodies.len() as u32 + imported_func_count;
                     let func_decl = &func_decls[func_index as usize];
-                    let ty_index = func_decl.ty_index;
+                    let ty_index = func_decl.ty;
                     let ty = &types[ty_index.0 as usize];
                     let params = &ty.params;
                     let results = &ty.results;
@@ -1060,10 +1066,72 @@ impl Module {
         }))
     }
 
-    pub fn instantiate<M: Memory>(self: Arc<Module>) -> Instance<M> {
+    pub fn instantiate<M: Memory, I: ImportRegistry>(
+        self: Arc<Module>,
+        import_registry: I,
+    ) -> Result<Instance<M, I>, TraceWasmError> {
         // TODO: take this from the module itself if specified! and make it tunable
         let memory = M::allocate_initial_memory(WASM_MEMORY_INITIAL_ALLOCATION_SIZE);
 
-        Instance::new(memory, self.clone())
+        // Validate the registry against the module's declared imports: the counts
+        // must agree, and every imported function must exist in the registry with
+        // a matching signature.
+        let imported_func_count = self.imported_func_count;
+
+        if import_registry.size() != imported_func_count {
+            return Err(TraceWasmError::ImportCountMismatch(
+                imported_func_count,
+                import_registry.size(),
+            ));
+        }
+
+        for i in 0..imported_func_count {
+            let func_decl = &self.func_decls[i as usize];
+
+            debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
+
+            let FuncKind::Imported {
+                module_name,
+                imported_func_name,
+            } = &func_decl.kind
+            else {
+                unreachable!()
+            };
+
+            let Some((import_params, import_results)) =
+                import_registry.signature(module_name, imported_func_name)
+            else {
+                return Err(TraceWasmError::ImportedFunctionNotFound(
+                    module_name.to_string(),
+                    imported_func_name.to_string(),
+                ));
+            };
+
+            let func_ty = &self.types[func_decl.ty.0 as usize];
+            let params = &func_ty.params;
+            let results = &func_ty.results;
+
+            if params.as_ref() != import_params.as_ref() {
+                return Err(TraceWasmError::ImportSignatureMismatch(
+                    module_name.to_string(),
+                    imported_func_name.to_string(),
+                    "params".to_string(),
+                    formatted_val_types(params),
+                    formatted_val_types(&import_params),
+                ));
+            }
+
+            if results.as_ref() != import_results.as_ref() {
+                return Err(TraceWasmError::ImportSignatureMismatch(
+                    module_name.to_string(),
+                    imported_func_name.to_string(),
+                    "results".to_string(),
+                    formatted_val_types(results),
+                    formatted_val_types(&import_results),
+                ));
+            }
+        }
+
+        Ok(Instance::new(memory, import_registry, self.clone()))
     }
 }

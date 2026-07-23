@@ -39,8 +39,8 @@
 //! `u32` height on a stack-polymorphic operand.
 
 use crate::{
-    module::{FuncDecl, FuncIndex, FuncType},
     error::TraceWasmError,
+    module::{FuncDecl, FuncIndex, FuncType},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -692,7 +692,7 @@ impl Instruction {
                 }
                 Operator::Call { function_index } => {
                     let func_decl = &func_decls[function_index as usize];
-                    let ty = &types[func_decl.ty_index.0 as usize];
+                    let ty = &types[func_decl.ty.0 as usize];
                     let params = &ty.params;
                     let results = &ty.results;
 
