@@ -4,12 +4,12 @@
 use crate::{
     error::TraceWasmError,
     instance::traits::{Params, Results},
-    memory::{Memory, linear::LinearMemory},
+    memory::Memory,
     module::{FuncIndex, Module},
     utils::formatted_val_types,
     vm::TraceVM,
 };
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 pub mod traits;
 
@@ -19,7 +19,13 @@ pub mod traits;
 /// implementation.
 pub struct Instance<M> {
     memory: M,
-    module: Module,
+    module: Arc<Module>,
+}
+
+impl<M: Memory> Instance<M> {
+    pub fn new(memory: M, module: Arc<Module>) -> Self {
+        Instance { memory, module }
+    }
 }
 
 /// A statically-typed handle to a module function: `P` is its parameter tuple
@@ -67,16 +73,13 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     }
 }
 
-fn _check_api_usage(module: Module) -> Result<(i32,), TraceWasmError> {
+fn _check_api_usage<M: Memory>(module: Arc<Module>) -> Result<(i32,), TraceWasmError> {
     let f: TypedFunc<(i32, f32), (i32,)> = TypedFunc {
         func_index: FuncIndex(10),
         phantom: PhantomData,
     };
 
-    let mut instance = Instance {
-        memory: LinearMemory::new(10),
-        module,
-    };
+    let mut instance = module.instantiate::<M>();
 
     let results = f.call((1, 2.0), &mut instance)?;
 

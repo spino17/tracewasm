@@ -16,11 +16,13 @@
 //! `n`-th function counting imported functions first, then locally-defined ones
 //! (see [`Module::func_decls`] and [`Module::imported_func_count`]).
 
-use crate::{error::TraceWasmError, instruction::Instruction};
+use crate::{error::TraceWasmError, instance::Instance, instruction::Instruction, memory::Memory};
 use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
-use std::hash::Hash;
+use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
+
+pub const WASM_MEMORY_INITIAL_ALLOCATION_SIZE: usize = 64 * 1024; // 512Kib
 
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
@@ -616,7 +618,7 @@ impl Module {
     /// [`TraceWasmError::Unsupported`] for valid modules using features TraceWasm
     /// does not model (components, GC types, non-function imports, or any
     /// operator the lowering pass rejects).
-    pub fn compile(buf: &[u8]) -> Result<Module, TraceWasmError> {
+    pub fn compile(buf: &[u8]) -> Result<Arc<Module>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
         // that is known to be well-formed.
@@ -1034,7 +1036,7 @@ impl Module {
             }
         }
 
-        Ok(Module {
+        Ok(Arc::new(Module {
             types: types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
             tables: tables.into_boxed_slice(),
@@ -1055,6 +1057,13 @@ impl Module {
             func_bodies: func_bodies.into_boxed_slice(),
             unknown_sections: unknown_sections.into_boxed_slice(),
             custom_sections: custom_sections.into_boxed_slice(),
-        })
+        }))
+    }
+
+    pub fn instantiate<M: Memory>(self: Arc<Module>) -> Instance<M> {
+        // TODO: take this from the module itself if specified! and make it tunable
+        let memory = M::allocate_initial_memory(WASM_MEMORY_INITIAL_ALLOCATION_SIZE);
+
+        Instance::new(memory, self.clone())
     }
 }
