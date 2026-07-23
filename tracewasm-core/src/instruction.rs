@@ -47,13 +47,15 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// Structured control flow, `call`, and the constant-expression operators
-/// (`*.const`, `global.get`, `ref.null`/`ref.func`, and the `i32`/`i64`
-/// add/sub/mul used in init expressions) are modelled. General value/numeric/
-/// memory operators in function bodies are not yet lowered and are rejected as
-/// unsupported by [`Instruction::emit_instruction_for_func`]. Index fields
-/// (`end_index`, `else_index`, `target_index`, ...) are *absolute* positions
-/// into the containing `Vec<Instruction>`, i.e. runtime program counters.
+/// Structured control flow, `call`, and a subset of value/numeric operators
+/// (`*.const`, `global.get`, `ref.null`/`ref.func`, and `i32`/`i64` add/sub/mul)
+/// are modelled. These operators are lowered in both function bodies and
+/// constant expressions. The remaining value/numeric/memory operators (loads/
+/// stores, comparisons, division, `local.*`, etc.) are not yet lowered and are
+/// rejected as unsupported by [`Instruction::emit_instruction_for_func`]. Index
+/// fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
+/// positions into the containing `Vec<Instruction>`, i.e. runtime program
+/// counters.
 #[derive(Debug, Clone)]
 pub enum Instruction {
     Unreachable,
@@ -541,6 +543,66 @@ impl Instruction {
                     (Instruction::Unreachable, StackEffectResult::NoEffect)
                 }
                 Operator::Nop => (Instruction::Nop, StackEffectResult::NoEffect),
+                Operator::I32Const { value } => (
+                    Instruction::I32Const { value },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::I64Const { value } => (
+                    Instruction::I64Const { value },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::F32Const { value } => (
+                    Instruction::F32Const {
+                        value: f32::from_bits(value.bits()),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::F64Const { value } => (
+                    Instruction::F64Const {
+                        value: f64::from_bits(value.bits()),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::GlobalGet { global_index } => (
+                    Instruction::GlobalGet {
+                        global_index: GlobalIndex(global_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::RefNull { hty: _hty } => (
+                    Instruction::RefNull,
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::RefFunc { function_index } => (
+                    Instruction::RefFunc {
+                        function_index: FuncIndex(function_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::I32Add => (
+                    Instruction::I32Add,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::I32Sub => (
+                    Instruction::I32Sub,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::I32Mul => (
+                    Instruction::I32Mul,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::I64Add => (
+                    Instruction::I64Add,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::I64Sub => (
+                    Instruction::I64Sub,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::I64Mul => (
+                    Instruction::I64Mul,
+                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
                         BlockKind::Block {

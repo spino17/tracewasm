@@ -27,6 +27,7 @@ use crate::{
     instruction::Instruction,
     memory::Memory,
     utils::formatted_val_types,
+    vm::stack::Val,
 };
 use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
@@ -1226,8 +1227,17 @@ impl Module {
         // TODO - cap this if the initial pages are beyond what we can materialize.
         let memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
 
+        // TODO: will be populated in the initialization execution of global init const exprs.
+        let global_vals: Vec<Val> = vec![];
+
         // TODO: run the instantiation routines on tables globals ... etc.
 
-        Ok(Instance::new(memory, import_registry, self.clone(), config))
+        Ok(Instance::new(
+            memory,
+            import_registry,
+            self.clone(),
+            config,
+            global_vals.into_boxed_slice(),
+        ))
     }
 }

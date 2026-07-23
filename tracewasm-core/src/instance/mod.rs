@@ -10,7 +10,7 @@ use crate::{
     memory::Memory,
     module::{FuncIndex, Module},
     utils::formatted_val_types,
-    vm::TraceVM,
+    vm::{TraceVM, stack::Val},
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -28,6 +28,7 @@ pub struct Instance<M, I> {
     import_registry: I,
     module: Arc<Module>,
     config: Config,
+    global_vals: Box<[Val]>,
 }
 
 impl<M: Memory, I: ImportRegistry> Instance<M, I> {
@@ -35,12 +36,19 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
     /// the registry against the module's imports first.
-    pub(crate) fn new(memory: M, import_registry: I, module: Arc<Module>, config: Config) -> Self {
+    pub(crate) fn new(
+        memory: M,
+        import_registry: I,
+        module: Arc<Module>,
+        config: Config,
+        global_vals: Box<[Val]>,
+    ) -> Self {
         Instance {
             memory,
             import_registry,
             module,
             config,
+            global_vals,
         }
     }
 }
@@ -84,6 +92,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
             &instance.module,
             &mut instance.memory,
             &mut instance.import_registry,
+            &instance.global_vals,
         )?;
 
         let Some(res) = R::from_vals(&results) else {

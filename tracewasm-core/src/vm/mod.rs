@@ -91,6 +91,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         func_index: FuncIndex,
         caller_base_height: u32,
         module: &Module,
+        global_vals: &[Val],
     ) -> Result<ExecutionResult, TraceWasmError> {
         let res = match instruction {
             // TODO - give complete stack trace! - with range information of the
@@ -245,20 +246,94 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                         self.memory,
                         caller_base_height_for_callee,
                         self.import_registry,
+                        global_vals,
                     )?;
                 }
 
                 ExecutionResult::Next
             }
-            // Operators the lowering pass can emit but the interpreter does not
-            // yet execute (e.g. the const/arithmetic instructions currently only
-            // reached via the const-expr evaluator). Surface an error rather than
-            // panic so an unhandled instruction can't take the process down.
-            _ => {
-                return Err(TraceWasmError::Unsupported(format!(
-                    "instruction `{:?}` is not yet supported by the interpreter",
-                    instruction
-                )));
+            Instruction::I32Const { value } => {
+                self.stack.push(Val::I32(*value));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Const { value } => {
+                self.stack.push(Val::I64(*value));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Const { value } => {
+                self.stack.push(Val::F32(*value));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Const { value } => {
+                self.stack.push(Val::F64(*value));
+
+                ExecutionResult::Next
+            }
+            Instruction::GlobalGet { global_index } => {
+                self.stack.push(global_vals[global_index.0 as usize]);
+
+                ExecutionResult::Next
+            }
+            Instruction::RefNull => {
+                self.stack.push(Val::Ref(None));
+
+                ExecutionResult::Next
+            }
+            Instruction::RefFunc { function_index } => {
+                self.stack.push(Val::Ref(Some(*function_index)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Add => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_add(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Sub => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_sub(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Mul => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_mul(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Add => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_add(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Sub => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_sub(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Mul => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_mul(b)));
+
+                ExecutionResult::Next
             }
         };
 
@@ -285,9 +360,9 @@ impl TraceVM {
     ///
     /// Returns [`TraceWasmError::IncorrectParamsResultsStructure`] if `params`
     /// don't match the function's signature, [`TraceWasmError::Execution`] on a
-    /// trap (`unreachable`), [`TraceWasmError::Unsupported`] if the body contains
-    /// an instruction the interpreter does not yet execute, and propagates errors
-    /// from nested calls (including imported-function calls).
+    /// trap (`unreachable`), [`TraceWasmError::Unsupported`] if a parameter or
+    /// local has an unsupported type (`V128`), and propagates errors from nested
+    /// calls (including imported-function calls).
     pub fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -296,6 +371,7 @@ impl TraceVM {
         memory: &mut M,
         caller_base_height: u32,
         import_registry: &mut I,
+        global_vals: &[Val],
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
@@ -367,7 +443,7 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            match state.execute(instr, func_index, caller_base_height, module)? {
+            match state.execute(instr, func_index, caller_base_height, module, global_vals)? {
                 ExecutionResult::JumpTo(next_pc) => {
                     pc = next_pc;
 
@@ -410,6 +486,7 @@ impl TraceVM {
         module: &Module,
         memory: &mut M,
         import_registry: &mut I,
+        global_vals: &[Val],
     ) -> Result<Box<[Val]>, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 
@@ -422,6 +499,7 @@ impl TraceVM {
             memory,
             0,
             import_registry,
+            global_vals,
         )?;
 
         // How many result values the function leaves on the stack.
