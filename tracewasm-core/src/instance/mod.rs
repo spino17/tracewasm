@@ -107,7 +107,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         params: P,
         instance: &mut Instance<M, I>,
     ) -> Result<R, TraceWasmError> {
-        let params = params.to_vals();
+        let params = params.to_vals(); // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
 
         let results = TraceVM::run(
             self.func_index,

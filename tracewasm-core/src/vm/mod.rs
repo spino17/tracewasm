@@ -137,6 +137,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 debug_assert!(
                     self.stack.height() == *recorded_height + *arity + caller_base_height
                 );
+
                 ExecutionResult::Next
             }
             Instruction::Br {
@@ -227,6 +228,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                         unreachable!()
                     };
 
+                    // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
                     let results =
                         self.import_registry
                             .execute(module_name, imported_func_name, &params)?;
@@ -387,6 +389,8 @@ impl TraceVM {
         // and `locals_ty[i]` is the declared type of local slot `i`.
         let locals_ty = &func_body.locals;
 
+        // OPTIMIZATION: AVOID check this because this path can only be invoked
+        // through typed<P, R> path which is constructed only after validation!
         // The caller must supply exactly one argument per declared parameter
         if params.len() != params_ty.len() {
             return Err(TraceWasmError::IncorrectParamsResultsStructure(
@@ -415,7 +419,7 @@ impl TraceVM {
         // Build the activation's local slots. Per the WebAssembly spec, a
         // function's locals are the parameters (bound to the incoming arguments,
         // in order) followed by the declared locals.
-        let mut locals: Vec<Val> = Vec::with_capacity(locals_ty.len());
+        let mut locals: Vec<Val> = Vec::with_capacity(locals_ty.len()); // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
 
         // Parameters occupy the first `params.len()` slots. Their count and types
         // were already validated above, so take the values as-is.
@@ -488,7 +492,7 @@ impl TraceVM {
         global_vals: &mut [Val],
         table_vals: &mut [TableVal],
     ) -> Result<Box<[Val]>, TraceWasmError> {
-        let mut stack: Stack<Val> = Stack::default();
+        let mut stack: Stack<Val> = Stack::default(); // OPTIMIZATION: AVOID HEAP-ALLOCATION
 
         // A fresh stack starts at height 0, so this frame's base is 0.
         Self::execute(
@@ -506,6 +510,7 @@ impl TraceVM {
         let func_decl = &module.func_decls[func_index.0 as usize];
         let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
 
+        // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
         Ok(stack.pops_and_reverse(results_len).into_boxed_slice())
     }
 
