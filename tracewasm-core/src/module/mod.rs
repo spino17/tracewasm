@@ -28,7 +28,7 @@ use crate::{
     memory::Memory,
     vm::{
         TraceVM,
-        stack::{TableVal, Val},
+        stack::{ElementVal, TableVal, Val},
     },
 };
 use core::fmt::{self, Debug};
@@ -1336,6 +1336,82 @@ impl Module {
             });
         }
 
+        // Elements processing...
+        let mut element_vals: Vec<ElementVal> = vec![];
+        let elements = &self.elements;
+
+        for element in elements {
+            let items = &element.items;
+            let kind = &element.kind;
+
+            let item_vals: Vec<Option<FuncIndex>> = match &items {
+                ElementItems::Functions(func_refs) => func_refs.iter().map(|x| Some(*x)).collect(),
+                ElementItems::Expressions(ref_ty, exprs) => {
+                    if !ref_ty.is_func_ref() {
+                        return Err(TraceWasmError::Unsupported(
+                            "non-funcref table element types".to_string(),
+                        ));
+                    }
+
+                    let mut v: Vec<Option<FuncIndex>> = vec![];
+
+                    for const_expr in exprs {
+                        // The element type is validated to be funcref, so the const
+                        // expr yields a `Val::Ref` and `as_ref` cannot panic.
+                        v.push(TraceVM::const_expr_evaluator(const_expr, &global_vals)?.as_ref());
+                    }
+
+                    v
+                }
+            };
+
+            match kind {
+                ElementKind::Active {
+                    table_index,
+                    offset_expr,
+                } => {
+                    let table_index = if let Some(table_index) = table_index {
+                        table_index.0
+                    } else {
+                        0
+                    } as usize;
+
+                    // The offset expr yields an `i32` for a 32-bit table; a
+                    // `table64` offset would be an `i64` and `as_i32` would panic.
+                    // TraceWasm does not support table64 yet, so this is fine.
+                    let offset =
+                        TraceVM::const_expr_evaluator(offset_expr, &global_vals)?.as_i32() as usize;
+
+                    let table = &mut table_vals[table_index].table;
+
+                    // Written as a subtraction to avoid `offset + len` overflowing
+                    // `usize` on a 32-bit target.
+                    if offset > table.len() || item_vals.len() > table.len() - offset {
+                        return Err(TraceWasmError::ElementSegmentOutOfBounds(
+                            offset,
+                            item_vals.len(),
+                            table.len(),
+                        ));
+                    }
+
+                    for (i, item) in item_vals.iter().enumerate() {
+                        table[offset + i] = *item;
+                    }
+
+                    // Per the WebAssembly spec, active element is dropped after writting to the table
+                    element_vals.push(ElementVal::Dropped);
+                }
+                ElementKind::Passive => {
+                    // Per the WebAssembly spec, passive element stays until either used at runtime by `table.init` or dropped by `elem.drop`
+                    element_vals.push(ElementVal::Passive(item_vals.into_boxed_slice()));
+                }
+                ElementKind::Declared => {
+                    // Per the WebAssembly spec, declared element is dropped from the start
+                    element_vals.push(ElementVal::Dropped);
+                }
+            }
+        }
+
         Ok(Instance::new(
             memory,
             import_registry,
@@ -1343,6 +1419,7 @@ impl Module {
             config,
             global_vals.into_boxed_slice(),
             table_vals.into_boxed_slice(),
+            element_vals.into_boxed_slice(),
         ))
     }
 }

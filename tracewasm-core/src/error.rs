@@ -59,6 +59,13 @@ pub enum TraceWasmError {
     /// initial element count and the allowed maximum.
     #[error("table too large: initial `{0}` elements exceeds the allowed maximum `{1}`")]
     TableTooLarge(u64, u64),
+    /// An active element segment writes past the end of its target table at
+    /// instantiation. Fields: the write offset, the number of elements written,
+    /// and the target table's length.
+    #[error(
+        "element segment out of bounds: writing `{1}` elements at offset `{0}` exceeds table length `{2}`"
+    )]
+    ElementSegmentOutOfBounds(usize, usize, usize),
     /// A named export was requested but the module declares no export with that
     /// name. The string is the requested export name.
     #[error("export `{0}` not found in the module")]

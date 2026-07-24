@@ -175,6 +175,11 @@ pub(crate) struct TableVal {
     pub maximum: u64,
 }
 
+pub(crate) enum ElementVal {
+    Dropped,
+    Passive(Box<[Option<FuncIndex>]>),
+}
+
 /// A function activation's local slots: its parameters followed by its declared
 /// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {
