@@ -216,6 +216,10 @@ pub trait ImportRegistry {
     /// [`TraceWasmError::ImportNotFound`] if the registry has no such global.
     /// The value's type is cross-checked against the module's declared global
     /// type at instantiation.
+    ///
+    /// Called only once per global, during [`Module::instantiate`](crate::module::Module::instantiate):
+    /// the resolved value is copied into the [`Instance`](crate::instance::Instance)
+    /// and read from there for the rest of the module's execution.
     fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError>;
 }
 
