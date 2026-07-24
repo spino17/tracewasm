@@ -25,9 +25,19 @@ impl Config {
         self.max_memory_size_in_pages = val;
     }
 
+    /// Returns `max_memory_size_in_pages`
+    pub fn get_max_memory_size_in_pages(&self) -> u64 {
+        self.max_memory_size_in_pages
+    }
+
     /// Sets `max_table_elements`
     pub fn set_max_table_elements(&mut self, val: u64) {
         self.max_table_elements = val;
+    }
+
+    /// Returns `max_table_elements`
+    pub fn get_max_table_elements(&self) -> u64 {
+        self.max_table_elements
     }
 
     /// Sets `max_locals_per_func`

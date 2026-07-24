@@ -26,7 +26,10 @@ use crate::{
     },
     instruction::Instruction,
     memory::Memory,
-    vm::{TraceVM, stack::Val},
+    vm::{
+        TraceVM,
+        stack::{TableVal, Val},
+    },
 };
 use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
@@ -603,8 +606,10 @@ pub enum TableInit {
 
 /// A table definition: its type plus initialization.
 pub struct Table {
-    pub ty: TableType,
+    pub element_ty: RefType,
     pub init: TableInit,
+    pub initial: u64,
+    pub maximum: Option<u64>,
 }
 
 /// A named export and the entity it exposes.
@@ -813,7 +818,7 @@ impl Module {
                             }
                             _ => {
                                 return Err(TraceWasmError::Unsupported(
-                                    "non-function imports".to_string(),
+                                    "only function or global imports allowed".to_string(),
                                 ));
                             }
                         }
@@ -843,6 +848,13 @@ impl Module {
                     for table in table_iter {
                         let table = table?;
                         let ty = table.ty;
+
+                        if !ty.element_type.is_func_ref() {
+                            return Err(TraceWasmError::Unsupported(
+                                "non-funcref table element types".to_string(),
+                            ));
+                        }
+
                         let init = table.init;
 
                         let table_init = match init {
@@ -856,8 +868,10 @@ impl Module {
                         };
 
                         tables.push(Table {
-                            ty: TableType::from_wasmparser(ty),
+                            element_ty: RefType::from_wasmparser(ty.element_type),
                             init: table_init,
+                            initial: ty.initial,
+                            maximum: ty.maximum,
                         });
                     }
                 }
@@ -1260,8 +1274,10 @@ impl Module {
 
         // TODO: use config to validate the module against it! including below TODO.
 
+        let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
         let memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
 
+        // Globals Initialization
         if import_registry.global_count() != self.imported_global_count {
             return Err(TraceWasmError::ImportGlobalCountMismatch(
                 self.imported_global_count,
@@ -1314,12 +1330,53 @@ impl Module {
             global_vals.push(val);
         }
 
+        // Tables Initialization
+        // NOTE: TraceWasm does not support imported tables so everything inside `self.tables` is locally declared.
+        let tables = &self.tables;
+        let mut table_vals = vec![];
+
+        for table in tables {
+            let maximum = if let Some(max) = table.maximum {
+                max.min(config.get_max_table_elements())
+            } else {
+                config.get_max_table_elements()
+            };
+
+            // WASM validation guarantees `initial <= declared maximum`, but not
+            // `initial <= config cap`, so an untrusted module could still ask for
+            // an arbitrarily large table. Reject rather than silently clamp:
+            // truncating would hand the module a smaller table than it declared,
+            // corrupting every table access it believes is in bounds.
+            if table.initial > maximum {
+                return Err(TraceWasmError::TableTooLarge(table.initial, maximum));
+            }
+
+            let initial_size = table.initial as usize;
+
+            let slots: Vec<Option<FuncIndex>> = match &table.init {
+                TableInit::RefNull => vec![None; initial_size],
+                TableInit::Expr(const_expr) => {
+                    // The element type is validated to be funcref, so the const
+                    // expr yields a `Val::Ref` and `as_ref` cannot panic.
+                    let val = TraceVM::const_expr_evaluator(const_expr, &global_vals)?.as_ref();
+
+                    vec![val; initial_size]
+                }
+            };
+
+            table_vals.push(TableVal {
+                table: slots.into_boxed_slice(),
+                maximum,
+            });
+        }
+
         Ok(Instance::new(
             memory,
             import_registry,
             self.clone(),
             config,
             global_vals.into_boxed_slice(),
+            table_vals.into_boxed_slice(),
         ))
     }
 }

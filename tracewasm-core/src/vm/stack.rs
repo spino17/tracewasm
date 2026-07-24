@@ -170,6 +170,11 @@ impl Val {
     }
 }
 
+pub(crate) struct TableVal {
+    pub table: Box<[Option<FuncIndex>]>,
+    pub maximum: u64,
+}
+
 /// A function activation's local slots: its parameters followed by its declared
 /// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {

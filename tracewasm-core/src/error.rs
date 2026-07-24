@@ -53,6 +53,12 @@ pub enum TraceWasmError {
     /// imports. Fields: the module's imported-global count, the registry's count.
     #[error("import global count mismatch: module imports `{0}` globals, registry provides `{1}`")]
     ImportGlobalCountMismatch(u32, u32),
+    /// A table's initial element count exceeds the maximum the instance is
+    /// willing to materialize (the declared maximum, capped by the instance
+    /// [`Config`](crate::instance::config::Config)). Fields: the requested
+    /// initial element count and the allowed maximum.
+    #[error("table too large: initial `{0}` elements exceeds the allowed maximum `{1}`")]
+    TableTooLarge(u64, u64),
     /// A named export was requested but the module declares no export with that
     /// name. The string is the requested export name.
     #[error("export `{0}` not found in the module")]
