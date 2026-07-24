@@ -180,6 +180,11 @@ pub(crate) enum ElementVal {
     Passive(Box<[Option<FuncIndex>]>),
 }
 
+pub(crate) enum DataVal {
+    Dropped,
+    Passive(Box<[u8]>), // data blob
+}
+
 /// A function activation's local slots: its parameters followed by its declared
 /// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {

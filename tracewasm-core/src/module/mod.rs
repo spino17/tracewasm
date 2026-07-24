@@ -28,7 +28,7 @@ use crate::{
     memory::Memory,
     vm::{
         TraceVM,
-        stack::{ElementVal, TableVal, Val},
+        stack::{DataVal, ElementVal, TableVal, Val},
     },
 };
 use core::fmt::{self, Debug};
@@ -1241,7 +1241,7 @@ impl Module {
         // TODO: use config to validate the module against it! including below TODO.
 
         let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
-        let memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
+        let mut memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
 
         // Globals Initialization
         if import_registry.global_count() != self.imported_global_count {
@@ -1412,6 +1412,43 @@ impl Module {
             }
         }
 
+        // Data processing...
+        let datas = &self.datas;
+        let mut data_vals: Vec<DataVal> = vec![];
+
+        for data in datas {
+            let kind = &data.kind;
+            let data = &data.data;
+
+            match kind {
+                DataKind::Passive => {
+                    data_vals.push(DataVal::Passive(data.clone()));
+
+                    continue;
+                }
+                DataKind::Active {
+                    memory_index,
+                    offset_expr,
+                } => {
+                    if memory_index.0 != 0 {
+                        return Err(TraceWasmError::Unsupported("multiple memories".to_string()));
+                    }
+
+                    // The offset expr yields an `i32` for a 32-bit memory; a
+                    // `memory64` offset would be an `i64` and `as_i32` would panic.
+                    // TraceWasm does not support memory64 yet, so this is fine.
+                    let offset =
+                        TraceVM::const_expr_evaluator(offset_expr, &global_vals)?.as_i32() as usize;
+
+                    // `write` bounds-checks (with `checked_add`) and traps on an
+                    // out-of-bounds segment, so no manual bounds check is needed.
+                    memory.write(offset, data)?;
+
+                    data_vals.push(DataVal::Dropped);
+                }
+            }
+        }
+
         Ok(Instance::new(
             memory,
             import_registry,
@@ -1420,6 +1457,7 @@ impl Module {
             global_vals.into_boxed_slice(),
             table_vals.into_boxed_slice(),
             element_vals.into_boxed_slice(),
+            data_vals.into_boxed_slice(),
         ))
     }
 }

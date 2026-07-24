@@ -13,6 +13,9 @@ pub trait Memory {
     /// Per the WebAssembly spec, this should be completely zeroed.
     fn allocate_initial_memory(size: usize) -> Self;
 
+    /// Returns the size of the memory.
+    fn size(&self) -> usize;
+
     /// Reads `data.len()` bytes starting from the `offset`.
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), TraceWasmError>;
 

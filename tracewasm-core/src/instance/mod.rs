@@ -11,7 +11,7 @@ use crate::{
     module::{FuncIndex, Module, formatted_val_types},
     vm::{
         TraceVM,
-        stack::{ElementVal, TableVal, Val},
+        stack::{DataVal, ElementVal, TableVal, Val},
     },
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -33,6 +33,7 @@ pub struct Instance<M, I> {
     global_vals: Box<[Val]>,
     table_vals: Box<[TableVal]>,
     element_vals: Box<[ElementVal]>,
+    data_vals: Box<[DataVal]>,
 }
 
 impl<M: Memory, I: ImportRegistry> Instance<M, I> {
@@ -48,6 +49,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         global_vals: Box<[Val]>,
         table_vals: Box<[TableVal]>,
         element_vals: Box<[ElementVal]>,
+        data_vals: Box<[DataVal]>,
     ) -> Self {
         Instance {
             memory,
@@ -57,6 +59,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
             global_vals,
             table_vals,
             element_vals,
+            data_vals,
         }
     }
 

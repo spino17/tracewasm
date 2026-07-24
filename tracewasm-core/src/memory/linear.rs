@@ -26,6 +26,10 @@ impl Memory for LinearMemory {
         Self::new(size)
     }
 
+    fn size(&self) -> usize {
+        self.inner.len()
+    }
+
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), TraceWasmError> {
         let len = data.len();
         let mem_len = self.inner.len();
