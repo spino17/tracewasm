@@ -45,7 +45,7 @@ use crate::{
     instruction::Instruction,
     memory::Memory,
     module::{FuncIndex, FuncKind, Module, formatted_val_types},
-    vm::stack::{Locals, Stack, Val},
+    vm::stack::{Locals, Stack, TableVal, Val},
 };
 
 pub(crate) mod stack;
@@ -485,7 +485,8 @@ impl TraceVM {
         module: &Module,
         memory: &mut M,
         import_registry: &mut I,
-        global_vals: &[Val],
+        global_vals: &mut [Val],
+        table_vals: &mut [TableVal],
     ) -> Result<Box<[Val]>, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 

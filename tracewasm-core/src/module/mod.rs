@@ -1168,7 +1168,7 @@ impl Module {
     /// import's signature disagrees with the module.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: Arc<Module>,
-        import_registry: I,
+        mut import_registry: I,
         config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
@@ -1449,13 +1449,26 @@ impl Module {
             }
         }
 
+        // execute start function
+        if let Some(func_index) = self.start_section {
+            TraceVM::run(
+                func_index,
+                &[],
+                self.as_ref(),
+                &mut memory,
+                &mut import_registry,
+                &mut global_vals,
+                &mut table_vals,
+            )?;
+        }
+
         Ok(Instance::new(
             memory,
             import_registry,
             self.clone(),
             config,
             global_vals.into_boxed_slice(),
-            table_vals.into_boxed_slice(),
+            table_vals,
             element_vals.into_boxed_slice(),
             data_vals.into_boxed_slice(),
         ))

@@ -31,7 +31,7 @@ pub struct Instance<M, I> {
     module: Arc<Module>,
     config: Config,
     global_vals: Box<[Val]>,
-    table_vals: Box<[TableVal]>,
+    table_vals: Vec<TableVal>,
     element_vals: Box<[ElementVal]>,
     data_vals: Box<[DataVal]>,
 }
@@ -47,7 +47,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         module: Arc<Module>,
         config: Config,
         global_vals: Box<[Val]>,
-        table_vals: Box<[TableVal]>,
+        table_vals: Vec<TableVal>,
         element_vals: Box<[ElementVal]>,
         data_vals: Box<[DataVal]>,
     ) -> Self {
@@ -115,7 +115,8 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
             &instance.module,
             &mut instance.memory,
             &mut instance.import_registry,
-            &instance.global_vals,
+            &mut instance.global_vals,
+            &mut instance.table_vals,
         )?;
 
         let Some(res) = R::from_vals(&results) else {
