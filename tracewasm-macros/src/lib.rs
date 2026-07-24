@@ -18,9 +18,24 @@
 //!
 //! Each `#[module("...")]`-tagged method becomes an importable function whose
 //! module name is the attribute argument and whose field name is the method
-//! name. The macro generates `ImportRegistry::{execute, signature, size}` and,
+//! name. The macro generates `ImportRegistry::{execute, signature, func_count}` and,
 //! for every tagged method, a compile-time assertion that its signature is a
 //! valid `ImportedFunc` (params/results are `WasmTy` tuples).
+//!
+//! A `#[global("...")]`-tagged method instead declares an importable global: it
+//! takes `&self`, returns a single [`WasmTy`] value, and its method name is the
+//! global name. The macro routes it through `ImportRegistry::get_global` and
+//! counts it in `ImportRegistry::global_count`.
+//!
+//! ```ignore
+//! #[imports]
+//! impl HostState {
+//!     #[global("env")]
+//!     fn table_size(&self) -> i32 {
+//!         self.table_size
+//!     }
+//! }
+//! ```
 //!
 //! Paths in the generated code are rooted at `::tracewasm_core`, which resolves
 //! inside `tracewasm-core` itself via its `extern crate self as tracewasm_core`
@@ -43,6 +58,27 @@ struct ImportEntry {
     ret_type: Type,
 }
 
+/// A single `#[global("...")]`-tagged host global extracted from the impl.
+struct GlobalEntry {
+    /// The wasm module name from `#[global("...")]`.
+    module: LitStr,
+    /// The method name, which is also the global's name.
+    fn_ident: syn::Ident,
+    /// The value type produced — must implement `WasmTy`.
+    ret_type: Type,
+}
+
+/// Whether a method takes `&self` (a shared-reference receiver). Imported
+/// functions are validated by the `ImportedFunc` trait enforcer, but imported
+/// globals have no such enforcer, so the macro requires `&self` explicitly to
+/// give a clear error rather than a raw borrow-check failure in `get_global`.
+fn takes_shared_ref(func: &syn::ImplItemFn) -> bool {
+    matches!(
+        func.sig.inputs.first(),
+        Some(FnArg::Receiver(recv)) if recv.reference.is_some() && recv.mutability.is_none()
+    )
+}
+
 /// Attribute macro placed on an `impl` block: generates an `ImportRegistry`
 /// implementation from the `#[module("...")]`-tagged methods. See the crate
 /// docs for the expected shape.
@@ -62,11 +98,43 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     // Collect the tagged methods, stripping the `#[module(...)]` attribute from
     // each so the impl block can be re-emitted with the user's bodies intact.
     let mut entries: Vec<ImportEntry> = Vec::new();
+    let mut globals: Vec<GlobalEntry> = Vec::new();
 
     for item in &mut impl_block.items {
         let ImplItem::Fn(func) = item else {
             continue;
         };
+
+        // A `#[global("...")]`-tagged method declares an imported global rather
+        // than a function; it takes `&self` and returns a single `WasmTy` value.
+        if let Some(pos) = func.attrs.iter().position(|a| a.path().is_ident("global")) {
+            let module: LitStr = func.attrs.remove(pos).parse_args()?;
+
+            if !takes_shared_ref(func) {
+                return Err(syn::Error::new_spanned(
+                    &func.sig,
+                    "a `#[global(\"...\")]` method must take `&self`",
+                ));
+            }
+
+            let ret_type: Type = match &func.sig.output {
+                ReturnType::Default => {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig,
+                        "a `#[global(\"...\")]` method must return a single `WasmTy` value",
+                    ));
+                }
+                ReturnType::Type(_, ty) => (**ty).clone(),
+            };
+
+            globals.push(GlobalEntry {
+                module,
+                fn_ident: func.sig.ident.clone(),
+                ret_type,
+            });
+
+            continue;
+        }
 
         let Some(pos) = func.attrs.iter().position(|a| a.path().is_ident("module")) else {
             continue;
@@ -98,10 +166,27 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     }
 
     let count = entries.len() as u32;
+    let global_count = globals.len() as u32;
 
     let mut execute_arms = Vec::new();
     let mut signature_arms = Vec::new();
     let mut asserts = Vec::new();
+    let mut get_global_arms = Vec::new();
+
+    for global in &globals {
+        let module = &global.module;
+        let fn_ident = &global.fn_ident;
+        let global_name = LitStr::new(&fn_ident.to_string(), fn_ident.span());
+        let ret_type = &global.ret_type;
+
+        // `get_global`: call the getter and marshal its value into a `Val`. The
+        // `WasmTy::to_val` call also enforces that `ret_type: WasmTy`.
+        get_global_arms.push(quote! {
+            (#module, #global_name) => ::core::result::Result::Ok(
+                <#ret_type as ::tracewasm_core::instance::traits::WasmTy>::to_val(&self.#fn_ident())
+            ),
+        });
+    }
 
     for entry in &entries {
         let module = &entry.module;
@@ -171,7 +256,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 match (module_name, func_name) {
                     #(#execute_arms)*
                     _ => ::core::result::Result::Err(
-                        ::tracewasm_core::error::TraceWasmError::ImportedFunctionNotFound(
+                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
                             module_name.to_string(),
                             func_name.to_string(),
                         ),
@@ -190,8 +275,31 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 }
             }
 
-            fn size(&self) -> u32 {
+            fn func_count(&self) -> u32 {
                 #count
+            }
+
+            fn global_count(&self) -> u32 {
+                #global_count
+            }
+
+            fn get_global(
+                &self,
+                module_name: &str,
+                global_name: &str,
+            ) -> ::core::result::Result<
+                ::tracewasm_core::instance::traits::Val,
+                ::tracewasm_core::error::TraceWasmError
+            > {
+                match (module_name, global_name) {
+                    #(#get_global_arms)*
+                    _ => ::core::result::Result::Err(
+                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
+                            module_name.to_string(),
+                            global_name.to_string(),
+                        ),
+                    ),
+                }
             }
         }
 

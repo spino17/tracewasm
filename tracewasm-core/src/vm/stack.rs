@@ -299,6 +299,15 @@ impl<T: Clone> Stack<T> {
         v
     }
 
+    /// Sets the logical height to `new_height`, discarding everything above it in
+    /// O(1) (backing storage is retained).
+    ///
+    /// Precondition: `new_height <= stack_pointer` (downward only). Raising the
+    /// height would expose stale slots.
+    pub fn truncate(&mut self, new_height: u32) {
+        self.stack_pointer = new_height as usize;
+    }
+
     /// Unwinds to `new_height` while preserving the top `arity` values — the
     /// stack shape a taken branch produces.
     ///

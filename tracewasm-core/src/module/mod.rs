@@ -26,7 +26,7 @@ use crate::{
     },
     instruction::Instruction,
     memory::Memory,
-    vm::stack::Val,
+    vm::{TraceVM, stack::Val},
 };
 use core::fmt::{self, Debug};
 use rustc_hash::FxHashMap;
@@ -432,6 +432,10 @@ pub struct Module {
     /// definitions in [`Self::func_decls`], and the offset mapping the `i`-th
     /// `func_bodies` entry to `func_decls[imported_func_count + i]`.
     pub imported_func_count: u32,
+    /// Number of imported globals, mirroring [`Self::imported_func_count`]: the
+    /// first `imported_global_count` entries of [`Self::globals`] are imports
+    /// (with [`GlobalKind::Imported`]), the rest are locally defined.
+    pub imported_global_count: u32,
     /// Lowered bodies of the locally-defined functions, in definition order.
     pub func_bodies: Box<[FuncBody]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
@@ -624,11 +628,16 @@ impl Export {
     }
 }
 
+pub enum GlobalKind {
+    Imported { module: String, name: String },
+    Local(Box<[Instruction]>),
+}
+
 /// A global definition: its type plus the constant expression for its initial
 /// value.
 pub struct Global {
     pub ty: GlobalType,
-    pub val: Box<[Instruction]>,
+    pub kind: GlobalKind,
 }
 
 /// A function type: parameter and result value types.
@@ -728,6 +737,7 @@ impl Module {
         let mut tables = vec![];
         let mut memories = vec![];
         let mut globals = vec![];
+        let mut imported_global_count = 0;
         let mut exports: FxHashMap<String, Export> = FxHashMap::default();
         let mut elements = vec![];
         let mut start_section: Option<FuncIndex> = None;
@@ -782,27 +792,38 @@ impl Module {
                         let module_name = import.module.to_string();
                         let imported_func_name = import.name.to_string();
 
-                        let ty_index = if let TypeRef::Func(ty) = import.ty {
-                            TyIndex(ty)
-                        } else {
-                            return Err(TraceWasmError::Unsupported(
-                                "non-function imports".to_string(),
-                            ));
-                        };
-
-                        func_decls.push(FuncDecl {
-                            kind: FuncKind::Imported {
-                                module_name,
-                                imported_func_name,
-                            },
-                            ty: ty_index,
-                        });
+                        match import.ty {
+                            TypeRef::Func(ty) => {
+                                func_decls.push(FuncDecl {
+                                    kind: FuncKind::Imported {
+                                        module_name,
+                                        imported_func_name,
+                                    },
+                                    ty: TyIndex(ty),
+                                });
+                            }
+                            TypeRef::Global(ty) => {
+                                globals.push(Global {
+                                    ty: GlobalType(ty),
+                                    kind: GlobalKind::Imported {
+                                        module: module_name,
+                                        name: imported_func_name,
+                                    },
+                                });
+                            }
+                            _ => {
+                                return Err(TraceWasmError::Unsupported(
+                                    "non-function imports".to_string(),
+                                ));
+                            }
+                        }
                     }
 
                     // At this point `func_decls` holds only imports (the function section comes
                     // later), and any non-function import already returned above — so this count is
                     // exactly the number of imported functions and marks the imports/definitions split.
                     imported_func_count = func_decls.len() as u32;
+                    imported_global_count = globals.len() as u32;
                 }
                 FunctionSection(func_sec) => {
                     let indices = func_sec.into_iter();
@@ -863,10 +884,12 @@ impl Module {
 
                         globals.push(Global {
                             ty: GlobalType::from_wasmparser(global_ty),
-                            val: Instruction::emit_instruction_for_const_expr(
-                                global.init_expr.get_operators_reader(),
-                            )?
-                            .into_boxed_slice(),
+                            kind: GlobalKind::Local(
+                                Instruction::emit_instruction_for_const_expr(
+                                    global.init_expr.get_operators_reader(),
+                                )?
+                                .into_boxed_slice(),
+                            ),
                         });
                     }
                 }
@@ -1143,6 +1166,7 @@ impl Module {
             code_sec_count,
             code_sec_size,
             imported_func_count,
+            imported_global_count,
             func_bodies: func_bodies.into_boxed_slice(),
             unknown_sections: unknown_sections.into_boxed_slice(),
             custom_sections: custom_sections.into_boxed_slice(),
@@ -1180,10 +1204,10 @@ impl Module {
         // a matching signature.
         let imported_func_count = self.imported_func_count;
 
-        if import_registry.size() != imported_func_count {
+        if import_registry.func_count() != imported_func_count {
             return Err(TraceWasmError::ImportCountMismatch(
                 imported_func_count,
-                import_registry.size(),
+                import_registry.func_count(),
             ));
         }
 
@@ -1203,7 +1227,7 @@ impl Module {
             let Some((import_params, import_results)) =
                 import_registry.signature(module_name, imported_func_name)
             else {
-                return Err(TraceWasmError::ImportedFunctionNotFound(
+                return Err(TraceWasmError::ImportNotFound(
                     module_name.to_string(),
                     imported_func_name.to_string(),
                 ));
@@ -1236,13 +1260,59 @@ impl Module {
 
         // TODO: use config to validate the module against it! including below TODO.
 
-        // TODO - cap this if the initial pages are beyond what we can materialize.
         let memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
 
-        // TODO: will be populated in the initialization execution of global init const exprs.
-        let global_vals: Vec<Val> = vec![];
+        if import_registry.global_count() != self.imported_global_count {
+            return Err(TraceWasmError::ImportGlobalCountMismatch(
+                self.imported_global_count,
+                import_registry.global_count(),
+            ));
+        }
 
-        // TODO: run the instantiation routines on tables globals ... etc.
+        let mut global_vals: Vec<Val> = Vec::with_capacity(self.globals.len());
+        let globals = &self.globals;
+
+        for i in 0..self.imported_global_count {
+            let global = &globals[i as usize];
+
+            debug_assert!(matches!(global.kind, GlobalKind::Imported { .. }));
+
+            let GlobalKind::Imported {
+                module: module_name,
+                name: global_name,
+            } = &global.kind
+            else {
+                unreachable!(
+                    "starting `imported_global_count` globals should have `Imported` kind. Reaching this means the global collecting logic in TraceWasm is incorrect"
+                )
+            };
+
+            let expected = ValType::from_wasmparser(global.ty.0.content_type);
+            let val = import_registry.get_global(module_name, global_name)?;
+
+            if !val.has_ty(expected)? {
+                return Err(TraceWasmError::ImportGlobalTypeMismatch(
+                    module_name.to_string(),
+                    global_name.to_string(),
+                    format!("{expected:?}"),
+                    format!("{val:?}"),
+                ));
+            }
+
+            global_vals.push(val);
+        }
+
+        for i in self.imported_global_count..(self.globals.len() as u32) {
+            let GlobalKind::Local(const_expr_instructions) = &globals[i as usize].kind else {
+                unreachable!(
+                    "after `imported_global_count` globals should have `Local` kind. Reaching this means the global collecting logic in TraceWasm is incorrect"
+                )
+            };
+
+            let val = TraceVM::const_expr_evaluator(const_expr_instructions, &global_vals)?;
+
+            global_vals.push(val);
+        }
 
         Ok(Instance::new(
             memory,

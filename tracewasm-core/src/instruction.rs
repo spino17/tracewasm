@@ -845,7 +845,7 @@ impl Instruction {
                 Operator::End => {
                     let Some(block) = control_stack.pop() else {
                         unreachable!(
-                            "unbalanced block calculation! getting this means block tracking logic of TraceWasm is not correct"
+                            "unbalanced block calculation! getting this means block tracking logic of TraceWasm is incorrect"
                         )
                     };
 

@@ -27,8 +27,8 @@ pub enum TraceWasmError {
     IncorrectParamsResultsStructure(String, u32, String, String),
     /// An imported function declared by the module (module name, function name)
     /// has no matching entry in the supplied import registry.
-    #[error("WASM module import `{0}::{1}` not found in the registry")]
-    ImportedFunctionNotFound(String, String),
+    #[error("import `{0}::{1}` not found in the registry")]
+    ImportNotFound(String, String),
     /// The import registry declares a different number of functions than the
     /// module imports. Fields: the module's import count, the registry's count.
     #[error("import count mismatch: module imports `{0}` functions, registry provides `{1}`")]
@@ -41,6 +41,18 @@ pub enum TraceWasmError {
         "import `{0}::{1}` signature mismatch in {2}: module expects `{3}`, registry provides `{4}`"
     )]
     ImportSignatureMismatch(String, String, String, String, String),
+    /// An imported global declared by the module (module name, global name) has a
+    /// registry value whose type differs from the module's declared global type.
+    /// Fields: module name, global name, the expected value type, and the value
+    /// the registry provided.
+    #[error(
+        "import global `{0}::{1}` type mismatch: module expects `{2}`, registry provides `{3}`"
+    )]
+    ImportGlobalTypeMismatch(String, String, String, String),
+    /// The import registry declares a different number of globals than the module
+    /// imports. Fields: the module's imported-global count, the registry's count.
+    #[error("import global count mismatch: module imports `{0}` globals, registry provides `{1}`")]
+    ImportGlobalCountMismatch(u32, u32),
     /// A named export was requested but the module declares no export with that
     /// name. The string is the requested export name.
     #[error("export `{0}` not found in the module")]

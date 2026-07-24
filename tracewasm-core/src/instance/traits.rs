@@ -206,7 +206,17 @@ pub trait ImportRegistry {
 
     /// The number of functions the registry provides (checked against the
     /// module's import count at instantiation).
-    fn size(&self) -> u32;
+    fn func_count(&self) -> u32;
+
+    /// The number of globals the registry provides (checked against the module's
+    /// imported-global count at instantiation).
+    fn global_count(&self) -> u32;
+
+    /// Returns the value of the imported global `module_name::global_name`, or
+    /// [`TraceWasmError::ImportNotFound`] if the registry has no such global.
+    /// The value's type is cross-checked against the module's declared global
+    /// type at instantiation.
+    fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError>;
 }
 
 /// Compile-time assertion helper used by the `#[imports]` macro: instantiating
