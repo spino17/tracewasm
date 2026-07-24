@@ -114,40 +114,6 @@ impl MemoryType {
     }
 }
 
-/// The type of a WebAssembly table: its element reference type and size limits.
-///
-/// An owned wrapper that keeps the underlying `wasmparser` representation
-/// private so it does not leak into this crate's public API.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct TableType(wasmparser::TableType);
-
-impl TableType {
-    pub(crate) fn from_wasmparser(value: wasmparser::TableType) -> Self {
-        TableType(value)
-    }
-
-    /// The reference type of the table's elements.
-    pub fn element_type(&self) -> RefType {
-        RefType::from_wasmparser(self.0.element_type)
-    }
-
-    /// Whether this is a 64-bit table (indexed by `i64`); `false` means 32-bit
-    /// (memory64 proposal).
-    pub fn is_64(&self) -> bool {
-        self.0.table64
-    }
-
-    /// Initial size, in elements.
-    pub fn initial(&self) -> u64 {
-        self.0.initial
-    }
-
-    /// Optional maximum size, in elements.
-    pub fn maximum(&self) -> Option<u64> {
-        self.0.maximum
-    }
-}
-
 /// The type of a WebAssembly tag (exception-handling proposal).
 ///
 /// An owned wrapper that keeps the underlying `wasmparser` representation
