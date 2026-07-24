@@ -1,5 +1,6 @@
 use std::fs;
-use tracewasm_core::{imports, memory::linear::LinearMemory, module::Module};
+use tracewasm_core::{memory::linear::LinearMemory, module::Module};
+use tracewasm_macros::imports;
 
 /// Example host module. The `#[imports]` macro reads the `#[module("...")]`-tagged
 /// methods below and generates the entire [`ImportRegistry`] impl (`execute`,
@@ -30,7 +31,7 @@ fn main() -> Result<(), anyhow::Error> {
     let func = module.get_typed_func::<(i32, i64), (i64,)>("bench_bits")?;
 
     let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
-    // let _ = func.call((1,), &mut instance)?;
+    let res = func.call((1, 2), &mut instance)?.0;
 
     Ok(())
 }

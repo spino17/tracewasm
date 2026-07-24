@@ -8,8 +8,7 @@ use crate::{
         traits::{ImportRegistry, Params, Results},
     },
     memory::Memory,
-    module::{FuncIndex, Module},
-    utils::formatted_val_types,
+    module::{FuncIndex, Module, formatted_val_types},
     vm::{TraceVM, stack::Val},
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -50,6 +49,18 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
             config,
             global_vals,
         }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn memory_view(&self) -> &M {
+        &self.memory
+    }
+
+    pub fn memory_view_mut(&mut self) -> &mut M {
+        &mut self.memory
     }
 }
 

@@ -44,8 +44,7 @@ use crate::{
     instance::traits::ImportRegistry,
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module},
-    utils::formatted_val_types,
+    module::{FuncIndex, FuncKind, Module, formatted_val_types},
     vm::stack::{Locals, Stack, Val},
 };
 

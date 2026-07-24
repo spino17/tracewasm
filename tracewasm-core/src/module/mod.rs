@@ -26,7 +26,6 @@ use crate::{
     },
     instruction::Instruction,
     memory::Memory,
-    utils::formatted_val_types,
     vm::stack::Val,
 };
 use core::fmt::{self, Debug};
@@ -207,6 +206,19 @@ impl ValType {
             wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r)),
         }
     }
+}
+
+/// Formats a value-type list as a parenthesized, comma-separated tuple, e.g.
+/// `(I32,F64)`. An empty list renders as `()` (correctly handling void/no-arg
+/// signatures — the previous index-based version underflowed on an empty slice).
+pub(crate) fn formatted_val_types(types: &[ValType]) -> String {
+    let inner = types
+        .iter()
+        .map(|ty| format!("{ty:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("({inner})")
 }
 
 /// A WebAssembly reference type (e.g. `funcref`, `externref`).
