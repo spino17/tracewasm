@@ -1223,7 +1223,7 @@ impl Module {
                     imported_func_name.to_string(),
                     "params".to_string(),
                     formatted_val_types(params),
-                    formatted_val_types(&import_params),
+                    formatted_val_types(import_params.as_ref()),
                 ));
             }
 
@@ -1233,7 +1233,7 @@ impl Module {
                     imported_func_name.to_string(),
                     "results".to_string(),
                     formatted_val_types(results),
-                    formatted_val_types(&import_results),
+                    formatted_val_types(import_results.as_ref()),
                 ));
             }
         }

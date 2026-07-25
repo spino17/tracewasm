@@ -198,9 +198,20 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             .map(Literal::usize_unsuffixed)
             .collect();
 
-        // The result tuple implements `FuncSignatureEntity` at both the param
-        // (`[_; 5]`) and result (`[_; 3]`) sizes, so an unqualified `to_vals`/
-        // `types` call is ambiguous. Pin the fully-qualified result instantiation.
+        // A tuple implements `FuncSignatureEntity` at both the param (`[_; 5]`) and
+        // result (`[_; 3]`) sizes, so an unqualified `to_vals`/`types` call is
+        // ambiguous. Pin the fully-qualified param/result instantiations so the
+        // right wrapper types (`ParamVals`/`ParamValTypes`, `ResultVals`/
+        // `ResultValTypes`) are selected.
+        let params_tuple = quote! { ( #(#param_types,)* ) };
+        let param_entity = quote! {
+            <#params_tuple as ::tracewasm_core::instance::traits::FuncSignatureEntity<
+                [::tracewasm_core::instance::traits::Val; 5],
+                [::tracewasm_core::module::ValType; 5],
+                ::tracewasm_core::instance::traits::ParamVals,
+                ::tracewasm_core::instance::traits::ParamValTypes,
+            >>
+        };
         let result_entity = quote! {
             <#ret_type as ::tracewasm_core::instance::traits::FuncSignatureEntity<
                 [::tracewasm_core::instance::traits::Val; 3],
@@ -225,17 +236,12 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             }
         });
 
-        // `signature`: the declared `(params, results)` value types.
+        // `signature`: the declared `(params, results)` value types, as the
+        // stack-allocated `ParamValTypes`/`ResultValTypes` wrappers.
         signature_arms.push(quote! {
             (#module, #fn_name) => ::core::option::Option::Some((
-                ::std::vec![
-                    #( <#param_types as ::tracewasm_core::instance::traits::WasmTy>::ty() ),*
-                ]
-                .into_boxed_slice(),
-                ::core::convert::AsRef::<[::tracewasm_core::module::ValType]>::as_ref(
-                    &#result_entity::types(),
-                )
-                .into(),
+                #param_entity::types(),
+                #result_entity::types(),
             )),
         });
 

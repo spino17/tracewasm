@@ -333,7 +333,7 @@ pub trait ImportedFunc<Ctx, P, R>: Fn(&mut Ctx, P) -> R {}
 impl<P: Params, R: Results, Ctx, F: Fn(&mut Ctx, P) -> R> ImportedFunc<Ctx, P, R> for F {}
 
 /// An imported function's signature as `(params, results)` value-type lists.
-pub type ImportSignature = (Box<[ValType]>, Box<[ValType]>);
+pub type ImportSignature = (ParamValTypes, ResultValTypes);
 
 /// Resolves a module's imported functions to host implementations.
 ///

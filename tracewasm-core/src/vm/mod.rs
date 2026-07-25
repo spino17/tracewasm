@@ -46,7 +46,7 @@ use crate::{
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module, formatted_val_types},
+    module::{FuncIndex, FuncKind, Module},
     vm::stack::{Locals, Stack, TableVal, Val},
 };
 
@@ -393,32 +393,19 @@ impl TraceVM {
         // and `locals_ty[i]` is the declared type of local slot `i`.
         let locals_ty = &func_body.locals;
 
-        // OPTIMIZATION: AVOID check this because this path can only be invoked
-        // through typed<P, R> path which is constructed only after validation!
-        // The caller must supply exactly one argument per declared parameter
-        if params.len() != params_ty.len() {
-            return Err(TraceWasmError::IncorrectParamsResultsStructure(
-                "params".to_string(),
-                func_index.0,
-                formatted_val_types(params_ty),
-                format!("{:?}", params),
-            ));
-        }
-
-        // their types should also match
-        for i in 0..params_ty.len() {
-            let ty = params_ty[i];
-            let param = params[i];
-
-            if !param.has_ty(ty)? {
-                return Err(TraceWasmError::IncorrectParamsResultsStructure(
-                    "params".to_string(),
-                    func_index.0,
-                    formatted_val_types(params_ty),
-                    format!("{:?}", params),
-                ));
-            }
-        }
+        // No runtime params check: `Module::compile` runs `Validator::validate_all`,
+        // so every call site is type-correct — the recursive `Call` arm (the common
+        // path) and the start function included, not just the typed `TypedFunc<P, R>`
+        // entry, which adds a second guard on the top-level call. Validation covers
+        // the input module but not TraceWasm's own lowering, so a `debug_assert`
+        // still guards against a lowering bug producing a wrong param count, at zero
+        // release cost.
+        debug_assert_eq!(
+            params.len(),
+            params_ty.len(),
+            "lowering produced wrong param count for func {}",
+            func_index.0,
+        );
 
         // Build the activation's local slots. Per the WebAssembly spec, a
         // function's locals are the parameters (bound to the incoming arguments,
@@ -496,7 +483,7 @@ impl TraceVM {
         global_vals: &mut [Val],
         table_vals: &mut [TableVal],
     ) -> Result<ResultVals, TraceWasmError> {
-        let mut stack: Stack<Val> = Stack::default(); // OPTIMIZATION: AVOID HEAP-ALLOCATION
+        let mut stack: Stack<Val> = Stack::default();
 
         // A fresh stack starts at height 0, so this frame's base is 0.
         Self::execute(
