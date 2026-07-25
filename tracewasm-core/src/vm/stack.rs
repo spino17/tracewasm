@@ -369,7 +369,7 @@ impl Stack<Val> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
-            s.push(self.inner[self.stack_pointer - num as usize + i].clone());
+            s.push(self.inner[self.stack_pointer - num as usize + i]);
         }
 
         self.stack_pointer -= num as usize;
@@ -381,7 +381,7 @@ impl Stack<Val> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
-            s.push(self.inner[self.stack_pointer - num as usize + i].clone());
+            s.push(self.inner[self.stack_pointer - num as usize + i]);
         }
 
         self.stack_pointer -= num as usize;
