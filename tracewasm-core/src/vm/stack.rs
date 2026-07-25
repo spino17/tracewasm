@@ -191,13 +191,13 @@ pub(crate) enum DataVal {
 /// A function activation's local slots: its parameters followed by its declared
 /// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {
-    inner: Vec<Val>, // size = params + declared locals
+    inner: SmallVec<[Val; 16]>, // size = params + declared locals
 }
 
 impl Locals {
     /// Wraps a fully-populated slot vector (params first, then zero-initialized
     /// declared locals). The caller owns getting the length and contents right.
-    pub fn new(locals: Vec<Val>) -> Self {
+    pub fn new(locals: SmallVec<[Val; 16]>) -> Self {
         Locals { inner: locals }
     }
 

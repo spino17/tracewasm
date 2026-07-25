@@ -39,6 +39,8 @@
 //! were. Instruction indices, by contrast, are per-function: each
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
+use smallvec::{SmallVec, smallvec};
+
 use crate::{
     error::TraceWasmError,
     instance::traits::{ImportRegistry, ResultVals},
@@ -421,7 +423,7 @@ impl TraceVM {
         // Build the activation's local slots. Per the WebAssembly spec, a
         // function's locals are the parameters (bound to the incoming arguments,
         // in order) followed by the declared locals.
-        let mut locals: Vec<Val> = Vec::with_capacity(locals_ty.len()); // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
+        let mut locals: SmallVec<[Val; 16]> = smallvec![]; // stack-allocated upto 16 locals per function
 
         // Parameters occupy the first `params.len()` slots. Their count and types
         // were already validated above, so take the values as-is.
