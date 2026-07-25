@@ -88,6 +88,68 @@ pub enum TraceWasmError {
     Parsing(String),
 }
 
+pub struct TraceRecord {
+    func_index: FuncIndex,
+    instr_index: usize,
+    kind: TraceRecordKind,
+}
+
+pub enum TraceRecordKind {
+    Call {
+        callee_index: FuncIndex,
+        is_indirect: Option<TableIndex>,
+    },
+    NonCall(String),
+}
+
+impl TraceWasmError {
+    fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
+        let TraceWasmError::InstructionExecution(func_index, instr_index, err) = self else {
+            return None;
+        };
+
+        let callee_index: Option<(FuncIndex, Option<TableIndex>)> = match err {
+            InstructionExecutionError::Call(callee_func_index, err) => {
+                err._extract_stack_trace(trace);
+
+                Some((*callee_func_index, None))
+            }
+            InstructionExecutionError::CallIndirect(table_index, err) => match err {
+                CallIndirectError::FunctionCall(callee_func_index, err) => {
+                    err._extract_stack_trace(trace);
+
+                    Some((*callee_func_index, Some(*table_index)))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        trace.push(TraceRecord {
+            func_index: *func_index,
+            kind: if let Some((callee_index, table_index)) = callee_index {
+                TraceRecordKind::Call {
+                    callee_index,
+                    is_indirect: table_index,
+                }
+            } else {
+                TraceRecordKind::NonCall(err.to_string())
+            },
+            instr_index: *instr_index,
+        });
+
+        Some(())
+    }
+
+    pub(crate) fn extract_stack_trace(&self) -> Option<Vec<TraceRecord>> {
+        let mut trace = vec![];
+
+        self._extract_stack_trace(&mut trace)?;
+
+        Some(trace)
+    }
+}
+
 impl From<wasmparser::Error> for TraceWasmError {
     fn from(value: wasmparser::Error) -> Self {
         TraceWasmError::Parsing(value.to_string())
@@ -103,14 +165,16 @@ pub enum InstructionExecutionError {
     /// Reached an `unreachable` instruction (a wasm trap).
     #[error("reached an `unreachable` instruction")]
     Unreachable,
-    /// A `call` failed; the string carries the underlying cause. Field: the
-    /// callee's function index.
+    /// A `call` failed; the boxed error carries the underlying cause (typically a
+    /// nested [`TraceWasmError::InstructionExecution`] from the callee, or a host
+    /// error for an imported callee). Field: the callee's function index.
     #[error("call to func({0:?}): {1}")]
-    Call(FuncIndex, String),
-    /// A `call_indirect` failed — an out-of-bounds index, a null element, or a
-    /// signature mismatch; the string carries which. Field: the table index.
+    Call(FuncIndex, Box<TraceWasmError>),
+    /// A `call_indirect` failed — an out-of-bounds index, a null element, a
+    /// signature mismatch, or an error inside the callee. Fields: the table index
+    /// and the specific [`CallIndirectError`].
     #[error("call_indirect via table({0:?}): {1}")]
-    CallIndirect(TableIndex, String),
+    CallIndirect(TableIndex, CallIndirectError),
 }
 
 impl InstructionExecutionError {
@@ -121,5 +185,219 @@ impl InstructionExecutionError {
         enclosing_func_index: FuncIndex,
     ) -> TraceWasmError {
         TraceWasmError::InstructionExecution(enclosing_func_index, instr_index, self)
+    }
+}
+
+/// Why a `call_indirect` failed: a table-access trap, a signature mismatch, or an
+/// error raised inside the resolved callee.
+#[derive(Error, Debug)]
+pub enum CallIndirectError {
+    /// The table index operand was outside the table's bounds (a wasm trap).
+    #[error("table slot out of bounds")]
+    TableSlotOutOfBounds,
+    /// The referenced table slot held a null element (a wasm trap).
+    #[error("null element in the table slot")]
+    NullElementInTable,
+    /// The callee's signature differs from the type the instruction expects (a
+    /// wasm trap). Fields: the expected signature and the callee's actual signature.
+    #[error("function signature mismatch: expected {0}, got {1}")]
+    FunctionSignatureMismatch(String, String),
+    /// The resolved callee itself failed; the boxed error carries the cause.
+    /// Field: the callee's function index.
+    #[error("call to func({0:?}): {1}")]
+    FunctionCall(FuncIndex, Box<TraceWasmError>),
+}
+
+#[cfg(test)]
+mod stack_trace_tests {
+    use super::*;
+
+    /// Build an `InstructionExecution` error: func `func`, instruction `instr`,
+    /// with the given per-instruction cause.
+    fn ie(func: u32, instr: usize, cause: InstructionExecutionError) -> TraceWasmError {
+        TraceWasmError::InstructionExecution(FuncIndex(func), instr, cause)
+    }
+
+    /// Assert a record is a `NonCall` at `(func, instr)`.
+    fn assert_noncall(rec: &TraceRecord, func: u32, instr: usize) {
+        assert_eq!(rec.func_index, FuncIndex(func));
+        assert_eq!(rec.instr_index, instr);
+        assert!(
+            matches!(rec.kind, TraceRecordKind::NonCall(_)),
+            "expected a NonCall record"
+        );
+    }
+
+    /// Assert a record is a `Call` at `(func, instr)` to `callee`, with the given
+    /// `is_indirect` table (None for a direct call, Some(table) for indirect).
+    fn assert_call(rec: &TraceRecord, func: u32, instr: usize, callee: u32, table: Option<u32>) {
+        assert_eq!(rec.func_index, FuncIndex(func));
+        assert_eq!(rec.instr_index, instr);
+        match &rec.kind {
+            TraceRecordKind::Call {
+                callee_index,
+                is_indirect,
+            } => {
+                assert_eq!(*callee_index, FuncIndex(callee));
+                assert_eq!(*is_indirect, table.map(TableIndex));
+            }
+            TraceRecordKind::NonCall(_) => panic!("expected a Call record, got NonCall"),
+        }
+    }
+
+    // top-level guard: a non-`InstructionExecution` error has no trace.
+    #[test]
+    fn non_instruction_error_yields_no_trace() {
+        assert!(
+            TraceWasmError::Unsupported("x".to_string())
+                .extract_stack_trace()
+                .is_none()
+        );
+        assert!(TraceWasmError::ExportNotA("function".to_string()).extract_stack_trace().is_none());
+    }
+
+    // leaf `Unreachable` (the catch-all IE arm) → single NonCall record.
+    #[test]
+    fn single_unreachable_frame() {
+        let trace = ie(0, 7, InstructionExecutionError::Unreachable)
+            .extract_stack_trace()
+            .expect("top-level is an InstructionExecution");
+
+        assert_eq!(trace.len(), 1);
+        assert_noncall(&trace[0], 0, 7);
+    }
+
+    // every non-`FunctionCall` `CallIndirect` cause hits the inner `_ => None`
+    // arm and becomes a NonCall leaf.
+    #[test]
+    fn call_indirect_leaf_traps_are_noncall() {
+        let leaves = [
+            CallIndirectError::TableSlotOutOfBounds,
+            CallIndirectError::NullElementInTable,
+            CallIndirectError::FunctionSignatureMismatch("(I32)".to_string(), "()".to_string()),
+        ];
+
+        for (i, leaf) in leaves.into_iter().enumerate() {
+            let trace = ie(1, i, InstructionExecutionError::CallIndirect(TableIndex(3), leaf))
+                .extract_stack_trace()
+                .unwrap();
+
+            assert_eq!(trace.len(), 1);
+            assert_noncall(&trace[0], 1, i);
+        }
+    }
+
+    // direct `Call` recursion: caller frame recorded as a Call, callee's trap as
+    // a NonCall, innermost first.
+    #[test]
+    fn direct_call_chain() {
+        let err = ie(
+            2,
+            5,
+            InstructionExecutionError::Call(
+                FuncIndex(3),
+                Box::new(ie(3, 1, InstructionExecutionError::Unreachable)),
+            ),
+        );
+
+        let trace = err.extract_stack_trace().unwrap();
+
+        assert_eq!(trace.len(), 2);
+        assert_noncall(&trace[0], 3, 1); // innermost first
+        assert_call(&trace[1], 2, 5, 3, None); // direct call → is_indirect None
+    }
+
+    // `CallIndirect::FunctionCall` recursion: Call record carries the table index.
+    #[test]
+    fn indirect_call_chain() {
+        let err = ie(
+            1,
+            9,
+            InstructionExecutionError::CallIndirect(
+                TableIndex(4),
+                CallIndirectError::FunctionCall(
+                    FuncIndex(6),
+                    Box::new(ie(6, 0, InstructionExecutionError::Unreachable)),
+                ),
+            ),
+        );
+
+        let trace = err.extract_stack_trace().unwrap();
+
+        assert_eq!(trace.len(), 2);
+        assert_noncall(&trace[0], 6, 0);
+        assert_call(&trace[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
+    }
+
+    // the `?`-free recursion: a nested non-`InstructionExecution` error (e.g. a
+    // host/import failure) must NOT discard the trace — the calling frame is still
+    // recorded, the non-instruction leaf is simply omitted.
+    #[test]
+    fn nested_non_instruction_error_keeps_caller_frame() {
+        // direct call whose callee is an import that failed
+        let via_call = ie(
+            0,
+            3,
+            InstructionExecutionError::Call(
+                FuncIndex(5),
+                Box::new(TraceWasmError::ImportNotFound(
+                    "env".to_string(),
+                    "log".to_string(),
+                )),
+            ),
+        );
+        let trace = via_call.extract_stack_trace().unwrap();
+        assert_eq!(trace.len(), 1, "caller frame must survive a non-IE leaf");
+        assert_call(&trace[0], 0, 3, 5, None);
+
+        // same for the indirect path
+        let via_indirect = ie(
+            0,
+            2,
+            InstructionExecutionError::CallIndirect(
+                TableIndex(1),
+                CallIndirectError::FunctionCall(
+                    FuncIndex(9),
+                    Box::new(TraceWasmError::ImportNotFound(
+                        "env".to_string(),
+                        "log".to_string(),
+                    )),
+                ),
+            ),
+        );
+        let trace = via_indirect.extract_stack_trace().unwrap();
+        assert_eq!(trace.len(), 1);
+        assert_call(&trace[0], 0, 2, 9, Some(1));
+    }
+
+    // deep mixed chain A --call--> B --call_indirect--> C(unreachable): exercises
+    // both recursion arms together and pins the innermost-first ordering.
+    #[test]
+    fn deep_mixed_chain_ordering() {
+        let err = ie(
+            0,
+            10,
+            InstructionExecutionError::Call(
+                FuncIndex(1),
+                Box::new(ie(
+                    1,
+                    4,
+                    InstructionExecutionError::CallIndirect(
+                        TableIndex(2),
+                        CallIndirectError::FunctionCall(
+                            FuncIndex(2),
+                            Box::new(ie(2, 0, InstructionExecutionError::Unreachable)),
+                        ),
+                    ),
+                )),
+            ),
+        );
+
+        let trace = err.extract_stack_trace().unwrap();
+
+        assert_eq!(trace.len(), 3);
+        assert_noncall(&trace[0], 2, 0); // innermost: the trap
+        assert_call(&trace[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
+        assert_call(&trace[2], 0, 10, 1, None); // A called B directly
     }
 }

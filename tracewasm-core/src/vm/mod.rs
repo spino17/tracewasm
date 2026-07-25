@@ -42,11 +42,14 @@
 use smallvec::{SmallVec, smallvec};
 
 use crate::{
-    error::{InstructionExecutionError, TraceWasmError},
+    error::{
+        CallIndirectError::{self, FunctionCall},
+        InstructionExecutionError, TraceWasmError,
+    },
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module},
+    module::{FuncIndex, FuncKind, Module, formatted_val_types},
     vm::stack::{Locals, Stack, TableVal, Val},
 };
 
@@ -262,7 +265,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             } => {
                 self.call_func(*callee_func_index, *params_count, module)
                     .map_err(|err| {
-                        InstructionExecutionError::Call(*callee_func_index, err.to_string())
+                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
                     })?;
 
                 ExecutionResult::Next
@@ -281,7 +284,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let Some(func_ref) = table.table.get(slot).copied() else {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
-                        "index out of bounds".to_string(),
+                        CallIndirectError::TableSlotOutOfBounds,
                     ));
                 };
 
@@ -289,7 +292,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let Some(callee_func_index) = func_ref else {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
-                        "null element in the slot".to_string(),
+                        CallIndirectError::NullElementInTable,
                     ));
                 };
 
@@ -306,14 +309,27 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
-                        "function signature type does not match with the function declaration"
-                            .to_string(),
+                        CallIndirectError::FunctionSignatureMismatch(
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(declared_params),
+                                formatted_val_types(declared_results)
+                            ),
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(params),
+                                formatted_val_types(results)
+                            ),
+                        ),
                     ));
                 }
 
                 self.call_func(callee_func_index, declared_params.len() as u32, module)
                     .map_err(|err| {
-                        InstructionExecutionError::CallIndirect(*table_index, err.to_string())
+                        InstructionExecutionError::CallIndirect(
+                            *table_index,
+                            FunctionCall(callee_func_index, Box::new(err)),
+                        )
                     })?;
 
                 ExecutionResult::Next
@@ -554,7 +570,7 @@ impl TraceVM {
         let mut stack: Stack<Val> = Stack::default();
 
         // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(
+        if let Err(err) = Self::execute(
             func_index,
             params,
             module,
@@ -564,7 +580,11 @@ impl TraceVM {
             import_registry,
             global_vals,
             table_vals,
-        )?;
+        ) {
+            let _trace = err.extract_stack_trace();
+
+            return Err(err);
+        }
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
