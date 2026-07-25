@@ -66,6 +66,20 @@ pub enum TraceWasmError {
         "element segment out of bounds: writing `{1}` elements at offset `{0}` exceeds table length `{2}`"
     )]
     ElementSegmentOutOfBounds(usize, usize, usize),
+    /// A `call_indirect` whose table index operand is outside the target table's
+    /// bounds (a wasm trap). Fields: the running function index, the index
+    /// operand, and the target table's length.
+    #[error("call_indirect in func `{0}`: table index `{1}` out of bounds (table len `{2}`)")]
+    CallIndirectIndexOutOfBounds(u32, usize, usize),
+    /// A `call_indirect` that referenced a null table element (a wasm trap).
+    /// Fields: the running function index and the index operand.
+    #[error("call_indirect in func `{0}`: table element `{1}` is null (uninitialized)")]
+    CallIndirectNullElement(u32, usize),
+    /// A `call_indirect` where the callee's actual signature differs from the type
+    /// the instruction expects (a wasm trap). Fields: the running function index,
+    /// the expected signature, and the callee's actual signature.
+    #[error("call_indirect in func `{0}`: signature mismatch: expected `{1}`, callee has `{2}`")]
+    CallIndirectSignatureMismatch(u32, String, String),
     /// A named export was requested but the module declares no export with that
     /// name. The string is the requested export name.
     #[error("export `{0}` not found in the module")]

@@ -46,7 +46,7 @@ use crate::{
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module},
+    module::{FuncIndex, FuncKind, Module, formatted_val_types},
     vm::stack::{Locals, Stack, TableVal, Val},
 };
 
@@ -75,9 +75,67 @@ struct TraceVMState<'a, M, I> {
     locals: Locals,
     /// The registry resolving imported-function calls, shared across the call tree.
     import_registry: &'a mut I,
+    globals: &'a [Val],
+    tables: &'a mut Vec<TableVal>,
 }
 
 impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
+    fn call_func(
+        &mut self,
+        func_index: FuncIndex,
+        params_count: u32,
+        module: &Module,
+    ) -> Result<(), TraceWasmError> {
+        // The callee's frame begins just below the arguments: everything up
+        // to this height belongs to the caller and is left untouched. The
+        // args are popped off the shared stack and rebound as the callee's
+        // locals, so on return the callee's results occupy exactly the slots
+        // the arguments did.
+        let caller_base_height_for_callee = self.stack.height() - params_count;
+        let params = self.stack.pop_params(params_count);
+        let imported_func_count = module.imported_func_count;
+
+        // Route on the *callee*: an imported callee is dispatched to the
+        // registry; a local one is interpreted recursively.
+        if func_index.0 < imported_func_count {
+            let func_decl = &module.func_decls[func_index.0 as usize];
+
+            debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
+
+            let FuncKind::Imported {
+                module_name,
+                imported_func_name,
+            } = &func_decl.kind
+            else {
+                unreachable!()
+            };
+
+            // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
+            let results =
+                self.import_registry
+                    .execute(module_name, imported_func_name, params.as_ref())?;
+
+            // push results to the stack
+            for res in results {
+                self.stack.push(res);
+            }
+        } else {
+            // local function execution
+            TraceVM::execute(
+                func_index,
+                params.as_ref(),
+                module,
+                self.stack,
+                self.memory,
+                caller_base_height_for_callee,
+                self.import_registry,
+                self.globals,
+                self.tables,
+            )?;
+        }
+
+        Ok(())
+    }
     /// Executes a single instruction against this activation's state and returns
     /// the control-flow decision for the driver loop.
     ///
@@ -92,7 +150,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         func_index: FuncIndex,
         caller_base_height: u32,
         module: &Module,
-        global_vals: &[Val],
     ) -> Result<ExecutionResult, TraceWasmError> {
         let res = match instruction {
             // TODO - give complete stack trace! - with range information of the
@@ -206,54 +263,61 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                // The callee's frame begins just below the arguments: everything up
-                // to this height belongs to the caller and is left untouched. The
-                // args are popped off the shared stack and rebound as the callee's
-                // locals, so on return the callee's results occupy exactly the slots
-                // the arguments did.
-                let caller_base_height_for_callee = self.stack.height() - *params_count;
-                let params = self.stack.pop_params(*params_count);
-                let imported_func_count = module.imported_func_count;
+                self.call_func(*callee_func_index, *params_count, module)?;
 
-                // Route on the *callee*: an imported callee is dispatched to the
-                // registry; a local one is interpreted recursively.
-                if callee_func_index.0 < imported_func_count {
-                    let func_decl = &module.func_decls[callee_func_index.0 as usize];
+                ExecutionResult::Next
+            }
+            Instruction::CallIndirect {
+                params,
+                results,
+                table_index,
+            } => {
+                let table = &self.tables[table_index.0 as usize];
+                // The index operand is an unsigned i32; a negative value becomes a
+                // large `usize` and fails the bounds check below.
+                let slot = self.stack.pop().as_i32() as u32 as usize;
 
-                    debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
+                // Trap if the index is past the table's end (wasm: "undefined element").
+                let Some(func_ref) = table.table.get(slot).copied() else {
+                    return Err(TraceWasmError::CallIndirectIndexOutOfBounds(
+                        func_index.0,
+                        slot,
+                        table.table.len(),
+                    ));
+                };
 
-                    let FuncKind::Imported {
-                        module_name,
-                        imported_func_name,
-                    } = &func_decl.kind
-                    else {
-                        unreachable!()
-                    };
+                // Trap on a null element (wasm: "uninitialized element").
+                let Some(callee_func_index) = func_ref else {
+                    return Err(TraceWasmError::CallIndirectNullElement(func_index.0, slot));
+                };
 
-                    // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-                    let results = self.import_registry.execute(
-                        module_name,
-                        imported_func_name,
-                        params.as_ref(),
-                    )?;
+                let func = &module.func_decls[callee_func_index.0 as usize];
+                let ty = &module.types[func.ty.0 as usize];
 
-                    // push results to the stack
-                    for res in results {
-                        self.stack.push(res);
-                    }
-                } else {
-                    // local function execution
-                    TraceVM::execute(
-                        *callee_func_index,
-                        params.as_ref(),
-                        module,
-                        self.stack,
-                        self.memory,
-                        caller_base_height_for_callee,
-                        self.import_registry,
-                        global_vals,
-                    )?;
+                let declared_params = &ty.params;
+                let declared_results = &ty.results;
+
+                // Trap if the callee's signature differs from the type the
+                // instruction expects (wasm: "indirect call type mismatch").
+                if params.as_ref() != declared_params.as_ref()
+                    || results.as_ref() != declared_results.as_ref()
+                {
+                    return Err(TraceWasmError::CallIndirectSignatureMismatch(
+                        func_index.0,
+                        format!(
+                            "{} -> {}",
+                            formatted_val_types(params),
+                            formatted_val_types(results)
+                        ),
+                        format!(
+                            "{} -> {}",
+                            formatted_val_types(declared_params),
+                            formatted_val_types(declared_results)
+                        ),
+                    ));
                 }
+
+                self.call_func(callee_func_index, declared_params.len() as u32, module)?;
 
                 ExecutionResult::Next
             }
@@ -278,7 +342,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::GlobalGet { global_index } => {
-                self.stack.push(global_vals[global_index.0 as usize]);
+                self.stack.push(self.globals[global_index.0 as usize]);
 
                 ExecutionResult::Next
             }
@@ -376,7 +440,8 @@ impl TraceVM {
         memory: &mut M,
         caller_base_height: u32,
         import_registry: &mut I,
-        global_vals: &[Val],
+        globals: &[Val],
+        tables: &mut Vec<TableVal>,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
@@ -429,6 +494,8 @@ impl TraceVM {
             memory,
             locals: Locals::new(locals),
             import_registry,
+            globals,
+            tables,
         };
 
         // Driver loop. `pc` indexes this function's instruction list only.
@@ -437,7 +504,7 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            match state.execute(instr, func_index, caller_base_height, module, global_vals)? {
+            match state.execute(instr, func_index, caller_base_height, module)? {
                 ExecutionResult::JumpTo(next_pc) => {
                     pc = next_pc;
 
@@ -481,7 +548,7 @@ impl TraceVM {
         memory: &mut M,
         import_registry: &mut I,
         global_vals: &mut [Val],
-        table_vals: &mut [TableVal],
+        table_vals: &mut Vec<TableVal>,
     ) -> Result<ResultVals, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 
@@ -495,6 +562,7 @@ impl TraceVM {
             0,
             import_registry,
             global_vals,
+            table_vals,
         )?;
 
         // How many result values the function leaves on the stack.

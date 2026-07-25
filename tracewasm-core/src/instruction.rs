@@ -41,7 +41,7 @@
 
 use crate::{
     error::TraceWasmError,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, TableIndex, ValType},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -119,6 +119,11 @@ pub enum Instruction {
     Call {
         func_index: FuncIndex,
         params_count: u32,
+    },
+    CallIndirect {
+        params: Box<[ValType]>,
+        results: Box<[ValType]>,
+        table_index: TableIndex,
     },
     I32Const {
         value: i32,
@@ -840,6 +845,28 @@ impl Instruction {
                             pops: params.len() as u32,
                             pushes: results.len() as u32,
                         },
+                    )
+                }
+                Operator::CallIndirect {
+                    type_index,
+                    table_index,
+                } => {
+                    let func_ty = &types[type_index as usize];
+                    let params = func_ty.params.clone();
+                    let results = func_ty.results.clone();
+
+                    let stack_effect = StackEffectResult::PopPush {
+                        pops: 1 + params.len() as u32,
+                        pushes: results.len() as u32,
+                    };
+
+                    (
+                        Instruction::CallIndirect {
+                            params,
+                            results,
+                            table_index: TableIndex(table_index),
+                        },
+                        stack_effect,
                     )
                 }
                 Operator::End => {
