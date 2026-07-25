@@ -41,7 +41,7 @@
 
 use crate::{
     error::TraceWasmError,
-    instance::traits::ImportRegistry,
+    instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
     module::{FuncIndex, FuncKind, Module, formatted_val_types},
@@ -210,7 +210,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // locals, so on return the callee's results occupy exactly the slots
                 // the arguments did.
                 let caller_base_height_for_callee = self.stack.height() - *params_count;
-                let params = self.stack.pops_and_reverse(*params_count);
+                let params = self.stack.pop_params(*params_count);
                 let imported_func_count = module.imported_func_count;
 
                 // Route on the *callee*: an imported callee is dispatched to the
@@ -228,10 +228,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                         unreachable!()
                     };
 
-                    // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
-                    let results =
-                        self.import_registry
-                            .execute(module_name, imported_func_name, &params)?;
+                    // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
+                    let results = self.import_registry.execute(
+                        module_name,
+                        imported_func_name,
+                        params.as_ref(),
+                    )?;
 
                     // push results to the stack
                     for res in results {
@@ -241,7 +243,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     // local function execution
                     TraceVM::execute(
                         *callee_func_index,
-                        &params,
+                        params.as_ref(),
                         module,
                         self.stack,
                         self.memory,
@@ -491,7 +493,7 @@ impl TraceVM {
         import_registry: &mut I,
         global_vals: &mut [Val],
         table_vals: &mut [TableVal],
-    ) -> Result<Box<[Val]>, TraceWasmError> {
+    ) -> Result<ResultVals, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default(); // OPTIMIZATION: AVOID HEAP-ALLOCATION
 
         // A fresh stack starts at height 0, so this frame's base is 0.
@@ -510,8 +512,7 @@ impl TraceVM {
         let func_decl = &module.func_decls[func_index.0 as usize];
         let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
 
-        // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
-        Ok(stack.pops_and_reverse(results_len).into_boxed_slice())
+        Ok(stack.pop_results(results_len))
     }
 
     pub(crate) fn const_expr_evaluator(

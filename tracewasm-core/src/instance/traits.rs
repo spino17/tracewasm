@@ -7,6 +7,7 @@
 //! without the caller touching raw `Val`s.
 
 use crate::{error::TraceWasmError, module::ValType};
+use smallvec::{Array, SmallVec, smallvec};
 
 // The runtime value type lives in the crate-internal `vm` module; re-export it
 // here so it has a public path (`instance::traits::Val`) for the `ImportRegistry`
@@ -81,39 +82,151 @@ impl WasmTy for f64 {
     }
 }
 
+// These structs are wrappers over `SmallVec` to avoid heap allocations in the VM hot path.
+#[derive(Debug)]
+pub struct ParamValTypes(SmallVec<[ValType; 5]>);
+#[derive(Debug)]
+pub struct ParamVals(SmallVec<[Val; 5]>);
+
+#[derive(Debug)]
+pub struct ResultValTypes(SmallVec<[ValType; 3]>);
+#[derive(Debug)]
+pub struct ResultVals(SmallVec<[Val; 3]>);
+
+impl ParamVals {
+    pub fn new(s: SmallVec<[Val; 5]>) -> Self {
+        ParamVals(s)
+    }
+}
+
+impl ResultVals {
+    pub fn new(s: SmallVec<[Val; 3]>) -> Self {
+        ResultVals(s)
+    }
+}
+
+pub struct ResultValsIter {
+    results: ResultVals,
+    index: usize,
+}
+
+impl Iterator for ResultValsIter {
+    type Item = Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.results.0.len() {
+            return None;
+        }
+
+        let item = self.results.0[self.index];
+
+        self.index += 1;
+
+        Some(item)
+    }
+}
+
+impl IntoIterator for ResultVals {
+    type Item = Val;
+    type IntoIter = ResultValsIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ResultValsIter {
+            results: self,
+            index: 0,
+        }
+    }
+}
+
+impl AsRef<[Val]> for ParamVals {
+    fn as_ref(&self) -> &[Val] {
+        &self.0
+    }
+}
+
+impl AsRef<[ValType]> for ParamValTypes {
+    fn as_ref(&self) -> &[ValType] {
+        &self.0
+    }
+}
+
+impl AsRef<[Val]> for ResultVals {
+    fn as_ref(&self) -> &[Val] {
+        &self.0
+    }
+}
+
+impl AsRef<[ValType]> for ResultValTypes {
+    fn as_ref(&self) -> &[ValType] {
+        &self.0
+    }
+}
+
+pub trait FromSmallVec<A: Array> {
+    fn from_small_vec(s: SmallVec<A>) -> Self;
+}
+
 /// Conversions and type info shared by a function's parameter and result tuples:
 /// value ↔ `Val` marshalling, arity, and the tuple's value types.
-pub trait FuncSignatureEntity: Sized {
+pub trait FuncSignatureEntity<A: Array, B: Array, V: FromSmallVec<A>, T: FromSmallVec<B>>:
+    Sized
+{
     /// Converts the tuple into runtime values, in declaration order.
-    fn to_vals(&self) -> Vec<Val>;
+    fn to_vals(&self) -> V;
     /// The number of values in the tuple.
     fn len() -> usize;
     /// The value types, in order.
-    fn types() -> Vec<ValType>;
+    fn types() -> T;
+}
+
+impl FromSmallVec<[Val; 5]> for ParamVals {
+    fn from_small_vec(s: SmallVec<[Val; 5]>) -> Self {
+        ParamVals(s)
+    }
+}
+
+impl FromSmallVec<[ValType; 5]> for ParamValTypes {
+    fn from_small_vec(s: SmallVec<[ValType; 5]>) -> Self {
+        ParamValTypes(s)
+    }
+}
+
+impl FromSmallVec<[Val; 3]> for ResultVals {
+    fn from_small_vec(s: SmallVec<[Val; 3]>) -> Self {
+        ResultVals(s)
+    }
+}
+
+impl FromSmallVec<[ValType; 3]> for ResultValTypes {
+    fn from_small_vec(s: SmallVec<[ValType; 3]>) -> Self {
+        ResultValTypes(s)
+    }
 }
 
 /// A function's parameter list, expressed as a tuple of [`WasmTy`] types.
-pub trait Params: FuncSignatureEntity {}
+pub trait Params: FuncSignatureEntity<[Val; 5], [ValType; 5], ParamVals, ParamValTypes> {}
 
 /// A function's result list, expressed as a tuple of [`WasmTy`] types.
-pub trait Results: FuncSignatureEntity {
+pub trait Results: FuncSignatureEntity<[Val; 3], [ValType; 3], ResultVals, ResultValTypes> {
     /// Rebuilds the tuple from runtime values, returning `None` if the count or
     /// types do not match.
     fn from_vals(vals: &[Val]) -> Option<Self>;
 }
 
 /// The empty signature: a function taking no parameters, or returning no results.
-impl FuncSignatureEntity for () {
-    fn to_vals(&self) -> Vec<Val> {
-        Vec::new()
+impl<A: Array, B: Array, V: FromSmallVec<A>, T: FromSmallVec<B>> FuncSignatureEntity<A, B, V, T>
+    for ()
+{
+    fn to_vals(&self) -> V {
+        V::from_small_vec(smallvec![])
     }
 
     fn len() -> usize {
         0
     }
 
-    fn types() -> Vec<ValType> {
-        vec![]
+    fn types() -> T {
+        T::from_small_vec(smallvec![])
     }
 }
 
@@ -125,32 +238,62 @@ impl Results for () {
     }
 }
 
-/// Implements [`FuncSignatureEntity`], [`Params`], and [`Results`] for a tuple,
-/// given just its element type params (e.g. `impl_tuple!(A1, A2)`).
+/// Implements [`FuncSignatureEntity`] (at the param sizes `[Val; 5]`/
+/// `[ValType; 5]`) and [`Params`] for a tuple, given just its element type params
+/// (e.g. `impl_params!(A1, A2)`).
 ///
-/// Field indices and arity are derived rather than passed in: `to_vals`
-/// destructures the tuple (binding each field to its type-param name), and
-/// `from_vals` consumes a value iterator in order — so no `self.0` / `vals[i]` /
-/// length literal is needed.
-macro_rules! impl_tuple {
+/// Mirrors the hand-written reference impl: the array/wrapper types are fixed to
+/// the param sizes while `V`/`T` stay generic, so the impl satisfies the `Params`
+/// supertrait bound. Field bindings and arity are derived — `to_vals`
+/// destructures the tuple (binding each field to its type-param name), and `len`
+/// counts the idents.
+macro_rules! impl_params {
     ($($ty:ident),+ $(,)?) => {
-        impl<$($ty: WasmTy),+> FuncSignatureEntity for ($($ty,)+) {
+        impl<V: FromSmallVec<[Val; 5]>, T: FromSmallVec<[ValType; 5]>, $($ty: WasmTy),+>
+            FuncSignatureEntity<[Val; 5], [ValType; 5], V, T> for ($($ty,)+)
+        {
             #[allow(non_snake_case)] // bindings reuse the (uppercase) type-param names
-            fn to_vals(&self) -> Vec<Val> {
+            fn to_vals(&self) -> V {
                 let ($($ty,)+) = self;
-                vec![$($ty.to_val()),+]
+                V::from_small_vec(smallvec![$($ty.to_val()),+])
             }
 
             fn len() -> usize {
-                Self::types().len()
+                [$(stringify!($ty)),+].len()
             }
 
-            fn types() -> Vec<ValType> {
-                vec![$($ty::ty()),+]
+            fn types() -> T {
+                T::from_small_vec(smallvec![$($ty::ty()),+])
             }
         }
 
         impl<$($ty: WasmTy),+> Params for ($($ty,)+) {}
+    };
+}
+
+/// Implements [`FuncSignatureEntity`] (at the result sizes `[Val; 3]`/
+/// `[ValType; 3]`) and [`Results`] for a tuple. Same shape as [`impl_params`] but
+/// sized for results; `from_vals` rebuilds the tuple from a value slice,
+/// consuming one value per element in order.
+macro_rules! impl_results {
+    ($($ty:ident),+ $(,)?) => {
+        impl<V: FromSmallVec<[Val; 3]>, T: FromSmallVec<[ValType; 3]>, $($ty: WasmTy),+>
+            FuncSignatureEntity<[Val; 3], [ValType; 3], V, T> for ($($ty,)+)
+        {
+            #[allow(non_snake_case)] // bindings reuse the (uppercase) type-param names
+            fn to_vals(&self) -> V {
+                let ($($ty,)+) = self;
+                V::from_small_vec(smallvec![$($ty.to_val()),+])
+            }
+
+            fn len() -> usize {
+                [$(stringify!($ty)),+].len()
+            }
+
+            fn types() -> T {
+                T::from_small_vec(smallvec![$($ty::ty()),+])
+            }
+        }
 
         impl<$($ty: WasmTy),+> Results for ($($ty,)+) {
             fn from_vals(vals: &[Val]) -> Option<Self> {
@@ -168,11 +311,17 @@ macro_rules! impl_tuple {
     };
 }
 
-impl_tuple!(A1);
-impl_tuple!(A1, A2);
-impl_tuple!(A1, A2, A3);
-impl_tuple!(A1, A2, A3, A4);
-impl_tuple!(A1, A2, A3, A4, A5);
+// Params: tuples of arity 1..=5 (inline capacity 5).
+impl_params!(A1);
+impl_params!(A1, A2);
+impl_params!(A1, A2, A3);
+impl_params!(A1, A2, A3, A4);
+impl_params!(A1, A2, A3, A4, A5);
+
+// Results: tuples of arity 1..=3 (inline capacity 3).
+impl_results!(A1);
+impl_results!(A1, A2);
+impl_results!(A1, A2, A3);
 
 /// A host function usable as a wasm import: a callable taking `&mut Ctx` and a
 /// [`Params`] tuple, returning a [`Results`] tuple.
@@ -198,7 +347,7 @@ pub trait ImportRegistry {
         module_name: &str,
         func_name: &str,
         params: &[Val],
-    ) -> Result<Box<[Val]>, TraceWasmError>;
+    ) -> Result<ResultVals, TraceWasmError>;
 
     /// Returns the `(params, results)` signature of `module_name::func_name`, or
     /// `None` if the registry has no such function.

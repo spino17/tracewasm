@@ -198,8 +198,20 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             .map(Literal::usize_unsuffixed)
             .collect();
 
+        // The result tuple implements `FuncSignatureEntity` at both the param
+        // (`[_; 5]`) and result (`[_; 3]`) sizes, so an unqualified `to_vals`/
+        // `types` call is ambiguous. Pin the fully-qualified result instantiation.
+        let result_entity = quote! {
+            <#ret_type as ::tracewasm_core::instance::traits::FuncSignatureEntity<
+                [::tracewasm_core::instance::traits::Val; 3],
+                [::tracewasm_core::module::ValType; 3],
+                ::tracewasm_core::instance::traits::ResultVals,
+                ::tracewasm_core::instance::traits::ResultValTypes,
+            >>
+        };
+
         // `execute`: decode each argument from the value slice with `WasmTy`,
-        // call the method, then encode the result tuple back to `Val`s.
+        // call the method, then marshal the result tuple into `ResultVals`.
         execute_arms.push(quote! {
             (#module, #fn_name) => {
                 let __res = self.#fn_ident(
@@ -209,10 +221,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                     ),*
                 );
 
-                ::core::result::Result::Ok(
-                    ::tracewasm_core::instance::traits::FuncSignatureEntity::to_vals(&__res)
-                        .into_boxed_slice(),
-                )
+                ::core::result::Result::Ok(#result_entity::to_vals(&__res))
             }
         });
 
@@ -223,7 +232,10 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                     #( <#param_types as ::tracewasm_core::instance::traits::WasmTy>::ty() ),*
                 ]
                 .into_boxed_slice(),
-                <#ret_type as ::tracewasm_core::instance::traits::FuncSignatureEntity>::types().into_boxed_slice(),
+                ::core::convert::AsRef::<[::tracewasm_core::module::ValType]>::as_ref(
+                    &#result_entity::types(),
+                )
+                .into(),
             )),
         });
 
@@ -250,7 +262,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 func_name: &str,
                 params: &[::tracewasm_core::instance::traits::Val],
             ) -> ::core::result::Result<
-                ::std::boxed::Box<[::tracewasm_core::instance::traits::Val]>,
+                ::tracewasm_core::instance::traits::ResultVals,
                 ::tracewasm_core::error::TraceWasmError,
             > {
                 match (module_name, func_name) {

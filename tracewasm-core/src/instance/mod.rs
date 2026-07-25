@@ -107,11 +107,12 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         params: P,
         instance: &mut Instance<M, I>,
     ) -> Result<R, TraceWasmError> {
-        let params = params.to_vals(); // OPTIMIZATION: AVOID HEAP-ALLOCATION - can use small vec ?
+        // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
+        let params = params.to_vals();
 
         let results = TraceVM::run(
             self.func_index,
-            &params,
+            params.as_ref(),
             &instance.module,
             &mut instance.memory,
             &mut instance.import_registry,
@@ -119,11 +120,11 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
             &mut instance.table_vals,
         )?;
 
-        let Some(res) = R::from_vals(&results) else {
+        let Some(res) = R::from_vals(results.as_ref()) else {
             return Err(TraceWasmError::IncorrectParamsResultsStructure(
                 "results".to_string(),
                 self.func_index.0,
-                formatted_val_types(&R::types()),
+                formatted_val_types(R::types().as_ref()),
                 format!("{:?}", results),
             ));
         };

@@ -33,8 +33,11 @@
 //! truncate downward). Violations panic via index/underflow rather than
 //! returning an error.
 
+use smallvec::{SmallVec, smallvec};
+
 use crate::{
     error::TraceWasmError,
+    instance::traits::{ParamVals, ResultVals},
     module::{FuncIndex, ValType},
 };
 
@@ -358,6 +361,32 @@ impl<T: Clone> Stack<T> {
     /// `stack_pointer` and panics.
     pub fn tee(&self) -> T {
         self.inner[self.stack_pointer - 1].clone()
+    }
+}
+
+impl Stack<Val> {
+    pub fn pop_params(&mut self, num: u32) -> ParamVals {
+        let mut s = smallvec![];
+
+        for i in 0..(num as usize) {
+            s.push(self.inner[self.stack_pointer - num as usize + i].clone());
+        }
+
+        self.stack_pointer -= num as usize;
+
+        ParamVals::new(s)
+    }
+
+    pub fn pop_results(&mut self, num: u32) -> ResultVals {
+        let mut s = smallvec![];
+
+        for i in 0..(num as usize) {
+            s.push(self.inner[self.stack_pointer - num as usize + i].clone());
+        }
+
+        self.stack_pointer -= num as usize;
+
+        ResultVals::new(s)
     }
 }
 

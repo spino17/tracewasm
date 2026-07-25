@@ -451,21 +451,21 @@ impl Module {
         let param_types = P::types();
         let result_types = R::types();
 
-        if ty.params.as_ref() != param_types.as_slice() {
+        if ty.params.as_ref() != param_types.as_ref() {
             return Err(TraceWasmError::IncorrectParamsResultsStructure(
                 "params".to_string(),
                 func_index.0,
                 formatted_val_types(&ty.params),
-                formatted_val_types(&param_types),
+                formatted_val_types(param_types.as_ref()),
             ));
         }
 
-        if ty.results.as_ref() != result_types.as_slice() {
+        if ty.results.as_ref() != result_types.as_ref() {
             return Err(TraceWasmError::IncorrectParamsResultsStructure(
                 "results".to_string(),
                 func_index.0,
                 formatted_val_types(&ty.results),
-                formatted_val_types(&result_types),
+                formatted_val_types(result_types.as_ref()),
             ));
         }
 
