@@ -1,15 +1,21 @@
 //! The crate-wide error type for parsing and lowering.
 use thiserror::Error;
 
+use crate::module::{FuncIndex, TableIndex};
+
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
 ///
 /// The `From<wasmparser::Error>` impl lets decode/validation failures propagate
 /// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
-    /// An execution error reported while executing a WASM module function
-    #[error("error occured while executing the WASM module func({0}): {1}")]
-    Execution(u32, String),
+    /// A trap or error raised while executing a single instruction, tagged with
+    /// where it happened. The interpreter's driver loop attaches these coordinates
+    /// to the [`InstructionExecutionError`] the instruction produced. Fields: the
+    /// enclosing function index, the instruction's index in that function's
+    /// lowered instruction list, and the underlying cause.
+    #[error("error occured while executing instruction `{1}` in func({0:?}): {2}")]
+    InstructionExecution(FuncIndex, usize, InstructionExecutionError),
     /// A linear-memory access that ran past the memory's bounds (a wasm trap).
     /// Fields: a description of the access, the byte offset attempted, and the
     /// current memory length in bytes.
@@ -66,20 +72,6 @@ pub enum TraceWasmError {
         "element segment out of bounds: writing `{1}` elements at offset `{0}` exceeds table length `{2}`"
     )]
     ElementSegmentOutOfBounds(usize, usize, usize),
-    /// A `call_indirect` whose table index operand is outside the target table's
-    /// bounds (a wasm trap). Fields: the running function index, the index
-    /// operand, and the target table's length.
-    #[error("call_indirect in func `{0}`: table index `{1}` out of bounds (table len `{2}`)")]
-    CallIndirectIndexOutOfBounds(u32, usize, usize),
-    /// A `call_indirect` that referenced a null table element (a wasm trap).
-    /// Fields: the running function index and the index operand.
-    #[error("call_indirect in func `{0}`: table element `{1}` is null (uninitialized)")]
-    CallIndirectNullElement(u32, usize),
-    /// A `call_indirect` where the callee's actual signature differs from the type
-    /// the instruction expects (a wasm trap). Fields: the running function index,
-    /// the expected signature, and the callee's actual signature.
-    #[error("call_indirect in func `{0}`: signature mismatch: expected `{1}`, callee has `{2}`")]
-    CallIndirectSignatureMismatch(u32, String, String),
     /// A named export was requested but the module declares no export with that
     /// name. The string is the requested export name.
     #[error("export `{0}` not found in the module")]
@@ -99,5 +91,35 @@ pub enum TraceWasmError {
 impl From<wasmparser::Error> for TraceWasmError {
     fn from(value: wasmparser::Error) -> Self {
         TraceWasmError::Parsing(value.to_string())
+    }
+}
+
+/// The cause of a failure while executing one instruction, one variant per
+/// instruction kind that can fail. The interpreter's driver loop tags this with
+/// the enclosing function and instruction index via
+/// [`Self::into_tracewasm_err`], producing a [`TraceWasmError::InstructionExecution`].
+#[derive(Error, Debug)]
+pub enum InstructionExecutionError {
+    /// Reached an `unreachable` instruction (a wasm trap).
+    #[error("reached an `unreachable` instruction")]
+    Unreachable,
+    /// A `call` failed; the string carries the underlying cause. Field: the
+    /// callee's function index.
+    #[error("call to func({0:?}): {1}")]
+    Call(FuncIndex, String),
+    /// A `call_indirect` failed — an out-of-bounds index, a null element, or a
+    /// signature mismatch; the string carries which. Field: the table index.
+    #[error("call_indirect via table({0:?}): {1}")]
+    CallIndirect(TableIndex, String),
+}
+
+impl InstructionExecutionError {
+    /// Tags this cause with where it happened, producing the crate-wide error.
+    pub fn into_tracewasm_err(
+        self,
+        instr_index: usize,
+        enclosing_func_index: FuncIndex,
+    ) -> TraceWasmError {
+        TraceWasmError::InstructionExecution(enclosing_func_index, instr_index, self)
     }
 }

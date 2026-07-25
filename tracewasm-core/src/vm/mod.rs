@@ -42,11 +42,11 @@
 use smallvec::{SmallVec, smallvec};
 
 use crate::{
-    error::TraceWasmError,
+    error::{InstructionExecutionError, TraceWasmError},
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module, formatted_val_types},
+    module::{FuncIndex, FuncKind, Module},
     vm::stack::{Locals, Stack, TableVal, Val},
 };
 
@@ -139,26 +139,23 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// Executes a single instruction against this activation's state and returns
     /// the control-flow decision for the driver loop.
     ///
-    /// `func_index` identifies the running function (used only for error
-    /// reporting). `caller_base_height` is this frame's base height on the shared
-    /// stack; it is added to the instructions' frame-relative `recorded_height`
-    /// to obtain absolute stack heights (see the module docs). `module` is needed
-    /// to resolve callees on `Call`.
+    /// `caller_base_height` is this frame's base height on the shared stack; it is
+    /// added to the instructions' frame-relative `recorded_height` to obtain
+    /// absolute stack heights (see the module docs). `module` is needed to resolve
+    /// callees on `Call`. Errors are returned bare as
+    /// [`InstructionExecutionError`]; the driver loop tags them with the enclosing
+    /// function and instruction index.
     fn execute(
         &mut self,
         instruction: &Instruction,
-        func_index: FuncIndex,
         caller_base_height: u32,
         module: &Module,
-    ) -> Result<ExecutionResult, TraceWasmError> {
+    ) -> Result<ExecutionResult, InstructionExecutionError> {
         let res = match instruction {
             // TODO - give complete stack trace! - with range information of the
             // original WASM instruction
             Instruction::Unreachable => {
-                return Err(TraceWasmError::Execution(
-                    func_index.0,
-                    "unreachable panic!".to_string(),
-                ));
+                return Err(InstructionExecutionError::Unreachable);
             }
             Instruction::Nop => ExecutionResult::Next,
             Instruction::Block {
@@ -263,7 +260,10 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                self.call_func(*callee_func_index, *params_count, module)?;
+                self.call_func(*callee_func_index, *params_count, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::Call(*callee_func_index, err.to_string())
+                    })?;
 
                 ExecutionResult::Next
             }
@@ -279,16 +279,18 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // Trap if the index is past the table's end (wasm: "undefined element").
                 let Some(func_ref) = table.table.get(slot).copied() else {
-                    return Err(TraceWasmError::CallIndirectIndexOutOfBounds(
-                        func_index.0,
-                        slot,
-                        table.table.len(),
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        "index out of bounds".to_string(),
                     ));
                 };
 
                 // Trap on a null element (wasm: "uninitialized element").
                 let Some(callee_func_index) = func_ref else {
-                    return Err(TraceWasmError::CallIndirectNullElement(func_index.0, slot));
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        "null element in the slot".to_string(),
+                    ));
                 };
 
                 let func = &module.func_decls[callee_func_index.0 as usize];
@@ -302,22 +304,17 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 if params.as_ref() != declared_params.as_ref()
                     || results.as_ref() != declared_results.as_ref()
                 {
-                    return Err(TraceWasmError::CallIndirectSignatureMismatch(
-                        func_index.0,
-                        format!(
-                            "{} -> {}",
-                            formatted_val_types(params),
-                            formatted_val_types(results)
-                        ),
-                        format!(
-                            "{} -> {}",
-                            formatted_val_types(declared_params),
-                            formatted_val_types(declared_results)
-                        ),
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        "function signature type does not match with the function declaration"
+                            .to_string(),
                     ));
                 }
 
-                self.call_func(callee_func_index, declared_params.len() as u32, module)?;
+                self.call_func(callee_func_index, declared_params.len() as u32, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::CallIndirect(*table_index, err.to_string())
+                    })?;
 
                 ExecutionResult::Next
             }
@@ -504,7 +501,11 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            match state.execute(instr, func_index, caller_base_height, module)? {
+            let res = state
+                .execute(instr, caller_base_height, module)
+                .map_err(|err| err.into_tracewasm_err(pc, func_index))?;
+
+            match res {
                 ExecutionResult::JumpTo(next_pc) => {
                     pc = next_pc;
 
