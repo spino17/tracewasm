@@ -632,6 +632,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32Store { offset, align: _ } => {
+                let val = self.stack.pop().as_i32();
+                let effective_offset = self.pop_effective_address(*offset)?;
+
+                self.memory.write_u32(effective_offset, val as u32)?;
+
+                ExecutionResult::Next
+            }
         };
 
         Ok(res)

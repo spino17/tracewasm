@@ -304,6 +304,16 @@ pub enum Instruction {
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
+    // Stores. Every variant pops the value then the address (the value is pushed
+    // last, so it sits on top) and writes to `address + offset` little-endian.
+    // `offset` and `align` carry the same meaning as for the loads above.
+    /// `i32.store`: pop an `i32` value and an address, write the value's 4 bytes.
+    I32Store {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -602,10 +612,7 @@ impl ControlStack {
 enum StackEffectResult {
     /// The operator pops `pops` values and pushes `pushes`; the net change is
     /// applied to `curr_height` (skipped while traversing dead code).
-    PopPush {
-        pops: u32,
-        pushes: u32,
-    },
+    PopPush { pops: u32, pushes: u32 },
     /// The operator resets the height to a known absolute value, e.g. `else`/`end`
     /// restoring `recorded_height + arity`.
     SetHeight(u32),
@@ -618,6 +625,7 @@ enum StackEffectResult {
     Unreachable,
     /// a specific `PopPush { pops: 1, pushes: 1 }` for load instructions.
     Loads,
+    /// a specific `PopPush { pops: 2, pushes: 0 }` for store instructions.
     Stores,
 }
 
@@ -855,6 +863,13 @@ impl Instruction {
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
+                ),
+                Operator::I32Store { memarg } => (
+                    Instruction::I32Store {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
                 ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
