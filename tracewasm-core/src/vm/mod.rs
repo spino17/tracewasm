@@ -171,7 +171,18 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         Ok(())
     }
 
-    fn effective_memory_offset(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
+    /// Pops the address operand of a memory access and resolves it to an
+    /// effective address by adding the instruction's static `memarg` offset.
+    ///
+    /// Shared by every load/store arm, so they all inherit the same overflow and
+    /// offset-range trapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::OffsetTooLarge`] if the static offset does not fit
+    /// a 32-bit address space, and [`MemoryError::EffectiveAddressOverflow`] if
+    /// the sum leaves it. The access itself is bounds-checked by [`Memory`].
+    fn pop_effective_address(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
         let addr = self.stack.pop().as_i32() as u32;
         let static_offset =
             u32::try_from(memarg_offset).map_err(|_| MemoryError::OffsetTooLarge)?;
@@ -510,8 +521,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::I32Load { offset, align: _ } => {
-                let effective_offset = self.effective_memory_offset(*offset)?;
-                let val = self.memory.read_u32(effective_offset)? as i32;
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i32(effective_offset)?;
 
                 self.stack.push(Val::I32(val));
 

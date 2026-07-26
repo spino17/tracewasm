@@ -28,6 +28,13 @@ pub trait Memory {
         Ok(u8::from_le_bytes(buf))
     }
 
+    /// Reads an `i8` at `offset`: the same byte as [`Self::read_u8`],
+    /// reinterpreted as signed (the `load8_s` variants sign-extend from this).
+    /// Errors if the access is out of bounds.
+    fn read_i8(&self, offset: usize) -> Result<i8, MemoryError> {
+        Ok(self.read_u8(offset)? as i8)
+    }
+
     /// Writes a `u8` at `offset`. Errors if the access is out of bounds.
     fn write_u8(&mut self, offset: usize, data: u8) -> Result<(), MemoryError> {
         let buf: [u8; 1] = [data; 1];
@@ -42,6 +49,13 @@ pub trait Memory {
         self.read(offset, &mut buf)?;
 
         Ok(u16::from_le_bytes(buf))
+    }
+
+    /// Reads a little-endian `i16` at `offset`: the same bytes as
+    /// [`Self::read_u16`], reinterpreted as signed (the `load16_s` variants
+    /// sign-extend from this). Errors if the access is out of bounds.
+    fn read_i16(&self, offset: usize) -> Result<i16, MemoryError> {
+        Ok(self.read_u16(offset)? as i16)
     }
 
     /// Writes a little-endian `u16` at `offset`. Errors if the access is out of bounds.
@@ -60,6 +74,14 @@ pub trait Memory {
         Ok(u32::from_le_bytes(buf))
     }
 
+    /// Reads a little-endian `i32` at `offset`: the same bytes as
+    /// [`Self::read_u32`], reinterpreted as signed (backs `i32.load`, and
+    /// `i64.load32_s` sign-extends from this). Errors if the access is out of
+    /// bounds.
+    fn read_i32(&self, offset: usize) -> Result<i32, MemoryError> {
+        Ok(self.read_u32(offset)? as i32)
+    }
+
     /// Writes a little-endian `u32` at `offset`. Errors if the access is out of bounds.
     fn write_u32(&mut self, offset: usize, data: u32) -> Result<(), MemoryError> {
         let buf: [u8; 4] = data.to_le_bytes();
@@ -74,6 +96,13 @@ pub trait Memory {
         self.read(offset, &mut buf)?;
 
         Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Reads a little-endian `i64` at `offset`: the same bytes as
+    /// [`Self::read_u64`], reinterpreted as signed (backs `i64.load`). Errors if
+    /// the access is out of bounds.
+    fn read_i64(&self, offset: usize) -> Result<i64, MemoryError> {
+        Ok(self.read_u64(offset)? as i64)
     }
 
     /// Writes a little-endian `u64` at `offset`. Errors if the access is out of bounds.
