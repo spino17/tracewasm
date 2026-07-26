@@ -198,14 +198,110 @@ pub enum Instruction {
         /// Index into the module's global index space.
         index: GlobalIndex,
     },
-    /// `i32.load`: pop an address, load 4 bytes little-endian from
-    /// `address + offset`, and push the loaded `i32`.
+    // Loads. Every variant pops an address and pushes one value read from
+    // `address + offset` (little-endian); the narrow `*_u`/`*_s` forms read fewer
+    // bytes than the result type and zero- / sign-extend to it. `offset` is the
+    // static `memarg` byte offset added to the popped address; `align` is the
+    // alignment hint (log2), which is validation-only — the interpreter ignores
+    // it, since unaligned access is permitted.
+    /// `i32.load`: load 4 bytes as the `i32` result.
     I32Load {
-        /// Static byte offset added to the popped address to form the effective
-        /// address.
+        /// Static byte offset added to the popped address.
         offset: u64,
-        /// Alignment hint (log2 of the expected alignment). Validation-only; the
-        /// interpreter ignores it, since unaligned access is permitted.
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i32.load8_u`: load 1 byte, zero-extend to `i32`.
+    I32Load8U {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i32.load8_s`: load 1 byte, sign-extend to `i32`.
+    I32Load8S {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i32.load16_u`: load 2 bytes, zero-extend to `i32`.
+    I32Load16U {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i32.load16_s`: load 2 bytes, sign-extend to `i32`.
+    I32Load16S {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load`: load 8 bytes as the `i64` result.
+    I64Load {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load8_u`: load 1 byte, zero-extend to `i64`.
+    I64Load8U {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load8_s`: load 1 byte, sign-extend to `i64`.
+    I64Load8S {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load16_u`: load 2 bytes, zero-extend to `i64`.
+    I64Load16U {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load16_s`: load 2 bytes, sign-extend to `i64`.
+    I64Load16S {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load32_u`: load 4 bytes, zero-extend to `i64`.
+    I64Load32U {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.load32_s`: load 4 bytes, sign-extend to `i64`.
+    I64Load32S {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `f32.load`: load 4 bytes as the `f32` result, preserving the exact bit
+    /// pattern (no NaN canonicalization).
+    F32Load {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `f64.load`: load 8 bytes as the `f64` result, preserving the exact bit
+    /// pattern (no NaN canonicalization).
+    F64Load {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
 }
@@ -665,6 +761,97 @@ impl Instruction {
                     },
                     StackEffectResult::Loads,
                 ),
+                Operator::I32Load8U { memarg } => (
+                    Instruction::I32Load8U {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I32Load8S { memarg } => (
+                    Instruction::I32Load8S {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I32Load16U { memarg } => (
+                    Instruction::I32Load16U {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I32Load16S { memarg } => (
+                    Instruction::I32Load16S {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load { memarg } => (
+                    Instruction::I64Load {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load8U { memarg } => (
+                    Instruction::I64Load8U {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load8S { memarg } => (
+                    Instruction::I64Load8S {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load16U { memarg } => (
+                    Instruction::I64Load16U {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load16S { memarg } => (
+                    Instruction::I64Load16S {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load32U { memarg } => (
+                    Instruction::I64Load32U {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::I64Load32S { memarg } => (
+                    Instruction::I64Load32S {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::F32Load { memarg } => (
+                    Instruction::F32Load {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
+                Operator::F64Load { memarg } => (
+                    Instruction::F64Load {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
+                ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
                         BlockKind::Block {
@@ -1042,11 +1229,10 @@ impl Instruction {
                 StackEffectResult::PopPush { pops, pushes } => {
                     control_stack.apply_stack_effects_to_height(pops, pushes)
                 }
-                StackEffectResult::Loads => {
-                    control_stack.apply_stack_effects_to_height(1, 1);
-                }
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
-                StackEffectResult::NoEffect | StackEffectResult::Unreachable => {}
+                StackEffectResult::NoEffect
+                | StackEffectResult::Unreachable
+                | StackEffectResult::Loads => {} // loads pop 1 and push 1 value so no net effect
             }
 
             instructions.push(instruction);

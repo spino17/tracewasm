@@ -528,6 +528,110 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32Load8U { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_u8(effective_offset)? as i32;
+
+                self.stack.push(Val::I32(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Load8S { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i8(effective_offset)? as i32;
+
+                self.stack.push(Val::I32(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Load16U { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_u16(effective_offset)? as i32;
+
+                self.stack.push(Val::I32(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Load16S { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i16(effective_offset)? as i32;
+
+                self.stack.push(Val::I32(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i64(effective_offset)?;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load8U { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_u8(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load8S { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i8(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load16U { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_u16(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load16S { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i16(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load32U { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_u32(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Load32S { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_i32(effective_offset)? as i64;
+
+                self.stack.push(Val::I64(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Load { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_f32(effective_offset)?;
+
+                self.stack.push(Val::F32(val));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Load { offset, align: _ } => {
+                let effective_offset = self.pop_effective_address(*offset)?;
+                let val = self.memory.read_f64(effective_offset)?;
+
+                self.stack.push(Val::F64(val));
+
+                ExecutionResult::Next
+            }
         };
 
         Ok(res)
