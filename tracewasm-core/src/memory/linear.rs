@@ -1,6 +1,9 @@
 //! A simple `Vec<u8>`-backed [`Memory`] implementation.
 
-use crate::{error::TraceWasmError, memory::Memory};
+use crate::{
+    error::{MemoryAccessKind, MemoryError},
+    memory::Memory,
+};
 
 /// A contiguous, heap-allocated linear memory backed by a `Vec<u8>`.
 ///
@@ -30,7 +33,7 @@ impl Memory for LinearMemory {
         self.inner.len()
     }
 
-    fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), TraceWasmError> {
+    fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), MemoryError> {
         let len = data.len();
         let mem_len = self.inner.len();
 
@@ -38,13 +41,13 @@ impl Memory for LinearMemory {
         // computing the end with `checked_add` traps instead of wrapping, so the
         // bounds comparison below can't be fooled into passing on wraparound.
         let end = offset.checked_add(len).ok_or_else(|| {
-            TraceWasmError::OutOfBoundMemoryAccess("read".to_string(), offset, mem_len)
+            MemoryError::OutOfBoundsAccess(MemoryAccessKind::Read, offset, mem_len)
         })?;
 
         // A valid access needs `offset + len <= mem_len`; anything past the end traps.
         if mem_len < end {
-            return Err(TraceWasmError::OutOfBoundMemoryAccess(
-                "read".to_string(),
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
                 offset,
                 mem_len,
             ));
@@ -58,19 +61,19 @@ impl Memory for LinearMemory {
         Ok(())
     }
 
-    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), TraceWasmError> {
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), MemoryError> {
         let len = data.len();
         let mem_len = self.inner.len();
 
         // See `read`: `checked_add` prevents a `usize` overflow from wrapping past
         // the bounds check.
         let end = offset.checked_add(len).ok_or_else(|| {
-            TraceWasmError::OutOfBoundMemoryAccess("write".to_string(), offset, mem_len)
+            MemoryError::OutOfBoundsAccess(MemoryAccessKind::Write, offset, mem_len)
         })?;
 
         if mem_len < end {
-            return Err(TraceWasmError::OutOfBoundMemoryAccess(
-                "write".to_string(),
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Write,
                 offset,
                 mem_len,
             ));
@@ -86,19 +89,19 @@ impl Memory for LinearMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::TraceWasmError;
+    use crate::error::MemoryError;
     use crate::memory::Memory;
 
     /// True iff the result is an out-of-bounds trap reporting `expected_offset`
     /// and `expected_mem_len`.
     fn is_oob<T: std::fmt::Debug>(
-        res: &Result<T, TraceWasmError>,
+        res: &Result<T, MemoryError>,
         expected_offset: usize,
         expected_mem_len: usize,
     ) -> bool {
         matches!(
             res,
-            Err(TraceWasmError::OutOfBoundMemoryAccess(_, off, len))
+            Err(MemoryError::OutOfBoundsAccess(_, off, len))
                 if *off == expected_offset && *len == expected_mem_len
         )
     }
@@ -182,7 +185,7 @@ mod tests {
         // regression guard for the copy-paste bug where write said "read".
         assert_eq!(
             err.to_string(),
-            "out of bound memory access: write at offset `0` on memory with len `1`"
+            "out of bounds access: Write at 0 on memory with length 1"
         );
     }
 
@@ -253,11 +256,11 @@ mod tests {
         let mut m = LinearMemory::new(4);
         assert!(matches!(
             m.read_u64(0),
-            Err(TraceWasmError::OutOfBoundMemoryAccess(..))
+            Err(MemoryError::OutOfBoundsAccess(..))
         )); // needs 8, only 4
         assert!(matches!(
             m.write_u32(1, 1),
-            Err(TraceWasmError::OutOfBoundMemoryAccess(..))
+            Err(MemoryError::OutOfBoundsAccess(..))
         )); // 1 + 4 = 5 > 4
     }
 

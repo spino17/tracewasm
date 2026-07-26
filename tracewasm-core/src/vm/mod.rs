@@ -42,7 +42,7 @@
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
-        InstructionExecutionError, TraceWasmError,
+        InstructionExecutionError, MemoryError, TraceWasmError,
     },
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
@@ -170,6 +170,22 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
         Ok(())
     }
+
+    fn effective_memory_offset(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
+        let addr = self.stack.pop().as_i32() as u32;
+        let static_offset =
+            u32::try_from(memarg_offset).map_err(|_| MemoryError::OffsetTooLarge)?;
+
+        // Effective address = popped address + static offset, computed with
+        // a checked add: a u32 overflow is past the 32-bit memory space, so
+        // it traps rather than wrapping to a wrong (in-bounds) address.
+        let effective_offset = addr
+            .checked_add(static_offset)
+            .ok_or(MemoryError::EffectiveAddressOverflow(addr, static_offset))?;
+
+        Ok(effective_offset as usize)
+    }
+
     /// Executes a single instruction against this activation's state and returns
     /// the control-flow decision for the driver loop.
     ///
@@ -490,6 +506,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop();
 
                 self.globals[index.0 as usize] = val;
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Load { offset, align: _ } => {
+                let effective_offset = self.effective_memory_offset(*offset)?;
+                let val = self.memory.read_u32(effective_offset)? as i32;
+
+                self.stack.push(Val::I32(val));
 
                 ExecutionResult::Next
             }

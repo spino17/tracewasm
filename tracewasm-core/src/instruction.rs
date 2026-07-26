@@ -198,6 +198,16 @@ pub enum Instruction {
         /// Index into the module's global index space.
         index: GlobalIndex,
     },
+    /// `i32.load`: pop an address, load 4 bytes little-endian from
+    /// `address + offset`, and push the loaded `i32`.
+    I32Load {
+        /// Static byte offset added to the popped address to form the effective
+        /// address.
+        offset: u64,
+        /// Alignment hint (log2 of the expected alignment). Validation-only; the
+        /// interpreter ignores it, since unaligned access is permitted.
+        align: u8,
+    },
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -507,6 +517,8 @@ enum StackEffectResult {
     /// enclosing `end` are unreachable anyway, and reaching that `end` always
     /// resets the height correctly to the block's `recorded_height + results`.
     Unreachable,
+    /// a specific `PopPush { pops: 1, pushes: 1 }` for load instructions.
+    Loads,
 }
 
 impl Instruction {
@@ -645,6 +657,13 @@ impl Instruction {
                         index: GlobalIndex(global_index),
                     },
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                ),
+                Operator::I32Load { memarg } => (
+                    Instruction::I32Load {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Loads,
                 ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
@@ -1022,6 +1041,9 @@ impl Instruction {
             match stack_effect {
                 StackEffectResult::PopPush { pops, pushes } => {
                     control_stack.apply_stack_effects_to_height(pops, pushes)
+                }
+                StackEffectResult::Loads => {
+                    control_stack.apply_stack_effects_to_height(1, 1);
                 }
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
                 StackEffectResult::NoEffect | StackEffectResult::Unreachable => {}

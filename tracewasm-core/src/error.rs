@@ -1,4 +1,6 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
+use std::fmt::Display;
+
 use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
@@ -21,8 +23,8 @@ pub enum TraceWasmError {
     /// A linear-memory access that ran past the memory's bounds (a wasm trap).
     /// Fields: a description of the access, the byte offset attempted, and the
     /// current memory length in bytes.
-    #[error("out of bound memory access: {0} at offset `{1}` on memory with len `{2}`")]
-    OutOfBoundMemoryAccess(String, usize, usize),
+    #[error("{0:?}")]
+    MemoryError(MemoryError),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, or non-function imports). The string
     /// describes the specific unsupported feature.
@@ -265,6 +267,10 @@ pub enum InstructionExecutionError {
     /// and the specific [`CallIndirectError`].
     #[error("call_indirect via table({0:?}): {1}")]
     CallIndirect(TableIndex, CallIndirectError),
+    /// A memory access failed (out of bounds, offset too large, or effective-
+    /// address overflow). Field: the specific [`MemoryError`].
+    #[error("{0}")]
+    Memory(MemoryError),
 }
 
 impl InstructionExecutionError {
@@ -297,6 +303,52 @@ pub enum CallIndirectError {
     /// Field: the callee's function index.
     #[error("call to func({0:?}): {1}")]
     FunctionCall(FuncIndex, Box<TraceWasmError>),
+}
+
+/// Which direction a failed memory access was going, for error reporting.
+#[derive(Debug)]
+pub enum MemoryAccessKind {
+    /// A load.
+    Read,
+    /// A store.
+    Write,
+}
+
+impl Display for MemoryAccessKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// A linear-memory access failure (all are wasm traps).
+#[derive(Error, Debug)]
+pub enum MemoryError {
+    /// The access ran past the memory's end. Fields: whether it was a read or a
+    /// write, the byte offset attempted, and the current memory length.
+    #[error("out of bounds access: {0} at {1} on memory with length {2}")]
+    OutOfBoundsAccess(MemoryAccessKind, usize, usize), // (kind, offset, mem_len)
+    /// A static `memarg` offset did not fit in a 32-bit memory's address space.
+    #[error("offset too large for 32-bit memory")]
+    OffsetTooLarge,
+    /// The effective address (popped address + static offset) overflowed the
+    /// 32-bit address space, so it is necessarily out of bounds. Fields: the
+    /// popped address and the static offset.
+    #[error(
+        "effective address overflow: address `{0}` + offset `{1}` exceeds the 32-bit address space"
+    )]
+    EffectiveAddressOverflow(u32, u32),
+}
+
+impl From<MemoryError> for InstructionExecutionError {
+    fn from(value: MemoryError) -> Self {
+        InstructionExecutionError::Memory(value)
+    }
+}
+
+impl From<MemoryError> for TraceWasmError {
+    fn from(value: MemoryError) -> Self {
+        TraceWasmError::MemoryError(value)
+    }
 }
 
 #[cfg(test)]
