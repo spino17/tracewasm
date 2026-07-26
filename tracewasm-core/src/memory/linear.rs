@@ -45,8 +45,8 @@ impl Memory for LinearMemory {
         Self::new(size_in_pages)
     }
 
-    fn size_in_pages(&self) -> u64 {
-        self.inner.len() as u64 / WASM_MEMORY_PAGE_SIZE
+    fn size_in_bytes(&self) -> usize {
+        self.inner.len()
     }
 
     fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError> {
@@ -75,6 +75,37 @@ impl Memory for LinearMemory {
             .resize((new_size * WASM_MEMORY_PAGE_SIZE) as usize, 0);
 
         Ok(old_size)
+    }
+
+    fn copy_within(&mut self, dest: usize, src: usize, len: usize) -> Result<(), MemoryError> {
+        let mem_len = self.inner.len();
+
+        // Both ranges are validated before anything moves, so a trap leaves the
+        // memory untouched. `checked_add` keeps a huge offset from wrapping past
+        // the comparison (see `read`).
+        let oob = |kind, offset| MemoryError::OutOfBoundsAccess(kind, offset, mem_len);
+
+        let src_end = src
+            .checked_add(len)
+            .ok_or_else(|| oob(MemoryAccessKind::Read, src))?;
+
+        if src_end > mem_len {
+            return Err(oob(MemoryAccessKind::Read, src));
+        }
+
+        let dest_end = dest
+            .checked_add(len)
+            .ok_or_else(|| oob(MemoryAccessKind::Write, dest))?;
+
+        if dest_end > mem_len {
+            return Err(oob(MemoryAccessKind::Write, dest));
+        }
+
+        // `slice::copy_within` is a memmove, so overlapping ranges are handled
+        // correctly, as the trait requires.
+        self.inner.copy_within(src..src_end, dest);
+
+        Ok(())
     }
 
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), MemoryError> {
@@ -178,6 +209,148 @@ mod tests {
             LinearMemory::with_byte_len(WASM_MEMORY_PAGE_SIZE as usize + 1).size_in_pages(),
             1
         );
+    }
+
+    // ------------------------------------------------------------------
+    // fill
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn fill_writes_only_its_range_with_the_low_byte() {
+        let mut m = LinearMemory::with_byte_len(6);
+        // 0x1FF truncates to 0xFF: `memory.fill` uses only the low byte.
+        m.fill(1, 0x1FF, 3).unwrap();
+        assert_eq!(m.inner, vec![0, 0xFF, 0xFF, 0xFF, 0, 0]);
+    }
+
+    #[test]
+    fn fill_spanning_multiple_chunks() {
+        // Longer than the default impl's 4096-byte chunk, so it exercises the loop.
+        let len = 4096 * 2 + 17;
+        let mut m = LinearMemory::with_byte_len(len + 8);
+
+        m.fill(8, 0xAB, len).unwrap();
+
+        assert!(m.inner[..8].iter().all(|&b| b == 0), "prefix untouched");
+        assert!(
+            m.inner[8..].iter().all(|&b| b == 0xAB),
+            "whole range filled"
+        );
+    }
+
+    #[test]
+    fn fill_to_the_exact_end_is_allowed() {
+        let mut m = LinearMemory::with_byte_len(4);
+        m.fill(0, 1, 4).unwrap();
+        assert_eq!(m.inner, vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn fill_zero_length_is_a_noop() {
+        let mut m = LinearMemory::with_byte_len(4);
+        m.fill(4, 9, 0).unwrap(); // dest == mem_len with len 0 does not trap
+        assert_eq!(m.inner, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fill_past_end_traps_without_writing_anything() {
+        let mut m = LinearMemory::with_byte_len(4);
+        let res = m.fill(2, 7, 3); // 2 + 3 = 5 > 4
+        assert!(is_oob(&res, 2, 4));
+        assert_eq!(m.inner, vec![0, 0, 0, 0], "must be all-or-nothing");
+    }
+
+    #[test]
+    fn fill_length_overflow_traps_instead_of_wrapping() {
+        let mut m = LinearMemory::with_byte_len(4);
+        let res = m.fill(8, 7, usize::MAX); // 8 + usize::MAX would wrap
+        assert!(is_oob(&res, 8, 4));
+        assert_eq!(m.inner, vec![0, 0, 0, 0]);
+    }
+
+    // ------------------------------------------------------------------
+    // copy_within
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn copy_within_copies_disjoint_range() {
+        let mut m = LinearMemory::with_byte_len(6);
+        m.write(0, &[1, 2, 3]).unwrap();
+
+        m.copy_within(3, 0, 3).unwrap(); // dest = 3, src = 0
+
+        assert_eq!(m.inner, vec![1, 2, 3, 1, 2, 3]);
+    }
+
+    #[test]
+    fn copy_within_argument_order_is_dest_then_src() {
+        // Regression guard: the trait declares (dest, src, len). Swapping them
+        // would copy the wrong direction and yield [1,2,3,1,2,3] here.
+        let mut m = LinearMemory::with_byte_len(6);
+        m.write(3, &[7, 8, 9]).unwrap(); // [0,0,0,7,8,9]
+
+        m.copy_within(0, 3, 3).unwrap(); // copy src=3..6 into dest=0
+
+        assert_eq!(m.inner, vec![7, 8, 9, 7, 8, 9]);
+    }
+
+    #[test]
+    fn copy_within_handles_overlap_forward() {
+        // dest just above src: a naive forward byte loop would smear the first
+        // byte across the range instead of memmove semantics.
+        let mut m = LinearMemory::with_byte_len(5);
+        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
+
+        m.copy_within(1, 0, 4).unwrap(); // [1,1,2,3,4]
+
+        assert_eq!(m.inner, vec![1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn copy_within_handles_overlap_backward() {
+        let mut m = LinearMemory::with_byte_len(5);
+        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
+
+        m.copy_within(0, 1, 4).unwrap(); // [2,3,4,5,5]
+
+        assert_eq!(m.inner, vec![2, 3, 4, 5, 5]);
+    }
+
+    #[test]
+    fn copy_within_zero_length_is_a_noop() {
+        let mut m = LinearMemory::with_byte_len(4);
+        m.write(0, &[1, 2, 3, 4]).unwrap();
+
+        m.copy_within(4, 4, 0).unwrap(); // both ends at mem_len, len 0
+
+        assert_eq!(m.inner, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn copy_within_out_of_bounds_src_traps_and_changes_nothing() {
+        let mut m = LinearMemory::with_byte_len(4);
+        m.write(0, &[1, 2, 3, 4]).unwrap();
+
+        let res = m.copy_within(0, 2, 3); // src 2 + 3 = 5 > 4
+        assert!(is_oob(&res, 2, 4));
+        assert_eq!(m.inner, vec![1, 2, 3, 4], "must be all-or-nothing");
+    }
+
+    #[test]
+    fn copy_within_out_of_bounds_dest_traps_and_changes_nothing() {
+        let mut m = LinearMemory::with_byte_len(4);
+        m.write(0, &[1, 2, 3, 4]).unwrap();
+
+        let res = m.copy_within(2, 0, 3); // dest 2 + 3 = 5 > 4
+        assert!(is_oob(&res, 2, 4));
+        assert_eq!(m.inner, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn copy_within_length_overflow_traps_instead_of_wrapping() {
+        let mut m = LinearMemory::with_byte_len(4);
+        let res = m.copy_within(0, 8, usize::MAX);
+        assert!(is_oob(&res, 8, 4));
     }
 
     // ------------------------------------------------------------------

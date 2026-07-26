@@ -1,6 +1,9 @@
 //! The linear-memory abstraction the VM runs against.
 
-use crate::error::MemoryError;
+use crate::{
+    error::{MemoryAccessKind, MemoryError},
+    module::WASM_MEMORY_PAGE_SIZE,
+};
 pub mod linear;
 
 /// A module's linear memory, supplied by the embedder.
@@ -12,8 +15,19 @@ pub trait Memory {
     /// Per the WebAssembly spec, this should be completely zeroed.
     fn allocate_initial_memory(size_in_pages: u64) -> Self;
 
+    /// Returns the size of the memory in bytes.
+    ///
+    /// This is the authoritative size: bounds checks and
+    /// [`Self::size_in_pages`] are both derived from it.
+    fn size_in_bytes(&self) -> usize;
+
     /// Returns the size of the memory in whole WASM pages, rounding down.
-    fn size_in_pages(&self) -> u64;
+    ///
+    /// A backing store is normally a whole number of pages, so this is exact;
+    /// it rounds down only for a memory built at byte granularity.
+    fn size_in_pages(&self) -> u64 {
+        self.size_in_bytes() as u64 / WASM_MEMORY_PAGE_SIZE
+    }
 
     /// Grows the memory by `delta_in_pages`, returning the size in pages *before*
     /// the growth. New pages are zeroed, per the spec.
@@ -30,6 +44,72 @@ pub trait Memory {
     /// implementing that instruction must map the error to `-1` and continue,
     /// rather than propagating it.
     fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError>;
+
+    /// Copies `len` bytes within this memory from `src` to `dest` (backs
+    /// `memory.copy`).
+    ///
+    /// The two ranges **may overlap**; an implementation must behave like
+    /// `memmove` — copying as if through a temporary — not a naive forward byte
+    /// loop, which would corrupt the tail when `dest` is just above `src`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::OutOfBoundsAccess`] if either range runs past the
+    /// end of the memory. Both ranges must be checked *before* any byte moves, so
+    /// a failed copy leaves the memory unchanged.
+    fn copy_within(&mut self, dest: usize, src: usize, len: usize) -> Result<(), MemoryError>;
+
+    /// Fills `len` bytes starting at `dest` with the low byte of `val` (backs
+    /// `memory.fill`, whose value operand is an `i32` of which only the low byte
+    /// is used).
+    ///
+    /// The default implementation writes through [`Self::write`] in fixed-size
+    /// chunks, so it allocates nothing regardless of `len`. A backend with direct
+    /// access to its buffer should override this with an in-place fill.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::OutOfBoundsAccess`] if the range runs past the end
+    /// of the memory. The bounds are checked up front, so a failed fill leaves the
+    /// memory unchanged.
+    fn fill(&mut self, dest: usize, val: u32, len: usize) -> Result<(), MemoryError> {
+        let mem_len = self.size_in_bytes();
+
+        // Checked up front rather than relying on `write`: the chunked loop below
+        // would otherwise leave the earlier chunks applied before trapping.
+        let end = dest.checked_add(len).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Write,
+            dest,
+            mem_len,
+        ))?;
+
+        if end > mem_len {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Write,
+                dest,
+                mem_len,
+            ));
+        }
+
+        // Bounded so a multi-gigabyte `memory.fill` doesn't allocate a buffer of
+        // the same size; this one lives on the stack.
+        const CHUNK_LEN: usize = 4096;
+        let chunk = [val as u8; CHUNK_LEN];
+
+        let mut written = 0;
+
+        while written < len {
+            let n = (len - written).min(CHUNK_LEN);
+
+            // `dest + written <= dest + len <= mem_len` by the check above, so this
+            // cannot overflow and each chunk is in bounds.
+            self.write(dest + written, &chunk[..n])?;
+
+            written += n;
+        }
+
+        Ok(())
+    }
 
     /// Reads `data.len()` bytes starting from the `offset`.
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), MemoryError>;
