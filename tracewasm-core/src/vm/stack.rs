@@ -34,13 +34,12 @@
 //! truncate downward). Violations panic via index/underflow rather than
 //! returning an error.
 
-use smallvec::smallvec;
-
 use crate::{
     error::TraceWasmError,
     instance::traits::{ParamVals, ResultVals},
     module::{FuncIndex, ValType},
 };
+use smallvec::smallvec;
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.

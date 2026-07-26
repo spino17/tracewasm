@@ -1,10 +1,9 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
-use std::fmt::Display;
-
 use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
 };
+use std::fmt::Display;
 use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
