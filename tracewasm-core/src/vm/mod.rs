@@ -518,7 +518,7 @@ impl TraceVM {
 
             let res = state
                 .execute(instr, caller_base_height, module)
-                .map_err(|err| err.into_tracewasm_err(pc, func_index))?;
+                .map_err(|err| err.into_tracewasm_err(pc, func_index, instr))?;
 
             match res {
                 ExecutionResult::JumpTo(next_pc) => {
@@ -559,6 +559,7 @@ impl TraceVM {
     /// mismatches, errors returned by imported functions, …).
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
+        func_name: Option<&str>,
         params: &[Val],
         module: &Module,
         memory: &mut M,
@@ -580,7 +581,10 @@ impl TraceVM {
             global_vals,
             table_vals,
         ) {
-            let _trace = err.extract_stack_trace();
+            if let Some(trace) = err.extract_stack_trace() {
+                // TODO - propogate trace also!
+                let _trace = trace.render(func_name, &module.custom_section);
+            }
 
             return Err(err);
         }

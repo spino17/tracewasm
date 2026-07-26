@@ -469,7 +469,7 @@ impl Module {
             ));
         }
 
-        Ok(TypedFunc::new(func_index))
+        Ok(TypedFunc::new(func_index, name))
     }
 }
 
@@ -487,24 +487,24 @@ pub struct FuncBody {
 /// `name` section (one map per subsection) plus the raw bytes of any other custom
 /// sections, keyed by section name.
 pub struct CustomSection {
-    module_name: String,
-    func: NameMap<FuncIndex>,
-    local: IndirectNameMap<FuncIndex, LocalIndex>,
-    label: IndirectNameMap<FuncIndex, LocalIndex>,
-    ty: NameMap<TyIndex>,
-    table: NameMap<TableIndex>,
-    mem: NameMap<MemoryIndex>,
-    global: NameMap<GlobalIndex>,
-    element: NameMap<ElementIndex>,
-    data: NameMap<DataIndex>,
-    field: IndirectNameMap<TyIndex, FieldIndex>,
-    tag: NameMap<TagIndex>,
+    pub module_name: String,
+    pub func: NameMap<FuncIndex>,
+    pub local: IndirectNameMap<FuncIndex, LocalIndex>,
+    pub label: IndirectNameMap<FuncIndex, LocalIndex>,
+    pub ty: NameMap<TyIndex>,
+    pub table: NameMap<TableIndex>,
+    pub mem: NameMap<MemoryIndex>,
+    pub global: NameMap<GlobalIndex>,
+    pub element: NameMap<ElementIndex>,
+    pub data: NameMap<DataIndex>,
+    pub field: IndirectNameMap<TyIndex, FieldIndex>,
+    pub tag: NameMap<TagIndex>,
     /// Unrecognized `name`-section subsections, keyed by subsection type byte.
-    name_unknown: FxHashMap<u8, Box<[u8]>>,
+    pub name_unknown: FxHashMap<u8, Box<[u8]>>,
     /// Custom sections `wasmparser` recognizes but we keep raw, by section name.
-    other: FxHashMap<String, Box<[u8]>>,
+    pub other: FxHashMap<String, Box<[u8]>>,
     /// Custom sections `wasmparser` does not recognize, by section name.
-    unknown: FxHashMap<String, Box<[u8]>>,
+    pub unknown: FxHashMap<String, Box<[u8]>>,
 }
 
 impl CustomSection {
@@ -1598,6 +1598,7 @@ impl Module {
         if let Some(func_index) = self.start_section {
             TraceVM::run(
                 func_index,
+                None,
                 &[],
                 self.as_ref(),
                 &mut memory,

@@ -1,5 +1,8 @@
 //! The crate-wide error type for parsing and lowering.
-use crate::module::{FuncIndex, Module, TableIndex};
+use crate::{
+    instruction::Instruction,
+    module::{CustomSection, FuncIndex, TableIndex},
+};
 use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
@@ -13,8 +16,8 @@ pub enum TraceWasmError {
     /// to the [`InstructionExecutionError`] the instruction produced. Fields: the
     /// enclosing function index, the instruction's index in that function's
     /// lowered instruction list, and the underlying cause.
-    #[error("error occured while executing instruction `{1}` in func({0:?}): {2}")]
-    InstructionExecution(FuncIndex, usize, InstructionExecutionError),
+    #[error("error occured while executing instruction `{1}`({2:?}) in func({0:?}): {3}")]
+    InstructionExecution(FuncIndex, usize, Instruction, InstructionExecutionError),
     /// A linear-memory access that ran past the memory's bounds (a wasm trap).
     /// Fields: a description of the access, the byte offset attempted, and the
     /// current memory length in bytes.
@@ -90,6 +93,7 @@ pub enum TraceWasmError {
 pub struct TraceRecord {
     pub func_index: FuncIndex,
     pub instr_index: usize,
+    pub instr: Instruction,
     pub kind: TraceRecordKind,
 }
 
@@ -104,25 +108,78 @@ pub enum TraceRecordKind {
 pub struct StackTrace(Vec<TraceRecord>);
 
 impl StackTrace {
-    pub fn to_string(&self, top_enclosing_func_name: Option<&str>, module: &Module) -> String {
-        let s = if let Some(enclosing_func_name) = top_enclosing_func_name {
-            format!("Stack Trace of {}:\n\n", enclosing_func_name)
-        } else {
-            "".to_string()
+    /// Renders the trace as a human-readable, innermost-first backtrace: frame
+    /// `#0` is where execution trapped, and each subsequent frame is the caller
+    /// that led to it.
+    ///
+    /// `top_enclosing_func_name` labels the header with the entry function (when
+    /// known); `module` supplies the `name`-section names used for functions and
+    /// tables, falling back to `func #N` / `table #N` when a name is absent.
+    pub fn render(
+        &self,
+        top_enclosing_func_name: Option<&str>,
+        custom_section: &CustomSection,
+    ) -> String {
+        let name_of_func = |f: FuncIndex| {
+            custom_section
+                .func_name(f)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("func #{}", f.0))
+        };
+        let name_of_table = |t: TableIndex| {
+            custom_section
+                .table_name(t)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("table #{}", t.0))
         };
 
-        for record in &self.0 {
-            let func_index = record.func_index;
-            let func_decl = &module.func_decls[func_index.0 as usize];
+        let mut out = match top_enclosing_func_name {
+            Some(name) => format!("Stack trace of `{name}` (most recent call first):\n\n"),
+            None => String::from("Stack trace (most recent call first):\n\n"),
+        };
+
+        // Pre-resolve each frame's function name so the function column aligns.
+        let frame_names: Vec<String> = self.0.iter().map(|r| name_of_func(r.func_index)).collect();
+        let width = frame_names.iter().map(String::len).max().unwrap_or(0);
+
+        for (i, (record, frame_name)) in self.0.iter().zip(&frame_names).enumerate() {
+            let detail = match &record.kind {
+                // The innermost frame: the instruction that actually trapped.
+                TraceRecordKind::NonCall(err) => {
+                    format!(
+                        "at instr {} ({:?}) — trap: {err}",
+                        record.instr_index, record.instr
+                    )
+                }
+                // A caller frame: the call that led into the next-inner frame.
+                TraceRecordKind::Call {
+                    callee_index,
+                    is_indirect,
+                } => {
+                    let via = match is_indirect {
+                        Some(table) => format!(" (indirect, via {})", name_of_table(*table)),
+                        None => String::new(),
+                    };
+
+                    format!(
+                        "at instr {} — calls `{}`{via}",
+                        record.instr_index,
+                        name_of_func(*callee_index)
+                    )
+                }
+            };
+
+            let column = format!("{frame_name:<width$}", width = width);
+            out.push_str(&format!("  #{i:<2} {column}  {detail}\n"));
         }
 
-        s
+        out
     }
 }
 
 impl TraceWasmError {
     fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
-        let TraceWasmError::InstructionExecution(func_index, instr_index, err) = self else {
+        let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err) = self else {
             return None;
         };
 
@@ -153,6 +210,7 @@ impl TraceWasmError {
             } else {
                 TraceRecordKind::NonCall(err.to_string())
             },
+            instr: instr.clone(),
             instr_index: *instr_index,
         });
 
@@ -201,8 +259,9 @@ impl InstructionExecutionError {
         self,
         instr_index: usize,
         enclosing_func_index: FuncIndex,
+        instr: &Instruction,
     ) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(enclosing_func_index, instr_index, self)
+        TraceWasmError::InstructionExecution(enclosing_func_index, instr_index, instr.clone(), self)
     }
 }
 
@@ -230,10 +289,12 @@ pub enum CallIndirectError {
 mod stack_trace_tests {
     use super::*;
 
-    /// Build an `InstructionExecution` error: func `func`, instruction `instr`,
-    /// with the given per-instruction cause.
+    /// Build an `InstructionExecution` error: func `func`, instruction index
+    /// `instr`, with the given per-instruction cause. The recorded `Instruction`
+    /// is a fixed placeholder — the trace-extraction logic only clones it through,
+    /// so its value is irrelevant to these tests.
     fn ie(func: u32, instr: usize, cause: InstructionExecutionError) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(FuncIndex(func), instr, cause)
+        TraceWasmError::InstructionExecution(FuncIndex(func), instr, Instruction::Nop, cause)
     }
 
     /// Assert a record is a `NonCall` at `(func, instr)`.

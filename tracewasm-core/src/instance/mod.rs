@@ -81,16 +81,17 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
 ///
 /// The type parameters let [`Self::call`] accept native Rust values and return
 /// native Rust values, converting to/from runtime `Val`s internally.
-#[derive(Clone, Copy)]
 pub struct TypedFunc<P, R> {
     func_index: FuncIndex,
+    func_name: String,
     phantom: PhantomData<(P, R)>,
 }
 
 impl<P: Params, R: Results> TypedFunc<P, R> {
-    pub(crate) fn new(func_index: FuncIndex) -> Self {
+    pub(crate) fn new(func_index: FuncIndex, func_name: &str) -> Self {
         TypedFunc {
             func_index,
+            func_name: func_name.to_string(),
             phantom: PhantomData,
         }
     }
@@ -112,6 +113,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
 
         let results = TraceVM::run(
             self.func_index,
+            Some(&self.func_name),
             params.as_ref(),
             &instance.module,
             &mut instance.memory,
