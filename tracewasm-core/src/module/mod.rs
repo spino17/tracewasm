@@ -409,7 +409,7 @@ pub struct Module {
     pub func_bodies: Box<[FuncBody]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
-    pub custom_sections: Box<[CustomSection]>,
+    pub custom_section: CustomSection,
 }
 
 impl Module {
@@ -483,37 +483,100 @@ pub struct FuncBody {
     pub instructions: Box<[Instruction]>,
 }
 
-/// One entry of the custom `name` section.
-pub enum Name {
-    Module(String),
-    Function(NameMap<FuncIndex>),
-    Local(IndirectNameMap<FuncIndex, LocalIndex>),
-    Label(IndirectNameMap<FuncIndex, LocalIndex>),
-    Type(NameMap<TyIndex>),
-    Table(NameMap<TableIndex>),
-    Memory(NameMap<MemoryIndex>),
-    Global(NameMap<GlobalIndex>),
-    Element(NameMap<ElementIndex>),
-    Data(NameMap<DataIndex>),
-    Field(IndirectNameMap<TyIndex, FieldIndex>),
-    Tag(NameMap<TagIndex>),
-    Unknown { ty: u8, data: Box<[u8]> },
-}
-
-/// The decoded payload of a custom section.
-pub enum CustomSectionKind {
-    /// The well-known `name` section, decoded into [`Name`] entries.
-    Name(Box<[Name]>),
-    /// A custom section `wasmparser` recognizes but that we keep as raw bytes.
-    Others(Box<[u8]>),
-    /// A custom section `wasmparser` does not recognize, kept as raw bytes.
-    Unknown(Box<[u8]>),
-}
-
-/// A custom section: its name plus decoded/raw contents.
+/// The module's custom-section data, flattened for direct lookup: the decoded
+/// `name` section (one map per subsection) plus the raw bytes of any other custom
+/// sections, keyed by section name.
 pub struct CustomSection {
-    pub name: String,
-    pub kind: CustomSectionKind,
+    module_name: String,
+    func: NameMap<FuncIndex>,
+    local: IndirectNameMap<FuncIndex, LocalIndex>,
+    label: IndirectNameMap<FuncIndex, LocalIndex>,
+    ty: NameMap<TyIndex>,
+    table: NameMap<TableIndex>,
+    mem: NameMap<MemoryIndex>,
+    global: NameMap<GlobalIndex>,
+    element: NameMap<ElementIndex>,
+    data: NameMap<DataIndex>,
+    field: IndirectNameMap<TyIndex, FieldIndex>,
+    tag: NameMap<TagIndex>,
+    /// Unrecognized `name`-section subsections, keyed by subsection type byte.
+    name_unknown: FxHashMap<u8, Box<[u8]>>,
+    /// Custom sections `wasmparser` recognizes but we keep raw, by section name.
+    other: FxHashMap<String, Box<[u8]>>,
+    /// Custom sections `wasmparser` does not recognize, by section name.
+    unknown: FxHashMap<String, Box<[u8]>>,
+}
+
+impl CustomSection {
+    /// The module's name from the `name` section's module subsection, if present
+    /// (empty when the module declares none).
+    pub fn module_name(&self) -> &str {
+        &self.module_name
+    }
+
+    /// The name of function `index`, if the `name` section records one.
+    pub fn func_name(&self, index: FuncIndex) -> Option<&str> {
+        self.func.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of local `local` in function `func`, if recorded.
+    pub fn local_name(&self, func: FuncIndex, local: LocalIndex) -> Option<&str> {
+        self.local.0.get(&func)?.0.get(&local).map(String::as_str)
+    }
+
+    /// The name of label `label` in function `func`, if recorded.
+    pub fn label_name(&self, func: FuncIndex, label: LocalIndex) -> Option<&str> {
+        self.label.0.get(&func)?.0.get(&label).map(String::as_str)
+    }
+
+    /// The name of type `index`, if recorded.
+    pub fn type_name(&self, index: TyIndex) -> Option<&str> {
+        self.ty.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of table `index`, if recorded.
+    pub fn table_name(&self, index: TableIndex) -> Option<&str> {
+        self.table.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of memory `index`, if recorded.
+    pub fn memory_name(&self, index: MemoryIndex) -> Option<&str> {
+        self.mem.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of global `index`, if recorded.
+    pub fn global_name(&self, index: GlobalIndex) -> Option<&str> {
+        self.global.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of element segment `index`, if recorded.
+    pub fn element_name(&self, index: ElementIndex) -> Option<&str> {
+        self.element.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of data segment `index`, if recorded.
+    pub fn data_name(&self, index: DataIndex) -> Option<&str> {
+        self.data.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of tag `index`, if recorded.
+    pub fn tag_name(&self, index: TagIndex) -> Option<&str> {
+        self.tag.0.get(&index).map(String::as_str)
+    }
+
+    /// The name of field `field` in type `ty`, if recorded.
+    pub fn field_name(&self, ty: TyIndex, field: FieldIndex) -> Option<&str> {
+        self.field.0.get(&ty)?.0.get(&field).map(String::as_str)
+    }
+
+    /// The raw bytes of the custom section named `name` (recognized-but-kept-raw
+    /// first, then unrecognized).
+    pub fn raw_section(&self, name: &str) -> Option<&[u8]> {
+        self.other
+            .get(name)
+            .or_else(|| self.unknown.get(name))
+            .map(Box::as_ref)
+    }
 }
 
 /// A data segment.
@@ -636,23 +699,28 @@ pub struct FuncDecl {
 /// A `name`-section map from a typed entity index to its name.
 pub struct NameMap<T: PartialEq + Eq + Hash + EntityIndex>(pub FxHashMap<T, String>);
 
+impl<T: PartialEq + Eq + Hash + EntityIndex> Default for NameMap<T> {
+    fn default() -> Self {
+        NameMap(FxHashMap::default())
+    }
+}
+
 impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
     /// Converts a `wasmparser` name map into an owned [`NameMap`], turning each
     /// raw `u32` into the typed index `T`.
     pub(crate) fn from_wasmparser_name_map(
         map: wasmparser::NameMap<'_>,
-    ) -> Result<Self, TraceWasmError> {
-        let mut new_map: FxHashMap<T, String> = FxHashMap::default();
-
+        new_map: &mut NameMap<T>,
+    ) -> Result<(), TraceWasmError> {
         for name in map {
             let name = name?;
             let index = T::from(name.index);
             let name = name.name.to_string();
 
-            new_map.insert(index, name);
+            new_map.0.insert(index, name);
         }
 
-        Ok(NameMap(new_map))
+        Ok(())
     }
 }
 
@@ -665,24 +733,33 @@ pub struct IndirectNameMap<
     V: PartialEq + Eq + Hash + EntityIndex,
 >(pub FxHashMap<T, NameMap<V>>);
 
+impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIndex> Default
+    for IndirectNameMap<T, V>
+{
+    fn default() -> Self {
+        IndirectNameMap(FxHashMap::default())
+    }
+}
+
 impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIndex>
     IndirectNameMap<T, V>
 {
     /// Converts a `wasmparser` indirect name map into the owned two-level form.
     pub(crate) fn from_wasmparser_indirect_map(
         map: wasmparser::IndirectNameMap<'_>,
-    ) -> Result<Self, TraceWasmError> {
-        let mut new_indirect_map: FxHashMap<T, NameMap<V>> = FxHashMap::default();
-
+        new_map: &mut IndirectNameMap<T, V>,
+    ) -> Result<(), TraceWasmError> {
         for entry in map {
             let entry = entry?;
             let outer_index = T::from(entry.index);
-            let names: NameMap<V> = NameMap::from_wasmparser_name_map(entry.names)?;
+            let mut inner_name_map: NameMap<V> = NameMap::default();
 
-            new_indirect_map.insert(outer_index, names);
+            NameMap::from_wasmparser_name_map(entry.names, &mut inner_name_map)?;
+
+            new_map.0.insert(outer_index, inner_name_map);
         }
 
-        Ok(IndirectNameMap(new_indirect_map))
+        Ok(())
     }
 }
 
@@ -720,7 +797,24 @@ impl Module {
         let mut func_bodies = vec![];
         let mut tags = vec![];
         let mut unknown_sections = vec![];
-        let mut custom_sections = vec![];
+        let mut custom_section_unknowns: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
+        let mut custom_section_others: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
+        let mut custom_section_module_name: String = "".to_string();
+        let mut custom_section_func: NameMap<FuncIndex> = NameMap::default();
+        let mut custom_section_local: IndirectNameMap<FuncIndex, LocalIndex> =
+            IndirectNameMap::default();
+        let mut custom_section_label: IndirectNameMap<FuncIndex, LocalIndex> =
+            IndirectNameMap::default();
+        let mut custom_section_ty: NameMap<TyIndex> = NameMap::default();
+        let mut custom_section_table: NameMap<TableIndex> = NameMap::default();
+        let mut custom_section_mem: NameMap<MemoryIndex> = NameMap::default();
+        let mut custom_section_global: NameMap<GlobalIndex> = NameMap::default();
+        let mut custom_section_element: NameMap<ElementIndex> = NameMap::default();
+        let mut custom_section_data: NameMap<DataIndex> = NameMap::default();
+        let mut custom_section_field: IndirectNameMap<TyIndex, FieldIndex> =
+            IndirectNameMap::default();
+        let mut custom_section_tag: NameMap<TagIndex> = NameMap::default();
+        let mut custom_section_name_unknown: FxHashMap<u8, Box<[u8]>> = FxHashMap::default();
 
         for payload in Parser::new(0).parse_all(buf) {
             let payload = payload?;
@@ -1036,77 +1130,112 @@ impl Module {
                     });
                 }
                 CustomSection(custom_sec) => {
-                    let name = custom_sec.name().to_string();
-
-                    let kind = match custom_sec.as_known() {
+                    match custom_sec.as_known() {
                         wasmparser::KnownCustom::Name(reader) => {
-                            let mut names: Vec<Name> = vec![];
-
                             for name in reader {
                                 let name = name?;
 
-                                let name = match name {
+                                match name {
                                     wasmparser::Name::Module {
                                         name,
                                         name_range: _name_range,
-                                    } => Name::Module(name.to_string()),
-                                    wasmparser::Name::Function(seq) => {
-                                        Name::Function(NameMap::from_wasmparser_name_map(seq)?)
+                                    } => {
+                                        custom_section_module_name = name.to_string();
                                     }
-                                    wasmparser::Name::Local(seq) => Name::Local(
-                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
-                                    ),
-                                    wasmparser::Name::Label(seq) => Name::Label(
-                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
-                                    ),
+                                    wasmparser::Name::Function(seq) => {
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_func,
+                                        )?
+                                    }
+                                    wasmparser::Name::Local(seq) => {
+                                        IndirectNameMap::from_wasmparser_indirect_map(
+                                            seq,
+                                            &mut custom_section_local,
+                                        )?
+                                    }
+                                    wasmparser::Name::Label(seq) => {
+                                        IndirectNameMap::from_wasmparser_indirect_map(
+                                            seq,
+                                            &mut custom_section_label,
+                                        )?
+                                    }
                                     wasmparser::Name::Type(seq) => {
-                                        Name::Type(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_ty,
+                                        )?
                                     }
                                     wasmparser::Name::Table(seq) => {
-                                        Name::Table(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_table,
+                                        )?
                                     }
                                     wasmparser::Name::Memory(seq) => {
-                                        Name::Memory(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_mem,
+                                        )?
                                     }
                                     wasmparser::Name::Global(seq) => {
-                                        Name::Global(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_global,
+                                        )?
                                     }
                                     wasmparser::Name::Element(seq) => {
-                                        Name::Element(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_element,
+                                        )?
                                     }
                                     wasmparser::Name::Data(seq) => {
-                                        Name::Data(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_data,
+                                        )?
                                     }
-                                    wasmparser::Name::Field(seq) => Name::Field(
-                                        IndirectNameMap::from_wasmparser_indirect_map(seq)?,
-                                    ),
+                                    wasmparser::Name::Field(seq) => {
+                                        IndirectNameMap::from_wasmparser_indirect_map(
+                                            seq,
+                                            &mut custom_section_field,
+                                        )?
+                                    }
                                     wasmparser::Name::Tag(seq) => {
-                                        Name::Tag(NameMap::from_wasmparser_name_map(seq)?)
+                                        NameMap::from_wasmparser_name_map(
+                                            seq,
+                                            &mut custom_section_tag,
+                                        )?
                                     }
                                     wasmparser::Name::Unknown {
                                         ty,
                                         data,
                                         range: _range,
-                                    } => Name::Unknown {
-                                        ty,
-                                        data: data.to_vec().into_boxed_slice(),
-                                    },
-                                };
-
-                                names.push(name);
+                                    } => {
+                                        // Keyed by the subsection type byte: the
+                                        // custom section name is always "name" here,
+                                        // so keying by it would collapse all unknown
+                                        // subsections into one.
+                                        custom_section_name_unknown
+                                            .insert(ty, data.to_vec().into_boxed_slice());
+                                    }
+                                }
                             }
-
-                            CustomSectionKind::Name(names.into_boxed_slice())
                         }
-                        wasmparser::KnownCustom::Unknown => CustomSectionKind::Unknown(
-                            custom_sec.data().to_vec().into_boxed_slice(),
-                        ),
+                        wasmparser::KnownCustom::Unknown => {
+                            custom_section_unknowns.insert(
+                                custom_sec.name().to_string(),
+                                custom_sec.data().to_vec().into_boxed_slice(),
+                            );
+                        }
                         _ => {
-                            CustomSectionKind::Others(custom_sec.data().to_vec().into_boxed_slice())
+                            custom_section_others.insert(
+                                custom_sec.name().to_string(),
+                                custom_sec.data().to_vec().into_boxed_slice(),
+                            );
                         }
                     };
-
-                    custom_sections.push(CustomSection { name, kind });
                 }
                 UnknownSection {
                     id,
@@ -1149,7 +1278,23 @@ impl Module {
             imported_global_count,
             func_bodies: func_bodies.into_boxed_slice(),
             unknown_sections: unknown_sections.into_boxed_slice(),
-            custom_sections: custom_sections.into_boxed_slice(),
+            custom_section: CustomSection {
+                module_name: custom_section_module_name,
+                func: custom_section_func,
+                local: custom_section_local,
+                label: custom_section_label,
+                ty: custom_section_ty,
+                table: custom_section_table,
+                mem: custom_section_mem,
+                global: custom_section_global,
+                element: custom_section_element,
+                data: custom_section_data,
+                field: custom_section_field,
+                tag: custom_section_tag,
+                name_unknown: custom_section_name_unknown,
+                other: custom_section_others,
+                unknown: custom_section_unknowns,
+            },
         }))
     }
 

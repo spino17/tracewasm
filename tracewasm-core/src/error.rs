@@ -1,7 +1,6 @@
 //! The crate-wide error type for parsing and lowering.
+use crate::module::{FuncIndex, Module, TableIndex};
 use thiserror::Error;
-
-use crate::module::{FuncIndex, TableIndex};
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
 ///
@@ -89,9 +88,9 @@ pub enum TraceWasmError {
 }
 
 pub struct TraceRecord {
-    func_index: FuncIndex,
-    instr_index: usize,
-    kind: TraceRecordKind,
+    pub func_index: FuncIndex,
+    pub instr_index: usize,
+    pub kind: TraceRecordKind,
 }
 
 pub enum TraceRecordKind {
@@ -100,6 +99,25 @@ pub enum TraceRecordKind {
         is_indirect: Option<TableIndex>,
     },
     NonCall(String),
+}
+
+pub struct StackTrace(Vec<TraceRecord>);
+
+impl StackTrace {
+    pub fn to_string(&self, top_enclosing_func_name: Option<&str>, module: &Module) -> String {
+        let s = if let Some(enclosing_func_name) = top_enclosing_func_name {
+            format!("Stack Trace of {}:\n\n", enclosing_func_name)
+        } else {
+            "".to_string()
+        };
+
+        for record in &self.0 {
+            let func_index = record.func_index;
+            let func_decl = &module.func_decls[func_index.0 as usize];
+        }
+
+        s
+    }
 }
 
 impl TraceWasmError {
@@ -141,12 +159,12 @@ impl TraceWasmError {
         Some(())
     }
 
-    pub(crate) fn extract_stack_trace(&self) -> Option<Vec<TraceRecord>> {
+    pub(crate) fn extract_stack_trace(&self) -> Option<StackTrace> {
         let mut trace = vec![];
 
         self._extract_stack_trace(&mut trace)?;
 
-        Some(trace)
+        Some(StackTrace(trace))
     }
 }
 
@@ -253,7 +271,11 @@ mod stack_trace_tests {
                 .extract_stack_trace()
                 .is_none()
         );
-        assert!(TraceWasmError::ExportNotA("function".to_string()).extract_stack_trace().is_none());
+        assert!(
+            TraceWasmError::ExportNotA("function".to_string())
+                .extract_stack_trace()
+                .is_none()
+        );
     }
 
     // leaf `Unreachable` (the catch-all IE arm) → single NonCall record.
@@ -263,8 +285,8 @@ mod stack_trace_tests {
             .extract_stack_trace()
             .expect("top-level is an InstructionExecution");
 
-        assert_eq!(trace.len(), 1);
-        assert_noncall(&trace[0], 0, 7);
+        assert_eq!(trace.0.len(), 1);
+        assert_noncall(&trace.0[0], 0, 7);
     }
 
     // every non-`FunctionCall` `CallIndirect` cause hits the inner `_ => None`
@@ -278,12 +300,16 @@ mod stack_trace_tests {
         ];
 
         for (i, leaf) in leaves.into_iter().enumerate() {
-            let trace = ie(1, i, InstructionExecutionError::CallIndirect(TableIndex(3), leaf))
-                .extract_stack_trace()
-                .unwrap();
+            let trace = ie(
+                1,
+                i,
+                InstructionExecutionError::CallIndirect(TableIndex(3), leaf),
+            )
+            .extract_stack_trace()
+            .unwrap();
 
-            assert_eq!(trace.len(), 1);
-            assert_noncall(&trace[0], 1, i);
+            assert_eq!(trace.0.len(), 1);
+            assert_noncall(&trace.0[0], 1, i);
         }
     }
 
@@ -302,9 +328,9 @@ mod stack_trace_tests {
 
         let trace = err.extract_stack_trace().unwrap();
 
-        assert_eq!(trace.len(), 2);
-        assert_noncall(&trace[0], 3, 1); // innermost first
-        assert_call(&trace[1], 2, 5, 3, None); // direct call → is_indirect None
+        assert_eq!(trace.0.len(), 2);
+        assert_noncall(&trace.0[0], 3, 1); // innermost first
+        assert_call(&trace.0[1], 2, 5, 3, None); // direct call → is_indirect None
     }
 
     // `CallIndirect::FunctionCall` recursion: Call record carries the table index.
@@ -324,9 +350,9 @@ mod stack_trace_tests {
 
         let trace = err.extract_stack_trace().unwrap();
 
-        assert_eq!(trace.len(), 2);
-        assert_noncall(&trace[0], 6, 0);
-        assert_call(&trace[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
+        assert_eq!(trace.0.len(), 2);
+        assert_noncall(&trace.0[0], 6, 0);
+        assert_call(&trace.0[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
     }
 
     // the `?`-free recursion: a nested non-`InstructionExecution` error (e.g. a
@@ -347,8 +373,8 @@ mod stack_trace_tests {
             ),
         );
         let trace = via_call.extract_stack_trace().unwrap();
-        assert_eq!(trace.len(), 1, "caller frame must survive a non-IE leaf");
-        assert_call(&trace[0], 0, 3, 5, None);
+        assert_eq!(trace.0.len(), 1, "caller frame must survive a non-IE leaf");
+        assert_call(&trace.0[0], 0, 3, 5, None);
 
         // same for the indirect path
         let via_indirect = ie(
@@ -366,8 +392,8 @@ mod stack_trace_tests {
             ),
         );
         let trace = via_indirect.extract_stack_trace().unwrap();
-        assert_eq!(trace.len(), 1);
-        assert_call(&trace[0], 0, 2, 9, Some(1));
+        assert_eq!(trace.0.len(), 1);
+        assert_call(&trace.0[0], 0, 2, 9, Some(1));
     }
 
     // deep mixed chain A --call--> B --call_indirect--> C(unreachable): exercises
@@ -395,9 +421,9 @@ mod stack_trace_tests {
 
         let trace = err.extract_stack_trace().unwrap();
 
-        assert_eq!(trace.len(), 3);
-        assert_noncall(&trace[0], 2, 0); // innermost: the trap
-        assert_call(&trace[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
-        assert_call(&trace[2], 0, 10, 1, None); // A called B directly
+        assert_eq!(trace.0.len(), 3);
+        assert_noncall(&trace.0[0], 2, 0); // innermost: the trap
+        assert_call(&trace.0[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
+        assert_call(&trace.0[2], 0, 10, 1, None); // A called B directly
     }
 }

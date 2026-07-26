@@ -39,8 +39,6 @@
 //! were. Instruction indices, by contrast, are per-function: each
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
-use smallvec::{SmallVec, smallvec};
-
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
@@ -52,6 +50,7 @@ use crate::{
     module::{FuncIndex, FuncKind, Module, formatted_val_types},
     vm::stack::{Locals, Stack, TableVal, Val},
 };
+use smallvec::{SmallVec, smallvec};
 
 pub(crate) mod stack;
 
@@ -445,7 +444,7 @@ impl TraceVM {
     /// trap (`unreachable`), [`TraceWasmError::Unsupported`] if a parameter or
     /// local has an unsupported type (`V128`), and propagates errors from nested
     /// calls (including imported-function calls).
-    pub fn execute<M: Memory, I: ImportRegistry>(
+    fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
         module: &Module,
