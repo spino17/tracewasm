@@ -602,7 +602,10 @@ impl ControlStack {
 enum StackEffectResult {
     /// The operator pops `pops` values and pushes `pushes`; the net change is
     /// applied to `curr_height` (skipped while traversing dead code).
-    PopPush { pops: u32, pushes: u32 },
+    PopPush {
+        pops: u32,
+        pushes: u32,
+    },
     /// The operator resets the height to a known absolute value, e.g. `else`/`end`
     /// restoring `recorded_height + arity`.
     SetHeight(u32),
@@ -615,6 +618,7 @@ enum StackEffectResult {
     Unreachable,
     /// a specific `PopPush { pops: 1, pushes: 1 }` for load instructions.
     Loads,
+    Stores,
 }
 
 impl Instruction {
@@ -1228,6 +1232,9 @@ impl Instruction {
             match stack_effect {
                 StackEffectResult::PopPush { pops, pushes } => {
                     control_stack.apply_stack_effects_to_height(pops, pushes)
+                }
+                StackEffectResult::Stores => {
+                    control_stack.apply_stack_effects_to_height(2, 0);
                 }
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
                 StackEffectResult::NoEffect
