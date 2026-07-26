@@ -44,7 +44,7 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 ///
 /// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB, and
 /// cap the initial allocation against the instance [`Config`].
-pub const WASM_MEMORY_PAGE_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
+pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
@@ -1486,7 +1486,7 @@ impl Module {
         // TODO: use config to validate the module against it! including below TODO.
 
         let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
-        let mut memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
+        let mut memory = M::allocate_initial_memory(initial_pages);
 
         // Globals Initialization
         if import_registry.global_count() != self.imported_global_count {

@@ -337,6 +337,17 @@ pub enum MemoryError {
         "effective address overflow: address `{0}` + offset `{1}` exceeds the 32-bit address space"
     )]
     EffectiveAddressOverflow(u32, u32),
+    /// A `memory.grow` could not be satisfied — the requested delta would exceed
+    /// the allowed maximum, or the page count overflowed. Fields: the maximum size
+    /// in pages, the requested delta in pages, and the memory's current pages.
+    ///
+    /// Note this is *not* a trap: per the spec `memory.grow` reports failure by
+    /// pushing `-1`, so the interpreter converts this into that value rather than
+    /// propagating it. See [`Memory::grow`](crate::memory::Memory::grow).
+    #[error(
+        "memory grow failed: maximum cap on memory size in pages is `{0}`, request received for increasing `{1}` pages on a memory with `{2}` pages"
+    )]
+    GrowFailed(u64, u64, u64),
 }
 
 impl From<MemoryError> for InstructionExecutionError {

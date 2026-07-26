@@ -8,12 +8,28 @@ pub mod linear;
 /// The interpreter is generic over this trait so the backing store (a plain
 /// `Vec<u8>`, an mmap, a guarded region, …) is the embedder's choice.
 pub trait Memory {
-    /// Creates a memory pre-allocated to `size` bytes.
+    /// Creates a memory pre-allocated to `size` in WASM pages.
     /// Per the WebAssembly spec, this should be completely zeroed.
-    fn allocate_initial_memory(size: usize) -> Self;
+    fn allocate_initial_memory(size_in_pages: u64) -> Self;
 
-    /// Returns the size of the memory.
-    fn size(&self) -> usize;
+    /// Returns the size of the memory in whole WASM pages, rounding down.
+    fn size_in_pages(&self) -> u64;
+
+    /// Grows the memory by `delta_in_pages`, returning the size in pages *before*
+    /// the growth. New pages are zeroed, per the spec.
+    ///
+    /// `max_size_in_pages` is the ceiling the caller allows: the module's declared
+    /// maximum, capped by the instance
+    /// [`Config`](crate::instance::config::Config).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::GrowFailed`] if the request cannot be satisfied
+    /// (past `max_size_in_pages`, or the page count overflows). This is **not** a
+    /// trap: `memory.grow` reports failure by pushing `-1`, so a caller
+    /// implementing that instruction must map the error to `-1` and continue,
+    /// rather than propagating it.
+    fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError>;
 
     /// Reads `data.len()` bytes starting from the `offset`.
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), MemoryError>;
