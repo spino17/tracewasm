@@ -1,7 +1,6 @@
-/// An Instance's Config.
+/// Per-instance resource limits, enforced at instantiation and during execution.
 pub struct Config {
-    /// Max memory size which is used for capping initial pages or
-    /// grow allocations beyond this value.
+    /// Max memory size, used to cap the module's initial memory pages.
     max_memory_size_in_pages: u64,
     /// Max number of elements in a table.
     max_table_elements: u64,
@@ -43,5 +42,10 @@ impl Config {
     /// Sets `max_locals_per_func`
     pub fn set_max_locals_per_func(&mut self, val: u64) {
         self.max_locals_per_func = val;
+    }
+
+    /// Returns `max_locals_per_func`
+    pub fn get_max_locals_per_func(&self) -> u64 {
+        self.max_locals_per_func
     }
 }

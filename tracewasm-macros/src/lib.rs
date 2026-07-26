@@ -18,9 +18,11 @@
 //!
 //! Each `#[module("...")]`-tagged method becomes an importable function whose
 //! module name is the attribute argument and whose field name is the method
-//! name. The macro generates `ImportRegistry::{execute, signature, func_count}` and,
-//! for every tagged method, a compile-time assertion that its signature is a
-//! valid `ImportedFunc` (params/results are `WasmTy` tuples).
+//! name. The macro generates
+//! `ImportRegistry::{execute, signature, func_count, global_count, get_global}`
+//! (where the generated `execute` returns a `ResultVals` wrapper) and, for every
+//! tagged method, a compile-time assertion that its signature is a valid
+//! `ImportedFunc` (params/results are `WasmTy` tuples).
 //!
 //! A `#[global("...")]`-tagged method instead declares an importable global: it
 //! takes `&self`, returns a single [`WasmTy`] value, and its method name is the
@@ -37,9 +39,8 @@
 //! }
 //! ```
 //!
-//! Paths in the generated code are rooted at `::tracewasm_core`, which resolves
-//! inside `tracewasm-core` itself via its `extern crate self as tracewasm_core`
-//! alias.
+//! Paths in the generated code are absolute (`::tracewasm_core`), so it compiles
+//! from any embedder crate that depends on `tracewasm-core`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Literal, TokenStream as TokenStream2};

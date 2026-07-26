@@ -63,14 +63,17 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         }
     }
 
+    /// The resource limits [`Config`] this instance was created with.
     pub fn config(&self) -> &Config {
         &self.config
     }
 
+    /// Shared access to the instance's linear [`Memory`].
     pub fn memory_view(&self) -> &M {
         &self.memory
     }
 
+    /// Mutable access to the instance's linear [`Memory`].
     pub fn memory_view_mut(&mut self) -> &mut M {
         &mut self.memory
     }

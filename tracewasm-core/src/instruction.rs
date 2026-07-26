@@ -47,10 +47,12 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// Structured control flow, `call`, and a subset of value/numeric operators
-/// (`*.const`, `global.get`, `ref.null`/`ref.func`, and `i32`/`i64` add/sub/mul)
-/// are modelled. These operators are lowered in both function bodies and
-/// constant expressions. The remaining value/numeric/memory operators (loads/
+/// Structured control flow, `call`/`call_indirect`, and a subset of
+/// value/numeric operators (`*.const`, `global.get`, `ref.null`/`ref.func`, and
+/// `i32`/`i64` add/sub/mul) are modelled. Control flow and calls are lowered in
+/// function bodies only; only the small value/numeric subset is shared with
+/// constant expressions ([`Instruction::emit_instruction_for_const_expr`] rejects
+/// calls and control flow). The remaining value/numeric/memory operators (loads/
 /// stores, comparisons, division, `local.*`, etc.) are not yet lowered and are
 /// rejected as unsupported by [`Instruction::emit_instruction_for_func`]. Index
 /// fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
@@ -58,13 +60,17 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// counters.
 #[derive(Debug, Clone)]
 pub enum Instruction {
+    /// Traps unconditionally.
     Unreachable,
+    /// Does nothing.
     Nop,
     Block {
         /// Absolute index of this block's matching `End`. Backpatched; a branch
         /// that targets this block jumps here.
         end_index: usize,
     },
+    /// Opens a loop. Branches targeting a loop jump back to this instruction
+    /// (the loop start), so no `end` index is needed.
     Loop,
     If {
         /// Absolute index of the matching `Else`, if one exists. Backpatched at
@@ -98,7 +104,9 @@ pub enum Instruction {
     BrIf {
         /// See `Br::target_index`. Same target rules as `Br`.
         target_index: usize,
+        /// Number of values transferred to the label; see `Br::arity`.
         arity: u32,
+        /// Stack height the target label unwinds to; see `Block::recorded_height`.
         recorded_height: u32,
     },
     BrTable {
@@ -117,38 +125,56 @@ pub enum Instruction {
         recorded_height: u32,
     },
     Call {
+        /// Index of the callee in the function index space.
         func_index: FuncIndex,
+        /// Number of arguments the callee pops from the stack.
         params_count: u32,
     },
     CallIndirect {
+        /// The callee signature's parameter types.
         params: Box<[ValType]>,
+        /// The callee signature's result types.
         results: Box<[ValType]>,
+        /// Table holding the callee function references.
         table_index: TableIndex,
     },
     I32Const {
+        /// The constant value pushed onto the stack.
         value: i32,
     },
     I64Const {
+        /// The constant value pushed onto the stack.
         value: i64,
     },
     F32Const {
+        /// The constant value pushed onto the stack.
         value: f32,
     },
     F64Const {
+        /// The constant value pushed onto the stack.
         value: f64,
     },
     GlobalGet {
+        /// Index of the global whose value is pushed.
         global_index: GlobalIndex,
     },
+    /// Pushes a null reference.
     RefNull,
     RefFunc {
+        /// Index of the function whose reference is pushed.
         function_index: FuncIndex,
     },
+    /// `i32.add`.
     I32Add,
+    /// `i32.sub`.
     I32Sub,
+    /// `i32.mul`.
     I32Mul,
+    /// `i64.add`.
     I64Add,
+    /// `i64.sub`.
     I64Sub,
+    /// `i64.mul`.
     I64Mul,
 }
 
@@ -163,7 +189,9 @@ pub struct TargetBranch {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
     pub target_index: usize,
+    /// Number of values transferred to the label (loop params, else results).
     pub arity: u32,
+    /// Stack height the target label unwinds to; see `Block::recorded_height`.
     pub recorded_height: u32,
 }
 
@@ -415,7 +443,8 @@ impl ControlStack {
         self.curr_height = height;
     }
 
-    /// Applies an operator's net stack effect: `curr_height -= pops; curr_height += pushes`.
+    /// Applies an operator's net stack effect as the single expression
+    /// `curr_height = curr_height - pops + pushes`.
     /// This is the default for ordinary operators described by their pop/push counts.
     ///
     /// NOTE: the dead-code guard is load-bearing, not just an optimization. The

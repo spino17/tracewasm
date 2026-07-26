@@ -65,9 +65,9 @@ enum ExecutionResult {
 
 /// The mutable state of a single in-flight function activation.
 ///
-/// `stack`, `memory`, and `import_registry` are borrowed because they are shared
-/// across the whole call tree (see the module docs); only `locals` is owned per
-/// activation.
+/// `stack`, `memory`, `import_registry`, `globals`, and `tables` are borrowed
+/// because they are shared across the whole call tree (see the module docs);
+/// only `locals` is owned per activation.
 struct TraceVMState<'a, M, I> {
     /// The operand stack, shared with every other active frame.
     stack: &'a mut Stack<Val>,
@@ -77,7 +77,9 @@ struct TraceVMState<'a, M, I> {
     locals: Locals,
     /// The registry resolving imported-function calls, shared across the call tree.
     import_registry: &'a mut I,
+    /// The module's global values, shared across the call tree.
     globals: &'a [Val],
+    /// The module's tables, shared across the call tree.
     tables: &'a mut Vec<TableVal>,
 }
 
@@ -439,11 +441,11 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::IncorrectParamsResultsStructure`] if `params`
-    /// don't match the function's signature, [`TraceWasmError::Execution`] on a
-    /// trap (`unreachable`), [`TraceWasmError::Unsupported`] if a parameter or
-    /// local has an unsupported type (`V128`), and propagates errors from nested
-    /// calls (including imported-function calls).
+    /// Returns [`TraceWasmError::Unsupported`] if a declared local has an
+    /// unsupported type (`V128`, via [`Val::zero_of_ty`]); wraps a failed
+    /// instruction as [`TraceWasmError::InstructionExecution`] (tagged with the
+    /// enclosing function and instruction index); and propagates errors from
+    /// nested and imported-function calls.
     fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -596,6 +598,14 @@ impl TraceVM {
         Ok(stack.pop_results(results_len))
     }
 
+    /// Evaluates a constant-expression instruction sequence to its single
+    /// resulting [`Val`], on a small dedicated stack. Used to compute
+    /// global/table/data/element initializers at instantiation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
+    /// instruction not permitted in a constant expression.
     pub(crate) fn const_expr_evaluator(
         instructions: &[Instruction],
         globals: &[Val],

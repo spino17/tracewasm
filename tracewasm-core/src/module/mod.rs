@@ -238,7 +238,10 @@ pub trait EntityIndex: From<u32> {}
 
 /// Index into the function index space (imports first, then defined functions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FuncIndex(pub u32);
+pub struct FuncIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FuncIndex {
     fn from(value: u32) -> Self {
@@ -251,7 +254,10 @@ impl EntityIndex for FuncIndex {}
 /// Index used by the `ref.func` "exact" reference form (function-references
 /// proposal); addresses the function index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FuncExactIndex(pub u32);
+pub struct FuncExactIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FuncExactIndex {
     fn from(value: u32) -> Self {
@@ -263,7 +269,10 @@ impl EntityIndex for FuncExactIndex {}
 
 /// Index into the type section ([`Module::types`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TyIndex(pub u32);
+pub struct TyIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TyIndex {
     fn from(value: u32) -> Self {
@@ -275,7 +284,10 @@ impl EntityIndex for TyIndex {}
 
 /// Index into the global index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GlobalIndex(pub u32);
+pub struct GlobalIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for GlobalIndex {
     fn from(value: u32) -> Self {
@@ -287,7 +299,10 @@ impl EntityIndex for GlobalIndex {}
 
 /// Index into the table index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TableIndex(pub u32);
+pub struct TableIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TableIndex {
     fn from(value: u32) -> Self {
@@ -299,7 +314,10 @@ impl EntityIndex for TableIndex {}
 
 /// Index into the memory index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MemoryIndex(pub u32);
+pub struct MemoryIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for MemoryIndex {
     fn from(value: u32) -> Self {
@@ -311,7 +329,10 @@ impl EntityIndex for MemoryIndex {}
 
 /// Index into the tag index space (exception-handling proposal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TagIndex(pub u32);
+pub struct TagIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TagIndex {
     fn from(value: u32) -> Self {
@@ -323,7 +344,10 @@ impl EntityIndex for TagIndex {}
 
 /// Index into the element segment space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ElementIndex(pub u32);
+pub struct ElementIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for ElementIndex {
     fn from(value: u32) -> Self {
@@ -335,7 +359,10 @@ impl EntityIndex for ElementIndex {}
 
 /// Index into the data segment space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DataIndex(pub u32);
+pub struct DataIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for DataIndex {
     fn from(value: u32) -> Self {
@@ -347,7 +374,10 @@ impl EntityIndex for DataIndex {}
 
 /// Index of a local within a function (params first, then declared locals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LocalIndex(pub u32);
+pub struct LocalIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for LocalIndex {
     fn from(value: u32) -> Self {
@@ -359,7 +389,10 @@ impl EntityIndex for LocalIndex {}
 
 /// Index of a field within a struct type (GC proposal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldIndex(pub u32);
+pub struct FieldIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FieldIndex {
     fn from(value: u32) -> Self {
@@ -381,17 +414,25 @@ pub struct Module {
     /// The function index space: imported functions first, then locally-defined
     /// ones. The split point is [`Self::imported_func_count`].
     pub func_decls: Box<[FuncDecl]>,
+    /// The table section.
     pub tables: Box<[Table]>,
+    /// The memory section (TraceWasm currently allows at most one memory).
     pub memories: Box<[MemoryType]>,
+    /// The tag section (exception-handling proposal).
     pub tags: Box<[TagType]>,
+    /// The global index space: imported globals first, then locally-defined ones.
+    /// The split point is [`Self::imported_global_count`].
     pub globals: Box<[Global]>,
+    /// The export section, keyed by export name.
     pub exports: FxHashMap<String, Export>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
+    /// The element section.
     pub elements: Box<[Element]>,
     /// The declared data-segment count from the data-count section, if present
     /// (required by the bulk-memory proposal for validating `data.drop`, etc.).
     pub data_count: Option<u32>,
+    /// The data section.
     pub datas: Box<[Data]>,
     /// Declared entry count of the code section (should match `func_bodies.len()`).
     pub code_sec_count: u32,
@@ -409,14 +450,17 @@ pub struct Module {
     pub func_bodies: Box<[FuncBody]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
+    /// Decoded `name`-section maps plus the raw bytes of other custom sections.
     pub custom_section: CustomSection,
 }
 
 impl Module {
+    /// The module's export map, keyed by export name.
     pub fn exports(&self) -> &FxHashMap<String, Export> {
         &self.exports
     }
 
+    /// Looks up the export named `name`, if any.
     pub fn export(&self, name: &str) -> Option<Export> {
         self.exports.get(name).cloned()
     }
@@ -487,17 +531,29 @@ pub struct FuncBody {
 /// `name` section (one map per subsection) plus the raw bytes of any other custom
 /// sections, keyed by section name.
 pub struct CustomSection {
+    /// The module's name from the `name` section (empty if none).
     pub module_name: String,
+    /// Function names.
     pub func: NameMap<FuncIndex>,
+    /// Local-variable names, per function.
     pub local: IndirectNameMap<FuncIndex, LocalIndex>,
+    /// Label names, per function.
     pub label: IndirectNameMap<FuncIndex, LocalIndex>,
+    /// Type names.
     pub ty: NameMap<TyIndex>,
+    /// Table names.
     pub table: NameMap<TableIndex>,
+    /// Memory names.
     pub mem: NameMap<MemoryIndex>,
+    /// Global names.
     pub global: NameMap<GlobalIndex>,
+    /// Element-segment names.
     pub element: NameMap<ElementIndex>,
+    /// Data-segment names.
     pub data: NameMap<DataIndex>,
+    /// Struct-field names, per type (GC proposal).
     pub field: IndirectNameMap<TyIndex, FieldIndex>,
+    /// Tag names.
     pub tag: NameMap<TagIndex>,
     /// Unrecognized `name`-section subsections, keyed by subsection type byte.
     pub name_unknown: FxHashMap<u8, Box<[u8]>>,
@@ -581,7 +637,9 @@ impl CustomSection {
 
 /// A data segment.
 pub struct Data {
+    /// Whether the segment is passive or actively initializes memory.
     pub kind: DataKind,
+    /// The segment's raw bytes.
     pub data: Box<[u8]>,
 }
 
@@ -592,7 +650,9 @@ pub enum DataKind {
     /// Copied into `memory_index` at instantiation, at the offset computed by
     /// `offset_expr`.
     Active {
+        /// Target memory index.
         memory_index: MemoryIndex,
+        /// Constant expression computing the destination offset.
         offset_expr: Box<[Instruction]>,
     },
 }
@@ -604,7 +664,9 @@ pub enum ElementKind {
     /// Copied into `table_index` at instantiation at `offset_expr` (a `None`
     /// table index means table 0).
     Active {
+        /// Target table index (`None` means table 0).
         table_index: Option<TableIndex>,
+        /// Constant expression computing the destination offset.
         offset_expr: Box<[Instruction]>,
     },
     /// Forward-declares references (for `ref.func`); contributes no table data.
@@ -621,7 +683,9 @@ pub enum ElementItems {
 
 /// An element segment.
 pub struct Element {
+    /// Whether the segment is passive, active, or declared.
     pub kind: ElementKind,
+    /// The segment's payload (function indices or constant expressions).
     pub items: ElementItems,
 }
 
@@ -635,24 +699,37 @@ pub enum TableInit {
 
 /// A table definition: its type plus initialization.
 pub struct Table {
+    /// The table's element reference type (always `funcref` in TraceWasm).
     pub element_ty: RefType,
+    /// How the table's slots are initialized.
     pub init: TableInit,
+    /// Initial size, in elements.
     pub initial: u64,
+    /// Optional maximum size, in elements.
     pub maximum: Option<u64>,
 }
 
 /// A named export and the entity it exposes.
 #[derive(Debug, Clone, Copy)]
 pub enum Export {
+    /// An exported function.
     Func(FuncIndex),
+    /// An exported table.
     Table(TableIndex),
+    /// An exported memory.
     Memory(MemoryIndex),
+    /// An exported global.
     Global(GlobalIndex),
+    /// An exported tag (exception-handling proposal).
     Tag(TagIndex),
+    /// An exported function in the "exact" reference form (function-references
+    /// proposal).
     FuncExact(FuncExactIndex),
 }
 
 impl Export {
+    /// Returns the function index if this is a [`Export::Func`], otherwise
+    /// [`TraceWasmError::ExportNotA`].
     pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
         let Export::Func(func_index) = self else {
             return Err(TraceWasmError::ExportNotA("function".to_string()));
@@ -662,42 +739,57 @@ impl Export {
     }
 }
 
+/// Whether a global is imported or locally defined.
 pub enum GlobalKind {
+    /// Imported from `module`::`name`; its value is supplied at instantiation.
     Imported { module: String, name: String },
+    /// Locally defined; the constant expression computes its initial value.
     Local(Box<[Instruction]>),
 }
 
 /// A global definition: its type plus the constant expression for its initial
 /// value.
 pub struct Global {
+    /// The global's value type and mutability.
     pub ty: GlobalType,
+    /// Whether the global is imported or locally defined (with its init expr).
     pub kind: GlobalKind,
 }
 
 /// A function type: parameter and result value types.
 pub struct FuncType {
+    /// Parameter value types.
     pub params: Box<[ValType]>,
+    /// Result value types.
     pub results: Box<[ValType]>,
 }
 
 /// Whether a function is defined locally or imported.
 pub enum FuncKind {
+    /// Defined locally, with a body in [`Module::func_bodies`].
     Local,
+    /// Imported from `module_name`::`imported_func_name`.
     Imported {
+        /// Name of the module the function is imported from.
         module_name: String,
+        /// Name of the imported function within that module.
         imported_func_name: String,
     },
 }
 
 /// A function declaration: its origin and its type-section index.
 pub struct FuncDecl {
+    /// Whether the function is defined locally or imported.
     pub kind: FuncKind,
     /// Index into [`Module::types`] giving this function's signature.
     pub ty: TyIndex,
 }
 
 /// A `name`-section map from a typed entity index to its name.
-pub struct NameMap<T: PartialEq + Eq + Hash + EntityIndex>(pub FxHashMap<T, String>);
+pub struct NameMap<T: PartialEq + Eq + Hash + EntityIndex>(
+    /// Map from typed index to name.
+    pub FxHashMap<T, String>,
+);
 
 impl<T: PartialEq + Eq + Hash + EntityIndex> Default for NameMap<T> {
     fn default() -> Self {
@@ -731,7 +823,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
 pub struct IndirectNameMap<
     T: PartialEq + Eq + Hash + EntityIndex,
     V: PartialEq + Eq + Hash + EntityIndex,
->(pub FxHashMap<T, NameMap<V>>);
+>(
+    /// Map from outer index to the nested [`NameMap`] of inner names.
+    pub FxHashMap<T, NameMap<V>>,
+);
 
 impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIndex> Default
     for IndirectNameMap<T, V>
@@ -1307,10 +1402,15 @@ impl Module {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::ImportCountMismatch`] if the counts differ,
-    /// [`TraceWasmError::ImportedFunctionNotFound`] if the registry lacks a
-    /// declared import, and [`TraceWasmError::ImportSignatureMismatch`] if an
-    /// import's signature disagrees with the module.
+    /// - [`TraceWasmError::ImportCountMismatch`] / [`TraceWasmError::ImportGlobalCountMismatch`]
+    ///   if the registry's function or global count disagrees with the module.
+    /// - [`TraceWasmError::ImportNotFound`] if the registry lacks a declared import.
+    /// - [`TraceWasmError::ImportSignatureMismatch`] if an imported function's
+    ///   signature disagrees, or [`TraceWasmError::ImportGlobalTypeMismatch`] if
+    ///   an imported global's type disagrees.
+    /// - [`TraceWasmError::TableTooLarge`] if a table's initial size exceeds the
+    ///   configured cap, and [`TraceWasmError::ElementSegmentOutOfBounds`] if an
+    ///   active element segment does not fit its target table.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: Arc<Module>,
         mut import_registry: I,

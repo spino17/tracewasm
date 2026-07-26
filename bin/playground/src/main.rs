@@ -3,9 +3,13 @@ use tracewasm_core::{memory::linear::LinearMemory, module::Module};
 use tracewasm_macros::imports;
 
 /// Example host module. The `#[imports]` macro reads the `#[module("...")]`-tagged
-/// methods below and generates the entire [`ImportRegistry`] impl (`execute`,
-/// `signature`, `size`) — the embedder writes only the function bodies.
+/// (and any `#[global("...")]`-tagged) methods below and generates the entire
+/// [`ImportRegistry`] impl (`execute`, `signature`, `func_count`, `global_count`,
+/// `get_global`) — the embedder writes only the function bodies.
+///
+/// Serves as the example host state / import registry for the playground.
 pub struct ImportedFunctions {
+    /// Call counter mutated by the host functions to demonstrate `&mut self` state.
     count: u32,
 }
 

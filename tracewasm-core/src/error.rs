@@ -1,4 +1,4 @@
-//! The crate-wide error type for parsing and lowering.
+//! The crate-wide error type for parsing, lowering, instantiation, and execution.
 use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
@@ -90,21 +90,35 @@ pub enum TraceWasmError {
     Parsing(String),
 }
 
+/// One frame of a captured interpreter backtrace: the instruction (and its
+/// enclosing function) that either trapped or called into the next-inner frame.
 pub struct TraceRecord {
+    /// The enclosing function this frame belongs to.
     pub func_index: FuncIndex,
+    /// The instruction's index in that function's lowered instruction list.
     pub instr_index: usize,
+    /// The instruction at that index.
     pub instr: Instruction,
+    /// Whether this frame is a call into a deeper frame or the trapping leaf.
     pub kind: TraceRecordKind,
 }
 
+/// Distinguishes a caller frame (a `call`/`call_indirect` into a deeper frame)
+/// from the innermost frame where execution actually trapped.
 pub enum TraceRecordKind {
+    /// A call frame leading into the next-inner frame. `callee_index` is the
+    /// function called; `is_indirect` is `Some(table)` for a `call_indirect` and
+    /// `None` for a direct `call`.
     Call {
         callee_index: FuncIndex,
         is_indirect: Option<TableIndex>,
     },
+    /// The innermost frame: the instruction that trapped, carrying its message.
     NonCall(String),
 }
 
+/// A captured interpreter backtrace, innermost-first: frame `0` is where
+/// execution trapped and each later frame is the caller that led to it.
 pub struct StackTrace(Vec<TraceRecord>);
 
 impl StackTrace {

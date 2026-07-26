@@ -21,9 +21,10 @@
 //!
 //! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
 //! in two flavors that differ only in the order of the returned `Vec`:
-//! `pops` returns top-first, `pops_and_reverse` returns push order
-//! (deepest-first). Callers pick whichever matches the consumer (e.g. branch
-//! result handling vs. binding call arguments into callee locals).
+//! `pops` returns top-first (the former top at `v[0]`), `pops_and_reverse`
+//! returns push order (deepest-first). Both are currently test-only utilities;
+//! execution instead uses `truncate_by_preserving_arity` for branch unwinding
+//! and `pop_params`/`pop_results` for call arguments and results.
 //!
 //! ## Preconditions
 //!
@@ -52,10 +53,15 @@ pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
 /// holds an optional function index — `None` is a null reference.
 #[derive(Debug, Copy, Clone)]
 pub enum Val {
+    /// A 32-bit integer value.
     I32(i32),
+    /// A 64-bit integer value.
     I64(i64),
+    /// A 32-bit float value.
     F32(f32),
+    /// A 64-bit float value.
     F64(f64),
+    /// A nullable function reference (`None` is a null reference).
     Ref(Option<FuncIndex>),
 }
 
@@ -173,18 +179,30 @@ impl Val {
     }
 }
 
+/// A materialized table instance: its function-reference slots and the maximum
+/// number of elements it may grow to.
 pub(crate) struct TableVal {
+    /// The table's slots, each a nullable function reference.
     pub table: Box<[Option<FuncIndex>]>,
+    /// The maximum element count the table may grow to.
     pub maximum: u64,
 }
 
+/// A passive element segment's runtime state: its remaining function references,
+/// or dropped once consumed.
 pub(crate) enum ElementVal {
+    /// The segment has been dropped (via `elem.drop` or an active init).
     Dropped,
+    /// A still-live passive segment holding nullable function references.
     Passive(Box<[Option<FuncIndex>]>),
 }
 
+/// A passive data segment's runtime state: its remaining bytes, or dropped once
+/// consumed.
 pub(crate) enum DataVal {
+    /// The segment has been dropped (via `data.drop` or an active init).
     Dropped,
+    /// A still-live passive segment holding its raw byte blob.
     Passive(Box<[u8]>), // data blob
 }
 
@@ -245,6 +263,8 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    /// Creates an empty stack sized for constant-expression evaluation, which
+    /// needs only a handful of slots, avoiding the large `Default` reservation.
     pub(crate) fn for_const_expr_evaluation() -> Self {
         Stack {
             inner: Vec::with_capacity(2), // needs very small stack
@@ -252,6 +272,7 @@ impl<T: Clone> Stack<T> {
         }
     }
 
+    /// The current logical height (number of live values).
     pub fn height(&self) -> u32 {
         self.stack_pointer as u32
     }
@@ -365,6 +386,10 @@ impl<T: Clone> Stack<T> {
 }
 
 impl Stack<Val> {
+    /// Removes the top `num` values and returns them as a callee's parameters, in
+    /// push order (`arg0..argN-1`) for binding into the callee's locals.
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pop_params(&mut self, num: u32) -> ParamVals {
         let mut s = smallvec![];
 
@@ -377,6 +402,10 @@ impl Stack<Val> {
         ParamVals::new(s)
     }
 
+    /// Removes the top `num` values and returns them as a function's results, in
+    /// push order (`result0..resultN-1`).
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pop_results(&mut self, num: u32) -> ResultVals {
         let mut s = smallvec![];
 
