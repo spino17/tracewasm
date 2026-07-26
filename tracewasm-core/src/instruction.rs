@@ -41,21 +41,17 @@
 
 use crate::{
     error::TraceWasmError,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, TableIndex, ValType},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, ValType},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// Structured control flow, `call`/`call_indirect`, and a subset of
-/// value/numeric operators (`*.const`, `global.get`, `ref.null`/`ref.func`, and
-/// `i32`/`i64` add/sub/mul) are modelled. Control flow and calls are lowered in
-/// function bodies only; only the small value/numeric subset is shared with
-/// constant expressions ([`Instruction::emit_instruction_for_const_expr`] rejects
-/// calls and control flow). The remaining value/numeric/memory operators (loads/
-/// stores, comparisons, division, `local.*`, etc.) are not yet lowered and are
-/// rejected as unsupported by [`Instruction::emit_instruction_for_func`]. Index
-/// fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
+/// `wasmparser` operators are translated into this owned form by
+/// [`Instruction::emit_instruction_for_func`] (function bodies) and
+/// [`Instruction::emit_instruction_for_const_expr`] (constant expressions); any
+/// operator TraceWasm does not model is rejected as unsupported at lowering time.
+/// Index fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
 /// positions into the containing `Vec<Instruction>`, i.e. runtime program
 /// counters.
 #[derive(Debug, Clone)]
@@ -154,10 +150,6 @@ pub enum Instruction {
         /// The constant value pushed onto the stack.
         value: f64,
     },
-    GlobalGet {
-        /// Index of the global whose value is pushed.
-        global_index: GlobalIndex,
-    },
     /// Pushes a null reference.
     RefNull,
     RefFunc {
@@ -176,6 +168,36 @@ pub enum Instruction {
     I64Sub,
     /// `i64.mul`.
     I64Mul,
+    /// `drop`: discards the top
+    Drop,
+    /// `select`: pop cond, then b, then a; push cond != 0 ? a : b -> standard in LLVM
+    Select,
+    /// `local.get`: push the value of the local at `index`.
+    LocalGet {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `local.set`: pop a value and store it into the local at `index`.
+    LocalSet {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `local.tee`: store the top value into the local at `index`, leaving it on
+    /// the stack.
+    LocalTee {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `global.get`: push the value of the global at `index`.
+    GlobalGet {
+        /// Index into the module's global index space.
+        index: GlobalIndex,
+    },
+    /// `global.set`: pop a value and store it into the (mutable) global at `index`.
+    GlobalSet {
+        /// Index into the module's global index space.
+        index: GlobalIndex,
+    },
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -488,51 +510,6 @@ enum StackEffectResult {
 }
 
 impl Instruction {
-    pub(crate) fn emit_instruction_for_const_expr(
-        mut operator_reader: OperatorsReader<'_>,
-    ) -> Result<Vec<Instruction>, TraceWasmError> {
-        let mut instructions = vec![];
-
-        while !operator_reader.eof() {
-            let operator = operator_reader.read()?;
-
-            let instr = match operator {
-                Operator::I32Const { value } => Instruction::I32Const { value },
-                Operator::I64Const { value } => Instruction::I64Const { value },
-                Operator::F32Const { value } => Instruction::F32Const {
-                    value: f32::from_bits(value.bits()),
-                },
-                Operator::F64Const { value } => Instruction::F64Const {
-                    value: f64::from_bits(value.bits()),
-                },
-                Operator::GlobalGet { global_index } => Instruction::GlobalGet {
-                    global_index: GlobalIndex(global_index),
-                },
-                Operator::RefNull { hty: _hty } => Instruction::RefNull,
-                Operator::RefFunc { function_index } => Instruction::RefFunc {
-                    function_index: FuncIndex(function_index),
-                },
-                Operator::I32Add => Instruction::I32Add,
-                Operator::I32Sub => Instruction::I32Sub,
-                Operator::I32Mul => Instruction::I32Mul,
-                Operator::I64Add => Instruction::I64Add,
-                Operator::I64Sub => Instruction::I64Sub,
-                Operator::I64Mul => Instruction::I64Mul,
-                Operator::End => break,
-                _ => {
-                    return Err(TraceWasmError::Unsupported(format!(
-                        "operator `{:?}` in const expression stream",
-                        operator
-                    )));
-                }
-            };
-
-            instructions.push(instr);
-        }
-
-        Ok(instructions)
-    }
-
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
@@ -597,12 +574,6 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
-                Operator::GlobalGet { global_index } => (
-                    Instruction::GlobalGet {
-                        global_index: GlobalIndex(global_index),
-                    },
-                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
-                ),
                 Operator::RefNull { hty: _hty } => (
                     Instruction::RefNull,
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
@@ -636,6 +607,44 @@ impl Instruction {
                 Operator::I64Mul => (
                     Instruction::I64Mul,
                     StackEffectResult::PopPush { pops: 2, pushes: 1 },
+                ),
+                Operator::Drop => (
+                    Instruction::Drop,
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                ),
+                Operator::Select => (
+                    Instruction::Select,
+                    StackEffectResult::PopPush { pops: 3, pushes: 1 },
+                ),
+                Operator::LocalGet { local_index } => (
+                    Instruction::LocalGet {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::LocalSet { local_index } => (
+                    Instruction::LocalSet {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                ),
+                Operator::LocalTee { local_index } => (
+                    Instruction::LocalTee {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::NoEffect,
+                ),
+                Operator::GlobalGet { global_index } => (
+                    Instruction::GlobalGet {
+                        index: GlobalIndex(global_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::GlobalSet { global_index } => (
+                    Instruction::GlobalSet {
+                        index: GlobalIndex(global_index),
+                    },
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
@@ -1019,6 +1028,51 @@ impl Instruction {
             }
 
             instructions.push(instruction);
+        }
+
+        Ok(instructions)
+    }
+
+    pub(crate) fn emit_instruction_for_const_expr(
+        mut operator_reader: OperatorsReader<'_>,
+    ) -> Result<Vec<Instruction>, TraceWasmError> {
+        let mut instructions = vec![];
+
+        while !operator_reader.eof() {
+            let operator = operator_reader.read()?;
+
+            let instr = match operator {
+                Operator::I32Const { value } => Instruction::I32Const { value },
+                Operator::I64Const { value } => Instruction::I64Const { value },
+                Operator::F32Const { value } => Instruction::F32Const {
+                    value: f32::from_bits(value.bits()),
+                },
+                Operator::F64Const { value } => Instruction::F64Const {
+                    value: f64::from_bits(value.bits()),
+                },
+                Operator::GlobalGet { global_index } => Instruction::GlobalGet {
+                    index: GlobalIndex(global_index),
+                },
+                Operator::RefNull { hty: _hty } => Instruction::RefNull,
+                Operator::RefFunc { function_index } => Instruction::RefFunc {
+                    function_index: FuncIndex(function_index),
+                },
+                Operator::I32Add => Instruction::I32Add,
+                Operator::I32Sub => Instruction::I32Sub,
+                Operator::I32Mul => Instruction::I32Mul,
+                Operator::I64Add => Instruction::I64Add,
+                Operator::I64Sub => Instruction::I64Sub,
+                Operator::I64Mul => Instruction::I64Mul,
+                Operator::End => break,
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "operator `{:?}` in const expression stream",
+                        operator
+                    )));
+                }
+            };
+
+            instructions.push(instr);
         }
 
         Ok(instructions)

@@ -34,7 +34,7 @@
 //! truncate downward). Violations panic via index/underflow rather than
 //! returning an error.
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::smallvec;
 
 use crate::{
     error::TraceWasmError,
@@ -204,36 +204,6 @@ pub(crate) enum DataVal {
     Dropped,
     /// A still-live passive segment holding its raw byte blob.
     Passive(Box<[u8]>), // data blob
-}
-
-/// A function activation's local slots: its parameters followed by its declared
-/// locals, addressed by `local.get`/`local.set` index.
-pub(crate) struct Locals {
-    inner: SmallVec<[Val; 16]>, // size = params + declared locals
-}
-
-impl Locals {
-    /// Wraps a fully-populated slot vector (params first, then zero-initialized
-    /// declared locals). The caller owns getting the length and contents right.
-    pub fn new(locals: SmallVec<[Val; 16]>) -> Self {
-        Locals { inner: locals }
-    }
-
-    /// Writes `val` into slot `index`.
-    ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn set(&mut self, index: usize, val: Val) {
-        self.inner[index] = val;
-    }
-
-    /// Reads the value in slot `index` (values are `Copy`).
-    ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn get(&self, index: usize) -> Val {
-        self.inner[index]
-    }
 }
 
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked

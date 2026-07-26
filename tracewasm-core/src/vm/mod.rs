@@ -47,12 +47,42 @@ use crate::{
     instance::traits::{ImportRegistry, ResultVals},
     instruction::Instruction,
     memory::Memory,
-    module::{FuncIndex, FuncKind, Module, formatted_val_types},
-    vm::stack::{Locals, Stack, TableVal, Val},
+    module::{FuncIndex, FuncKind, LocalIndex, Module, formatted_val_types},
+    vm::stack::{Stack, TableVal, Val},
 };
 use smallvec::{SmallVec, smallvec};
 
 pub(crate) mod stack;
+
+/// A function activation's local slots: its parameters followed by its declared
+/// locals, addressed by `local.get`/`local.set` index.
+pub(crate) struct Locals {
+    inner: SmallVec<[Val; 16]>, // size = params + declared locals
+}
+
+impl Locals {
+    /// Wraps a fully-populated slot vector (params first, then zero-initialized
+    /// declared locals). The caller owns getting the length and contents right.
+    pub fn new(locals: SmallVec<[Val; 16]>) -> Self {
+        Locals { inner: locals }
+    }
+
+    /// Writes `val` into the slot addressed by `index`.
+    ///
+    /// Panics if `index` is out of range; validation guarantees in-range indices
+    /// for well-formed modules.
+    pub fn set(&mut self, index: LocalIndex, val: Val) {
+        self.inner[index.0 as usize] = val;
+    }
+
+    /// Reads the value in the slot addressed by `index` (values are `Copy`).
+    ///
+    /// Panics if `index` is out of range; validation guarantees in-range indices
+    /// for well-formed modules.
+    pub fn get(&self, index: LocalIndex) -> Val {
+        self.inner[index.0 as usize]
+    }
+}
 
 /// What the driver loop should do after executing one instruction.
 enum ExecutionResult {
@@ -78,7 +108,7 @@ struct TraceVMState<'a, M, I> {
     /// The registry resolving imported-function calls, shared across the call tree.
     import_registry: &'a mut I,
     /// The module's global values, shared across the call tree.
-    globals: &'a [Val],
+    globals: &'a mut [Val],
     /// The module's tables, shared across the call tree.
     tables: &'a mut Vec<TableVal>,
 }
@@ -355,11 +385,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
-            Instruction::GlobalGet { global_index } => {
-                self.stack.push(self.globals[global_index.0 as usize]);
-
-                ExecutionResult::Next
-            }
             Instruction::RefNull => {
                 self.stack.push(Val::Ref(None));
 
@@ -418,6 +443,56 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::Drop => {
+                let _ = self.stack.pop();
+
+                ExecutionResult::Next
+            }
+            Instruction::Select => {
+                let cond = self.stack.pop().as_i32();
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+
+                // true condition
+                if cond != 0 {
+                    self.stack.push(a);
+                } else {
+                    self.stack.push(b);
+                }
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalGet { index } => {
+                self.stack.push(self.locals.get(*index));
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalSet { index } => {
+                let val = self.stack.pop();
+
+                self.locals.set(*index, val);
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalTee { index } => {
+                let val = self.stack.tee();
+
+                self.locals.set(*index, val);
+
+                ExecutionResult::Next
+            }
+            Instruction::GlobalGet { index } => {
+                self.stack.push(self.globals[index.0 as usize]);
+
+                ExecutionResult::Next
+            }
+            Instruction::GlobalSet { index } => {
+                let val = self.stack.pop();
+
+                self.globals[index.0 as usize] = val;
+
+                ExecutionResult::Next
+            }
         };
 
         Ok(res)
@@ -454,7 +529,7 @@ impl TraceVM {
         memory: &mut M,
         caller_base_height: u32,
         import_registry: &mut I,
-        globals: &[Val],
+        globals: &mut [Val],
         tables: &mut Vec<TableVal>,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
@@ -624,8 +699,8 @@ impl TraceVM {
                     stack.push(Val::F32(*value));
                 }
                 Instruction::F64Const { value } => stack.push(Val::F64(*value)),
-                Instruction::GlobalGet { global_index } => {
-                    stack.push(globals[global_index.0 as usize]);
+                Instruction::GlobalGet { index } => {
+                    stack.push(globals[index.0 as usize]);
                 }
                 Instruction::RefNull => stack.push(Val::Ref(None)),
                 Instruction::RefFunc { function_index } => {
