@@ -314,6 +314,64 @@ pub enum Instruction {
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
+    /// `i32.store8`: write the low 1 byte of the popped `i32` (wrapping).
+    I32Store8 {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i32.store16`: write the low 2 bytes of the popped `i32` (wrapping).
+    I32Store16 {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.store`: pop an `i64` value and an address, write the value's 8 bytes.
+    I64Store {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.store8`: write the low 1 byte of the popped `i64` (wrapping).
+    I64Store8 {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.store16`: write the low 2 bytes of the popped `i64` (wrapping).
+    I64Store16 {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `i64.store32`: write the low 4 bytes of the popped `i64` (wrapping).
+    I64Store32 {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `f32.store`: write the popped `f32`'s 4 bytes, preserving the exact bit
+    /// pattern (no NaN canonicalization).
+    F32Store {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
+    /// `f64.store`: write the popped `f64`'s 8 bytes, preserving the exact bit
+    /// pattern (no NaN canonicalization).
+    F64Store {
+        /// Static byte offset added to the popped address.
+        offset: u64,
+        /// Alignment hint (log2); ignored at execution.
+        align: u8,
+    },
 }
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -866,6 +924,62 @@ impl Instruction {
                 ),
                 Operator::I32Store { memarg } => (
                     Instruction::I32Store {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I32Store8 { memarg } => (
+                    Instruction::I32Store8 {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I32Store16 { memarg } => (
+                    Instruction::I32Store16 {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I64Store { memarg } => (
+                    Instruction::I64Store {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I64Store8 { memarg } => (
+                    Instruction::I64Store8 {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I64Store16 { memarg } => (
+                    Instruction::I64Store16 {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::I64Store32 { memarg } => (
+                    Instruction::I64Store32 {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::F32Store { memarg } => (
+                    Instruction::F32Store {
+                        offset: memarg.offset,
+                        align: memarg.align,
+                    },
+                    StackEffectResult::Stores,
+                ),
+                Operator::F64Store { memarg } => (
+                    Instruction::F64Store {
                         offset: memarg.offset,
                         align: memarg.align,
                     },
