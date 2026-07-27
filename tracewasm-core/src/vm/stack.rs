@@ -139,21 +139,22 @@ impl Val {
     /// Returns the zero/default value for `ty`, as used to initialize declared
     /// locals per the WebAssembly spec.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`TraceWasmError::Unsupported`] for `V128`, which the VM does not
-    /// model.
-    pub fn zero_of_ty(ty: ValType) -> Result<Self, TraceWasmError> {
-        let val = match ty {
+    /// Panics on `V128`, which the VM does not model. Infallible in practice:
+    /// `Module::compile` rejects a `v128` local, so no compiled module can reach
+    /// this with one.
+    pub fn zero_of_ty(ty: ValType) -> Self {
+        match ty {
             ValType::I32 => Self::i32_zero(),
             ValType::I64 => Self::i64_zero(),
             ValType::F32 => Self::f32_zero(),
             ValType::F64 => Self::f64_zero(),
             ValType::Ref(_) => Self::ref_zero(),
-            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
-        };
-
-        Ok(val)
+            ValType::V128 => unreachable!(
+                "hitting this means the validation in `compile` method in module/mod.rs is incorrect"
+            ),
+        }
     }
 
     /// Whether this value's variant matches the WebAssembly type `ty`.
@@ -782,25 +783,20 @@ mod tests {
 
     #[test]
     fn zero_of_ty_produces_typed_zeroes() {
-        assert!(matches!(
-            Val::zero_of_ty(ValType::I32).unwrap(),
-            Val::I32(0)
-        ));
-        assert!(matches!(
-            Val::zero_of_ty(ValType::I64).unwrap(),
-            Val::I64(0)
-        ));
-        assert!(matches!(Val::zero_of_ty(ValType::F32).unwrap(), Val::F32(x) if x == 0.0));
-        assert!(matches!(Val::zero_of_ty(ValType::F64).unwrap(), Val::F64(x) if x == 0.0));
-        assert!(matches!(
-            Val::zero_of_ty(ValType::FUNCREF).unwrap(),
-            Val::Ref(None)
-        ));
+        assert!(matches!(Val::zero_of_ty(ValType::I32), Val::I32(0)));
+        assert!(matches!(Val::zero_of_ty(ValType::I64), Val::I64(0)));
+        assert!(matches!(Val::zero_of_ty(ValType::F32), Val::F32(x) if x == 0.0));
+        assert!(matches!(Val::zero_of_ty(ValType::F64), Val::F64(x) if x == 0.0));
+        assert!(matches!(Val::zero_of_ty(ValType::FUNCREF), Val::Ref(None)));
     }
 
+    // `v128` locals are rejected by `Module::compile`, so reaching here is a bug
+    // in that validation rather than a supported input — hence a panic, not an
+    // error.
     #[test]
-    fn zero_of_ty_rejects_v128() {
-        assert!(Val::zero_of_ty(ValType::V128).is_err());
+    #[should_panic(expected = "module/mod.rs")]
+    fn zero_of_ty_panics_on_v128() {
+        Val::zero_of_ty(ValType::V128);
     }
 
     #[test]

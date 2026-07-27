@@ -727,11 +727,13 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::Unsupported`] if a declared local has an
-    /// unsupported type (`V128`, via [`Val::zero_of_ty`]); wraps a failed
-    /// instruction as [`TraceWasmError::InstructionExecution`] (tagged with the
-    /// enclosing function and instruction index); and propagates errors from
-    /// nested and imported-function calls.
+    /// Always a [`TraceWasmError::InstructionExecution`]: every failure — a trap,
+    /// an error from a nested call, or one from an imported function — is tagged
+    /// here with the instruction that raised it. Frame setup cannot fail, since
+    /// `Module::compile` already rejected the local types the VM does not model.
+    ///
+    /// [`FuncCallError`](crate::error::FuncCallError) depends on this being the
+    /// only error shape that escapes the interpreter.
     // Threads the whole shared interpreter state (stack, memory, globals, tables,
     // registry) down each recursive call; bundling it would add a borrow-splitting
     // problem without simplifying anything.
@@ -792,7 +794,7 @@ impl TraceVM {
         for i in params.len()..locals_ty.len() {
             let ty = locals_ty[i];
 
-            locals.push(Val::zero_of_ty(ty)?);
+            locals.push(Val::zero_of_ty(ty));
         }
 
         let mut state = TraceVMState {
