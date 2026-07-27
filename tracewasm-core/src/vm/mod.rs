@@ -213,8 +213,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         module: &Module,
     ) -> Result<ExecutionResult, InstructionExecutionError> {
         let res = match instruction {
-            // TODO - give complete stack trace! - with range information of the
-            // original WASM instruction
             Instruction::Unreachable => {
                 return Err(InstructionExecutionError::Unreachable);
             }

@@ -1357,13 +1357,10 @@ impl Instruction {
                     )
                 }
                 _ => {
-                    // TODO - remove this! just for testing
-                    continue;
-                    /*return Err(TraceWasmError::Unsupported(format!(
+                    return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}`",
                         operator
                     )));
-                    */
                 }
             };
 

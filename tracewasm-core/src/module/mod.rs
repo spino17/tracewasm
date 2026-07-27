@@ -1605,8 +1605,6 @@ impl Module {
             }
         }
 
-        // TODO: use config to validate the module against it! including below TODO.
-
         let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
         let mut memory = M::allocate_initial_memory(initial_pages);
 
