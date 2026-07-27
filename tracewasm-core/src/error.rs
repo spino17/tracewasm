@@ -3,6 +3,7 @@ use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
 };
+use rustc_demangle::demangle;
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -138,9 +139,18 @@ impl StackTrace {
         let name_of_func = |f: FuncIndex| {
             custom_section
                 .func_name(f)
-                .map(str::to_string)
+                .map(|name| {
+                    // Some toolchains emit the WAT-style `$`-prefixed symbol; strip
+                    // it so the demangler sees the bare symbol. `{:#}` drops the
+                    // trailing `::h<hash>` disambiguator, and a non-Rust symbol
+                    // passes through unchanged.
+                    let symbol = name.strip_prefix('$').unwrap_or(name);
+
+                    format!("{:#}", demangle(symbol))
+                })
                 .unwrap_or_else(|| format!("func #{}", f.0))
         };
+
         let name_of_table = |t: TableIndex| {
             custom_section
                 .table_name(t)
@@ -185,6 +195,7 @@ impl StackTrace {
             };
 
             let column = format!("{frame_name:<width$}", width = width);
+
             out.push_str(&format!("  #{i:<2} {column}  {detail}\n"));
         }
 

@@ -1351,10 +1351,12 @@ impl Instruction {
                     )
                 }
                 _ => {
-                    return Err(TraceWasmError::Unsupported(format!(
+                    continue;
+                    /*return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}`",
                         operator
                     )));
+                    */
                 }
             };
 

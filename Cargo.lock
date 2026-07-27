@@ -60,6 +60,7 @@ name = "playground"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rustc-demangle",
  "tracewasm-core",
  "tracewasm-macros",
 ]
@@ -81,6 +82,12 @@ checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rustc-demangle"
+version = "0.1.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
 
 [[package]]
 name = "rustc-hash"
@@ -176,6 +183,7 @@ name = "tracewasm-core"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "rustc-demangle",
  "rustc-hash",
  "smallvec",
  "thiserror",

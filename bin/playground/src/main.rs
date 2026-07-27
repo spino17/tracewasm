@@ -1,3 +1,4 @@
+use rustc_demangle::demangle;
 use std::fs;
 use tracewasm_core::{memory::linear::LinearMemory, module::Module};
 use tracewasm_macros::imports;
@@ -29,16 +30,23 @@ impl ImportedFunctions {
 
 fn main() -> Result<(), anyhow::Error> {
     let buf = fs::read(
-        "/Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/release/tracewasm_scratch.wasm",
+        "/Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/debug/tracewasm_scratch.wasm",
     )?;
 
     let module = Module::compile(&buf)?;
+
+    println!("{:?}", module.custom_section.unknown.keys());
     let registry = ImportedFunctions { count: 0 };
 
     let func = module.get_typed_func::<(i32, i64), (i64,)>("bench_bits")?;
 
-    let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
-    let res = func.call((1, 2), &mut instance)?.0;
+    /*let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
+    let res = func.call((1, 2), &mut instance)?.0;*/
+
+    let s = "$_RNvNtNtCs3O6bguQwcd4_4core9panicking11panic_const24panic_const_div_overflow";
+    let s = s.strip_prefix('$').unwrap_or(s);
+    let str = demangle(s);
+    // println!("{:#}", str); // core::panicking::panic_const::panic_const_div_overflow
 
     Ok(())
 }
