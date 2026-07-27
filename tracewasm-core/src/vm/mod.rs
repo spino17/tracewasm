@@ -754,6 +754,7 @@ impl TraceVM {
         let params_ty = &ty.params;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
+
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`.
         let locals_ty = &func_body.locals;
