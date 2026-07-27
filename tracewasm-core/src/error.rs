@@ -319,9 +319,82 @@ pub struct SourceTraceRecord {
     pub inline_trace: Vec<InlineFrameRecord>,
 }
 
+impl InlineFrameRecord {
+    /// `file:line`, or just the file when DWARF recorded no line number.
+    fn location(&self) -> String {
+        if self.line == 0 {
+            self.file.clone()
+        } else {
+            format!("{}:{}", self.file, self.line)
+        }
+    }
+}
+
+impl SourceTraceRecord {
+    /// Renders this interpreter frame as a numbered block: the function the
+    /// instruction resolved to and its source location, then each function it was
+    /// inlined into, outward to the one that physically contains the code.
+    ///
+    /// The block is `\n`-terminated so records stack directly. A frame the DWARF
+    /// does not cover still renders a line, so the numbering stays aligned with
+    /// the interpreter trace.
+    pub fn render(&self) -> String {
+        let index = self.trace_record_index;
+
+        // `inline_trace` is innermost-first: entry 0 is the deepest inlined
+        // callee, and everything after it is a caller the compiler inlined it
+        // into, ending at the real function.
+        let Some((innermost, inlined_into)) = self.inline_trace.split_first() else {
+            return format!("  #{index:<3} <no source information>\n");
+        };
+
+        let mut out = format!(
+            "  #{index:<3} {}\n           at {}\n",
+            innermost.func_name,
+            innermost.location()
+        );
+
+        for caller in inlined_into {
+            out.push_str(&format!(
+                "        inlined into {}\n           at {}\n",
+                caller.func_name,
+                caller.location()
+            ));
+        }
+
+        out
+    }
+}
+
 /// A [`StackTrace`] resolved against the module's DWARF: one entry per
 /// interpreter frame, each expanded into its source-level (and inlined) frames.
 pub struct SourceStackTrace(Vec<SourceTraceRecord>);
+
+impl SourceStackTrace {
+    /// The per-frame records, innermost frame first.
+    pub fn records(&self) -> &[SourceTraceRecord] {
+        &self.0
+    }
+
+    /// Renders the whole source trace, innermost frame first — the source-level
+    /// counterpart of [`StackTrace::render`].
+    ///
+    /// `top_enclosing_func_name` labels the header with the entry function when
+    /// known. Frame numbers are the indices of the corresponding [`TraceRecord`]s
+    /// in the originating [`StackTrace`], so the two renderings line up.
+    pub fn render(&self, top_enclosing_func_name: Option<&str>) -> String {
+        let mut out = match top_enclosing_func_name {
+            Some(name) => format!("Source trace of `{name}` (most recent call first):\n\n"),
+            None => String::from("Source trace (most recent call first):\n\n"),
+        };
+
+        for record in &self.0 {
+            out.push_str(&record.render());
+        }
+
+        out
+    }
+}
 
 /// A failure while resolving a [`StackTrace`] against DWARF debug info.
 #[derive(Error, Debug)]
@@ -517,6 +590,97 @@ impl From<MemoryError> for InstructionExecutionError {
 impl From<MemoryError> for TraceWasmError {
     fn from(value: MemoryError) -> Self {
         TraceWasmError::MemoryError(value)
+    }
+}
+
+#[cfg(test)]
+mod source_trace_render_tests {
+    use super::*;
+
+    fn frame(func_name: &str, file: &str, line: u32) -> InlineFrameRecord {
+        InlineFrameRecord {
+            file: file.to_string(),
+            func_name: func_name.to_string(),
+            line,
+        }
+    }
+
+    fn record(index: u32, inline_trace: Vec<InlineFrameRecord>) -> SourceTraceRecord {
+        SourceTraceRecord {
+            trace_record_index: index,
+            inline_trace,
+        }
+    }
+
+    #[test]
+    fn single_frame_renders_function_and_location() {
+        let out = record(0, vec![frame("my_crate::run", "src/lib.rs", 42)]).render();
+
+        assert_eq!(out, "  #0   my_crate::run\n           at src/lib.rs:42\n");
+    }
+
+    // `inline_trace` is innermost-first, so entry 0 is the frame and the rest are
+    // the callers it was inlined into.
+    #[test]
+    fn inlined_frames_are_attributed_to_their_callers() {
+        let out = record(
+            1,
+            vec![
+                frame("core::num::checked_mul", "core/src/num.rs", 1102),
+                frame("my_crate::bench_bits", "src/lib.rs", 517),
+            ],
+        )
+        .render();
+
+        assert_eq!(
+            out,
+            "  #1   core::num::checked_mul\n           at core/src/num.rs:1102\n\
+             \x20       inlined into my_crate::bench_bits\n           at src/lib.rs:517\n"
+        );
+    }
+
+    #[test]
+    fn frame_without_dwarf_coverage_still_renders() {
+        // Must not vanish: the numbering has to stay aligned with the interpreter
+        // trace even when DWARF covers nothing at that offset.
+        assert_eq!(
+            record(2, vec![]).render(),
+            "  #2   <no source information>\n"
+        );
+    }
+
+    #[test]
+    fn missing_line_number_omits_the_colon() {
+        let out = record(0, vec![frame("f", "<unknown>", 0)]).render();
+
+        assert!(out.ends_with("at <unknown>\n"), "got: {out:?}");
+    }
+
+    #[test]
+    fn whole_trace_renders_header_and_every_frame_in_order() {
+        let trace = SourceStackTrace(vec![
+            record(0, vec![frame("inner", "a.rs", 1)]),
+            record(1, vec![]),
+            record(2, vec![frame("outer", "b.rs", 9)]),
+        ]);
+
+        let out = trace.render(Some("entry"));
+
+        assert!(out.starts_with("Source trace of `entry` (most recent call first):\n\n"));
+        assert_eq!(trace.records().len(), 3);
+
+        // innermost first, one block per frame, none dropped
+        let inner = out.find("inner").unwrap();
+        let none = out.find("<no source information>").unwrap();
+        let outer = out.find("outer").unwrap();
+        assert!(inner < none && none < outer, "frames out of order: {out}");
+    }
+
+    #[test]
+    fn trace_without_entry_name_uses_the_bare_header() {
+        let out = SourceStackTrace(vec![]).render(None);
+
+        assert_eq!(out, "Source trace (most recent call first):\n\n");
     }
 }
 
