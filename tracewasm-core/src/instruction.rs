@@ -701,14 +701,20 @@ impl Instruction {
     /// `types` is the module's type section, used to resolve `BlockType::FuncType`
     /// arities. `func_decls` is the module's function declarations, used by
     /// `Call` to resolve a callee's parameter count.
+    ///
+    /// Returns the lowered instructions alongside a parallel vector of source
+    /// offsets: element `i` is the byte offset in the module binary of the
+    /// operator that produced instruction `i`. The two are pushed together on
+    /// every iteration, so they always have the same length and indexing.
     pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
         types: &[FuncType],
         func_decls: &[FuncDecl],
-    ) -> Result<Vec<Instruction>, TraceWasmError> {
+    ) -> Result<(Vec<Instruction>, Vec<u32>), TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
+        let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
 
         control_stack.inner.push(Block {
@@ -722,7 +728,7 @@ impl Instruction {
         });
 
         while !operator_reader.eof() {
-            let operator = operator_reader.read()?;
+            let (operator, offset) = operator_reader.read_with_offset()?;
 
             let (instruction, stack_effect): (Instruction, StackEffectResult) = match operator {
                 Operator::Unreachable => {
@@ -1351,6 +1357,7 @@ impl Instruction {
                     )
                 }
                 _ => {
+                    // TODO - remove this! just for testing
                     continue;
                     /*return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}`",
@@ -1373,10 +1380,16 @@ impl Instruction {
                 | StackEffectResult::Loads => {} // loads pop 1 and push 1 value so no net effect
             }
 
+            // Offsets are bounded by the module's byte length, so this cannot
+            // lose information for any module that could be loaded at all.
+            debug_assert!(u32::try_from(offset).is_ok(), "module larger than 4 GiB");
+
+            // Pushed together to keep the two vectors index-aligned.
+            instruction_offsets.push(offset as u32);
             instructions.push(instruction);
         }
 
-        Ok(instructions)
+        Ok((instructions, instruction_offsets))
     }
 
     pub(crate) fn emit_instruction_for_const_expr(

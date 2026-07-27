@@ -525,6 +525,14 @@ pub struct FuncBody {
     /// The body lowered by [`crate::instruction`] (control flow resolved to
     /// absolute indices).
     pub instructions: Box<[Instruction]>,
+    /// Source positions for [`Self::instructions`], used to point diagnostics at
+    /// the original binary.
+    ///
+    /// **Invariant:** parallel to `instructions` — `instruction_offsets[i]` is the
+    /// byte offset in the module binary of the operator that produced
+    /// `instructions[i]`, and both slices always have the same length. Lowering
+    /// pushes the two together, which is what upholds this.
+    pub instruction_offsets: Box<[u32]>,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -1210,18 +1218,19 @@ impl Module {
                         }
                     }
 
-                    let instructions = Instruction::emit_instruction_for_func(
-                        code_sec_entry.get_operators_reader()?,
-                        params.len() as u32,
-                        results.len() as u32,
-                        &types,
-                        &func_decls,
-                    )?
-                    .into_boxed_slice();
+                    let (instructions, instruction_offsets) =
+                        Instruction::emit_instruction_for_func(
+                            code_sec_entry.get_operators_reader()?,
+                            params.len() as u32,
+                            results.len() as u32,
+                            &types,
+                            &func_decls,
+                        )?;
 
                     func_bodies.push(FuncBody {
                         locals: locals.into_boxed_slice(), // params + declared locals
-                        instructions,
+                        instructions: instructions.into_boxed_slice(),
+                        instruction_offsets: instruction_offsets.into_boxed_slice(),
                     });
                 }
                 CustomSection(custom_sec) => {
