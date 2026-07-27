@@ -3,7 +3,6 @@ use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
 };
-use addr2line;
 use rustc_demangle::demangle;
 use std::fmt::Display;
 use thiserror::Error;
@@ -16,9 +15,13 @@ use thiserror::Error;
 pub enum TraceWasmError {
     /// A trap or error raised while executing a single instruction, tagged with
     /// where it happened. The interpreter's driver loop attaches these coordinates
-    /// to the [`InstructionExecutionError`] the instruction produced. Fields: the
-    /// enclosing function index, the instruction's index in that function's
-    /// lowered instruction list, and the underlying cause.
+    /// to the [`InstructionExecutionError`] the instruction produced.
+    ///
+    /// Fields: the enclosing function index, the instruction's index in that
+    /// function's lowered instruction list, the instruction itself, the underlying
+    /// cause, and the instruction's byte offset in the module binary. The offset
+    /// is carried for DWARF lookup rather than display, so it is deliberately
+    /// absent from the message.
     #[error("error occured while executing instruction `{1}`({2:?}) in func({0:?}): {3}")]
     InstructionExecution(
         FuncIndex,
@@ -110,6 +113,8 @@ pub struct TraceRecord {
     pub instr: Instruction,
     /// Whether this frame is a call into a deeper frame or the trapping leaf.
     pub kind: TraceRecordKind,
+    /// The instruction's byte offset in the module binary, for resolving a source
+    /// location against the module's DWARF (see [`Module::dwarf`](crate::module::Module::dwarf)).
     pub instr_offset: u32,
 }
 

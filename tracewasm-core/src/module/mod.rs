@@ -32,6 +32,8 @@ use crate::{
     },
 };
 use core::fmt::{self, Debug};
+use gimli::{Dwarf, EndianArcSlice, EndianReader, RunTimeEndian, SectionId};
+use phf::phf_set;
 use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
@@ -452,6 +454,12 @@ pub struct Module {
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
     pub custom_section: CustomSection,
+    /// The module's DWARF debug info, parsed from its `.debug_*` custom sections,
+    /// or `None` if the module carries none (no `.debug_info`).
+    ///
+    /// Behind an `Arc` because the sections are large and shared by every
+    /// consumer; read it through [`Self::dwarf`].
+    dwarf: Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>>,
 }
 
 impl Module {
@@ -463,6 +471,15 @@ impl Module {
     /// Looks up the export named `name`, if any.
     pub fn export(&self, name: &str) -> Option<Export> {
         self.exports.get(name).cloned()
+    }
+
+    /// The module's DWARF debug info, or `None` if it was built without any.
+    ///
+    /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
+    /// instruction's byte offset (see [`FuncBody::instruction_offsets`]) back to a
+    /// source location.
+    pub fn dwarf(&self) -> Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>> {
+        self.dwarf.clone()
     }
 
     /// Looks up an exported function by name and returns a typed handle to it,
@@ -866,6 +883,39 @@ impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIn
     }
 }
 
+/// Custom-section names that carry DWARF debug info, routed to the DWARF loader
+/// instead of being kept as opaque bytes in [`CustomSection`].
+///
+/// The names match [`gimli::SectionId::name`] (leading dot included), so a hit
+/// here is exactly a section the loader will ask for.
+static DEBUG_SECTION_NAMES: phf::Set<&'static str> = phf_set! {
+    ".debug_abbrev",
+    ".debug_addr",
+    ".debug_aranges",
+    ".debug_cu_index",
+    ".debug_frame",
+    ".eh_frame",
+    ".eh_frame_hdr",
+    ".debug_gnu_pubnames",
+    ".debug_gnu_pubtypes",
+    ".debug_info",
+    ".debug_line",
+    ".debug_line_str",
+    ".debug_loc",
+    ".debug_loclists",
+    ".debug_macinfo",
+    ".debug_macro",
+    ".debug_names",
+    ".debug_pubnames",
+    ".debug_pubtypes",
+    ".debug_ranges",
+    ".debug_rnglists",
+    ".debug_str",
+    ".debug_str_offsets",
+    ".debug_tu_index",
+    ".debug_types"
+};
+
 impl Module {
     /// Validates `buf` as a core WebAssembly module and builds an owned
     /// [`Module`] from it, wrapped in an `Arc` so it can be shared across
@@ -900,6 +950,8 @@ impl Module {
         let mut func_bodies = vec![];
         let mut tags = vec![];
         let mut unknown_sections = vec![];
+        let mut debug_sections: FxHashMap<String, &[u8]> = FxHashMap::default();
+        let mut possible_dwarf: Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>> = None;
         let mut custom_section_unknowns: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_others: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_module_name: String = "".to_string();
@@ -1328,10 +1380,15 @@ impl Module {
                             }
                         }
                         wasmparser::KnownCustom::Unknown => {
-                            custom_section_unknowns.insert(
-                                custom_sec.name().to_string(),
-                                custom_sec.data().to_vec().into_boxed_slice(),
-                            );
+                            if DEBUG_SECTION_NAMES.contains(custom_sec.name()) {
+                                debug_sections
+                                    .insert(custom_sec.name().to_string(), custom_sec.data());
+                            } else {
+                                custom_section_unknowns.insert(
+                                    custom_sec.name().to_string(),
+                                    custom_sec.data().to_vec().into_boxed_slice(),
+                                );
+                            }
                         }
                         _ => {
                             custom_section_others.insert(
@@ -1359,6 +1416,34 @@ impl Module {
             return Err(TraceWasmError::Unsupported(
                 "more than one memory".to_string(),
             ));
+        }
+
+        // DWARF in a WebAssembly binary is always little-endian.
+        let endian = RunTimeEndian::Little;
+
+        // `.debug_info` is the root of the DWARF tree: without it there is nothing
+        // to resolve. Gate on it so a module built without debug info reports
+        // `None` — `Dwarf::load` itself cannot fail here (the loader below returns
+        // `Ok` on every path, using an empty slice for absent sections), so
+        // without this check every module would come back as `Some(..)` holding a
+        // shell of empty sections.
+        if debug_sections.contains_key(SectionId::DebugInfo.name()) {
+            let loaded = Dwarf::load(
+                |id: SectionId| -> Result<EndianArcSlice<RunTimeEndian>, gimli::Error> {
+                    let bytes: Arc<[u8]> = match debug_sections.get(id.name()) {
+                        Some(v) => Arc::from(v.to_vec().into_boxed_slice()),
+                        None => Arc::from(&[][..]),
+                    };
+
+                    Ok(EndianArcSlice::new(bytes, endian))
+                },
+            );
+
+            // Debug info is diagnostic-only: a malformed section degrades the
+            // stack traces rather than failing the whole compile.
+            if let Ok(dwarf) = loaded {
+                possible_dwarf = Some(Arc::from(dwarf));
+            }
         }
 
         Ok(Arc::new(Module {
@@ -1399,6 +1484,7 @@ impl Module {
                 other: custom_section_others,
                 unknown: custom_section_unknowns,
             },
+            dwarf: possible_dwarf,
         }))
     }
 
