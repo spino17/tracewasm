@@ -857,7 +857,6 @@ impl TraceVM {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
-        func_name: Option<&str>,
         params: &[Val],
         module: &Module,
         memory: &mut M,
@@ -868,7 +867,7 @@ impl TraceVM {
         let mut stack: Stack<Val> = Stack::default();
 
         // A fresh stack starts at height 0, so this frame's base is 0.
-        if let Err(err) = Self::execute(
+        Self::execute(
             func_index,
             params,
             module,
@@ -878,14 +877,7 @@ impl TraceVM {
             import_registry,
             global_vals,
             table_vals,
-        ) {
-            if let Some(trace) = err.extract_stack_trace() {
-                // TODO - propogate trace also!
-                let _trace = trace.render(func_name, &module.custom_section);
-            }
-
-            return Err(err);
-        }
+        )?;
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];

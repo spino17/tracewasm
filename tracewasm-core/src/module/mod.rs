@@ -433,6 +433,7 @@ pub struct Module {
     pub globals: Box<[Global]>,
     /// The export section, keyed by export name.
     pub exports: FxHashMap<String, Export>,
+    pub exported_func_index_to_name: FxHashMap<FuncIndex, String>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
     /// The element section.
@@ -536,7 +537,11 @@ impl Module {
             ));
         }
 
-        Ok(TypedFunc::new(func_index, name))
+        Ok(TypedFunc::new(func_index))
+    }
+
+    pub fn exported_func_name(&self, index: FuncIndex) -> Option<&String> {
+        self.exported_func_index_to_name.get(&index)
     }
 }
 
@@ -976,6 +981,7 @@ impl Module {
             IndirectNameMap::default();
         let mut custom_section_tag: NameMap<TagIndex> = NameMap::default();
         let mut custom_section_name_unknown: FxHashMap<u8, Box<[u8]>> = FxHashMap::default();
+        let mut exported_func_index_to_name: FxHashMap<FuncIndex, String> = FxHashMap::default();
 
         for payload in Parser::new(0).parse_all(buf) {
             let payload = payload?;
@@ -1138,7 +1144,11 @@ impl Module {
                         exports.insert(
                             export.name.to_string(),
                             match export.kind {
-                                ExternalKind::Func => Export::Func(FuncIndex(index)),
+                                ExternalKind::Func => {
+                                    exported_func_index_to_name
+                                        .insert(FuncIndex(index), export.name.to_string());
+                                    Export::Func(FuncIndex(index))
+                                }
                                 ExternalKind::Table => Export::Table(TableIndex(index)),
                                 ExternalKind::Memory => Export::Memory(MemoryIndex(index)),
                                 ExternalKind::Global => Export::Global(GlobalIndex(index)),
@@ -1270,9 +1280,19 @@ impl Module {
 
                     for local in locals_reader {
                         let (count, ty) = local?;
+                        let ty = ValType::from_wasmparser(ty);
+
+                        // Rejected here rather than when the frame is built: the
+                        // local's type is static, so failing at compile time gives
+                        // a clearer error and keeps every runtime error out of
+                        // `TraceVM::execute` an `InstructionExecution` (the
+                        // invariant `FuncCallError` relies on).
+                        if ty == ValType::V128 {
+                            return Err(TraceWasmError::Unsupported("v128 local".to_string()));
+                        }
 
                         for _ in 0..count {
-                            locals.push(ValType::from_wasmparser(ty));
+                            locals.push(ty);
                         }
                     }
 
@@ -1463,6 +1483,7 @@ impl Module {
             tags: tags.into_iter().map(TagType::from_wasmparser).collect(),
             globals: globals.into_boxed_slice(),
             exports,
+            exported_func_index_to_name,
             elements: elements.into_boxed_slice(),
             start_section,
             data_count,
@@ -1513,7 +1534,7 @@ impl Module {
     ///   configured cap, and [`TraceWasmError::ElementSegmentOutOfBounds`] if an
     ///   active element segment does not fit its target table.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
-        self: Arc<Module>,
+        self: &Arc<Module>,
         mut import_registry: I,
         config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
@@ -1799,7 +1820,6 @@ impl Module {
         if let Some(func_index) = self.start_section {
             TraceVM::run(
                 func_index,
-                None,
                 &[],
                 self.as_ref(),
                 &mut memory,

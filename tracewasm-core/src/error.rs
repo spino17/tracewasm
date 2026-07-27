@@ -1,11 +1,14 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
 use crate::{
     instruction::Instruction,
-    module::{CustomSection, FuncIndex, ModuleDwarf, TableIndex},
+    module::{FuncIndex, Module, TableIndex},
 };
 use addr2line::LookupResult;
 use rustc_demangle::demangle;
-use std::fmt::Display;
+use std::{
+    fmt::{self, Debug, Display},
+    sync::Arc,
+};
 use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
@@ -103,6 +106,12 @@ pub enum TraceWasmError {
     Parsing(String),
 }
 
+impl From<wasmparser::Error> for TraceWasmError {
+    fn from(value: wasmparser::Error) -> Self {
+        TraceWasmError::Parsing(value.to_string())
+    }
+}
+
 /// One frame of a captured interpreter backtrace: the instruction (and its
 /// enclosing function) that either trapped or called into the next-inner frame.
 pub struct TraceRecord {
@@ -135,9 +144,9 @@ pub enum TraceRecordKind {
 
 /// A captured interpreter backtrace, innermost-first: frame `0` is where
 /// execution trapped and each later frame is the caller that led to it.
-pub struct StackTrace(Vec<TraceRecord>);
+pub struct StackTrace<'a>(Vec<TraceRecord>, &'a str, &'a Arc<Module>);
 
-impl StackTrace {
+impl<'a> StackTrace<'a> {
     /// Resolves each frame of this trace against the module's `dwarf`, expanding
     /// it into its source-level frames (including any the compiler inlined).
     ///
@@ -151,12 +160,22 @@ impl StackTrace {
     ///
     /// # Errors
     ///
-    /// Fails if the DWARF cannot be indexed or a lookup errors; see
-    /// [`SourceStackTraceError`].
-    pub fn to_source_trace(
-        &self,
-        dwarf: ModuleDwarf,
-    ) -> Result<SourceStackTrace, SourceStackTraceError> {
+    /// Returns [`SourceStackTraceError::NoDebugInfo`] if the module carries no
+    /// DWARF — i.e. the wasm was **not built with debug info**, which is the
+    /// default for a release build. Resolving source locations requires the
+    /// `.debug_*` custom sections, so enable debug info when producing the module
+    /// (for a Cargo build, `debug = true` on the profile at the *workspace root*;
+    /// a profile in a member manifest is ignored).
+    ///
+    /// Also fails if the DWARF cannot be indexed or a lookup errors; see
+    /// [`SourceStackTraceError`] for the full set.
+    pub fn to_source_trace(&self) -> Result<SourceStackTrace<'_>, SourceStackTraceError> {
+        // A module built without debug info is the common case, not a bug — report
+        // it rather than panicking on a diagnostics path.
+        let Some(dwarf) = self.2.dwarf() else {
+            return Err(SourceStackTraceError::NoDebugInfo);
+        };
+
         let mut source_trace = vec![];
         // Built once: indexing the DWARF is proportional to its size, so doing it
         // per frame would re-parse the whole thing for every frame.
@@ -214,22 +233,19 @@ impl StackTrace {
             });
         }
 
-        Ok(SourceStackTrace(source_trace))
+        Ok(SourceStackTrace(source_trace, self.1))
     }
 
     /// Renders the trace as a human-readable, innermost-first backtrace: frame
     /// `#0` is where execution trapped, and each subsequent frame is the caller
     /// that led to it.
     ///
-    /// `top_enclosing_func_name` labels the header with the entry function (when
-    /// known); `custom_section` supplies the `name`-section names used for
-    /// functions and tables, falling back to `func #N` / `table #N` when a name is
-    /// absent.
-    pub fn render(
-        &self,
-        top_enclosing_func_name: Option<&str>,
-        custom_section: &CustomSection,
-    ) -> String {
+    /// The header names the entry function the trace was captured for. Function
+    /// and table names come from the module's `name` section, falling back to
+    /// `func #N` / `table #N` when a name is absent.
+    pub fn render(&self) -> String {
+        let custom_section = &self.2.custom_section;
+
         let name_of_func = |f: FuncIndex| {
             custom_section
                 .func_name(f)
@@ -252,10 +268,7 @@ impl StackTrace {
                 .unwrap_or_else(|| format!("table #{}", t.0))
         };
 
-        let mut out = match top_enclosing_func_name {
-            Some(name) => format!("Stack trace of `{name}` (most recent call first):\n\n"),
-            None => String::from("Stack trace (most recent call first):\n\n"),
-        };
+        let mut out = format!("Stack trace of `{}` (most recent call first):\n\n", self.1);
 
         // Pre-resolve each frame's function name so the function column aligns.
         let frame_names: Vec<String> = self.0.iter().map(|r| name_of_func(r.func_index)).collect();
@@ -368,9 +381,9 @@ impl SourceTraceRecord {
 
 /// A [`StackTrace`] resolved against the module's DWARF: one entry per
 /// interpreter frame, each expanded into its source-level (and inlined) frames.
-pub struct SourceStackTrace(Vec<SourceTraceRecord>);
+pub struct SourceStackTrace<'a>(Vec<SourceTraceRecord>, &'a str);
 
-impl SourceStackTrace {
+impl<'a> SourceStackTrace<'a> {
     /// The per-frame records, innermost frame first.
     pub fn records(&self) -> &[SourceTraceRecord] {
         &self.0
@@ -379,14 +392,11 @@ impl SourceStackTrace {
     /// Renders the whole source trace, innermost frame first — the source-level
     /// counterpart of [`StackTrace::render`].
     ///
-    /// `top_enclosing_func_name` labels the header with the entry function when
-    /// known. Frame numbers are the indices of the corresponding [`TraceRecord`]s
-    /// in the originating [`StackTrace`], so the two renderings line up.
-    pub fn render(&self, top_enclosing_func_name: Option<&str>) -> String {
-        let mut out = match top_enclosing_func_name {
-            Some(name) => format!("Source trace of `{name}` (most recent call first):\n\n"),
-            None => String::from("Source trace (most recent call first):\n\n"),
-        };
+    /// The header names the entry function, carried over from the [`StackTrace`]
+    /// this was resolved from. Frame numbers are the indices of the corresponding
+    /// [`TraceRecord`]s in that trace, so the two renderings line up.
+    pub fn render(&self) -> String {
+        let mut out = format!("Source trace of `{}` (most recent call first):\n\n", self.1);
 
         for record in &self.0 {
             out.push_str(&record.render());
@@ -412,6 +422,11 @@ pub enum SourceStackTraceError {
     /// which is not loadable from a self-contained wasm module.
     #[error("split DWARF is not supported")]
     SplitDwarfUnsupported,
+    /// The module carries no DWARF, so there is nothing to resolve against. This
+    /// is the normal case for a release build — debug info has to be enabled for
+    /// the wasm to contain `.debug_*` sections.
+    #[error("the module has no debug info; rebuild the wasm with debug info enabled")]
+    NoDebugInfo,
 }
 
 impl TraceWasmError {
@@ -456,19 +471,88 @@ impl TraceWasmError {
 
         Some(())
     }
+}
 
-    pub fn extract_stack_trace(&self) -> Option<StackTrace> {
+/// A failed [`TypedFunc::call`](crate::instance::TypedFunc::call), carrying the
+/// context needed to explain it.
+///
+/// The underlying [`TraceWasmError`] is raised deep inside the interpreter, where
+/// the entry function and the [`Module`] are not in reach. This pairs the cause
+/// with both, so a caller can go straight from the error to a rendered backtrace
+/// via [`Self::stack_trace`] without threading that context in themselves.
+pub struct FuncCallError {
+    func_name: String,
+    err: TraceWasmError,
+    module: Arc<Module>,
+}
+
+impl FuncCallError {
+    /// Pairs a failure with the entry function and module it happened in.
+    ///
+    /// `err` must be a [`TraceWasmError::InstructionExecution`]: every error path
+    /// out of the interpreter is tagged with the instruction that raised it, which
+    /// is what lets [`Self::stack_trace`] always produce at least one frame. The
+    /// `debug_assert` below pins that invariant at construction, so a violation
+    /// surfaces where the error is built rather than where it is read.
+    pub(crate) fn new(func_name: String, err: TraceWasmError, module: Arc<Module>) -> Self {
+        debug_assert!(matches!(
+            err,
+            TraceWasmError::InstructionExecution(_, _, _, _, _)
+        ));
+
+        FuncCallError {
+            func_name,
+            err,
+            module,
+        }
+    }
+
+    /// The underlying cause, without the call context.
+    pub fn cause(&self) -> &TraceWasmError {
+        &self.err
+    }
+
+    /// The interpreter backtrace for this failure, innermost frame first.
+    ///
+    /// Always has at least one frame: [`Self::new`] requires the cause to be a
+    /// [`TraceWasmError::InstructionExecution`].
+    pub fn stack_trace(&self) -> StackTrace<'_> {
         let mut trace = vec![];
 
-        self._extract_stack_trace(&mut trace)?;
+        self.err._extract_stack_trace(&mut trace);
 
-        Some(StackTrace(trace))
+        StackTrace(trace, &self.func_name, &self.module)
     }
 }
 
-impl From<wasmparser::Error> for TraceWasmError {
-    fn from(value: wasmparser::Error) -> Self {
-        TraceWasmError::Parsing(value.to_string())
+// `Module` is large and deliberately not `Debug`, so this is written by hand to
+// show the parts that identify the failure.
+impl Debug for FuncCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FuncCallError")
+            .field("func_name", &self.func_name)
+            .field("err", &self.err)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Display for FuncCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Deliberately a one-liner: the backtrace can be long, so it is opt-in
+        // through `stack_trace().render()` rather than part of the message.
+        write!(f, "call to `{}` failed: {}", self.func_name, self.err)
+    }
+}
+
+impl std::error::Error for FuncCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.err)
+    }
+}
+
+impl From<FuncCallError> for TraceWasmError {
+    fn from(value: FuncCallError) -> Self {
+        value.err
     }
 }
 
@@ -658,13 +742,16 @@ mod source_trace_render_tests {
 
     #[test]
     fn whole_trace_renders_header_and_every_frame_in_order() {
-        let trace = SourceStackTrace(vec![
-            record(0, vec![frame("inner", "a.rs", 1)]),
-            record(1, vec![]),
-            record(2, vec![frame("outer", "b.rs", 9)]),
-        ]);
+        let trace = SourceStackTrace(
+            vec![
+                record(0, vec![frame("inner", "a.rs", 1)]),
+                record(1, vec![]),
+                record(2, vec![frame("outer", "b.rs", 9)]),
+            ],
+            "entry",
+        );
 
-        let out = trace.render(Some("entry"));
+        let out = trace.render();
 
         assert!(out.starts_with("Source trace of `entry` (most recent call first):\n\n"));
         assert_eq!(trace.records().len(), 3);
@@ -676,11 +763,31 @@ mod source_trace_render_tests {
         assert!(inner < none && none < outer, "frames out of order: {out}");
     }
 
+    // The entry-function name is carried by the trace itself, so the header always
+    // names it — there is no anonymous form.
     #[test]
-    fn trace_without_entry_name_uses_the_bare_header() {
-        let out = SourceStackTrace(vec![]).render(None);
+    fn empty_trace_still_renders_its_header() {
+        let out = SourceStackTrace(vec![], "entry").render();
 
-        assert_eq!(out, "Source trace (most recent call first):\n\n");
+        assert_eq!(out, "Source trace of `entry` (most recent call first):\n\n");
+    }
+}
+
+#[cfg(test)]
+impl TraceWasmError {
+    /// Test-only counterpart of [`FuncCallError::stack_trace`], returning just the
+    /// frames.
+    ///
+    /// The public path borrows the entry-function name and the [`Module`] to build
+    /// a [`StackTrace`], neither of which the extraction logic itself uses — this
+    /// exposes the frames so that logic can be tested without standing up a whole
+    /// module.
+    fn stack_trace(&self) -> Option<Vec<TraceRecord>> {
+        let mut trace = vec![];
+
+        self._extract_stack_trace(&mut trace)?;
+
+        Some(trace)
     }
 }
 
@@ -728,12 +835,12 @@ mod stack_trace_tests {
     fn non_instruction_error_yields_no_trace() {
         assert!(
             TraceWasmError::Unsupported("x".to_string())
-                .extract_stack_trace()
+                .stack_trace()
                 .is_none()
         );
         assert!(
             TraceWasmError::ExportNotA("function".to_string())
-                .extract_stack_trace()
+                .stack_trace()
                 .is_none()
         );
     }
@@ -742,11 +849,11 @@ mod stack_trace_tests {
     #[test]
     fn single_unreachable_frame() {
         let trace = ie(0, 7, InstructionExecutionError::Unreachable)
-            .extract_stack_trace()
+            .stack_trace()
             .expect("top-level is an InstructionExecution");
 
-        assert_eq!(trace.0.len(), 1);
-        assert_noncall(&trace.0[0], 0, 7);
+        assert_eq!(trace.len(), 1);
+        assert_noncall(&trace[0], 0, 7);
     }
 
     // every non-`FunctionCall` `CallIndirect` cause hits the inner `_ => None`
@@ -765,11 +872,11 @@ mod stack_trace_tests {
                 i,
                 InstructionExecutionError::CallIndirect(TableIndex(3), leaf),
             )
-            .extract_stack_trace()
+            .stack_trace()
             .unwrap();
 
-            assert_eq!(trace.0.len(), 1);
-            assert_noncall(&trace.0[0], 1, i);
+            assert_eq!(trace.len(), 1);
+            assert_noncall(&trace[0], 1, i);
         }
     }
 
@@ -786,11 +893,11 @@ mod stack_trace_tests {
             ),
         );
 
-        let trace = err.extract_stack_trace().unwrap();
+        let trace = err.stack_trace().unwrap();
 
-        assert_eq!(trace.0.len(), 2);
-        assert_noncall(&trace.0[0], 3, 1); // innermost first
-        assert_call(&trace.0[1], 2, 5, 3, None); // direct call → is_indirect None
+        assert_eq!(trace.len(), 2);
+        assert_noncall(&trace[0], 3, 1); // innermost first
+        assert_call(&trace[1], 2, 5, 3, None); // direct call → is_indirect None
     }
 
     // `CallIndirect::FunctionCall` recursion: Call record carries the table index.
@@ -808,11 +915,11 @@ mod stack_trace_tests {
             ),
         );
 
-        let trace = err.extract_stack_trace().unwrap();
+        let trace = err.stack_trace().unwrap();
 
-        assert_eq!(trace.0.len(), 2);
-        assert_noncall(&trace.0[0], 6, 0);
-        assert_call(&trace.0[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
+        assert_eq!(trace.len(), 2);
+        assert_noncall(&trace[0], 6, 0);
+        assert_call(&trace[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
     }
 
     // the `?`-free recursion: a nested non-`InstructionExecution` error (e.g. a
@@ -832,9 +939,9 @@ mod stack_trace_tests {
                 )),
             ),
         );
-        let trace = via_call.extract_stack_trace().unwrap();
-        assert_eq!(trace.0.len(), 1, "caller frame must survive a non-IE leaf");
-        assert_call(&trace.0[0], 0, 3, 5, None);
+        let trace = via_call.stack_trace().unwrap();
+        assert_eq!(trace.len(), 1, "caller frame must survive a non-IE leaf");
+        assert_call(&trace[0], 0, 3, 5, None);
 
         // same for the indirect path
         let via_indirect = ie(
@@ -851,9 +958,9 @@ mod stack_trace_tests {
                 ),
             ),
         );
-        let trace = via_indirect.extract_stack_trace().unwrap();
-        assert_eq!(trace.0.len(), 1);
-        assert_call(&trace.0[0], 0, 2, 9, Some(1));
+        let trace = via_indirect.stack_trace().unwrap();
+        assert_eq!(trace.len(), 1);
+        assert_call(&trace[0], 0, 2, 9, Some(1));
     }
 
     // deep mixed chain A --call--> B --call_indirect--> C(unreachable): exercises
@@ -879,11 +986,63 @@ mod stack_trace_tests {
             ),
         );
 
-        let trace = err.extract_stack_trace().unwrap();
+        let trace = err.stack_trace().unwrap();
 
-        assert_eq!(trace.0.len(), 3);
-        assert_noncall(&trace.0[0], 2, 0); // innermost: the trap
-        assert_call(&trace.0[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
-        assert_call(&trace.0[2], 0, 10, 1, None); // A called B directly
+        assert_eq!(trace.len(), 3);
+        assert_noncall(&trace[0], 2, 0); // innermost: the trap
+        assert_call(&trace[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
+        assert_call(&trace[2], 0, 10, 1, None); // A called B directly
+    }
+}
+
+#[cfg(test)]
+mod func_call_error_tests {
+    use super::*;
+
+    fn err() -> TraceWasmError {
+        TraceWasmError::InstructionExecution(
+            FuncIndex(3),
+            7,
+            Instruction::Nop,
+            InstructionExecutionError::Unreachable,
+            0x2a,
+        )
+    }
+
+    // The whole point of the type: it must work as an ordinary error.
+    #[test]
+    fn implements_std_error_with_display_and_source() {
+        fn assert_is_error<E: std::error::Error + 'static>(_: &E) {}
+
+        let module = crate::module::Module::compile(&wat_min()).unwrap();
+        let e = FuncCallError::new("entry".to_string(), err(), module);
+
+        assert_is_error(&e);
+        assert!(
+            e.to_string().starts_with("call to `entry` failed:"),
+            "got: {e}"
+        );
+        assert!(std::error::Error::source(&e).is_some(), "cause must chain");
+        assert!(
+            format!("{e:?}").contains("func_name"),
+            "Debug must not panic"
+        );
+    }
+
+    // A release module has no `.debug_*` sections; that must be an error, not a panic.
+    #[test]
+    fn source_trace_without_debug_info_errors_instead_of_panicking() {
+        let module = crate::module::Module::compile(&wat_min()).unwrap();
+        let e = FuncCallError::new("entry".to_string(), err(), module);
+
+        assert!(matches!(
+            e.stack_trace().to_source_trace(),
+            Err(SourceStackTraceError::NoDebugInfo)
+        ));
+    }
+
+    /// The smallest valid module: `(module)`.
+    fn wat_min() -> Vec<u8> {
+        vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
     }
 }
