@@ -3,6 +3,7 @@ use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
 };
+use addr2line;
 use rustc_demangle::demangle;
 use std::fmt::Display;
 use thiserror::Error;
@@ -19,7 +20,13 @@ pub enum TraceWasmError {
     /// enclosing function index, the instruction's index in that function's
     /// lowered instruction list, and the underlying cause.
     #[error("error occured while executing instruction `{1}`({2:?}) in func({0:?}): {3}")]
-    InstructionExecution(FuncIndex, usize, Instruction, InstructionExecutionError),
+    InstructionExecution(
+        FuncIndex,
+        usize,
+        Instruction,
+        InstructionExecutionError,
+        u32,
+    ),
     /// A linear-memory access that ran past the memory's bounds (a wasm trap).
     /// Fields: a description of the access, the byte offset attempted, and the
     /// current memory length in bytes.
@@ -103,6 +110,7 @@ pub struct TraceRecord {
     pub instr: Instruction,
     /// Whether this frame is a call into a deeper frame or the trapping leaf.
     pub kind: TraceRecordKind,
+    pub instr_offset: u32,
 }
 
 /// Distinguishes a caller frame (a `call`/`call_indirect` into a deeper frame)
@@ -205,7 +213,9 @@ impl StackTrace {
 
 impl TraceWasmError {
     fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
-        let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err) = self else {
+        let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err, instr_offset) =
+            self
+        else {
             return None;
         };
 
@@ -238,6 +248,7 @@ impl TraceWasmError {
             },
             instr: instr.clone(),
             instr_index: *instr_index,
+            instr_offset: *instr_offset,
         });
 
         Some(())
@@ -290,8 +301,15 @@ impl InstructionExecutionError {
         instr_index: usize,
         enclosing_func_index: FuncIndex,
         instr: &Instruction,
+        offset: u32,
     ) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(enclosing_func_index, instr_index, instr.clone(), self)
+        TraceWasmError::InstructionExecution(
+            enclosing_func_index,
+            instr_index,
+            instr.clone(),
+            self,
+            offset,
+        )
     }
 }
 
@@ -381,7 +399,7 @@ mod stack_trace_tests {
     /// is a fixed placeholder — the trace-extraction logic only clones it through,
     /// so its value is irrelevant to these tests.
     fn ie(func: u32, instr: usize, cause: InstructionExecutionError) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(FuncIndex(func), instr, Instruction::Nop, cause)
+        TraceWasmError::InstructionExecution(FuncIndex(func), instr, Instruction::Nop, cause, 0)
     }
 
     /// Assert a record is a `NonCall` at `(func, instr)`.

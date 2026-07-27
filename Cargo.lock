@@ -329,6 +329,7 @@ dependencies = [
 name = "tracewasm-core"
 version = "0.1.0"
 dependencies = [
+ "addr2line",
  "bytemuck",
  "rustc-demangle",
  "rustc-hash",

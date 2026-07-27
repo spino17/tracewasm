@@ -1,3 +1,4 @@
+use addr2line::LookupResult;
 use gimli::{Dwarf, EndianSlice, RunTimeEndian, SectionId};
 use rustc_demangle::demangle;
 use std::{borrow::Cow, fs};
@@ -84,50 +85,33 @@ fn main() -> Result<(), anyhow::Error> {
 
     println!("{:?}", dwarf);
 
-    let mut rows: Vec<(u64, String, u64)> = Vec::new(); // (code_offset, file, line)
+    let ctx = addr2line::Context::from_dwarf(dwarf)?;
 
-    let mut units = dwarf.units();
+    let LookupResult::Output(o) = ctx.find_frames(245) else {
+        unreachable!()
+    }; // returns a FrameIter (inline chain)
 
-    while let Some(header) = units.next()? {
-        let unit = dwarf.unit(header)?;
+    let mut frames = o?;
 
-        let Some(program) = unit.line_program.clone() else {
-            continue;
+    while let Some(frame) = frames.next()? {
+        let name = frame
+            .function
+            .as_ref()
+            .map(|f| {
+                f.demangle()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| f.raw_name().unwrap().into_owned())
+            })
+            .unwrap_or_else(|| "<unknown>".into());
+
+        let (file, line) = match &frame.location {
+            Some(loc) => (loc.file.unwrap_or("<unknown>"), loc.line.unwrap_or(0)),
+            None => ("<unknown>", 0),
         };
 
-        let mut sm = program.rows();
-
-        while let Some((hdr, row)) = sm.next_row()? {
-            if row.end_sequence() {
-                continue;
-            }
-
-            let line = row.line().map(|l| l.get()).unwrap_or(0);
-
-            let file = row
-                .file(hdr)
-                .map(|f| {
-                    let dir = f
-                        .directory(hdr)
-                        .and_then(|d| dwarf.attr_string(&unit, d).ok())
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let name = dwarf
-                        .attr_string(&unit, f.path_name())
-                        .ok()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    format!("{dir}/{name}") // optionally prepend unit.comp_dir too
-                })
-                .unwrap_or_default();
-
-            rows.push((row.address(), file, line)); // address = code-section offset
-        }
+        println!("file: {} - line: {}", file, line);
+        // emit frame
     }
-
-    rows.sort_by_key(|r| r.0);
-
-    println!("rows: {:?}", rows);
 
     let registry = ImportedFunctions { count: 0 };
 

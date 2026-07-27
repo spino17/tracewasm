@@ -754,6 +754,7 @@ impl TraceVM {
         let params_ty = &ty.params;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
+        let instruction_offsets = &func_body.instruction_offsets;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`.
@@ -807,7 +808,9 @@ impl TraceVM {
 
             let res = state
                 .execute(instr, caller_base_height, module)
-                .map_err(|err| err.into_tracewasm_err(pc, func_index, instr))?;
+                .map_err(|err| {
+                    err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
+                })?;
 
             match res {
                 ExecutionResult::JumpTo(next_pc) => {

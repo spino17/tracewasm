@@ -11,3 +11,4 @@ bytemuck = "1.25.2"
 tracewasm-macros = { path = "../tracewasm-macros" }
 smallvec = { workspace = true }
 rustc-demangle = { workspace = true }
+addr2line = { workspace = true }
