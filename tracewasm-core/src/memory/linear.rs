@@ -2,7 +2,7 @@
 
 use crate::{
     error::{MemoryAccessKind, MemoryError},
-    memory::Memory,
+    memory::{Memory, MemoryView},
     module::WASM_MEMORY_PAGE_SIZE,
 };
 
@@ -45,10 +45,6 @@ impl Memory for LinearMemory {
         Self::new(size_in_pages)
     }
 
-    fn size_in_bytes(&self) -> usize {
-        self.inner.len()
-    }
-
     fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError> {
         let old_size = self.size_in_pages();
 
@@ -75,6 +71,12 @@ impl Memory for LinearMemory {
             .resize((new_size * WASM_MEMORY_PAGE_SIZE) as usize, 0);
 
         Ok(old_size)
+    }
+}
+
+impl MemoryView for LinearMemory {
+    fn size_in_bytes(&self) -> usize {
+        self.inner.len()
     }
 
     fn copy_within(&mut self, dest: usize, src: usize, len: usize) -> Result<(), MemoryError> {

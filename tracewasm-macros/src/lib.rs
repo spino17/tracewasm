@@ -389,12 +389,12 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         #impl_block
 
         impl ::tracewasm_core::instance::traits::ImportRegistry for #self_ty {
-            fn execute<M: ::tracewasm_core::memory::Memory>(
+            fn execute<V: ::tracewasm_core::memory::MemoryView>(
                 &mut self,
                 module_name: &str,
                 func_name: &str,
                 params: &[::tracewasm_core::instance::traits::Val],
-                memory_view: &mut M,
+                memory_view: &mut V,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::ResultVals,
                 ::tracewasm_core::error::TraceWasmError,

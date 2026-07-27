@@ -1,6 +1,6 @@
 use std::fs;
 use tracewasm_core::{
-    memory::{Memory, linear::LinearMemory},
+    memory::{MemoryView, linear::LinearMemory},
     module::Module,
 };
 use tracewasm_macros::imports;
@@ -19,13 +19,13 @@ pub struct ImportedFunctions {
 #[imports]
 impl ImportedFunctions {
     #[module("env")]
-    fn host1<M: Memory>(&mut self, a: i32, b: i32, memory_view: &mut M) -> (i32,) {
+    fn host1<V: MemoryView>(&mut self, a: i32, b: i32, memory_view: &mut V) -> (i32,) {
         self.count += 1;
         (a.wrapping_add(b),)
     }
 
     #[module("env")]
-    fn host2<M: Memory>(&mut self, a: i32, b: i32, c: i64, memory_view: &mut M) -> (i32,) {
+    fn host2<V: MemoryView>(&mut self, a: i32, b: i32, c: i64, memory_view: &mut V) -> (i32,) {
         (a.wrapping_add(b).wrapping_add(c as i32),)
     }
 }

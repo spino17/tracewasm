@@ -6,15 +6,15 @@ use crate::{
 };
 pub mod linear;
 
-/// A module's linear memory, supplied by the embedder.
+/// Read/write access to a linear memory, without the ability to resize it.
 ///
-/// The interpreter is generic over this trait so the backing store (a plain
-/// `Vec<u8>`, an mmap, a guarded region, …) is the embedder's choice.
-pub trait Memory {
-    /// Creates a memory pre-allocated to `size` in WASM pages.
-    /// Per the WebAssembly spec, this should be completely zeroed.
-    fn allocate_initial_memory(size_in_pages: u64) -> Self;
-
+/// This is the capability handed to host functions: every operation here is
+/// bounds-checked and leaves the memory's size unchanged, so a host cannot grow
+/// past the module's declared maximum or the instance
+/// [`Config`](crate::instance::config::Config) cap — those limits live on the
+/// [`Instance`](crate::instance::Instance), which a host function cannot see.
+/// Resizing is reserved to [`Memory`], which only the interpreter holds.
+pub trait MemoryView {
     /// Returns the size of the memory in bytes.
     ///
     /// This is the authoritative size: bounds checks and
@@ -28,22 +28,6 @@ pub trait Memory {
     fn size_in_pages(&self) -> u64 {
         self.size_in_bytes() as u64 / WASM_MEMORY_PAGE_SIZE
     }
-
-    /// Grows the memory by `delta_in_pages`, returning the size in pages *before*
-    /// the growth. New pages are zeroed, per the spec.
-    ///
-    /// `max_size_in_pages` is the ceiling the caller allows: the module's declared
-    /// maximum, capped by the instance
-    /// [`Config`](crate::instance::config::Config).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::GrowFailed`] if the request cannot be satisfied
-    /// (past `max_size_in_pages`, or the page count overflows). This is **not** a
-    /// trap: `memory.grow` reports failure by pushing `-1`, so a caller
-    /// implementing that instruction must map the error to `-1` and continue,
-    /// rather than propagating it.
-    fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError>;
 
     /// Copies `len` bytes within this memory from `src` to `dest` (backs
     /// `memory.copy`).
@@ -244,4 +228,35 @@ pub trait Memory {
 
         Ok(())
     }
+}
+
+/// A module's linear memory, supplied by the embedder.
+///
+/// The interpreter is generic over this trait so the backing store (a plain
+/// `Vec<u8>`, an mmap, a guarded region, …) is the embedder's choice.
+///
+/// Extends [`MemoryView`] with the operations that change the memory's size.
+/// Host functions receive only the [`MemoryView`] half, so growing stays with the
+/// interpreter, which is the only party that knows the module's declared maximum
+/// and the instance's configured cap.
+pub trait Memory: MemoryView {
+    /// Creates a memory pre-allocated to `size` in WASM pages.
+    /// Per the WebAssembly spec, this should be completely zeroed.
+    fn allocate_initial_memory(size_in_pages: u64) -> Self;
+
+    /// Grows the memory by `delta_in_pages`, returning the size in pages *before*
+    /// the growth. New pages are zeroed, per the spec.
+    ///
+    /// `max_size_in_pages` is the ceiling the caller allows: the module's declared
+    /// maximum, capped by the instance
+    /// [`Config`](crate::instance::config::Config).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::GrowFailed`] if the request cannot be satisfied
+    /// (past `max_size_in_pages`, or the page count overflows). This is **not** a
+    /// trap: `memory.grow` reports failure by pushing `-1`, so a caller
+    /// implementing that instruction must map the error to `-1` and continue,
+    /// rather than propagating it.
+    fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError>;
 }

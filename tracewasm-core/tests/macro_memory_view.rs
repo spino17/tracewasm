@@ -4,7 +4,7 @@
 use tracewasm_core::{
     error::TraceWasmError,
     instance::traits::{ImportRegistry, Val},
-    memory::{Memory, linear::LinearMemory},
+    memory::{Memory, MemoryView, linear::LinearMemory},
 };
 use tracewasm_macros::imports;
 
@@ -16,7 +16,7 @@ struct Host {
 impl Host {
     /// Takes the memory view: writes the byte and reads it straight back.
     #[module("env")]
-    fn poke<M: Memory>(&mut self, addr: i32, byte: i32, mem: &mut M) -> (i32,) {
+    fn poke<V: MemoryView>(&mut self, addr: i32, byte: i32, mem: &mut V) -> (i32,) {
         self.calls += 1;
         mem.write_u8(addr as usize, byte as u8).unwrap();
 
@@ -32,11 +32,11 @@ impl Host {
     /// Fallible: an out-of-bounds pointer from the guest must trap, not panic.
     /// The `?` converts `MemoryError` through its `From` impl.
     #[module("env")]
-    fn checked_poke<M: Memory>(
+    fn checked_poke<V: MemoryView>(
         &mut self,
         addr: i32,
         byte: i32,
-        mem: &mut M,
+        mem: &mut V,
     ) -> Result<(i32,), TraceWasmError> {
         mem.write_u8(addr as usize, byte as u8)?;
 
