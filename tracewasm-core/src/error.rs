@@ -3,8 +3,10 @@ use crate::{
     instruction::Instruction,
     module::{CustomSection, FuncIndex, TableIndex},
 };
+use addr2line::LookupResult;
+use gimli::{Dwarf, EndianReader, RunTimeEndian};
 use rustc_demangle::demangle;
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
 use thiserror::Error;
 
 /// Any failure while validating, parsing, or lowering a WebAssembly module.
@@ -216,6 +218,131 @@ impl StackTrace {
     }
 }
 
+/// One source-level frame resolved from DWARF. A single wasm instruction can map
+/// to several of these when the compiler inlined calls into it.
+pub struct InlineFrameRecord {
+    /// Source file the frame came from, or `<unknown>` if DWARF omits it.
+    pub file: String,
+    /// The function's demangled name, or `<unknown>` if DWARF omits it.
+    pub func_name: String,
+    /// Line number within [`Self::file`], or `0` if DWARF omits it.
+    pub line: u32,
+}
+
+/// The source-level expansion of one interpreter frame.
+pub struct SourceTraceRecord {
+    /// Index of the [`TraceRecord`] in the originating [`StackTrace`] that this
+    /// expands, so the two traces can be shown side by side.
+    pub trace_record_index: u32,
+    /// The source frames for that instruction, outermost call site last. Empty
+    /// when the instruction's offset has no DWARF coverage — the record is still
+    /// emitted so no interpreter frame goes missing from the trace.
+    pub inline_trace: Vec<InlineFrameRecord>,
+}
+
+/// A [`StackTrace`] resolved against the module's DWARF: one entry per
+/// interpreter frame, each expanded into its source-level (and inlined) frames.
+pub struct SourceStackTrace(Vec<SourceTraceRecord>);
+
+/// A failure while resolving a [`StackTrace`] against DWARF debug info.
+#[derive(Error, Debug)]
+pub enum SourceStackTraceError {
+    /// The DWARF sections could not be indexed into an `addr2line` context.
+    #[error("context load from dwarf failed: {0}")]
+    ContextLoadFailed(String),
+    /// Looking up the frames covering an instruction's offset failed.
+    #[error("find_frames failed: {0}")]
+    FindFramesFailed(String),
+    /// Advancing to the next inlined frame failed.
+    #[error("failed to fetch the next frame: {0}")]
+    NextFrameFetchFailed(String),
+    /// The DWARF refers to a split unit (`.dwo`/`.dwp`) or a supplementary file,
+    /// which is not loadable from a self-contained wasm module.
+    #[error("split DWARF is not supported")]
+    SplitDwarfUnsupported,
+}
+
+impl SourceStackTrace {
+    /// Resolves each frame of `trace` against the module's `dwarf`, expanding it
+    /// into its source-level frames (including any the compiler inlined).
+    ///
+    /// The instruction offsets recorded in the trace are byte offsets into the
+    /// module binary, which is exactly how WebAssembly DWARF encodes code
+    /// addresses, so they can be used as lookup probes directly.
+    ///
+    /// Every input frame yields exactly one [`SourceTraceRecord`], even when DWARF
+    /// has no coverage for it (an empty `inline_trace`), so the source trace never
+    /// drops a frame relative to the interpreter trace.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the DWARF cannot be indexed or a lookup errors; see
+    /// [`SourceStackTraceError`].
+    pub fn from_trace(
+        trace: &StackTrace,
+        dwarf: Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>,
+    ) -> Result<Self, SourceStackTraceError> {
+        let mut source_trace = vec![];
+        // Built once: indexing the DWARF is proportional to its size, so doing it
+        // per frame would re-parse the whole thing for every frame.
+        let ctx = addr2line::Context::from_arc_dwarf(dwarf)
+            .map_err(|err| SourceStackTraceError::ContextLoadFailed(err.to_string()))?;
+
+        for (i, frame) in trace.0.iter().enumerate() {
+            let instruction_offset = frame.instr_offset;
+
+            let mut frames = match ctx.find_frames(instruction_offset as u64) {
+                // Only returned when the DWARF points at a split/supplementary
+                // object, which a self-contained wasm module has no way to supply.
+                // Report it rather than panicking — this is a diagnostics path.
+                LookupResult::Load { .. } => {
+                    return Err(SourceStackTraceError::SplitDwarfUnsupported);
+                }
+                LookupResult::Output(output) => output,
+            }
+            .map_err(|err| SourceStackTraceError::FindFramesFailed(err.to_string()))?;
+
+            let mut inline_trace = vec![];
+
+            while let Some(frame) = frames
+                .next()
+                .map_err(|err| SourceStackTraceError::NextFrameFetchFailed(err.to_string()))?
+            {
+                // Fall back through demangled → raw → `<unknown>`; a name we cannot
+                // decode should degrade the trace, not panic while reporting it.
+                let func_name = frame
+                    .function
+                    .as_ref()
+                    .and_then(|f| {
+                        f.demangle()
+                            .or_else(|_| f.raw_name())
+                            .ok()
+                            .map(|name| name.into_owned())
+                    })
+                    .unwrap_or_else(|| "<unknown>".into());
+
+                let (file, line) = match &frame.location {
+                    Some(loc) => (loc.file.unwrap_or("<unknown>"), loc.line.unwrap_or(0)),
+                    None => ("<unknown>", 0),
+                };
+
+                inline_trace.push(InlineFrameRecord {
+                    file: file.to_string(),
+                    line,
+                    func_name,
+                });
+            }
+
+            source_trace.push(SourceTraceRecord {
+                trace_record_index: i as u32,
+                inline_trace,
+            });
+        }
+
+        Ok(SourceStackTrace(source_trace))
+    }
+}
+
 impl TraceWasmError {
     fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
         let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err, instr_offset) =
@@ -259,7 +386,7 @@ impl TraceWasmError {
         Some(())
     }
 
-    pub(crate) fn extract_stack_trace(&self) -> Option<StackTrace> {
+    pub fn extract_stack_trace(&self) -> Option<StackTrace> {
         let mut trace = vec![];
 
         self._extract_stack_trace(&mut trace)?;

@@ -109,7 +109,7 @@ fn main() -> Result<(), anyhow::Error> {
             None => ("<unknown>", 0),
         };
 
-        println!("file: {} - line: {}", file, line);
+        println!("file: {} - line: {} - name: {}", file, line, name);
         // emit frame
     }
 
