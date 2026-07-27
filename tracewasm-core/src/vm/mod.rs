@@ -732,6 +732,10 @@ impl TraceVM {
     /// instruction as [`TraceWasmError::InstructionExecution`] (tagged with the
     /// enclosing function and instruction index); and propagates errors from
     /// nested and imported-function calls.
+    // Threads the whole shared interpreter state (stack, memory, globals, tables,
+    // registry) down each recursive call; bundling it would add a borrow-splitting
+    // problem without simplifying anything.
+    #[allow(clippy::too_many_arguments)]
     fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -849,6 +853,8 @@ impl TraceVM {
     ///
     /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
     /// mismatches, errors returned by imported functions, …).
+    // Mirrors `execute`'s parameter list — see the note there.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         func_name: Option<&str>,

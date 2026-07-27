@@ -115,9 +115,13 @@ impl Memory for LinearMemory {
         // `offset + len` could overflow `usize` for a maliciously large `offset`;
         // computing the end with `checked_add` traps instead of wrapping, so the
         // bounds comparison below can't be fooled into passing on wraparound.
-        let end = offset.checked_add(len).ok_or_else(|| {
-            MemoryError::OutOfBoundsAccess(MemoryAccessKind::Read, offset, mem_len)
-        })?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ))?;
 
         // A valid access needs `offset + len <= mem_len`; anything past the end traps.
         if mem_len < end {
@@ -142,9 +146,13 @@ impl Memory for LinearMemory {
 
         // See `read`: `checked_add` prevents a `usize` overflow from wrapping past
         // the bounds check.
-        let end = offset.checked_add(len).ok_or_else(|| {
-            MemoryError::OutOfBoundsAccess(MemoryAccessKind::Write, offset, mem_len)
-        })?;
+        let end = offset
+            .checked_add(len)
+            .ok_or(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Write,
+                offset,
+                mem_len,
+            ))?;
 
         if mem_len < end {
             return Err(MemoryError::OutOfBoundsAccess(

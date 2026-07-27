@@ -48,6 +48,12 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 /// cap the initial allocation against the instance [`Config`].
 pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
 
+/// The module's parsed DWARF, as loaded from its `.debug_*` custom sections.
+///
+/// Shared behind an `Arc` because the sections are large and every consumer of
+/// the debug info reads the same copy.
+pub type ModuleDwarf = Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>;
+
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
 /// An owned wrapper that keeps the underlying `wasmparser` representation
@@ -459,7 +465,7 @@ pub struct Module {
     ///
     /// Behind an `Arc` because the sections are large and shared by every
     /// consumer; read it through [`Self::dwarf`].
-    dwarf: Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>>,
+    dwarf: Option<ModuleDwarf>,
 }
 
 impl Module {
@@ -478,7 +484,7 @@ impl Module {
     /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
     /// instruction's byte offset (see [`FuncBody::instruction_offsets`]) back to a
     /// source location.
-    pub fn dwarf(&self) -> Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>> {
+    pub fn dwarf(&self) -> Option<ModuleDwarf> {
         self.dwarf.clone()
     }
 
@@ -951,7 +957,7 @@ impl Module {
         let mut tags = vec![];
         let mut unknown_sections = vec![];
         let mut debug_sections: FxHashMap<String, &[u8]> = FxHashMap::default();
-        let mut possible_dwarf: Option<Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>> = None;
+        let mut possible_dwarf: Option<ModuleDwarf> = None;
         let mut custom_section_unknowns: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_others: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_module_name: String = "".to_string();

@@ -41,6 +41,9 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
     /// the registry against the module's imports first.
+    // Assembles every piece of instance state; grouping them into a struct would
+    // just move the same fields behind another type.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         memory: M,
         import_registry: I,

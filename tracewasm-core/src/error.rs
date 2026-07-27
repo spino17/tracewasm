@@ -357,14 +357,14 @@ impl TraceWasmError {
 
                 Some((*callee_func_index, None))
             }
-            InstructionExecutionError::CallIndirect(table_index, err) => match err {
-                CallIndirectError::FunctionCall(callee_func_index, err) => {
-                    err._extract_stack_trace(trace);
+            InstructionExecutionError::CallIndirect(
+                table_index,
+                CallIndirectError::FunctionCall(callee_func_index, err),
+            ) => {
+                err._extract_stack_trace(trace);
 
-                    Some((*callee_func_index, Some(*table_index)))
-                }
-                _ => None,
-            },
+                Some((*callee_func_index, Some(*table_index)))
+            }
             _ => None,
         };
 
