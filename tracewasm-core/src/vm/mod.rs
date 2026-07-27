@@ -145,9 +145,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             };
 
             // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-            let results =
-                self.import_registry
-                    .execute(module_name, imported_func_name, params.as_ref())?;
+            let results = self.import_registry.execute(
+                module_name,
+                imported_func_name,
+                params.as_ref(),
+                self.memory,
+            )?;
 
             // push results to the stack
             for res in results {

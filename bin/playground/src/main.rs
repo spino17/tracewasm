@@ -1,5 +1,8 @@
 use std::fs;
-use tracewasm_core::{memory::linear::LinearMemory, module::Module};
+use tracewasm_core::{
+    memory::{Memory, linear::LinearMemory},
+    module::Module,
+};
 use tracewasm_macros::imports;
 
 /// Example host module. The `#[imports]` macro reads the `#[module("...")]`-tagged
@@ -16,13 +19,13 @@ pub struct ImportedFunctions {
 #[imports]
 impl ImportedFunctions {
     #[module("env")]
-    fn host1(&mut self, a: i32, b: i32) -> (i32,) {
+    fn host1<M: Memory>(&mut self, a: i32, b: i32, memory_view: &mut M) -> (i32,) {
         self.count += 1;
         (a.wrapping_add(b),)
     }
 
     #[module("env")]
-    fn host2(&mut self, a: i32, b: i32, c: i64) -> (i32,) {
+    fn host2<M: Memory>(&mut self, a: i32, b: i32, c: i64, memory_view: &mut M) -> (i32,) {
         (a.wrapping_add(b).wrapping_add(c as i32),)
     }
 }

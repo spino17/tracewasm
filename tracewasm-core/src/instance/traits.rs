@@ -7,7 +7,7 @@
 //! [`crate::instance::TypedFunc`] can convert arguments and results without the
 //! caller touching raw `Val`s.
 
-use crate::{error::TraceWasmError, module::ValType};
+use crate::{error::TraceWasmError, memory::Memory, module::ValType};
 use smallvec::{Array, SmallVec, smallvec};
 
 // The runtime value type lives in the crate-internal `vm` module; re-export it
@@ -355,11 +355,12 @@ pub type ImportSignature = (ParamValTypes, ResultValTypes);
 pub trait ImportRegistry {
     /// Invokes the imported function `module_name::func_name` with `params`,
     /// returning its results.
-    fn execute(
+    fn execute<M: Memory>(
         &mut self,
         module_name: &str,
         func_name: &str,
         params: &[Val],
+        memory_view: &mut M,
     ) -> Result<ResultVals, TraceWasmError>;
 
     /// Returns the `(params, results)` signature of `module_name::func_name`, or

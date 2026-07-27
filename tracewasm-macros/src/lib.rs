@@ -13,6 +13,12 @@
 //!     fn add(&mut self, a: i32, b: i32) -> (i32,) {
 //!         (a + b,)
 //!     }
+//!
+//!     // A trailing `&mut M` gives the host access to the guest's linear memory.
+//!     #[module("env")]
+//!     fn store_byte<M: Memory>(&mut self, addr: i32, b: i32, mem: &mut M) -> () {
+//!         let _ = mem.write_u8(addr as usize, b as u8);
+//!     }
 //! }
 //! ```
 //!
@@ -21,8 +27,36 @@
 //! name. The macro generates
 //! `ImportRegistry::{execute, signature, func_count, global_count, get_global}`
 //! (where the generated `execute` returns a `ResultVals` wrapper) and, for every
-//! tagged method, a compile-time assertion that its signature is a valid
-//! `ImportedFunc` (params/results are `WasmTy` tuples).
+//! tagged method, a compile-time assertion that its parameters form a `Params`
+//! tuple and its return type a `Results` tuple.
+//!
+//! ## The memory view
+//!
+//! A method may end with a `&mut M` parameter (where `M: Memory`) to read and
+//! write the instance's linear memory. It is **optional and must come last**: the
+//! macro strips it from the wasm signature and forwards the caller's memory after
+//! the decoded arguments, so a host function that ignores guest memory can simply
+//! leave it off. A `&mut` parameter anywhere else is rejected, since it would
+//! shift the wasm arguments.
+//!
+//! ## Trapping
+//!
+//! A method may return `Result<T, E>` instead of `T` to signal a wasm trap. The
+//! wasm signature is taken from `T`, and the error is propagated with `?`, so any
+//! `E` convertible into a [`TraceWasmError`] works:
+//!
+//! ```ignore
+//! #[module("env")]
+//! fn read_byte<M: Memory>(&mut self, addr: i32, mem: &mut M)
+//!     -> Result<(i32,), TraceWasmError>
+//! {
+//!     Ok((mem.read_u8(addr as usize)? as i32,))   // OOB pointer → trap
+//! }
+//! ```
+//!
+//! This matters for any host function that touches guest memory: the guest picks
+//! the pointer, so an out-of-bounds access is reachable input, not a bug. Without
+//! a `Result` the only options are to panic the embedder or fabricate a value.
 //!
 //! A `#[global("...")]`-tagged method instead declares an importable global: it
 //! takes `&self`, returns a single [`WasmTy`] value, and its method name is the
@@ -44,7 +78,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Literal, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::{FnArg, ImplItem, ItemImpl, LitStr, ReturnType, Type, parse_macro_input, parse_quote};
 
 /// A single `#[module("...")]`-tagged host function extracted from the impl.
@@ -53,10 +87,52 @@ struct ImportEntry {
     module: LitStr,
     /// The method name, which is also the import's function name.
     fn_ident: syn::Ident,
-    /// Parameter types (excluding the `&mut self` receiver), in order.
+    /// The wasm parameter types, in order — the receiver and any trailing
+    /// memory-view parameter are excluded, since neither is a wasm value.
     param_types: Vec<Type>,
-    /// Return type — must implement `Results` (i.e. a tuple like `(i32,)` or `()`).
+    /// Whether the method ends with a memory-view parameter (`&mut M`), which the
+    /// generated `execute` forwards after the decoded wasm arguments.
+    takes_memory_view: bool,
+    /// Whether the method returns a `Result`, in which case the generated
+    /// `execute` propagates the error with `?` so the host can trap.
+    is_fallible: bool,
+    /// The success type — must implement `Results` (a tuple like `(i32,)` or
+    /// `()`). For a fallible method this is the `T` of its `Result<T, _>`, not the
+    /// `Result` itself.
     ret_type: Type,
+}
+
+/// If `ty` is a `Result<T, _>`, returns its `T`.
+///
+/// Matched on the path's last segment, so `Result`, `std::result::Result`, and
+/// aliases spelled `…::Result` are all recognised.
+fn result_ok_type(ty: &Type) -> Option<Type> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+
+    let segment = type_path.path.segments.last()?;
+
+    if segment.ident != "Result" {
+        return None;
+    }
+
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(ty) => Some(ty.clone()),
+        _ => None,
+    })
+}
+
+/// Whether `ty` is a mutable reference, i.e. the memory-view parameter.
+///
+/// Unambiguous as a marker: every wasm value type maps to a `Copy` scalar, so a
+/// `&mut _` parameter can only be the memory view.
+fn is_memory_view(ty: &Type) -> bool {
+    matches!(ty, Type::Reference(r) if r.mutability.is_some())
 }
 
 /// A single `#[global("...")]`-tagged host global extracted from the impl.
@@ -143,7 +219,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
 
         let module: LitStr = func.attrs.remove(pos).parse_args()?;
 
-        let param_types = func
+        let mut param_types: Vec<Type> = func
             .sig
             .inputs
             .iter()
@@ -153,15 +229,43 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             })
             .collect();
 
-        let ret_type: Type = match &func.sig.output {
+        // A trailing `&mut M` is the memory view, not a wasm parameter: drop it
+        // from the signature and forward it separately. It is optional, so a host
+        // function that does not touch guest memory can leave it off.
+        let takes_memory_view = param_types.last().is_some_and(is_memory_view);
+
+        if takes_memory_view {
+            param_types.pop();
+        }
+
+        // Only the last parameter may be the memory view; one in the middle would
+        // silently shift the wasm arguments.
+        if let Some(pos) = param_types.iter().position(is_memory_view) {
+            return Err(syn::Error::new_spanned(
+                &param_types[pos],
+                "the memory-view parameter must come last, after the wasm arguments",
+            ));
+        }
+
+        let declared_ret: Type = match &func.sig.output {
             ReturnType::Default => parse_quote!(()),
             ReturnType::Type(_, ty) => (**ty).clone(),
+        };
+
+        // A `Result` return lets the host trap — reading guest memory can fail on
+        // a bad pointer, and that must reach the interpreter rather than panic.
+        // The signature is built from the success type; the error is propagated.
+        let (is_fallible, ret_type) = match result_ok_type(&declared_ret) {
+            Some(ok_ty) => (true, ok_ty),
+            None => (false, declared_ret),
         };
 
         entries.push(ImportEntry {
             module,
             fn_ident: func.sig.ident.clone(),
             param_types,
+            takes_memory_view,
+            is_fallible,
             ret_type,
         });
     }
@@ -222,6 +326,22 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             >>
         };
 
+        // Forwarded after the wasm arguments, and only to methods that asked for
+        // it — a host function that ignores guest memory need not declare it.
+        let memory_arg = if entry.takes_memory_view {
+            quote! { , memory_view }
+        } else {
+            quote! {}
+        };
+
+        // Propagated with `?`, so any error type the host uses is converted into a
+        // `TraceWasmError` through the usual `From` impl.
+        let propagate = if entry.is_fallible {
+            quote! { ? }
+        } else {
+            quote! {}
+        };
+
         // `execute`: decode each argument from the value slice with `WasmTy`,
         // call the method, then marshal the result tuple into `ResultVals`.
         execute_arms.push(quote! {
@@ -231,7 +351,8 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                         <#param_types as ::tracewasm_core::instance::traits::WasmTy>::from_val(params[#indices])
                             .expect("import argument type mismatch (validated at instantiation)")
                     ),*
-                );
+                    #memory_arg
+                ) #propagate;
 
                 ::core::result::Result::Ok(#result_entity::to_vals(&__res))
             }
@@ -246,16 +367,21 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             )),
         });
 
-        // Compile-time check that the method is a valid `ImportedFunc`: its
-        // params form a `Params` tuple and its return type is a `Results` tuple.
-        let binds: Vec<syn::Ident> = (0..param_types.len())
-            .map(|i| format_ident!("__p{}", i))
-            .collect();
-
+        // Compile-time check that the declared signature is expressible in wasm:
+        // the parameters form a `Params` tuple and the return type a `Results`
+        // tuple.
+        //
+        // Asserted on the types directly rather than by closing over the method:
+        // one taking `&mut M` is generic, so there is no single concrete `Fn`
+        // shape to check it against.
         asserts.push(quote! {
-            ::tracewasm_core::instance::traits::assert_imported_func_trait(
-                |__ctx: &mut #self_ty, ( #(#binds,)* ): ( #(#param_types,)* )| __ctx.#fn_ident( #(#binds),* )
-            );
+            {
+                fn __assert_params<T: ::tracewasm_core::instance::traits::Params>() {}
+                fn __assert_results<T: ::tracewasm_core::instance::traits::Results>() {}
+
+                __assert_params::<#params_tuple>();
+                __assert_results::<#ret_type>();
+            }
         });
     }
 
@@ -263,11 +389,12 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         #impl_block
 
         impl ::tracewasm_core::instance::traits::ImportRegistry for #self_ty {
-            fn execute(
+            fn execute<M: ::tracewasm_core::memory::Memory>(
                 &mut self,
                 module_name: &str,
                 func_name: &str,
                 params: &[::tracewasm_core::instance::traits::Val],
+                memory_view: &mut M,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::ResultVals,
                 ::tracewasm_core::error::TraceWasmError,
