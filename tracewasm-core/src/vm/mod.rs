@@ -1018,6 +1018,54 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::F32Eq => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a == b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Ne => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a != b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Lt => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Gt => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Le => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Ge => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::F64Add => {
                 let b = self.stack.pop().as_f64();
                 let a = self.stack.pop().as_f64();
@@ -1049,6 +1097,54 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // See `F32Div`: division by zero yields an infinity or NaN, never
                 // a trap.
                 self.stack.push(Val::F64(a / b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Eq => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a == b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Ne => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a != b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Lt => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Gt => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Le => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Ge => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32((a >= b) as i32));
 
                 ExecutionResult::Next
             }

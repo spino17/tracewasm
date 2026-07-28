@@ -47,10 +47,18 @@ impl ImportRegistry for NoImports {
     }
 }
 
-/// Calls a `() -> i32` export of the fixture module.
+/// Calls a `() -> i32` export of the integer-comparison fixture.
 fn call(name: &str) -> i32 {
-    let wasm = include_bytes!("fixtures/comparisons.wasm");
+    call_in(include_bytes!("fixtures/comparisons.wasm"), name)
+}
 
+/// Calls a `() -> i32` export of the float-comparison fixture.
+fn call_f(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/float_comparisons.wasm"), name)
+}
+
+/// Compiles `wasm`, instantiates it, and calls its `() -> i32` export `name`.
+fn call_in(wasm: &[u8], name: &str) -> i32 {
     let module = Module::compile(wasm).expect("fixture should compile");
 
     let func = module
@@ -89,4 +97,33 @@ fn i64_comparisons_use_the_right_signedness_too() {
 #[test]
 fn i64_comparison_result_is_an_i32_usable_as_a_branch_condition() {
     assert_eq!(call("i64_brif"), 111, "5 <s 9 should take the branch");
+}
+
+// IEEE 754 ordering, which is *not* the two's-complement ordering the integer
+// comparisons use. Rust's operators already behave this way, so these guard
+// against someone "fixing" them into something like `a.partial_cmp(b)` handling.
+#[test]
+fn nan_makes_ordered_comparisons_false_but_ne_true() {
+    assert_eq!(call_f("nan_lt"), 0, "NaN < 1 is false");
+    assert_eq!(call_f("nan_ge"), 0, "NaN >= 1 is false");
+    assert_eq!(call_f("nan_eq"), 0, "NaN == NaN is false");
+    assert_eq!(call_f("nan_ne"), 1, "NaN != NaN is true");
+    assert_eq!(call_f("f64_nan_le"), 0, "and the same on the f64 path");
+}
+
+#[test]
+fn negative_and_positive_zero_compare_equal() {
+    assert_eq!(call_f("negzero_eq"), 1, "-0.0 == +0.0");
+    assert_eq!(call_f("negzero_lt"), 0, "-0.0 is not less than +0.0");
+}
+
+#[test]
+fn infinities_order_normally() {
+    assert_eq!(call_f("f64_inf_gt"), 1);
+}
+
+// As for the i64 comparisons: the result must be an `i32`, or `br_if` panics.
+#[test]
+fn float_comparison_result_is_an_i32_usable_as_a_branch_condition() {
+    assert_eq!(call_f("f64_brif"), 111, "1 < 2 should take the branch");
 }

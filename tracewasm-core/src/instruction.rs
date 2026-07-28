@@ -425,6 +425,23 @@ pub enum Instruction {
     /// `f32.div`: unlike the integer divides this never traps — dividing by zero
     /// yields `±inf`, and `0.0 / 0.0` yields NaN.
     F32Div,
+    // Float comparisons. Like the integer ones these push an **`i32`** 0/1, but the
+    // ordering is IEEE 754 rather than two's complement: a NaN operand makes every
+    // ordered comparison (and `eq`) false while making `ne` true, and `-0.0`
+    // compares *equal* to `+0.0`. Rust's operators already have exactly these
+    // semantics — unlike `min`/`max`, where they diverge from wasm.
+    /// `f32.eq`: equality; false if either operand is NaN, true for `-0.0 == +0.0`.
+    F32Eq,
+    /// `f32.ne`: inequality; **true** if either operand is NaN.
+    F32Ne,
+    /// `f32.lt`: ordered less-than; false if either operand is NaN.
+    F32Lt,
+    /// `f32.gt`: ordered greater-than; false if either operand is NaN.
+    F32Gt,
+    /// `f32.le`: ordered less-than-or-equal; false if either operand is NaN.
+    F32Le,
+    /// `f32.ge`: ordered greater-than-or-equal; false if either operand is NaN.
+    F32Ge,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
@@ -433,6 +450,18 @@ pub enum Instruction {
     F64Mul,
     /// `f64.div`: never traps; see [`Self::F32Div`].
     F64Div,
+    /// `f64.eq`: equality; false if either operand is NaN, true for `-0.0 == +0.0`.
+    F64Eq,
+    /// `f64.ne`: inequality; **true** if either operand is NaN.
+    F64Ne,
+    /// `f64.lt`: ordered less-than; false if either operand is NaN.
+    F64Lt,
+    /// `f64.gt`: ordered greater-than; false if either operand is NaN.
+    F64Gt,
+    /// `f64.le`: ordered less-than-or-equal; false if either operand is NaN.
+    F64Le,
+    /// `f64.ge`: ordered greater-than-or-equal; false if either operand is NaN.
+    F64Ge,
     /// `local.get`: push the value of the local at `index`.
     LocalGet {
         /// Index of the local (params first, then declared locals).
@@ -1248,10 +1277,22 @@ impl Instruction {
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
                 Operator::F32Mul => (Instruction::F32Mul, StackEffectResult::BinaryOperator),
                 Operator::F32Div => (Instruction::F32Div, StackEffectResult::BinaryOperator),
+                Operator::F32Eq => (Instruction::F32Eq, StackEffectResult::BinaryOperator),
+                Operator::F32Ne => (Instruction::F32Ne, StackEffectResult::BinaryOperator),
+                Operator::F32Lt => (Instruction::F32Lt, StackEffectResult::BinaryOperator),
+                Operator::F32Gt => (Instruction::F32Gt, StackEffectResult::BinaryOperator),
+                Operator::F32Le => (Instruction::F32Le, StackEffectResult::BinaryOperator),
+                Operator::F32Ge => (Instruction::F32Ge, StackEffectResult::BinaryOperator),
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
                 Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
                 Operator::F64Div => (Instruction::F64Div, StackEffectResult::BinaryOperator),
+                Operator::F64Eq => (Instruction::F64Eq, StackEffectResult::BinaryOperator),
+                Operator::F64Ne => (Instruction::F64Ne, StackEffectResult::BinaryOperator),
+                Operator::F64Lt => (Instruction::F64Lt, StackEffectResult::BinaryOperator),
+                Operator::F64Gt => (Instruction::F64Gt, StackEffectResult::BinaryOperator),
+                Operator::F64Le => (Instruction::F64Le, StackEffectResult::BinaryOperator),
+                Operator::F64Ge => (Instruction::F64Ge, StackEffectResult::BinaryOperator),
                 Operator::LocalGet { local_index } => (
                     Instruction::LocalGet {
                         index: LocalIndex(local_index),
