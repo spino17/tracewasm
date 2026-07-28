@@ -272,12 +272,36 @@ pub enum Instruction {
     I32Sub,
     /// `i32.mul`.
     I32Mul,
+    I32DivU,
+    I32DivS,
+    I32RemU,
+    I32RemS,
+    I32And,
+    I32Or,
+    I32Xor,
+    I32Shl,
+    I32ShrU,
+    I32ShrS,
+    I32Rotl,
+    I32Rotr,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
     I64Sub,
     /// `i64.mul`.
     I64Mul,
+    I64DivU,
+    I64DivS,
+    I64RemU,
+    I64RemS,
+    I64And,
+    I64Or,
+    I64Xor,
+    I64Shl,
+    I64ShrU,
+    I64ShrS,
+    I64Rotl,
+    I64Rotr,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
     // a NaN operand yields a NaN, whose payload the spec leaves nondeterministic.
@@ -287,12 +311,14 @@ pub enum Instruction {
     F32Sub,
     /// `f32.mul`.
     F32Mul,
+    F32Div,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
     F64Sub,
     /// `f64.mul`.
     F64Mul,
+    F64Div,
     /// `local.get`: push the value of the local at `index`.
     LocalGet {
         /// Index of the local (params first, then declared locals).
@@ -695,7 +721,10 @@ impl ControlStack {
 enum StackEffectResult {
     /// The operator pops `pops` values and pushes `pushes`; the net change is
     /// applied to `curr_height` (skipped while traversing dead code).
-    PopPush { pops: u32, pushes: u32 },
+    PopPush {
+        pops: u32,
+        pushes: u32,
+    },
     /// The operator resets the height to a known absolute value, e.g. `else`/`end`
     /// restoring `recorded_height + arity`.
     SetHeight(u32),
@@ -717,6 +746,7 @@ enum StackEffectResult {
     /// comparison operators — the comparisons included, since they push an `i32`
     /// boolean rather than nothing.
     BinaryOperator,
+    UnaryOperator,
 }
 
 impl Instruction {
@@ -1019,15 +1049,41 @@ impl Instruction {
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
                 Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
+                Operator::I32DivU => (Instruction::I32DivU, StackEffectResult::BinaryOperator),
+                Operator::I32DivS => (Instruction::I32DivS, StackEffectResult::BinaryOperator),
+                Operator::I32RemU => (Instruction::I32RemU, StackEffectResult::BinaryOperator),
+                Operator::I32RemS => (Instruction::I32RemS, StackEffectResult::BinaryOperator),
+                Operator::I32And => (Instruction::I32And, StackEffectResult::BinaryOperator),
+                Operator::I32Or => (Instruction::I32Or, StackEffectResult::BinaryOperator),
+                Operator::I32Xor => (Instruction::I32Xor, StackEffectResult::BinaryOperator),
+                Operator::I32Shl => (Instruction::I32Shl, StackEffectResult::BinaryOperator),
+                Operator::I32ShrU => (Instruction::I32ShrU, StackEffectResult::BinaryOperator),
+                Operator::I32ShrS => (Instruction::I32ShrS, StackEffectResult::BinaryOperator),
+                Operator::I32Rotl => (Instruction::I32Rotl, StackEffectResult::BinaryOperator),
+                Operator::I32Rotr => (Instruction::I32Rotr, StackEffectResult::BinaryOperator),
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
                 Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
                 Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
+                Operator::I64DivU => (Instruction::I64DivU, StackEffectResult::BinaryOperator),
+                Operator::I64DivS => (Instruction::I64DivS, StackEffectResult::BinaryOperator),
+                Operator::I64RemU => (Instruction::I64RemU, StackEffectResult::BinaryOperator),
+                Operator::I64RemS => (Instruction::I64RemS, StackEffectResult::BinaryOperator),
+                Operator::I64And => (Instruction::I64And, StackEffectResult::BinaryOperator),
+                Operator::I64Or => (Instruction::I64Or, StackEffectResult::BinaryOperator),
+                Operator::I64Xor => (Instruction::I64Xor, StackEffectResult::BinaryOperator),
+                Operator::I64Shl => (Instruction::I64Shl, StackEffectResult::BinaryOperator),
+                Operator::I64ShrU => (Instruction::I64ShrU, StackEffectResult::BinaryOperator),
+                Operator::I64ShrS => (Instruction::I64ShrS, StackEffectResult::BinaryOperator),
+                Operator::I64Rotl => (Instruction::I64Rotl, StackEffectResult::BinaryOperator),
+                Operator::I64Rotr => (Instruction::I64Rotr, StackEffectResult::BinaryOperator),
                 Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
                 Operator::F32Mul => (Instruction::F32Mul, StackEffectResult::BinaryOperator),
+                Operator::F32Div => (Instruction::F32Div, StackEffectResult::BinaryOperator),
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
                 Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
+                Operator::F64Div => (Instruction::F64Div, StackEffectResult::BinaryOperator),
                 Operator::LocalGet { local_index } => (
                     Instruction::LocalGet {
                         index: LocalIndex(local_index),
@@ -1452,6 +1508,7 @@ impl Instruction {
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
                 StackEffectResult::NoEffect
                 | StackEffectResult::Unreachable
+                | StackEffectResult::UnaryOperator
                 | StackEffectResult::Loads => {} // loads pop 1 and push 1 value so no net effect
             }
 

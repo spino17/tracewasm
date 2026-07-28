@@ -39,6 +39,8 @@
 //! were. Instruction indices, by contrast, are per-function: each
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
+use std::ops::{BitAnd, BitOr, BitXor};
+
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
@@ -54,7 +56,6 @@ use crate::{
     vm::stack::{DataVal, Stack, TableVal, Val},
 };
 use smallvec::{SmallVec, smallvec};
-use wasmparser::Data;
 
 pub(crate) mod stack;
 
@@ -547,6 +548,134 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32DivU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )? as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32DivS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )?));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32RemU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32(a.checked_rem(b).ok_or(
+                    InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    },
+                )? as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32RemS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                // A zero divisor is the *only* trap here. Unlike `i32.div_s`,
+                // `rem_s` does not trap on overflow: the spec defines
+                // `i32::MIN % -1` as `0`, which is what `wrapping_rem` returns.
+                // `checked_rem` would wrongly report that case as a failure.
+                if b == 0 {
+                    return Err(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    });
+                }
+
+                self.stack.push(Val::I32(a.wrapping_rem(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32And => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.bitand(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Or => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.bitor(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Xor => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.bitxor(b)));
+
+                ExecutionResult::Next
+            }
+            // Shift and rotate counts are taken modulo the operand width, so a
+            // count of 32 or more is well defined rather than a trap or UB. The
+            // `wrapping_*`/`rotate_*` methods apply exactly that masking; the plain
+            // `<<`/`>>` operators would instead panic in debug builds.
+            Instruction::I32Shl => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_shl(b as u32)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32ShrU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                // Logical shift: done on `u32` so the vacated high bits are zeros.
+                self.stack.push(Val::I32(a.wrapping_shr(b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32ShrS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                // Arithmetic shift: on `i32` the sign bit is replicated.
+                self.stack.push(Val::I32(a.wrapping_shr(b as u32)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Rotl => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32(a.rotate_left(b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Rotr => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32(a.rotate_right(b) as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I64Add => {
                 let b = self.stack.pop().as_i64();
                 let a = self.stack.pop().as_i64();
@@ -568,6 +697,130 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_i64();
 
                 self.stack.push(Val::I64(a.wrapping_mul(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64DivU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I64(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )? as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64DivS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )?));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64RemU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I64(a.checked_rem(b).ok_or(
+                    InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    },
+                )? as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64RemS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
+                if b == 0 {
+                    return Err(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    });
+                }
+
+                self.stack.push(Val::I64(a.wrapping_rem(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64And => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.bitand(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Or => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.bitor(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Xor => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.bitxor(b)));
+
+                ExecutionResult::Next
+            }
+            // As for `i32`, but masked modulo 64. The count arrives as an `i64` and
+            // the shift methods take `u32`, so it is narrowed first — harmless,
+            // since only the low 6 bits survive the masking anyway.
+            Instruction::I64Shl => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_shl(b as u32)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64ShrU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                // Logical shift: done on `u64` so the vacated high bits are zeros.
+                self.stack.push(Val::I64(a.wrapping_shr(b as u32) as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64ShrS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                // Arithmetic shift: on `i64` the sign bit is replicated.
+                self.stack.push(Val::I64(a.wrapping_shr(b as u32)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Rotl => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I64(a.rotate_left(b as u32) as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Rotr => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I64(a.rotate_right(b as u32) as i64));
 
                 ExecutionResult::Next
             }
@@ -595,6 +848,16 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::F32Div => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                // Unlike the integer divides this never traps: IEEE 754 gives
+                // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
+                self.stack.push(Val::F32(a / b));
+
+                ExecutionResult::Next
+            }
             Instruction::F64Add => {
                 let b = self.stack.pop().as_f64();
                 let a = self.stack.pop().as_f64();
@@ -616,6 +879,16 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_f64();
 
                 self.stack.push(Val::F64(a * b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Div => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                // See `F32Div`: division by zero yields an infinity or NaN, never
+                // a trap.
+                self.stack.push(Val::F64(a / b));
 
                 ExecutionResult::Next
             }

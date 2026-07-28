@@ -585,6 +585,10 @@ pub enum InstructionExecutionError {
     /// address overflow). Field: the specific [`MemoryError`].
     #[error("{0}")]
     Memory(MemoryError),
+    #[error("division failed: {num}/{deno}")]
+    Division { num: String, deno: String },
+    #[error("remainder failed: {left} % {right}")]
+    Remainder { left: String, right: String },
 }
 
 impl InstructionExecutionError {
