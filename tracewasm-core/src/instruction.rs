@@ -335,15 +335,30 @@ pub enum Instruction {
     I32Rotl,
     /// `i32.rotr`: rotate right by `count mod 32`.
     I32Rotr,
+    // Comparisons. Each pops two operands and pushes an **`i32`** 0/1 — the result
+    // is an `i32` even for the `i64` forms, so it can feed `br_if`/`select`
+    // directly. `eq`/`ne` compare bit patterns, so they need no signed/unsigned
+    // split; the ordered comparisons do, and the two disagree whenever an operand
+    // has its high bit set (`-1` is the largest value unsigned).
+    /// `i32.eq`: equality.
     I32Eq,
+    /// `i32.ne`: inequality.
     I32Ne,
+    /// `i32.lt_u`: unsigned less-than.
     I32LtU,
+    /// `i32.lt_s`: signed less-than.
     I32LtS,
+    /// `i32.gt_u`: unsigned greater-than.
     I32GtU,
+    /// `i32.gt_s`: signed greater-than.
     I32GtS,
+    /// `i32.le_u`: unsigned less-than-or-equal.
     I32LeU,
+    /// `i32.le_s`: signed less-than-or-equal.
     I32LeS,
+    /// `i32.ge_u`: unsigned greater-than-or-equal.
     I32GeU,
+    /// `i32.ge_s`: signed greater-than-or-equal.
     I32GeS,
     /// `i64.add`.
     I64Add,
@@ -378,15 +393,25 @@ pub enum Instruction {
     I64Rotl,
     /// `i64.rotr`: rotate right by `count mod 64`.
     I64Rotr,
+    /// `i64.eq`: equality.
     I64Eq,
+    /// `i64.ne`: inequality.
     I64Ne,
+    /// `i64.lt_u`: unsigned less-than.
     I64LtU,
+    /// `i64.lt_s`: signed less-than.
     I64LtS,
+    /// `i64.gt_u`: unsigned greater-than.
     I64GtU,
+    /// `i64.gt_s`: signed greater-than.
     I64GtS,
+    /// `i64.le_u`: unsigned less-than-or-equal.
     I64LeU,
+    /// `i64.le_s`: signed less-than-or-equal.
     I64LeS,
+    /// `i64.ge_u`: unsigned greater-than-or-equal.
     I64GeU,
+    /// `i64.ge_s`: signed greater-than-or-equal.
     I64GeS,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
