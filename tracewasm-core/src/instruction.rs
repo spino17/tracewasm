@@ -60,80 +60,6 @@ pub enum Instruction {
     Unreachable,
     /// Does nothing.
     Nop,
-    Block {
-        /// Absolute index of this block's matching `End`. Backpatched; a branch
-        /// that targets this block jumps here.
-        end_index: usize,
-    },
-    /// Opens a loop. Branches targeting a loop jump back to this instruction
-    /// (the loop start), so no `end` index is needed.
-    Loop,
-    If {
-        /// Absolute index of the matching `Else`, if one exists. Backpatched at
-        /// `End`.
-        else_index: Option<usize>,
-        /// Absolute index of this `if`'s matching `End`. Backpatched.
-        end_index: usize,
-    },
-    Else {
-        /// Absolute index of the owning `if`'s `End`. When the then-branch falls
-        /// through into `else`, control skips to this `End`. Backpatched.
-        if_end_index: usize,
-    },
-    End {
-        /// Number of result values the just-closed block leaves on the stack.
-        arity: u32,
-        /// Height the stack unwinds to before the `arity` results are kept. See
-        /// `Block::recorded_height`.
-        recorded_height: u32,
-    },
-    Br {
-        /// Absolute jump target. For a `loop` label this is the `Loop`
-        /// instruction (a back-edge / "continue"); otherwise it is the label's
-        /// `End`. Backpatched (with `usize::MAX` sentinel) for non-loop targets.
-        target_index: usize,
-        /// Number of values transferred to the label (loop params, else results).
-        arity: u32,
-        /// Stack height the target label unwinds to; see `Block::recorded_height`.
-        recorded_height: u32,
-    },
-    BrIf {
-        /// See `Br::target_index`. Same target rules as `Br`.
-        target_index: usize,
-        /// Number of values transferred to the label; see `Br::arity`.
-        arity: u32,
-        /// Stack height the target label unwinds to; see `Block::recorded_height`.
-        recorded_height: u32,
-    },
-    BrTable {
-        /// One [`TargetBranch`] per explicit label, in order, followed by the
-        /// default label as the final element.
-        targets: Vec<TargetBranch>,
-    },
-    Return {
-        /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
-        /// sentinel) — `return` is a branch to the outermost function label.
-        target_index: usize,
-        /// Number of result values the function returns.
-        arity: u32,
-        /// Stack height the function frame unwinds to before the `arity` results
-        /// are kept; always 0 for the function frame.
-        recorded_height: u32,
-    },
-    Call {
-        /// Index of the callee in the function index space.
-        func_index: FuncIndex,
-        /// Number of arguments the callee pops from the stack.
-        params_count: u32,
-    },
-    CallIndirect {
-        /// The callee signature's parameter types.
-        params: Box<[ValType]>,
-        /// The callee signature's result types.
-        results: Box<[ValType]>,
-        /// Table holding the callee function references.
-        table_index: TableIndex,
-    },
     I32Const {
         /// The constant value pushed onto the stack.
         value: i32,
@@ -155,48 +81,6 @@ pub enum Instruction {
     RefFunc {
         /// Index of the function whose reference is pushed.
         function_index: FuncIndex,
-    },
-    /// `i32.add`.
-    I32Add,
-    /// `i32.sub`.
-    I32Sub,
-    /// `i32.mul`.
-    I32Mul,
-    /// `i64.add`.
-    I64Add,
-    /// `i64.sub`.
-    I64Sub,
-    /// `i64.mul`.
-    I64Mul,
-    /// `drop`: discards the top
-    Drop,
-    /// `select`: pop cond, then b, then a; push cond != 0 ? a : b -> standard in LLVM
-    Select,
-    /// `local.get`: push the value of the local at `index`.
-    LocalGet {
-        /// Index of the local (params first, then declared locals).
-        index: LocalIndex,
-    },
-    /// `local.set`: pop a value and store it into the local at `index`.
-    LocalSet {
-        /// Index of the local (params first, then declared locals).
-        index: LocalIndex,
-    },
-    /// `local.tee`: store the top value into the local at `index`, leaving it on
-    /// the stack.
-    LocalTee {
-        /// Index of the local (params first, then declared locals).
-        index: LocalIndex,
-    },
-    /// `global.get`: push the value of the global at `index`.
-    GlobalGet {
-        /// Index into the module's global index space.
-        index: GlobalIndex,
-    },
-    /// `global.set`: pop a value and store it into the (mutable) global at `index`.
-    GlobalSet {
-        /// Index into the module's global index space.
-        index: GlobalIndex,
     },
     // Loads. Every variant pops an address and pushes one value read from
     // `address + offset` (little-endian); the narrow `*_u`/`*_s` forms read fewer
@@ -371,6 +255,137 @@ pub enum Instruction {
         offset: u64,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
+    },
+    /// `i32.add`.
+    I32Add,
+    /// `i32.sub`.
+    I32Sub,
+    /// `i32.mul`.
+    I32Mul,
+    /// `i64.add`.
+    I64Add,
+    /// `i64.sub`.
+    I64Sub,
+    /// `i64.mul`.
+    I64Mul,
+    // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
+    // operators already provide. These never trap: overflow yields an infinity and
+    // a NaN operand yields a NaN, whose payload the spec leaves nondeterministic.
+    /// `f32.add`.
+    F32Add,
+    /// `f32.sub`.
+    F32Sub,
+    /// `f32.mul`.
+    F32Mul,
+    /// `f64.add`.
+    F64Add,
+    /// `f64.sub`.
+    F64Sub,
+    /// `f64.mul`.
+    F64Mul,
+    /// `local.get`: push the value of the local at `index`.
+    LocalGet {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `local.set`: pop a value and store it into the local at `index`.
+    LocalSet {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `local.tee`: store the top value into the local at `index`, leaving it on
+    /// the stack.
+    LocalTee {
+        /// Index of the local (params first, then declared locals).
+        index: LocalIndex,
+    },
+    /// `global.get`: push the value of the global at `index`.
+    GlobalGet {
+        /// Index into the module's global index space.
+        index: GlobalIndex,
+    },
+    /// `global.set`: pop a value and store it into the (mutable) global at `index`.
+    GlobalSet {
+        /// Index into the module's global index space.
+        index: GlobalIndex,
+    },
+    Call {
+        /// Index of the callee in the function index space.
+        func_index: FuncIndex,
+        /// Number of arguments the callee pops from the stack.
+        params_count: u32,
+    },
+    CallIndirect {
+        /// The callee signature's parameter types.
+        params: Box<[ValType]>,
+        /// The callee signature's result types.
+        results: Box<[ValType]>,
+        /// Table holding the callee function references.
+        table_index: TableIndex,
+    },
+    /// `drop`: discards the top
+    Drop,
+    /// `select`: pop cond, then b, then a; push cond != 0 ? a : b -> standard in LLVM
+    Select,
+    Block {
+        /// Absolute index of this block's matching `End`. Backpatched; a branch
+        /// that targets this block jumps here.
+        end_index: usize,
+    },
+    /// Opens a loop. Branches targeting a loop jump back to this instruction
+    /// (the loop start), so no `end` index is needed.
+    Loop,
+    If {
+        /// Absolute index of the matching `Else`, if one exists. Backpatched at
+        /// `End`.
+        else_index: Option<usize>,
+        /// Absolute index of this `if`'s matching `End`. Backpatched.
+        end_index: usize,
+    },
+    Else {
+        /// Absolute index of the owning `if`'s `End`. When the then-branch falls
+        /// through into `else`, control skips to this `End`. Backpatched.
+        if_end_index: usize,
+    },
+    Br {
+        /// Absolute jump target. For a `loop` label this is the `Loop`
+        /// instruction (a back-edge / "continue"); otherwise it is the label's
+        /// `End`. Backpatched (with `usize::MAX` sentinel) for non-loop targets.
+        target_index: usize,
+        /// Number of values transferred to the label (loop params, else results).
+        arity: u32,
+        /// Stack height the target label unwinds to; see `Block::recorded_height`.
+        recorded_height: u32,
+    },
+    BrIf {
+        /// See `Br::target_index`. Same target rules as `Br`.
+        target_index: usize,
+        /// Number of values transferred to the label; see `Br::arity`.
+        arity: u32,
+        /// Stack height the target label unwinds to; see `Block::recorded_height`.
+        recorded_height: u32,
+    },
+    BrTable {
+        /// One [`TargetBranch`] per explicit label, in order, followed by the
+        /// default label as the final element.
+        targets: Vec<TargetBranch>,
+    },
+    Return {
+        /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
+        /// sentinel) — `return` is a branch to the outermost function label.
+        target_index: usize,
+        /// Number of result values the function returns.
+        arity: u32,
+        /// Stack height the function frame unwinds to before the `arity` results
+        /// are kept; always 0 for the function frame.
+        recorded_height: u32,
+    },
+    End {
+        /// Number of result values the just-closed block leaves on the stack.
+        arity: u32,
+        /// Height the stack unwinds to before the `arity` results are kept. See
+        /// `Block::recorded_height`.
+        recorded_height: u32,
     },
 }
 
@@ -775,50 +790,6 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
-                Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
-                Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
-                Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
-                Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
-                Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
-                Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
-                Operator::Drop => (
-                    Instruction::Drop,
-                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
-                ),
-                Operator::Select => (
-                    Instruction::Select,
-                    StackEffectResult::PopPush { pops: 3, pushes: 1 },
-                ),
-                Operator::LocalGet { local_index } => (
-                    Instruction::LocalGet {
-                        index: LocalIndex(local_index),
-                    },
-                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
-                ),
-                Operator::LocalSet { local_index } => (
-                    Instruction::LocalSet {
-                        index: LocalIndex(local_index),
-                    },
-                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
-                ),
-                Operator::LocalTee { local_index } => (
-                    Instruction::LocalTee {
-                        index: LocalIndex(local_index),
-                    },
-                    StackEffectResult::NoEffect,
-                ),
-                Operator::GlobalGet { global_index } => (
-                    Instruction::GlobalGet {
-                        index: GlobalIndex(global_index),
-                    },
-                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
-                ),
-                Operator::GlobalSet { global_index } => (
-                    Instruction::GlobalSet {
-                        index: GlobalIndex(global_index),
-                    },
-                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
-                ),
                 Operator::I32Load { memarg } => (
                     Instruction::I32Load {
                         offset: memarg.offset,
@@ -979,6 +950,95 @@ impl Instruction {
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
+                ),
+                Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
+                Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
+                Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
+                Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
+                Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
+                Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
+                Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
+                Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
+                Operator::F32Mul => (Instruction::F32Mul, StackEffectResult::BinaryOperator),
+                Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
+                Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
+                Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
+                Operator::LocalGet { local_index } => (
+                    Instruction::LocalGet {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::LocalSet { local_index } => (
+                    Instruction::LocalSet {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                ),
+                Operator::LocalTee { local_index } => (
+                    Instruction::LocalTee {
+                        index: LocalIndex(local_index),
+                    },
+                    StackEffectResult::NoEffect,
+                ),
+                Operator::GlobalGet { global_index } => (
+                    Instruction::GlobalGet {
+                        index: GlobalIndex(global_index),
+                    },
+                    StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::GlobalSet { global_index } => (
+                    Instruction::GlobalSet {
+                        index: GlobalIndex(global_index),
+                    },
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
+                ),
+                Operator::Call { function_index } => {
+                    let func_decl = &func_decls[function_index as usize];
+                    let ty = &types[func_decl.ty.0 as usize];
+                    let params = &ty.params;
+                    let results = &ty.results;
+
+                    (
+                        Instruction::Call {
+                            func_index: FuncIndex(function_index),
+                            params_count: params.len() as u32,
+                        },
+                        StackEffectResult::PopPush {
+                            pops: params.len() as u32,
+                            pushes: results.len() as u32,
+                        },
+                    )
+                }
+                Operator::CallIndirect {
+                    type_index,
+                    table_index,
+                } => {
+                    let func_ty = &types[type_index as usize];
+                    let params = func_ty.params.clone();
+                    let results = func_ty.results.clone();
+
+                    let stack_effect = StackEffectResult::PopPush {
+                        pops: 1 + params.len() as u32,
+                        pushes: results.len() as u32,
+                    };
+
+                    (
+                        Instruction::CallIndirect {
+                            params,
+                            results,
+                            table_index: TableIndex(table_index),
+                        },
+                        stack_effect,
+                    )
+                }
+                Operator::Select => (
+                    Instruction::Select,
+                    StackEffectResult::PopPush { pops: 3, pushes: 1 },
+                ),
+                Operator::Drop => (
+                    Instruction::Drop,
+                    StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
                 Operator::Block { blockty } => {
                     control_stack.add_block(
@@ -1200,45 +1260,6 @@ impl Instruction {
                             recorded_height,
                         },
                         StackEffectResult::Unreachable,
-                    )
-                }
-                Operator::Call { function_index } => {
-                    let func_decl = &func_decls[function_index as usize];
-                    let ty = &types[func_decl.ty.0 as usize];
-                    let params = &ty.params;
-                    let results = &ty.results;
-
-                    (
-                        Instruction::Call {
-                            func_index: FuncIndex(function_index),
-                            params_count: params.len() as u32,
-                        },
-                        StackEffectResult::PopPush {
-                            pops: params.len() as u32,
-                            pushes: results.len() as u32,
-                        },
-                    )
-                }
-                Operator::CallIndirect {
-                    type_index,
-                    table_index,
-                } => {
-                    let func_ty = &types[type_index as usize];
-                    let params = func_ty.params.clone();
-                    let results = func_ty.results.clone();
-
-                    let stack_effect = StackEffectResult::PopPush {
-                        pops: 1 + params.len() as u32,
-                        pushes: results.len() as u32,
-                    };
-
-                    (
-                        Instruction::CallIndirect {
-                            params,
-                            results,
-                            table_index: TableIndex(table_index),
-                        },
-                        stack_effect,
                     )
                 }
                 Operator::End => {

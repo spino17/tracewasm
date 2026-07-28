@@ -220,179 +220,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 return Err(InstructionExecutionError::Unreachable);
             }
             Instruction::Nop => ExecutionResult::Next,
-            Instruction::Block {
-                end_index: _end_index,
-            } => ExecutionResult::Next,
-            Instruction::Loop => ExecutionResult::Next,
-            Instruction::If {
-                else_index,
-                end_index,
-            } => {
-                let cond = self.stack.pop().as_i32();
-
-                if cond != 0 {
-                    ExecutionResult::Next
-                } else {
-                    if let Some(else_index) = else_index {
-                        ExecutionResult::JumpTo(*else_index + 1) // first instruction of the else branch
-                    } else {
-                        ExecutionResult::JumpTo(*end_index)
-                    }
-                }
-            }
-            // this instruction would be encountered only when control flow is coming after completing `if` branch
-            // because if the condition was `false` and the control went to `else` branch, it jumps to the first
-            // instruction of `else` branch and not the `else` instruction.
-            Instruction::Else { if_end_index } => ExecutionResult::JumpTo(*if_end_index),
-            Instruction::End {
-                arity,
-                recorded_height,
-            } => {
-                // Sanity check the height model: when a block closes, the stack must
-                // hold exactly its `arity` results above the label's recorded height.
-                // Both are frame-relative, so shift by this frame's base to compare
-                // against the shared stack's absolute height.
-                debug_assert!(
-                    self.stack.height() == *recorded_height + *arity + caller_base_height
-                );
-
-                ExecutionResult::Next
-            }
-            Instruction::Br {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                // Unwind to the target label's absolute height (frame base + its
-                // recorded height) while keeping the top `arity` values, then jump.
-                self.stack
-                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
-
-                ExecutionResult::JumpTo(*target_index)
-            }
-            Instruction::BrIf {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                let cond = self.stack.pop().as_i32();
-
-                if cond != 0 {
-                    self.stack.truncate_by_preserving_arity(
-                        *recorded_height + caller_base_height,
-                        *arity,
-                    );
-
-                    ExecutionResult::JumpTo(*target_index)
-                } else {
-                    ExecutionResult::Next
-                }
-            }
-            Instruction::BrTable { targets } => {
-                // the branch index is an unsigned i32; go through u32 so a
-                // high-bit-set value maps to a large index (→ default), not a
-                // sign-extended one.
-                let index = self.stack.pop().as_i32() as u32 as usize;
-                let target_count = targets.len() - 1;
-
-                let branch = if target_count <= index {
-                    &targets[target_count] // always the last element of targets
-                } else {
-                    &targets[index]
-                };
-
-                self.stack.truncate_by_preserving_arity(
-                    branch.recorded_height + caller_base_height,
-                    branch.arity,
-                );
-
-                ExecutionResult::JumpTo(branch.target_index)
-            }
-            Instruction::Return {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                self.stack
-                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
-
-                ExecutionResult::JumpTo(*target_index)
-            }
-            Instruction::Call {
-                func_index: callee_func_index,
-                params_count,
-            } => {
-                self.call_func(*callee_func_index, *params_count, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
-                    })?;
-
-                ExecutionResult::Next
-            }
-            Instruction::CallIndirect {
-                params,
-                results,
-                table_index,
-            } => {
-                let table = &self.tables[table_index.0 as usize];
-                // The index operand is an unsigned i32; a negative value becomes a
-                // large `usize` and fails the bounds check below.
-                let slot = self.stack.pop().as_i32() as u32 as usize;
-
-                // Trap if the index is past the table's end (wasm: "undefined element").
-                let Some(func_ref) = table.table.get(slot).copied() else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::TableSlotOutOfBounds,
-                    ));
-                };
-
-                // Trap on a null element (wasm: "uninitialized element").
-                let Some(callee_func_index) = func_ref else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::NullElementInTable,
-                    ));
-                };
-
-                let func = &module.func_decls[callee_func_index.0 as usize];
-                let ty = &module.types[func.ty.0 as usize];
-
-                let declared_params = &ty.params;
-                let declared_results = &ty.results;
-
-                // Trap if the callee's signature differs from the type the
-                // instruction expects (wasm: "indirect call type mismatch").
-                if params.as_ref() != declared_params.as_ref()
-                    || results.as_ref() != declared_results.as_ref()
-                {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::FunctionSignatureMismatch(
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(declared_params),
-                                formatted_val_types(declared_results)
-                            ),
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(params),
-                                formatted_val_types(results)
-                            ),
-                        ),
-                    ));
-                }
-
-                self.call_func(callee_func_index, declared_params.len() as u32, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::CallIndirect(
-                            *table_index,
-                            FunctionCall(callee_func_index, Box::new(err)),
-                        )
-                    })?;
-
-                ExecutionResult::Next
-            }
             Instruction::I32Const { value } => {
                 self.stack.push(Val::I32(*value));
 
@@ -420,104 +247,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::RefFunc { function_index } => {
                 self.stack.push(Val::Ref(Some(*function_index)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Add => {
-                let b = self.stack.pop().as_i32();
-                let a = self.stack.pop().as_i32();
-
-                self.stack.push(Val::I32(a.wrapping_add(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Sub => {
-                let b = self.stack.pop().as_i32();
-                let a = self.stack.pop().as_i32();
-
-                self.stack.push(Val::I32(a.wrapping_sub(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Mul => {
-                let b = self.stack.pop().as_i32();
-                let a = self.stack.pop().as_i32();
-
-                self.stack.push(Val::I32(a.wrapping_mul(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Add => {
-                let b = self.stack.pop().as_i64();
-                let a = self.stack.pop().as_i64();
-
-                self.stack.push(Val::I64(a.wrapping_add(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Sub => {
-                let b = self.stack.pop().as_i64();
-                let a = self.stack.pop().as_i64();
-
-                self.stack.push(Val::I64(a.wrapping_sub(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Mul => {
-                let b = self.stack.pop().as_i64();
-                let a = self.stack.pop().as_i64();
-
-                self.stack.push(Val::I64(a.wrapping_mul(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::Drop => {
-                let _ = self.stack.pop();
-
-                ExecutionResult::Next
-            }
-            Instruction::Select => {
-                let cond = self.stack.pop().as_i32();
-                let b = self.stack.pop();
-                let a = self.stack.pop();
-
-                // true condition
-                if cond != 0 {
-                    self.stack.push(a);
-                } else {
-                    self.stack.push(b);
-                }
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalGet { index } => {
-                self.stack.push(self.locals.get(*index));
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalSet { index } => {
-                let val = self.stack.pop();
-
-                self.locals.set(*index, val);
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalTee { index } => {
-                let val = self.stack.tee();
-
-                self.locals.set(*index, val);
-
-                ExecutionResult::Next
-            }
-            Instruction::GlobalGet { index } => {
-                self.stack.push(self.globals[index.0 as usize]);
-
-                ExecutionResult::Next
-            }
-            Instruction::GlobalSet { index } => {
-                let val = self.stack.pop();
-
-                self.globals[index.0 as usize] = val;
 
                 ExecutionResult::Next
             }
@@ -702,6 +431,325 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
 
                 self.memory.write_f64(effective_offset, val)?;
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Add => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_add(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Sub => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_sub(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Mul => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.wrapping_mul(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Add => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_add(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Sub => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_sub(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Mul => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.wrapping_mul(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Add => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a + b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Sub => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a - b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Mul => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a * b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Add => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a + b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Sub => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a - b));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Mul => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a * b));
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalGet { index } => {
+                self.stack.push(self.locals.get(*index));
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalSet { index } => {
+                let val = self.stack.pop();
+
+                self.locals.set(*index, val);
+
+                ExecutionResult::Next
+            }
+            Instruction::LocalTee { index } => {
+                let val = self.stack.tee();
+
+                self.locals.set(*index, val);
+
+                ExecutionResult::Next
+            }
+            Instruction::GlobalGet { index } => {
+                self.stack.push(self.globals[index.0 as usize]);
+
+                ExecutionResult::Next
+            }
+            Instruction::GlobalSet { index } => {
+                let val = self.stack.pop();
+
+                self.globals[index.0 as usize] = val;
+
+                ExecutionResult::Next
+            }
+            Instruction::Call {
+                func_index: callee_func_index,
+                params_count,
+            } => {
+                self.call_func(*callee_func_index, *params_count, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
+                    })?;
+
+                ExecutionResult::Next
+            }
+            Instruction::CallIndirect {
+                params,
+                results,
+                table_index,
+            } => {
+                let table = &self.tables[table_index.0 as usize];
+                // The index operand is an unsigned i32; a negative value becomes a
+                // large `usize` and fails the bounds check below.
+                let slot = self.stack.pop().as_i32() as u32 as usize;
+
+                // Trap if the index is past the table's end (wasm: "undefined element").
+                let Some(func_ref) = table.table.get(slot).copied() else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::TableSlotOutOfBounds,
+                    ));
+                };
+
+                // Trap on a null element (wasm: "uninitialized element").
+                let Some(callee_func_index) = func_ref else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::NullElementInTable,
+                    ));
+                };
+
+                let func = &module.func_decls[callee_func_index.0 as usize];
+                let ty = &module.types[func.ty.0 as usize];
+
+                let declared_params = &ty.params;
+                let declared_results = &ty.results;
+
+                // Trap if the callee's signature differs from the type the
+                // instruction expects (wasm: "indirect call type mismatch").
+                if params.as_ref() != declared_params.as_ref()
+                    || results.as_ref() != declared_results.as_ref()
+                {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::FunctionSignatureMismatch(
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(declared_params),
+                                formatted_val_types(declared_results)
+                            ),
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(params),
+                                formatted_val_types(results)
+                            ),
+                        ),
+                    ));
+                }
+
+                self.call_func(callee_func_index, declared_params.len() as u32, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::CallIndirect(
+                            *table_index,
+                            FunctionCall(callee_func_index, Box::new(err)),
+                        )
+                    })?;
+
+                ExecutionResult::Next
+            }
+            Instruction::Drop => {
+                let _ = self.stack.pop();
+
+                ExecutionResult::Next
+            }
+            Instruction::Select => {
+                let cond = self.stack.pop().as_i32();
+                let b = self.stack.pop();
+                let a = self.stack.pop();
+
+                // true condition
+                if cond != 0 {
+                    self.stack.push(a);
+                } else {
+                    self.stack.push(b);
+                }
+
+                ExecutionResult::Next
+            }
+            Instruction::Block {
+                end_index: _end_index,
+            } => ExecutionResult::Next,
+            Instruction::Loop => ExecutionResult::Next,
+            Instruction::If {
+                else_index,
+                end_index,
+            } => {
+                let cond = self.stack.pop().as_i32();
+
+                if cond != 0 {
+                    ExecutionResult::Next
+                } else {
+                    if let Some(else_index) = else_index {
+                        ExecutionResult::JumpTo(*else_index + 1) // first instruction of the else branch
+                    } else {
+                        ExecutionResult::JumpTo(*end_index)
+                    }
+                }
+            }
+            // this instruction would be encountered only when control flow is coming after completing `if` branch
+            // because if the condition was `false` and the control went to `else` branch, it jumps to the first
+            // instruction of `else` branch and not the `else` instruction.
+            Instruction::Else { if_end_index } => ExecutionResult::JumpTo(*if_end_index),
+            Instruction::Br {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                // Unwind to the target label's absolute height (frame base + its
+                // recorded height) while keeping the top `arity` values, then jump.
+                self.stack
+                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
+
+                ExecutionResult::JumpTo(*target_index)
+            }
+            Instruction::BrIf {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                let cond = self.stack.pop().as_i32();
+
+                if cond != 0 {
+                    self.stack.truncate_by_preserving_arity(
+                        *recorded_height + caller_base_height,
+                        *arity,
+                    );
+
+                    ExecutionResult::JumpTo(*target_index)
+                } else {
+                    ExecutionResult::Next
+                }
+            }
+            Instruction::BrTable { targets } => {
+                // the branch index is an unsigned i32; go through u32 so a
+                // high-bit-set value maps to a large index (→ default), not a
+                // sign-extended one.
+                let index = self.stack.pop().as_i32() as u32 as usize;
+                let target_count = targets.len() - 1;
+
+                let branch = if target_count <= index {
+                    &targets[target_count] // always the last element of targets
+                } else {
+                    &targets[index]
+                };
+
+                self.stack.truncate_by_preserving_arity(
+                    branch.recorded_height + caller_base_height,
+                    branch.arity,
+                );
+
+                ExecutionResult::JumpTo(branch.target_index)
+            }
+            Instruction::Return {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                self.stack
+                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
+
+                ExecutionResult::JumpTo(*target_index)
+            }
+            Instruction::End {
+                arity,
+                recorded_height,
+            } => {
+                // Sanity check the height model: when a block closes, the stack must
+                // hold exactly its `arity` results above the label's recorded height.
+                // Both are frame-relative, so shift by this frame's base to compare
+                // against the shared stack's absolute height.
+                debug_assert!(
+                    self.stack.height() == *recorded_height + *arity + caller_base_height
+                );
 
                 ExecutionResult::Next
             }
