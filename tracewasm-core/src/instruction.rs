@@ -681,10 +681,17 @@ enum StackEffectResult {
     /// enclosing `end` are unreachable anyway, and reaching that `end` always
     /// resets the height correctly to the block's `recorded_height + results`.
     Unreachable,
-    /// a specific `PopPush { pops: 1, pushes: 1 }` for load instructions.
+    /// Shorthand for `PopPush { pops: 1, pushes: 1 }`: a load pops its address and
+    /// pushes the value read, so the height is unchanged.
     Loads,
-    /// a specific `PopPush { pops: 2, pushes: 0 }` for store instructions.
+    /// Shorthand for `PopPush { pops: 2, pushes: 0 }`: a store pops the value and
+    /// the address, pushing nothing.
     Stores,
+    /// Shorthand for `PopPush { pops: 2, pushes: 1 }`: a binary operator pops both
+    /// operands and pushes the single result. Covers the arithmetic, bitwise, and
+    /// comparison operators — the comparisons included, since they push an `i32`
+    /// boolean rather than nothing.
+    BinaryOperator,
 }
 
 impl Instruction {
@@ -768,30 +775,12 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
-                Operator::I32Add => (
-                    Instruction::I32Add,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
-                Operator::I32Sub => (
-                    Instruction::I32Sub,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
-                Operator::I32Mul => (
-                    Instruction::I32Mul,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
-                Operator::I64Add => (
-                    Instruction::I64Add,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
-                Operator::I64Sub => (
-                    Instruction::I64Sub,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
-                Operator::I64Mul => (
-                    Instruction::I64Mul,
-                    StackEffectResult::PopPush { pops: 2, pushes: 1 },
-                ),
+                Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
+                Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
+                Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
+                Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
+                Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
+                Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
                 Operator::Drop => (
                     Instruction::Drop,
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
@@ -1370,6 +1359,9 @@ impl Instruction {
                 }
                 StackEffectResult::Stores => {
                     control_stack.apply_stack_effects_to_height(2, 0);
+                }
+                StackEffectResult::BinaryOperator => {
+                    control_stack.apply_stack_effects_to_height(2, 1);
                 }
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
                 StackEffectResult::NoEffect
