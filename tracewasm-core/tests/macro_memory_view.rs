@@ -4,7 +4,7 @@
 use tracewasm_core::{
     error::TraceWasmError,
     instance::traits::{ImportRegistry, Val},
-    memory::{Memory, MemoryView, linear::LinearMemory},
+    memory::{MemoryView, linear::LinearMemory},
 };
 use tracewasm_macros::imports;
 

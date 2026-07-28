@@ -381,6 +381,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "trace-rs"
+version = "0.1.0"
+
+[[package]]
 name = "tracewasm-core"
 version = "0.1.0"
 dependencies = [
