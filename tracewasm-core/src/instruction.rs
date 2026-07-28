@@ -60,36 +60,67 @@ pub enum Instruction {
     Unreachable,
     /// Does nothing.
     Nop,
+    /// `i32.const`: push an immediate `i32`.
     I32Const {
         /// The constant value pushed onto the stack.
         value: i32,
     },
+    /// `i64.const`: push an immediate `i64`.
     I64Const {
         /// The constant value pushed onto the stack.
         value: i64,
     },
+    /// `f32.const`: push an immediate `f32`, bit pattern preserved exactly.
     F32Const {
         /// The constant value pushed onto the stack.
         value: f32,
     },
+    /// `f64.const`: push an immediate `f64`, bit pattern preserved exactly.
     F64Const {
         /// The constant value pushed onto the stack.
         value: f64,
     },
-    /// Pushes a null reference.
+    /// `ref.null`: push a null reference.
     RefNull,
+    /// `ref.func`: push a reference to the given function.
     RefFunc {
         /// Index of the function whose reference is pushed.
         function_index: FuncIndex,
     },
+    /// `memory.size`: push the memory's current size in pages.
     MemorySize,
+    /// `memory.grow`: pop a page delta and grow the memory, pushing the size
+    /// *before* the growth.
+    ///
+    /// Does **not** trap when the request cannot be satisfied — it pushes `-1` and
+    /// execution continues. The ceiling is the module's declared maximum, narrowed
+    /// by the instance [`Config`](crate::instance::config::Config).
     MemoryGrow,
+    /// `memory.copy`: pop `len`, `src`, `dest` and copy within linear memory.
+    ///
+    /// The ranges may overlap (`memmove` semantics). Traps if either runs past the
+    /// end of memory, with nothing written.
     MemoryCopy,
+    /// `memory.fill`: pop `len`, `value`, `dest` and set the range to the low byte
+    /// of `value`. Traps if the range runs past the end of memory.
     MemoryFill,
+    /// `memory.init`: pop `len`, `src`, `dest` and copy from a passive data
+    /// segment into linear memory.
+    ///
+    /// Traps if the source range exceeds the segment or the destination exceeds
+    /// memory. A segment already released by [`Self::DataDrop`] reads as empty, so
+    /// a zero-length init still succeeds.
     MemoryInit {
+        /// Index of the data segment to copy from.
         data_index: u32,
     },
+    /// `data.drop`: release a passive data segment's bytes.
+    ///
+    /// The segment becomes empty rather than invalid, so a later
+    /// [`Self::MemoryInit`] traps only if it asks for a non-empty range. Dropping
+    /// twice is harmless.
     DataDrop {
+        /// Index of the data segment to release.
         data_index: u32,
     },
     // Loads. Every variant pops an address and pushes one value read from
@@ -272,17 +303,37 @@ pub enum Instruction {
     I32Sub,
     /// `i32.mul`.
     I32Mul,
+    /// `i32.div_u`: unsigned division. Traps on a zero divisor.
     I32DivU,
+    /// `i32.div_s`: signed division, truncating toward zero. Traps on a zero
+    /// divisor **and** on overflow (`i32::MIN / -1`, whose quotient is not
+    /// representable).
     I32DivS,
+    /// `i32.rem_u`: unsigned remainder. Traps on a zero divisor.
     I32RemU,
+    /// `i32.rem_s`: signed remainder, taking the sign of the dividend.
+    ///
+    /// Traps *only* on a zero divisor — unlike [`Self::I32DivS`] it does not trap
+    /// on overflow: `i32::MIN % -1` is defined as `0`.
     I32RemS,
+    /// `i32.and`: bitwise AND.
     I32And,
+    /// `i32.or`: bitwise OR.
     I32Or,
+    /// `i32.xor`: bitwise XOR.
     I32Xor,
+    // Shifts and rotates take their count modulo the operand width, so a count of
+    // 32 or more wraps rather than being an error — none of these can trap.
+    /// `i32.shl`: shift left by `count mod 32`.
     I32Shl,
+    /// `i32.shr_u`: logical shift right by `count mod 32`, shifting in zeros.
     I32ShrU,
+    /// `i32.shr_s`: arithmetic shift right by `count mod 32`, replicating the sign
+    /// bit.
     I32ShrS,
+    /// `i32.rotl`: rotate left by `count mod 32`.
     I32Rotl,
+    /// `i32.rotr`: rotate right by `count mod 32`.
     I32Rotr,
     /// `i64.add`.
     I64Add,
@@ -290,17 +341,32 @@ pub enum Instruction {
     I64Sub,
     /// `i64.mul`.
     I64Mul,
+    /// `i64.div_u`: unsigned division. Traps on a zero divisor.
     I64DivU,
+    /// `i64.div_s`: signed division, truncating toward zero. Traps on a zero
+    /// divisor **and** on overflow (`i64::MIN / -1`).
     I64DivS,
+    /// `i64.rem_u`: unsigned remainder. Traps on a zero divisor.
     I64RemU,
+    /// `i64.rem_s`: signed remainder. Traps *only* on a zero divisor;
+    /// `i64::MIN % -1` is `0`, not an overflow. See [`Self::I32RemS`].
     I64RemS,
+    /// `i64.and`: bitwise AND.
     I64And,
+    /// `i64.or`: bitwise OR.
     I64Or,
+    /// `i64.xor`: bitwise XOR.
     I64Xor,
+    /// `i64.shl`: shift left by `count mod 64`.
     I64Shl,
+    /// `i64.shr_u`: logical shift right by `count mod 64`, shifting in zeros.
     I64ShrU,
+    /// `i64.shr_s`: arithmetic shift right by `count mod 64`, replicating the sign
+    /// bit.
     I64ShrS,
+    /// `i64.rotl`: rotate left by `count mod 64`.
     I64Rotl,
+    /// `i64.rotr`: rotate right by `count mod 64`.
     I64Rotr,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
@@ -311,6 +377,8 @@ pub enum Instruction {
     F32Sub,
     /// `f32.mul`.
     F32Mul,
+    /// `f32.div`: unlike the integer divides this never traps — dividing by zero
+    /// yields `±inf`, and `0.0 / 0.0` yields NaN.
     F32Div,
     /// `f64.add`.
     F64Add,
@@ -318,6 +386,7 @@ pub enum Instruction {
     F64Sub,
     /// `f64.mul`.
     F64Mul,
+    /// `f64.div`: never traps; see [`Self::F32Div`].
     F64Div,
     /// `local.get`: push the value of the local at `index`.
     LocalGet {
@@ -345,12 +414,22 @@ pub enum Instruction {
         /// Index into the module's global index space.
         index: GlobalIndex,
     },
+    /// `call`: pop the callee's arguments and invoke it directly.
+    ///
+    /// An imported callee is dispatched to the host registry; a local one is
+    /// interpreted recursively on the shared operand stack.
     Call {
         /// Index of the callee in the function index space.
         func_index: FuncIndex,
         /// Number of arguments the callee pops from the stack.
         params_count: u32,
     },
+    /// `call_indirect`: pop a table index, resolve it to a function reference,
+    /// and call it.
+    ///
+    /// Traps if the index is out of the table's bounds, the slot is null, or the
+    /// callee's signature differs from the type recorded here — that last check is
+    /// why the expected signature travels with the instruction.
     CallIndirect {
         /// The callee signature's parameter types.
         params: Box<[ValType]>,
@@ -363,6 +442,8 @@ pub enum Instruction {
     Drop,
     /// `select`: pop cond, then b, then a; push cond != 0 ? a : b -> standard in LLVM
     Select,
+    /// Opens a block. Purely a label: entering one does nothing at runtime, but a
+    /// branch targeting it jumps forward to its `End`.
     Block {
         /// Absolute index of this block's matching `End`. Backpatched; a branch
         /// that targets this block jumps here.
@@ -371,6 +452,8 @@ pub enum Instruction {
     /// Opens a loop. Branches targeting a loop jump back to this instruction
     /// (the loop start), so no `end` index is needed.
     Loop,
+    /// `if`: pop a condition and fall through when it is non-zero, otherwise jump
+    /// to the `else` branch (or past the `end` when there is none).
     If {
         /// Absolute index of the matching `Else`, if one exists. Backpatched at
         /// `End`.
@@ -378,11 +461,18 @@ pub enum Instruction {
         /// Absolute index of this `if`'s matching `End`. Backpatched.
         end_index: usize,
     },
+    /// Reached only by falling out of a taken then-branch, which must skip the
+    /// else-branch entirely — control jumps straight to the owning `if`'s `End`.
+    ///
+    /// A *false* condition never lands here: `If` jumps past this instruction to
+    /// the first instruction of the else-branch.
     Else {
         /// Absolute index of the owning `if`'s `End`. When the then-branch falls
         /// through into `else`, control skips to this `End`. Backpatched.
         if_end_index: usize,
     },
+    /// `br`: unconditional branch to an enclosing label, unwinding the stack to
+    /// that label's height while preserving the top `arity` values.
     Br {
         /// Absolute jump target. For a `loop` label this is the `Loop`
         /// instruction (a back-edge / "continue"); otherwise it is the label's
@@ -393,6 +483,8 @@ pub enum Instruction {
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
         recorded_height: u32,
     },
+    /// `br_if`: pop a condition and branch as [`Self::Br`] when it is non-zero;
+    /// otherwise fall through.
     BrIf {
         /// See `Br::target_index`. Same target rules as `Br`.
         target_index: usize,
@@ -401,11 +493,18 @@ pub enum Instruction {
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
         recorded_height: u32,
     },
+    /// `br_table`: pop an index and branch to that arm, falling back to the
+    /// default when it is out of range.
+    ///
+    /// The index is unsigned, so a negative value selects the default rather than
+    /// wrapping to a valid arm.
     BrTable {
         /// One [`TargetBranch`] per explicit label, in order, followed by the
         /// default label as the final element.
         targets: Vec<TargetBranch>,
     },
+    /// `return`: branch to the function's outermost label, leaving the frame's
+    /// results on the stack.
     Return {
         /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
         /// sentinel) — `return` is a branch to the outermost function label.
@@ -416,6 +515,10 @@ pub enum Instruction {
         /// are kept; always 0 for the function frame.
         recorded_height: u32,
     },
+    /// Closes a block, `if`, or the function body, resetting the stack to the
+    /// label's height plus its results.
+    ///
+    /// Advancing past the function's final `End` is what ends the frame.
     End {
         /// Number of result values the just-closed block leaves on the stack.
         arity: u32,
