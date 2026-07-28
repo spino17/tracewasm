@@ -676,6 +676,86 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32Eq => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a == b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Ne => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a != b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32LtU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32LtS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32GtU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32GtS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32LeU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32LeS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32GeU => {
+                let b = self.stack.pop().as_i32() as u32;
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32GeS => {
+                let b = self.stack.pop().as_i32();
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I64Add => {
                 let b = self.stack.pop().as_i64();
                 let a = self.stack.pop().as_i64();
@@ -821,6 +901,86 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_i64() as u64;
 
                 self.stack.push(Val::I64(a.rotate_right(b as u32) as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Eq => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a == b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Ne => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a != b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64LtU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64LtS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a < b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64GtU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64GtS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a > b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64LeU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64LeS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a <= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64GeU => {
+                let b = self.stack.pop().as_i64() as u64;
+                let a = self.stack.pop().as_i64() as u64;
+
+                self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64GeS => {
+                let b = self.stack.pop().as_i64();
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
