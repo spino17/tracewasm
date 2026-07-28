@@ -83,6 +83,12 @@ pub enum TraceWasmError {
     /// initial element count and the allowed maximum.
     #[error("table too large: initial `{0}` elements exceeds the allowed maximum `{1}`")]
     TableTooLarge(u64, u64),
+    /// The module's initial memory size exceeds the maximum the instance is
+    /// willing to materialize (its declared maximum, capped by the instance
+    /// [`Config`](crate::instance::config::Config)). Fields: the requested initial
+    /// page count and the allowed maximum.
+    #[error("memory too large: initial `{0}` pages exceeds the allowed maximum `{1}`")]
+    MemoryTooLarge(u64, u64),
     /// An active element segment writes past the end of its target table at
     /// instantiation. Fields: the write offset, the number of elements written,
     /// and the target table's length.

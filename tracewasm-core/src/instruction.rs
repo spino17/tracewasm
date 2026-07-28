@@ -82,6 +82,16 @@ pub enum Instruction {
         /// Index of the function whose reference is pushed.
         function_index: FuncIndex,
     },
+    MemorySize,
+    MemoryGrow,
+    MemoryCopy,
+    MemoryFill,
+    MemoryInit {
+        data_index: u32,
+    },
+    DataDrop {
+        data_index: u32,
+    },
     // Loads. Every variant pops an address and pushes one value read from
     // `address + offset` (little-endian); the narrow `*_u`/`*_s` forms read fewer
     // bytes than the result type and zero- / sign-extend to it. `offset` is the
@@ -710,6 +720,16 @@ enum StackEffectResult {
 }
 
 impl Instruction {
+    fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
+        if index != 0 {
+            return Err(TraceWasmError::Unsupported(
+                "more than one memory".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
@@ -789,6 +809,51 @@ impl Instruction {
                         function_index: FuncIndex(function_index),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                ),
+                Operator::MemorySize { mem } => {
+                    Self::check_memory_index(mem)?;
+
+                    (
+                        Instruction::MemorySize,
+                        StackEffectResult::PopPush { pops: 0, pushes: 1 },
+                    )
+                }
+                Operator::MemoryGrow { mem } => {
+                    Self::check_memory_index(mem)?;
+
+                    (
+                        Instruction::MemoryGrow,
+                        StackEffectResult::PopPush { pops: 1, pushes: 1 },
+                    )
+                }
+                Operator::MemoryCopy { dst_mem, src_mem } => {
+                    Self::check_memory_index(dst_mem)?;
+                    Self::check_memory_index(src_mem)?;
+
+                    (
+                        Instruction::MemoryCopy,
+                        StackEffectResult::PopPush { pops: 3, pushes: 0 },
+                    )
+                }
+                Operator::MemoryFill { mem } => {
+                    Self::check_memory_index(mem)?;
+
+                    (
+                        Instruction::MemoryFill,
+                        StackEffectResult::PopPush { pops: 3, pushes: 0 },
+                    )
+                }
+                Operator::MemoryInit { data_index, mem } => {
+                    Self::check_memory_index(mem)?;
+
+                    (
+                        Instruction::MemoryInit { data_index },
+                        StackEffectResult::PopPush { pops: 3, pushes: 0 },
+                    )
+                }
+                Operator::DataDrop { data_index } => (
+                    Instruction::DataDrop { data_index },
+                    StackEffectResult::NoEffect,
                 ),
                 Operator::I32Load { memarg } => (
                     Instruction::I32Load {

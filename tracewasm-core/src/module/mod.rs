@@ -1544,7 +1544,9 @@ impl Module {
             0
         };
 
-        let config = config.unwrap_or_default();
+        // Narrowed below to the module's declared memory maximum, so the instance
+        // carries the *effective* limits rather than only the requested ones.
+        let mut config = config.unwrap_or_default();
 
         // Validate the registry against the module's declared imports: the counts
         // must agree, and every imported function must exist in the registry with
@@ -1605,7 +1607,33 @@ impl Module {
             }
         }
 
-        let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
+        // Resolve the instance's effective memory ceiling once: the module's own
+        // declared maximum, narrowed by the configured cap. Folding it into the
+        // config means `memory.grow` reads a single limit instead of re-deriving it
+        // per instruction — and, critically, that growth respects the maximum the
+        // module declared, which its own code is entitled to rely on.
+        let config_max_pages = config.get_max_memory_size_in_pages();
+
+        let max_memory_pages = self
+            .memories
+            .first()
+            .and_then(|memory| memory.maximum())
+            .unwrap_or(config_max_pages)
+            .min(config_max_pages);
+
+        config.set_max_memory_size_in_pages(max_memory_pages);
+
+        // Reject rather than truncate: handing a module less memory than it
+        // declared would make it trap on accesses it is entitled to make.
+        // Validation guarantees `initial <= declared maximum`, so this can only
+        // fire when the configured cap is the binding limit.
+        if initial_pages > max_memory_pages {
+            return Err(TraceWasmError::MemoryTooLarge(
+                initial_pages,
+                max_memory_pages,
+            ));
+        }
+
         let mut memory = M::allocate_initial_memory(initial_pages);
 
         // Globals Initialization
@@ -1824,6 +1852,8 @@ impl Module {
                 &mut import_registry,
                 &mut global_vals,
                 &mut table_vals,
+                &mut data_vals,
+                &config,
             )?;
         }
 

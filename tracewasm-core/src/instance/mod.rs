@@ -66,7 +66,11 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         }
     }
 
-    /// The resource limits [`Config`] this instance was created with.
+    /// The resource limits in force for this instance.
+    ///
+    /// These are the *effective* limits: instantiation narrows the configured
+    /// memory cap to the module's own declared maximum, so this can report a lower
+    /// value than was supplied.
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -129,6 +133,8 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
             &mut instance.import_registry,
             &mut instance.global_vals,
             &mut instance.table_vals,
+            &mut instance.data_vals,
+            &instance.config,
         ) {
             Ok(res) => res,
             Err(err) => {

@@ -42,15 +42,19 @@
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
-        InstructionExecutionError, MemoryError, TraceWasmError,
+        InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
     },
-    instance::traits::{ImportRegistry, ResultVals},
+    instance::{
+        config::Config,
+        traits::{ImportRegistry, ResultVals},
+    },
     instruction::Instruction,
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, formatted_val_types},
-    vm::stack::{Stack, TableVal, Val},
+    vm::stack::{DataVal, Stack, TableVal, Val},
 };
 use smallvec::{SmallVec, smallvec};
+use wasmparser::Data;
 
 pub(crate) mod stack;
 
@@ -111,6 +115,7 @@ struct TraceVMState<'a, M, I> {
     globals: &'a mut [Val],
     /// The module's tables, shared across the call tree.
     tables: &'a mut Vec<TableVal>,
+    datas: &'a mut [DataVal],
 }
 
 impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
@@ -119,6 +124,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         func_index: FuncIndex,
         params_count: u32,
         module: &Module,
+        config: &Config,
     ) -> Result<(), TraceWasmError> {
         // The callee's frame begins just below the arguments: everything up
         // to this height belongs to the caller and is left untouched. The
@@ -168,6 +174,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 self.import_registry,
                 self.globals,
                 self.tables,
+                self.datas,
+                config,
             )?;
         }
 
@@ -214,6 +222,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         instruction: &Instruction,
         caller_base_height: u32,
         module: &Module,
+        config: &Config,
     ) -> Result<ExecutionResult, InstructionExecutionError> {
         let res = match instruction {
             Instruction::Unreachable => {
@@ -247,6 +256,86 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::RefFunc { function_index } => {
                 self.stack.push(Val::Ref(Some(*function_index)));
+
+                ExecutionResult::Next
+            }
+            Instruction::MemorySize => {
+                self.stack
+                    .push(Val::I32(self.memory.size_in_pages() as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::MemoryGrow => {
+                // The delta is an unsigned i32; going through `u32` keeps a
+                // high-bit-set value from sign-extending into a different number.
+                let delta_in_pages = self.stack.pop().as_i32() as u32 as u64;
+
+                // `instantiate` already narrowed this to the module's declared
+                // maximum, so the configured cap is the effective ceiling here.
+                match self
+                    .memory
+                    .grow(delta_in_pages, config.get_max_memory_size_in_pages())
+                {
+                    Ok(old_page) => self.stack.push(Val::I32(old_page as i32)),
+                    // Per the spec `memory.grow` does not trap: a request it cannot
+                    // satisfy reports `-1` and execution continues.
+                    Err(_) => self.stack.push(Val::I32(-1)),
+                }
+
+                ExecutionResult::Next
+            }
+            Instruction::MemoryCopy => {
+                let len = self.stack.pop().as_i32() as usize;
+                let src = self.stack.pop().as_i32() as usize;
+                let dest = self.stack.pop().as_i32() as usize;
+
+                self.memory.copy_within(dest, src, len)?;
+
+                ExecutionResult::Next
+            }
+            Instruction::MemoryFill => {
+                let len = self.stack.pop().as_i32() as usize;
+                let val = self.stack.pop().as_i32() as u32;
+                let dest = self.stack.pop().as_i32() as usize;
+
+                self.memory.fill(dest, val, len)?;
+
+                ExecutionResult::Next
+            }
+            Instruction::MemoryInit { data_index } => {
+                let len = self.stack.pop().as_i32() as usize;
+                let src = self.stack.pop().as_i32() as usize;
+                let dest = self.stack.pop().as_i32() as usize;
+
+                // A dropped segment reads as *empty*, not as an outright trap: the
+                // spec replaces its bytes with the empty sequence, so a
+                // zero-length `memory.init` after `data.drop` still succeeds while
+                // any non-empty read fails the bounds check below.
+                let segment: &[u8] = match &self.datas[*data_index as usize] {
+                    DataVal::Dropped => &[],
+                    DataVal::Passive(segment) => segment,
+                };
+
+                // The source range is validated against the segment before
+                // anything is written, and `checked_add` stops a huge `len` from
+                // wrapping past the comparison.
+                let end = src
+                    .checked_add(len)
+                    .filter(|end| *end <= segment.len())
+                    .ok_or(MemoryError::OutOfBoundsAccess(
+                        MemoryAccessKind::Read,
+                        src,
+                        segment.len(),
+                    ))?;
+
+                // `write` bounds-checks the destination, so a trap on either side
+                // leaves memory untouched.
+                self.memory.write(dest, &segment[src..end])?;
+
+                ExecutionResult::Next
+            }
+            Instruction::DataDrop { data_index } => {
+                self.datas[*data_index as usize] = DataVal::Dropped;
 
                 ExecutionResult::Next
             }
@@ -565,7 +654,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                self.call_func(*callee_func_index, *params_count, module)
+                self.call_func(*callee_func_index, *params_count, module, config)
                     .map_err(|err| {
                         InstructionExecutionError::Call(*callee_func_index, Box::new(err))
                     })?;
@@ -626,13 +715,18 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 }
 
-                self.call_func(callee_func_index, declared_params.len() as u32, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::CallIndirect(
-                            *table_index,
-                            FunctionCall(callee_func_index, Box::new(err)),
-                        )
-                    })?;
+                self.call_func(
+                    callee_func_index,
+                    declared_params.len() as u32,
+                    module,
+                    config,
+                )
+                .map_err(|err| {
+                    InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        FunctionCall(callee_func_index, Box::new(err)),
+                    )
+                })?;
 
                 ExecutionResult::Next
             }
@@ -797,6 +891,8 @@ impl TraceVM {
         import_registry: &mut I,
         globals: &mut [Val],
         tables: &mut Vec<TableVal>,
+        datas: &mut [DataVal],
+        config: &Config,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
@@ -853,6 +949,7 @@ impl TraceVM {
             import_registry,
             globals,
             tables,
+            datas,
         };
 
         // Driver loop. `pc` indexes this function's instruction list only.
@@ -862,7 +959,7 @@ impl TraceVM {
             let instr = &instructions[pc];
 
             let res = state
-                .execute(instr, caller_base_height, module)
+                .execute(instr, caller_base_height, module, config)
                 .map_err(|err| {
                     err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
                 })?;
@@ -914,6 +1011,8 @@ impl TraceVM {
         import_registry: &mut I,
         global_vals: &mut [Val],
         table_vals: &mut Vec<TableVal>,
+        data_vals: &mut [DataVal],
+        config: &Config,
     ) -> Result<ResultVals, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 
@@ -928,6 +1027,8 @@ impl TraceVM {
             import_registry,
             global_vals,
             table_vals,
+            data_vals,
+            config,
         )?;
 
         // How many result values the function leaves on the stack.

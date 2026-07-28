@@ -1,6 +1,12 @@
 /// Per-instance resource limits, enforced at instantiation and during execution.
 pub struct Config {
-    /// Max memory size, used to cap the module's initial memory pages.
+    /// Max memory size in pages: the ceiling for both the initial allocation and
+    /// any later `memory.grow`.
+    ///
+    /// [`Module::instantiate`](crate::module::Module::instantiate) narrows this to
+    /// the module's own declared maximum, so on an instantiated
+    /// [`Instance`](crate::instance::Instance) it is the *effective* limit and may
+    /// read lower than the value supplied.
     max_memory_size_in_pages: u64,
     /// Max number of elements in a table.
     max_table_elements: u64,
