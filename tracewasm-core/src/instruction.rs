@@ -341,6 +341,22 @@ pub enum Instruction {
     I32TruncF64U,
     /// `i32.trunc_f64_s`: truncate an `f64` to a signed 32-bit integer.
     I32TruncF64S,
+    // The `trunc_sat` operators are the total counterpart of `trunc`: where that
+    // family traps, these clamp. An operand past the target's range saturates to
+    // the nearest bound, and a NaN becomes `0` — not the minimum, which is the
+    // easy mistake, since NaN has no natural place in an ordering.
+    /// `i32.trunc_sat_f32_u`: truncate an `f32` to an unsigned 32-bit integer,
+    /// saturating instead of trapping.
+    I32TruncSatF32U,
+    /// `i32.trunc_sat_f32_s`: truncate an `f32` to a signed 32-bit integer,
+    /// saturating instead of trapping.
+    I32TruncSatF32S,
+    /// `i32.trunc_sat_f64_u`: truncate an `f64` to an unsigned 32-bit integer,
+    /// saturating instead of trapping.
+    I32TruncSatF64U,
+    /// `i32.trunc_sat_f64_s`: truncate an `f64` to a signed 32-bit integer,
+    /// saturating instead of trapping.
+    I32TruncSatF64S,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -441,6 +457,18 @@ pub enum Instruction {
     I64TruncF64U,
     /// `i64.trunc_f64_s`: truncate an `f64` to a signed 64-bit integer.
     I64TruncF64S,
+    /// `i64.trunc_sat_f32_u`: truncate an `f32` to an unsigned 64-bit integer,
+    /// saturating instead of trapping.
+    I64TruncSatF32U,
+    /// `i64.trunc_sat_f32_s`: truncate an `f32` to a signed 64-bit integer,
+    /// saturating instead of trapping.
+    I64TruncSatF32S,
+    /// `i64.trunc_sat_f64_u`: truncate an `f64` to an unsigned 64-bit integer,
+    /// saturating instead of trapping.
+    I64TruncSatF64U,
+    /// `i64.trunc_sat_f64_s`: truncate an `f64` to a signed 64-bit integer,
+    /// saturating instead of trapping.
+    I64TruncSatF64S,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
@@ -1405,6 +1433,22 @@ impl Instruction {
                 Operator::I32TruncF64S => {
                     (Instruction::I32TruncF64S, StackEffectResult::UnaryOperator)
                 }
+                Operator::I32TruncSatF32U => (
+                    Instruction::I32TruncSatF32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncSatF32S => (
+                    Instruction::I32TruncSatF32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncSatF64U => (
+                    Instruction::I32TruncSatF64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncSatF64S => (
+                    Instruction::I32TruncSatF64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
@@ -1463,6 +1507,22 @@ impl Instruction {
                 Operator::I64TruncF64S => {
                     (Instruction::I64TruncF64S, StackEffectResult::UnaryOperator)
                 }
+                Operator::I64TruncSatF32U => (
+                    Instruction::I64TruncSatF32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncSatF32S => (
+                    Instruction::I64TruncSatF32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncSatF64U => (
+                    Instruction::I64TruncSatF64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncSatF64S => (
+                    Instruction::I64TruncSatF64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 // i64 binary operations
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
                 Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),

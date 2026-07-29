@@ -498,3 +498,79 @@ fn truncation_traps_on_nan_and_infinity() {
     assert_traps::<(i32,)>("neg_inf_traps", "i32");
     assert_traps::<(i64,)>("i64_nan_traps", "u64");
 }
+
+/// `i32` result of the saturating-truncation fixture.
+fn sat_i32(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/trunc_sat.wasm"), name)
+}
+
+/// `i64` result of the saturating-truncation fixture.
+fn sat_i64(name: &str) -> i64 {
+    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/trunc_sat.wasm"), name);
+    v
+}
+
+// NaN converts to `0`, *not* to the target's minimum. Treating it as an
+// out-of-range value and clamping it — the intuitive reading of "saturate" — is
+// the standard way to get this wrong.
+#[test]
+fn saturating_truncation_maps_nan_to_zero() {
+    assert_eq!(sat_i32("nan_s"), 0, "not i32::MIN");
+    assert_eq!(sat_i32("nan_u"), 0);
+    assert_eq!(sat_i32("f64_nan_s"), 0);
+    assert_eq!(sat_i64("i64_nan_s"), 0, "not i64::MIN");
+    assert_eq!(sat_i64("i64_nan_u"), 0);
+}
+
+// The infinities, by contrast, *do* clamp — they sit at the ends of the ordering.
+#[test]
+fn saturating_truncation_clamps_the_infinities_to_the_bounds() {
+    assert_eq!(sat_i32("inf_s"), i32::MAX);
+    assert_eq!(sat_i32("neg_inf_s"), i32::MIN);
+    assert_eq!(sat_i32("inf_u"), -1, "u32::MAX as an i32");
+    assert_eq!(sat_i32("neg_inf_u"), 0, "unsigned clamps at zero");
+    assert_eq!(sat_i64("i64_inf_s"), i64::MAX);
+    assert_eq!(sat_i64("i64_neg_inf_s"), i64::MIN);
+    assert_eq!(sat_i64("i64_inf_u"), -1, "u64::MAX as an i64");
+}
+
+// The whole point of the family: these operands trap under `trunc` and clamp here.
+#[test]
+fn saturating_truncation_clamps_where_trunc_would_trap() {
+    assert_eq!(sat_i32("big_s"), i32::MAX);
+    assert_eq!(sat_i32("negbig_s"), i32::MIN);
+    assert_eq!(sat_i32("neg_u"), 0, "-1.5 clamps to 0 instead of trapping");
+    assert_eq!(sat_i32("at_2pow31_s"), i32::MAX);
+    assert_eq!(sat_i32("at_u32_max"), -1);
+}
+
+// Saturation has to clamp at the *target* integer's bound. Deriving the bound
+// from the source float's width instead is right only when the two widths happen
+// to agree, so it shows up on exactly these cross-width unsigned conversions:
+// 1e10 exceeds u32 but fits comfortably in u64.
+#[test]
+fn saturating_truncation_clamps_at_the_target_width_not_the_source_width() {
+    assert_eq!(
+        sat_i32("cross_i32_u"),
+        -1,
+        "1e10 must clamp to u32::MAX; going via u64 would wrap to 1410065408"
+    );
+    assert_eq!(
+        sat_i64("cross_i64_u"),
+        10_000_000_000,
+        "1e10 fits a u64, so clamping at u32::MAX here would lose it"
+    );
+    assert_eq!(
+        sat_i64("cross_i64_u_huge"),
+        -1,
+        "1e30 is past u64 too, so it clamps to u64::MAX"
+    );
+}
+
+#[test]
+fn saturating_truncation_leaves_in_range_operands_alone() {
+    assert_eq!(sat_i32("plain_s"), 3);
+    assert_eq!(sat_i32("plain_neg_s"), -3, "still toward zero, not floor");
+    assert_eq!(sat_i32("plain_u"), 0, "trunc(-0.9) is -0.0");
+    assert_eq!(sat_i64("i64_plain_s"), -3);
+}

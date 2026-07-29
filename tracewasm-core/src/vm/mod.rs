@@ -682,6 +682,36 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32TruncSatF32U => {
+                let a = self.stack.pop().as_f32() as u32;
+
+                self.stack.push(Val::I32(a as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncSatF32S => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I32(a as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncSatF64U => {
+                // Saturate to `u32`, the *target* width — going through `u64` here
+                // would clamp at the wrong bound and then wrap on the way down.
+                let a = self.stack.pop().as_f64() as u32;
+
+                self.stack.push(Val::I32(a as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncSatF64S => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I32(a as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I32Add => {
                 let b = self.stack.pop().as_i32();
                 let a = self.stack.pop().as_i32();
@@ -1013,6 +1043,36 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let truncated = Self::trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 self.stack.push(Val::I64(truncated as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncSatF32U => {
+                // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
+                // first would lose every value an `i64` can still represent.
+                let a = self.stack.pop().as_f32() as u64;
+
+                self.stack.push(Val::I64(a as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncSatF32S => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::I64(a as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncSatF64U => {
+                let a = self.stack.pop().as_f64() as u64;
+
+                self.stack.push(Val::I64(a as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncSatF64S => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::I64(a as i64));
 
                 ExecutionResult::Next
             }
