@@ -3,7 +3,7 @@
 //! *every* comparison yields an `i32` regardless of operand width.
 
 use tracewasm_core::{
-    instance::traits::{ImportRegistry, ResultVals, Val},
+    instance::traits::{ImportRegistry, ResultVals, Results, Val},
     memory::{MemoryView, linear::LinearMemory},
     module::Module,
 };
@@ -59,10 +59,16 @@ fn call_f(name: &str) -> i32 {
 
 /// Compiles `wasm`, instantiates it, and calls its `() -> i32` export `name`.
 fn call_in(wasm: &[u8], name: &str) -> i32 {
+    let (v,) = call_typed::<(i32,)>(wasm, name);
+    v
+}
+
+/// Compiles `wasm`, instantiates it, and calls its `() -> R` export `name`.
+fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
     let module = Module::compile(wasm).expect("fixture should compile");
 
     let func = module
-        .get_typed_func::<(), (i32,)>(name)
+        .get_typed_func::<(), R>(name)
         .unwrap_or_else(|e| panic!("export `{name}`: {e}"));
 
     let mut instance = module
@@ -70,7 +76,7 @@ fn call_in(wasm: &[u8], name: &str) -> i32 {
         .expect("fixture should instantiate");
 
     match func.call((), &mut instance) {
-        Ok((v,)) => v,
+        Ok(v) => v,
         Err(e) => panic!("calling `{name}` failed: {e}"),
     }
 }
@@ -126,4 +132,54 @@ fn infinities_order_normally() {
 #[test]
 fn float_comparison_result_is_an_i32_usable_as_a_branch_condition() {
     assert_eq!(call_f("f64_brif"), 111, "1 < 2 should take the branch");
+}
+
+/// `f32` result of the min/max/copysign fixture.
+fn min_max_f32(name: &str) -> f32 {
+    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/float_minmax.wasm"), name);
+    v
+}
+
+/// `f64` result of the min/max/copysign fixture.
+fn min_max_f64(name: &str) -> f64 {
+    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/float_minmax.wasm"), name);
+    v
+}
+
+// The cases where Rust's `f32::min`/`max` disagree with wasm: they return the
+// *non*-NaN operand, and leave the signed-zero tie unspecified. Delegating to
+// them would pass every ordinary test and fail only these.
+#[test]
+fn min_max_return_nan_when_either_operand_is_nan() {
+    assert!(min_max_f32("min_nan").is_nan(), "min(NaN, 1) must be NaN");
+    assert!(min_max_f32("max_nan").is_nan(), "max(1, NaN) must be NaN");
+    assert!(min_max_f64("f64_min_nan").is_nan(), "and on the f64 path");
+}
+
+// `-0.0 == +0.0`, so the tie is broken by sign: min yields -0.0, max +0.0.
+// Checked via `is_sign_negative`, since `==` cannot tell the two zeros apart.
+#[test]
+fn min_max_break_the_signed_zero_tie_by_sign() {
+    let min = min_max_f32("min_zero");
+    assert_eq!(min, 0.0);
+    assert!(min.is_sign_negative(), "min(+0.0, -0.0) must be -0.0");
+
+    let max = min_max_f32("max_zero");
+    assert_eq!(max, 0.0);
+    assert!(max.is_sign_positive(), "max(-0.0, +0.0) must be +0.0");
+
+    assert!(min_max_f64("f64_max_zero").is_sign_positive());
+}
+
+#[test]
+fn min_max_order_ordinary_values() {
+    assert_eq!(min_max_f32("min_plain"), 3.0);
+    assert_eq!(min_max_f32("max_plain"), 7.0);
+}
+
+#[test]
+fn copysign_takes_magnitude_from_the_first_and_sign_from_the_second() {
+    assert_eq!(min_max_f32("copysign_neg"), -5.0);
+    assert_eq!(min_max_f32("copysign_pos"), 5.0);
+    assert_eq!(min_max_f64("f64_copysign"), -5.0);
 }

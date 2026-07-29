@@ -1066,6 +1066,56 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::F32Min => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                self.stack.push(Val::F32(r));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Max => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                self.stack.push(Val::F32(r));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Copysign => {
+                let b = self.stack.pop().as_f32();
+                let a = self.stack.pop().as_f32();
+
+                // Purely a sign-bit transplant: the magnitude of `a` with the sign
+                // of `b`. Defined even when either operand is NaN — the sign is
+                // copied without inspecting the payload — so unlike `min`/`max`
+                // this needs no NaN special case, and Rust's method matches.
+                self.stack.push(Val::F32(a.copysign(b)));
+
+                ExecutionResult::Next
+            }
             Instruction::F64Add => {
                 let b = self.stack.pop().as_f64();
                 let a = self.stack.pop().as_f64();
@@ -1145,6 +1195,53 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_f64();
 
                 self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Min => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                self.stack.push(Val::F64(r));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Max => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                self.stack.push(Val::F64(r));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Copysign => {
+                let b = self.stack.pop().as_f64();
+                let a = self.stack.pop().as_f64();
+
+                // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
+                self.stack.push(Val::F64(a.copysign(b)));
 
                 ExecutionResult::Next
             }

@@ -442,6 +442,24 @@ pub enum Instruction {
     F32Le,
     /// `f32.ge`: ordered greater-than-or-equal; false if either operand is NaN.
     F32Ge,
+    // `min`/`max` are the one place Rust's float methods do *not* match wasm:
+    // `f32::min` returns the non-NaN operand where wasm returns NaN, and leaves
+    // the `-0.0`/`+0.0` tie unspecified where wasm fixes it. Both are therefore
+    // written out longhand in the interpreter rather than delegated.
+    /// `f32.min`: the smaller operand.
+    ///
+    /// Returns NaN if *either* operand is NaN, and `-0.0` when the operands are
+    /// `-0.0` and `+0.0` (which compare equal).
+    F32Min,
+    /// `f32.max`: the larger operand.
+    ///
+    /// Returns NaN if *either* operand is NaN, and `+0.0` for the
+    /// `-0.0`/`+0.0` tie.
+    F32Max,
+    /// `f32.copysign`: the magnitude of the first operand with the sign of
+    /// the second. A pure sign-bit transplant, so it is defined for NaN too and
+    /// never traps.
+    F32Copysign,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
@@ -462,6 +480,20 @@ pub enum Instruction {
     F64Le,
     /// `f64.ge`: ordered greater-than-or-equal; false if either operand is NaN.
     F64Ge,
+    /// `f64.min`: the smaller operand.
+    ///
+    /// Returns NaN if *either* operand is NaN, and `-0.0` when the operands are
+    /// `-0.0` and `+0.0` (which compare equal).
+    F64Min,
+    /// `f64.max`: the larger operand.
+    ///
+    /// Returns NaN if *either* operand is NaN, and `+0.0` for the
+    /// `-0.0`/`+0.0` tie.
+    F64Max,
+    /// `f64.copysign`: the magnitude of the first operand with the sign of
+    /// the second. A pure sign-bit transplant, so it is defined for NaN too and
+    /// never traps.
+    F64Copysign,
     /// `local.get`: push the value of the local at `index`.
     LocalGet {
         /// Index of the local (params first, then declared locals).
@@ -1283,6 +1315,11 @@ impl Instruction {
                 Operator::F32Gt => (Instruction::F32Gt, StackEffectResult::BinaryOperator),
                 Operator::F32Le => (Instruction::F32Le, StackEffectResult::BinaryOperator),
                 Operator::F32Ge => (Instruction::F32Ge, StackEffectResult::BinaryOperator),
+                Operator::F32Min => (Instruction::F32Min, StackEffectResult::BinaryOperator),
+                Operator::F32Max => (Instruction::F32Max, StackEffectResult::BinaryOperator),
+                Operator::F32Copysign => {
+                    (Instruction::F32Copysign, StackEffectResult::BinaryOperator)
+                }
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
                 Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
@@ -1293,6 +1330,11 @@ impl Instruction {
                 Operator::F64Gt => (Instruction::F64Gt, StackEffectResult::BinaryOperator),
                 Operator::F64Le => (Instruction::F64Le, StackEffectResult::BinaryOperator),
                 Operator::F64Ge => (Instruction::F64Ge, StackEffectResult::BinaryOperator),
+                Operator::F64Min => (Instruction::F64Min, StackEffectResult::BinaryOperator),
+                Operator::F64Max => (Instruction::F64Max, StackEffectResult::BinaryOperator),
+                Operator::F64Copysign => {
+                    (Instruction::F64Copysign, StackEffectResult::BinaryOperator)
+                }
                 Operator::LocalGet { local_index } => (
                     Instruction::LocalGet {
                         index: LocalIndex(local_index),
