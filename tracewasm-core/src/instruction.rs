@@ -561,6 +561,17 @@ pub enum Instruction {
     F32ConvertI64U,
     /// `f32.convert_i64_s`: convert a signed 64-bit integer to `f32`.
     F32ConvertI64S,
+    /// `f32.demote_f64`: narrow an `f64` to an `f32`, rounding to nearest with ties
+    /// to even.
+    ///
+    /// The lossy half of the float-width pair; [`Instruction::F64PromoteF32`] is
+    /// the exact inverse direction. It does not trap, and it does not clamp:
+    /// a magnitude past what `f32` can hold becomes an **infinity**, not
+    /// `f32::MAX`. Note the overflow threshold is the halfway point between
+    /// `f32::MAX` and 2^128, not `f32::MAX` itself — operands just above
+    /// `f32::MAX` still round back down to it. Underflow goes to a zero of the
+    /// operand's sign.
+    F32DemoteF64,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
     // a NaN operand yields a NaN, whose payload the spec leaves nondeterministic.
@@ -642,6 +653,13 @@ pub enum Instruction {
     ///
     /// Lossy past 2^53: `i64::MAX` converts to `2^63`, one above itself.
     F64ConvertI64S,
+    /// `f64.promote_f32`: widen an `f32` to an `f64`.
+    ///
+    /// Always exact — every `f32` is representable in `f64`, so this never rounds
+    /// and never overflows. It widens the *value the `f32` actually held*, which is
+    /// not the decimal that produced it: `0.1f32` promotes to `0.10000000149…`,
+    /// not to `0.1f64`. [`Instruction::F32DemoteF64`] is the lossy direction back.
+    F64PromoteF32,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
@@ -1605,6 +1623,9 @@ impl Instruction {
                     Instruction::F32ConvertI64S,
                     StackEffectResult::UnaryOperator,
                 ),
+                Operator::F32DemoteF64 => {
+                    (Instruction::F32DemoteF64, StackEffectResult::UnaryOperator)
+                }
                 // f32 binary operations
                 Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
@@ -1645,6 +1666,9 @@ impl Instruction {
                     Instruction::F64ConvertI64S,
                     StackEffectResult::UnaryOperator,
                 ),
+                Operator::F64PromoteF32 => {
+                    (Instruction::F64PromoteF32, StackEffectResult::UnaryOperator)
+                }
                 // f64 binary operations
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),

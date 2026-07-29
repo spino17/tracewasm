@@ -1381,6 +1381,13 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::F32DemoteF64 => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F32(a as f32));
+
+                ExecutionResult::Next
+            }
             Instruction::F32Add => {
                 let b = self.stack.pop().as_f32();
                 let a = self.stack.pop().as_f32();
@@ -1585,6 +1592,13 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::F64ConvertI64S => {
                 let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::F64(a as f64));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64PromoteF32 => {
+                let a = self.stack.pop().as_f32();
 
                 self.stack.push(Val::F64(a as f64));
 

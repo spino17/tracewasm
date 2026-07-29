@@ -653,3 +653,110 @@ fn conversion_is_exact_for_small_operands() {
     assert_eq!(conv_f64("f64_exact_s"), 42.0);
     assert_eq!(conv_f32("exact_zero"), 0.0);
 }
+
+/// `f32` result of the demote/promote fixture.
+fn dp_f32(name: &str) -> f32 {
+    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/demote_promote.wasm"), name);
+    v
+}
+
+/// `f64` result of the demote/promote fixture.
+fn dp_f64(name: &str) -> f64 {
+    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/demote_promote.wasm"), name);
+    v
+}
+
+// Demote overflows to an infinity. Clamping to `f32::MAX` — the saturating
+// behaviour of `trunc_sat`, and a tempting thing to reuse — would be wrong here.
+#[test]
+fn demote_overflows_to_infinity_rather_than_clamping() {
+    assert_eq!(dp_f32("over_pos"), f32::INFINITY, "not f32::MAX");
+    assert_eq!(dp_f32("over_neg"), f32::NEG_INFINITY);
+}
+
+// The overflow threshold is not `f32::MAX` but the halfway point between it and
+// 2^128, so an operand past `f32::MAX` can still round back down to it. A check
+// shaped like `if v > f32::MAX as f64 { inf }` would wrongly overflow the first
+// of these.
+#[test]
+fn demote_overflows_at_the_rounding_threshold_not_at_f32_max() {
+    assert_eq!(
+        dp_f32("below_threshold"),
+        f32::MAX,
+        "a quarter-ULP past f32::MAX still rounds down to it"
+    );
+    assert_eq!(
+        dp_f32("at_threshold"),
+        f32::INFINITY,
+        "the exact tie rounds away from f32::MAX, whose significand is all ones"
+    );
+    assert_eq!(dp_f32("above_threshold"), f32::INFINITY);
+    assert_eq!(dp_f32("at_f32_max"), f32::MAX);
+}
+
+// Underflow collapses to a zero, and the sign survives even though `-0.0 == 0.0`.
+#[test]
+fn demote_underflows_to_a_signed_zero() {
+    let pos = dp_f32("under_pos");
+    assert_eq!(pos, 0.0);
+    assert!(pos.is_sign_positive());
+
+    let neg = dp_f32("under_neg");
+    assert_eq!(neg, 0.0);
+    assert!(neg.is_sign_negative(), "-1e-300 must underflow to -0.0");
+}
+
+// Ties to even again, now on the float-narrowing path: at 1.0 the `f32` step is
+// 2^-23, so 1+2^-24 is exactly a tie and resolves downward.
+#[test]
+fn demote_breaks_rounding_ties_to_even() {
+    assert_eq!(dp_f32("tie_down"), 1.0, "1+2^-24 rounds down to 1.0");
+    assert_eq!(dp_f32("tie_up"), 1.0000002, "1+3*2^-24 rounds up");
+}
+
+#[test]
+fn demote_passes_the_specials_through() {
+    assert!(dp_f32("demote_nan").is_nan());
+    assert_eq!(dp_f32("demote_inf"), f32::INFINITY);
+
+    let neg_zero = dp_f32("demote_neg_zero");
+    assert_eq!(neg_zero, 0.0);
+    assert!(neg_zero.is_sign_negative());
+}
+
+// Promote is exact, so demoting a promoted value returns the original `f32`
+// bit-for-bit — including at `f32::MAX`, where demote is otherwise near overflow.
+#[test]
+fn promote_is_exact_so_the_round_trip_is_the_identity() {
+    assert_eq!(dp_f32("round_trip"), 3.1415927);
+    assert_eq!(dp_f32("round_trip_max"), f32::MAX);
+}
+
+// Promote widens the value the `f32` actually held, which is not the decimal that
+// produced it: `0.1f32` is 0.100000001490116119384765625, and that is what lands
+// in the `f64`. Asserting `0.1` here would fail.
+#[test]
+fn promote_widens_the_f32_value_not_the_source_decimal() {
+    assert_eq!(dp_f64("promote_tenth"), 0.1f32 as f64);
+    assert_ne!(
+        dp_f64("promote_tenth"),
+        0.1f64,
+        "not the f64 nearest to 0.1"
+    );
+    assert_eq!(dp_f64("promote_plain"), 3.5, "exact in both widths");
+}
+
+#[test]
+fn promote_passes_the_specials_and_subnormals_through() {
+    assert!(dp_f64("promote_nan").is_nan());
+    assert_eq!(dp_f64("promote_neg_inf"), f64::NEG_INFINITY);
+
+    let neg_zero = dp_f64("promote_neg_zero");
+    assert_eq!(neg_zero, 0.0);
+    assert!(neg_zero.is_sign_negative());
+
+    // A subnormal `f32` is a perfectly ordinary `f64`, so it widens exactly rather
+    // than being flushed to zero.
+    assert_eq!(dp_f64("promote_subnormal"), f32::from_bits(1) as f64);
+    assert!(dp_f64("promote_subnormal") > 0.0);
+}
