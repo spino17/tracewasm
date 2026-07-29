@@ -309,6 +309,12 @@ pub enum Instruction {
     /// `i32.popcnt`: count set bits, over the two's-complement representation,
     /// so a negative operand counts its sign bits too.
     I32Popcnt,
+    /// `i32.eqz`: `1` if the operand is zero, else `0`.
+    ///
+    /// Unlike the bit-counting operators above, the result is an `i32` even for
+    /// the `i64` form — it is a comparison against zero, so it follows the
+    /// comparison convention.
+    I32Eqz,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -381,6 +387,12 @@ pub enum Instruction {
     /// `i64.popcnt`: count set bits, over the two's-complement representation,
     /// so a negative operand counts its sign bits too.
     I64Popcnt,
+    /// `i64.eqz`: `1` if the operand is zero, else `0`.
+    ///
+    /// Unlike the bit-counting operators above, the result is an `i32` even for
+    /// the `i64` form — it is a comparison against zero, so it follows the
+    /// comparison convention.
+    I64Eqz,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
@@ -1284,6 +1296,7 @@ impl Instruction {
                 Operator::I32Clz => (Instruction::I32Clz, StackEffectResult::UnaryOperator),
                 Operator::I32Ctz => (Instruction::I32Ctz, StackEffectResult::UnaryOperator),
                 Operator::I32Popcnt => (Instruction::I32Popcnt, StackEffectResult::UnaryOperator),
+                Operator::I32Eqz => (Instruction::I32Eqz, StackEffectResult::UnaryOperator),
                 // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
@@ -1310,11 +1323,12 @@ impl Instruction {
                 Operator::I32LeS => (Instruction::I32LeS, StackEffectResult::BinaryOperator),
                 Operator::I32GeU => (Instruction::I32GeU, StackEffectResult::BinaryOperator),
                 Operator::I32GeS => (Instruction::I32GeS, StackEffectResult::BinaryOperator),
-                // i32 unary operations
+                // i64 unary operations
                 Operator::I64Clz => (Instruction::I64Clz, StackEffectResult::UnaryOperator),
                 Operator::I64Ctz => (Instruction::I64Ctz, StackEffectResult::UnaryOperator),
                 Operator::I64Popcnt => (Instruction::I64Popcnt, StackEffectResult::UnaryOperator),
-                // i32 binary operations
+                Operator::I64Eqz => (Instruction::I64Eqz, StackEffectResult::UnaryOperator),
+                // i64 binary operations
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
                 Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
                 Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),

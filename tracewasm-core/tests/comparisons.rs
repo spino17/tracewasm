@@ -218,3 +218,24 @@ fn popcnt_counts_sign_bits_of_negative_operands() {
     assert_eq!(bits_i32("popcnt_5"), 2, "0b101");
     assert_eq!(bits_i64("i64_popcnt_neg1"), 64);
 }
+
+/// `i32` result of the `eqz` fixture.
+fn eqz(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/eqz.wasm"), name)
+}
+
+#[test]
+fn eqz_tests_against_zero() {
+    assert_eq!(eqz("eqz_zero"), 1);
+    assert_eq!(eqz("eqz_nonzero"), 0);
+    assert_eq!(eqz("eqz_neg"), 0, "-1 is non-zero");
+    assert_eq!(eqz("i64_eqz_zero"), 1);
+    assert_eq!(eqz("i64_eqz_nonzero"), 0);
+}
+
+// `i64.eqz` returns an `i32` despite its `i64` operand — the opposite of the
+// bit-counting unaries. Pushing `Val::I64` would panic `br_if`, not just differ.
+#[test]
+fn i64_eqz_result_is_an_i32_usable_as_a_branch_condition() {
+    assert_eq!(eqz("i64_eqz_brif"), 111);
+}
