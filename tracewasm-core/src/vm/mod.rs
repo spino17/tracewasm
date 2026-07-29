@@ -103,6 +103,38 @@ const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 pub(crate) struct TraceVM;
 
 impl TraceVM {
+    /// Top-level entry point: runs a locally-defined function on a fresh operand
+    /// stack and returns its result values (in declaration order).
+    ///
+    /// This is the wrapper around [`Self::execute`] that owns the shared stack
+    /// and extracts the results, which `execute` itself leaves on the stack.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
+    /// mismatches, errors returned by imported functions, …).
+    pub(crate) fn run<M: Memory, I: ImportRegistry>(
+        func_index: FuncIndex,
+        params: &[Val],
+        instance: &mut Instance<M, I>,
+        module: &Module,
+    ) -> Result<ResultVals, TraceWasmError> {
+        let mut stack: Stack<Val> = Stack::default();
+
+        for param in params {
+            stack.push(*param);
+        }
+
+        // A fresh stack starts at height 0, so this frame's base is 0.
+        Self::execute(func_index, &mut stack, instance, module)?;
+
+        // How many result values the function leaves on the stack.
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
+
+        Ok(stack.pop_results(results_len))
+    }
+
     /// Runs one (locally-defined) function to completion on the shared stack.
     ///
     /// Called both as the top-level entry (with an empty stack, so this frame's
@@ -211,38 +243,6 @@ impl TraceVM {
         stack.truncate_by_preserving_arity(caller_base_height, results_len as u32);
 
         Ok(())
-    }
-
-    /// Top-level entry point: runs a locally-defined function on a fresh operand
-    /// stack and returns its result values (in declaration order).
-    ///
-    /// This is the wrapper around [`Self::execute`] that owns the shared stack
-    /// and extracts the results, which `execute` itself leaves on the stack.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
-    /// mismatches, errors returned by imported functions, …).
-    pub(crate) fn run<M: Memory, I: ImportRegistry>(
-        func_index: FuncIndex,
-        params: &[Val],
-        instance: &mut Instance<M, I>,
-        module: &Module,
-    ) -> Result<ResultVals, TraceWasmError> {
-        let mut stack: Stack<Val> = Stack::default();
-
-        for param in params {
-            stack.push(*param);
-        }
-
-        // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(func_index, &mut stack, instance, module)?;
-
-        // How many result values the function leaves on the stack.
-        let func_decl = &module.func_decls[func_index.0 as usize];
-        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
-
-        Ok(stack.pop_results(results_len))
     }
 
     /// Evaluates a constant-expression instruction sequence to its single
@@ -531,6 +531,81 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         pc: &mut usize,
     ) -> Result<(), InstructionExecutionError> {
         let res = match instruction {
+            Instruction::Call {
+                func_index: callee_func_index,
+                params_count,
+            } => {
+                self.call_func(*callee_func_index, *params_count, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
+                    })?;
+
+                ExecutionResult::Next
+            }
+            Instruction::CallIndirect {
+                params,
+                results,
+                table_index,
+            } => {
+                let table = &self.instance.table_vals[table_index.0 as usize];
+                // The index operand is an unsigned i32; a negative value becomes a
+                // large `usize` and fails the bounds check below.
+                let slot = self.stack.pop().as_i32() as u32 as usize;
+
+                // Trap if the index is past the table's end (wasm: "undefined element").
+                let Some(func_ref) = table.table.get(slot).copied() else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::TableSlotOutOfBounds,
+                    ));
+                };
+
+                // Trap on a null element (wasm: "uninitialized element").
+                let Some(callee_func_index) = func_ref else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::NullElementInTable,
+                    ));
+                };
+
+                let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
+                let ty = &self.instance.module.types[func.ty.0 as usize];
+
+                let declared_params = &ty.params;
+                let declared_results = &ty.results;
+
+                // Trap if the callee's signature differs from the type the
+                // instruction expects (wasm: "indirect call type mismatch").
+                if params.as_ref() != declared_params.as_ref()
+                    || results.as_ref() != declared_results.as_ref()
+                {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::FunctionSignatureMismatch(
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(declared_params),
+                                formatted_val_types(declared_results)
+                            ),
+                            format!(
+                                "{} -> {}",
+                                formatted_val_types(params),
+                                formatted_val_types(results)
+                            ),
+                        ),
+                    ));
+                }
+
+                self.call_func(callee_func_index, declared_params.len() as u32, module)
+                    .map_err(|err| {
+                        InstructionExecutionError::CallIndirect(
+                            *table_index,
+                            FunctionCall(callee_func_index, Box::new(err)),
+                        )
+                    })?;
+
+                ExecutionResult::Next
+            }
             Instruction::Unreachable => {
                 return Err(InstructionExecutionError::Unreachable);
             }
@@ -2043,81 +2118,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop();
 
                 self.instance.global_vals[index.0 as usize] = val;
-
-                ExecutionResult::Next
-            }
-            Instruction::Call {
-                func_index: callee_func_index,
-                params_count,
-            } => {
-                self.call_func(*callee_func_index, *params_count, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
-                    })?;
-
-                ExecutionResult::Next
-            }
-            Instruction::CallIndirect {
-                params,
-                results,
-                table_index,
-            } => {
-                let table = &self.instance.table_vals[table_index.0 as usize];
-                // The index operand is an unsigned i32; a negative value becomes a
-                // large `usize` and fails the bounds check below.
-                let slot = self.stack.pop().as_i32() as u32 as usize;
-
-                // Trap if the index is past the table's end (wasm: "undefined element").
-                let Some(func_ref) = table.table.get(slot).copied() else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::TableSlotOutOfBounds,
-                    ));
-                };
-
-                // Trap on a null element (wasm: "uninitialized element").
-                let Some(callee_func_index) = func_ref else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::NullElementInTable,
-                    ));
-                };
-
-                let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
-                let ty = &self.instance.module.types[func.ty.0 as usize];
-
-                let declared_params = &ty.params;
-                let declared_results = &ty.results;
-
-                // Trap if the callee's signature differs from the type the
-                // instruction expects (wasm: "indirect call type mismatch").
-                if params.as_ref() != declared_params.as_ref()
-                    || results.as_ref() != declared_results.as_ref()
-                {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::FunctionSignatureMismatch(
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(declared_params),
-                                formatted_val_types(declared_results)
-                            ),
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(params),
-                                formatted_val_types(results)
-                            ),
-                        ),
-                    ));
-                }
-
-                self.call_func(callee_func_index, declared_params.len() as u32, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::CallIndirect(
-                            *table_index,
-                            FunctionCall(callee_func_index, Box::new(err)),
-                        )
-                    })?;
 
                 ExecutionResult::Next
             }
