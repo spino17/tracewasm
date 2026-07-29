@@ -760,3 +760,88 @@ fn promote_passes_the_specials_and_subnormals_through() {
     assert_eq!(dp_f64("promote_subnormal"), f32::from_bits(1) as f64);
     assert!(dp_f64("promote_subnormal") > 0.0);
 }
+
+/// `i32` result of the reinterpretation fixture.
+fn rein_i32(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/reinterpret.wasm"), name)
+}
+
+/// `i64` result of the reinterpretation fixture.
+fn rein_i64(name: &str) -> i64 {
+    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    v
+}
+
+/// `f32` result of the reinterpretation fixture.
+fn rein_f32(name: &str) -> f32 {
+    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    v
+}
+
+/// `f64` result of the reinterpretation fixture.
+fn rein_f64(name: &str) -> f64 {
+    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    v
+}
+
+// Reinterpretation moves bits; it does not convert values. Implementing it with an
+// `as` cast — the mistake the whole family invites, since the signatures match —
+// would return `1` for all three of these instead of the bit patterns.
+#[test]
+fn reinterpretation_moves_bits_rather_than_converting_values() {
+    assert_eq!(rein_i32("f32_bits_1_5"), 1069547520, "0x3FC00000, not 1");
+    assert_eq!(rein_i32("f32_bits_1_0"), 1065353216, "0x3F800000");
+    assert_eq!(rein_i64("f64_bits_1_5"), 4609434218613702656);
+}
+
+// The float's sign bit becomes the integer's sign bit. `-0.0` is the sharpest case:
+// it compares equal to `+0.0` and every *conversion* sends it to `0`, but
+// reinterpreting it gives the minimum integer.
+#[test]
+fn reinterpretation_carries_the_sign_bit_across() {
+    assert_eq!(rein_i32("neg_zero_f32"), i32::MIN, "0x80000000, not 0");
+    assert_eq!(rein_i64("neg_zero_f64"), i64::MIN);
+    assert_eq!(rein_i32("pos_zero"), 0, "+0.0 really is all-zero bits");
+    assert_eq!(rein_i32("neg_1_5_f32"), -1077936128);
+}
+
+// Every bit pattern is a valid float, so neither direction can fail and a round
+// trip is the identity — including for patterns that are NaNs or subnormals.
+#[test]
+fn reinterpretation_round_trips_in_both_directions() {
+    assert_eq!(rein_i32("round_trip_i32"), 1069547520);
+    assert_eq!(rein_i64("round_trip_i64"), 4609434218613702656);
+    assert_eq!(rein_f32("i32_to_f32"), 1.5, "0x3FC00000 read as a float");
+    assert_eq!(rein_f64("i64_to_f64"), 1.5);
+    assert_eq!(rein_i32("subnormal"), 1, "the smallest subnormal survives");
+    assert_eq!(rein_i32("infinity"), 2139095040, "0x7F800000");
+    assert_eq!(
+        rein_i32("neg_one_to_f32"),
+        -1,
+        "0xFFFFFFFF is a NaN, and returns"
+    );
+}
+
+// NaN payloads must survive verbatim. Reinterpretation is not an arithmetic
+// operation, so it has no licence to canonicalise them — and that includes the
+// signalling patterns, which some float paths quieten by setting the high
+// significand bit.
+#[test]
+fn reinterpretation_preserves_nan_payloads_without_canonicalising() {
+    assert_eq!(
+        rein_i32("nan_payload"),
+        2143289345,
+        "0x7FC00001 keeps its payload"
+    );
+    assert_eq!(
+        rein_i32("nan_signalling"),
+        2139095041,
+        "0x7F800001 is a signalling NaN and must not be quietened to 0x7FC00001"
+    );
+    assert_eq!(
+        rein_i32("nan_negative"),
+        -4194304,
+        "0xFFC00000, sign bit intact"
+    );
+    assert_eq!(rein_i64("nan_payload_f64"), 9218868437227405313);
+}
