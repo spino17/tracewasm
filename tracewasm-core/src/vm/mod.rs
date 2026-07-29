@@ -554,6 +554,20 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32Extend8S => {
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a as i8 as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Extend16S => {
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a as i16 as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I32Add => {
                 let b = self.stack.pop().as_i32();
                 let a = self.stack.pop().as_i32();
@@ -814,6 +828,41 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_i64();
 
                 self.stack.push(Val::I32(if a == 0 { 1 } else { 0 }));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Extend8S => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a as i8 as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Extend16S => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a as i16 as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Extend32S => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a as i32 as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64ExtendI32U => {
+                let a = self.stack.pop().as_i32() as u32;
+
+                self.stack.push(Val::I64(a as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64ExtendI32S => {
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I64(a as i64));
 
                 ExecutionResult::Next
             }

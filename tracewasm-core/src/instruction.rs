@@ -315,6 +315,13 @@ pub enum Instruction {
     /// the `i64` form — it is a comparison against zero, so it follows the
     /// comparison convention.
     I32Eqz,
+    // Sign-extension operators: reinterpret the low bits of the operand as a
+    // signed value of that narrower width, then widen back. The result keeps the
+    // operand's type; none of them traps.
+    /// `i32.extend8_s`: sign-extend the low 8 bits to `i32`.
+    I32Extend8S,
+    /// `i32.extend16_s`: sign-extend the low 16 bits to `i32`.
+    I32Extend16S,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -393,6 +400,18 @@ pub enum Instruction {
     /// the `i64` form — it is a comparison against zero, so it follows the
     /// comparison convention.
     I64Eqz,
+    /// `i64.extend8_s`: sign-extend the low 8 bits to `i64`.
+    I64Extend8S,
+    /// `i64.extend16_s`: sign-extend the low 16 bits to `i64`.
+    I64Extend16S,
+    /// `i64.extend32_s`: sign-extend the low 32 bits to `i64`.
+    I64Extend32S,
+    /// `i64.extend_i32_u`: widen an `i32` to `i64` by **zero**-extending, so `-1`
+    /// becomes `4294967295` rather than staying `-1`.
+    I64ExtendI32U,
+    /// `i64.extend_i32_s`: widen an `i32` to `i64` by **sign**-extending, so `-1`
+    /// stays `-1`.
+    I64ExtendI32S,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
@@ -1338,6 +1357,12 @@ impl Instruction {
                 Operator::I32Ctz => (Instruction::I32Ctz, StackEffectResult::UnaryOperator),
                 Operator::I32Popcnt => (Instruction::I32Popcnt, StackEffectResult::UnaryOperator),
                 Operator::I32Eqz => (Instruction::I32Eqz, StackEffectResult::UnaryOperator),
+                Operator::I32Extend8S => {
+                    (Instruction::I32Extend8S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I32Extend16S => {
+                    (Instruction::I32Extend16S, StackEffectResult::UnaryOperator)
+                }
                 // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
@@ -1369,6 +1394,21 @@ impl Instruction {
                 Operator::I64Ctz => (Instruction::I64Ctz, StackEffectResult::UnaryOperator),
                 Operator::I64Popcnt => (Instruction::I64Popcnt, StackEffectResult::UnaryOperator),
                 Operator::I64Eqz => (Instruction::I64Eqz, StackEffectResult::UnaryOperator),
+                Operator::I64Extend8S => {
+                    (Instruction::I64Extend8S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64Extend16S => {
+                    (Instruction::I64Extend16S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64Extend32S => {
+                    (Instruction::I64Extend32S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64ExtendI32U => {
+                    (Instruction::I64ExtendI32U, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64ExtendI32S => {
+                    (Instruction::I64ExtendI32S, StackEffectResult::UnaryOperator)
+                }
                 // i64 binary operations
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
                 Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),

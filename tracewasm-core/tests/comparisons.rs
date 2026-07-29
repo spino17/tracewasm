@@ -289,3 +289,57 @@ fn sqrt_of_a_negative_operand_is_nan() {
     assert_eq!(unary_f32("sqrt_4"), 2.0);
     assert_eq!(unary_f64("f64_abs_neg"), 3.5);
 }
+
+/// `i32` result of the sign-extension fixture.
+fn extend_i32(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/extend.wasm"), name)
+}
+
+/// `i64` result of the sign-extension fixture.
+fn extend_i64(name: &str) -> i64 {
+    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/extend.wasm"), name);
+    v
+}
+
+// The narrow sign-extensions read only the low bits of their operand, so the
+// high bits have to be dropped first. An implementation that widened the operand
+// as-is would pass `e8s_7f` and fail every other case here.
+#[test]
+fn narrow_sign_extension_discards_the_high_bits() {
+    assert_eq!(extend_i32("e8s_ff"), -1, "low byte 0xFF is -1 as an i8");
+    assert_eq!(extend_i32("e8s_7f"), 127, "0x7F stays positive");
+    assert_eq!(
+        extend_i32("e8s_high"),
+        -128,
+        "only the low byte 0x80 is read"
+    );
+    assert_eq!(extend_i32("e8s_256"), 0, "0x100 has a zero low byte");
+    assert_eq!(extend_i32("e16s_ffff"), -1);
+    assert_eq!(extend_i32("e16s_65536"), 0);
+}
+
+#[test]
+fn narrow_sign_extension_to_i64_uses_the_same_rule() {
+    assert_eq!(extend_i64("i64_e8s"), -1);
+    assert_eq!(extend_i64("i64_e16s"), -1);
+    assert_eq!(
+        extend_i64("i64_e32s"),
+        -1,
+        "0x1_FFFFFFFF keeps only the low 32 bits, which are all ones"
+    );
+}
+
+// The one pair that is easy to conflate: both widen an `i32` to an `i64`, but
+// `_s` copies the sign bit and `_u` does not. They agree on every non-negative
+// operand, so a negative one is the only thing that tells them apart.
+#[test]
+fn i32_to_i64_signed_and_unsigned_widening_disagree_on_negatives() {
+    assert_eq!(extend_i64("i32_to_i64_s_neg"), -1, "sign-extended");
+    assert_eq!(
+        extend_i64("i32_to_i64_u_neg"),
+        4_294_967_295,
+        "zero-extended: 0xFFFFFFFF, not -1"
+    );
+    assert_eq!(extend_i64("i32_to_i64_s_pos"), 7, "and agree on positives");
+    assert_eq!(extend_i64("i32_to_i64_u_pos"), 7);
+}
