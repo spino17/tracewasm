@@ -589,6 +589,14 @@ pub enum InstructionExecutionError {
     Division { num: String, deno: String },
     #[error("remainder failed: {left} % {right}")]
     Remainder { left: String, right: String },
+    /// A `trunc` conversion could not represent its operand in the target integer
+    /// type — the operand was NaN, an infinity, or truncated to a value outside
+    /// the target's range. Fields: the operand, and the target type's name.
+    ///
+    /// The saturating `trunc_sat` family clamps instead of failing, so it never
+    /// produces this.
+    #[error("float truncation of `{0}` to {1} failed")]
+    FloatToIntTruncation(String, String),
 }
 
 impl InstructionExecutionError {

@@ -58,6 +58,26 @@ use std::ops::{BitAnd, BitOr, BitXor, Neg};
 
 pub(crate) mod stack;
 
+// Bounds for the `trunc` targets. Each `_HIGH` is the power of two just *past*
+// the target's range and is treated as exclusive; see `trunc_float_to_int`.
+//
+// The casts land on those powers of two precisely *because* they round: no
+// `_HIGH` maximum is representable in the type it is cast through, so each one
+// rounds up to the next power of two, which is. The trailing comment on every
+// line is the resulting value — keep them in step if these are ever rewritten.
+//
+// This makes the intermediate `as f32` on the 32-bit lines load-bearing despite
+// looking redundant. Dropping it leaves `i32::MAX as f64 == 2147483647.0`, an
+// *inclusive* maximum, and the exclusive test would then reject `i32::MAX`
+// itself. The 64-bit lines need no such step because `i64::MAX`/`u64::MAX` are
+// already unrepresentable in `f64`.
+const I32_TRUNC_LOW: f64 = i32::MIN as f32 as f64; // -2^31 = -2147483648
+const I32_TRUNC_HIGH: f64 = i32::MAX as f32 as f64; // 2^31 = 2147483648
+const U32_TRUNC_HIGH: f64 = u32::MAX as f32 as f64; // 2^32 = 4294967296
+const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
+const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
+const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
+
 /// A function activation's local slots: its parameters followed by its declared
 /// locals, addressed by `local.get`/`local.set` index.
 pub(crate) struct Locals {
@@ -119,6 +139,57 @@ struct TraceVMState<'a, M, I> {
 }
 
 impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
+    /// Truncates `operand` toward zero, checking the result is representable in an
+    /// integer type spanning the half-open range `[low, high)`.
+    ///
+    /// Shared by the eight `iNN.trunc_fNN_{s,u}` instructions, which differ only in
+    /// those bounds and in how they reinterpret the result. Two details make it worth
+    /// centralising rather than repeating per arm:
+    ///
+    /// * **Truncation happens before the range test.** `trunc_u` of `-0.9` is `-0.0`,
+    ///   a valid zero — testing `operand >= 0.0` first would trap on it instead.
+    /// * **The upper bound is exclusive.** An exclusive power of two is exactly
+    ///   representable where the target's maximum often is not: `i32::MAX as f32`
+    ///   rounds *up* to 2^31, so comparing against it would wrongly admit 2^31
+    ///   itself, and `i64::MAX as f64` rounds up to 2^63 the same way. Callers
+    ///   promote `f32` operands to `f64` so the 64-bit bounds stay precise too.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstructionExecutionError::FloatToIntTruncation`] for a NaN or
+    /// infinite operand, and for a truncated value outside `[low, high)`.
+    ///
+    /// Those are two checks but one condition: the range test alone would reject all
+    /// three special values, since NaN compares false against everything and the
+    /// infinities fall outside any finite range. The explicit guard is kept for
+    /// legibility — it states the intent without asking the reader to work through
+    /// IEEE comparison semantics — so note that no input can reach the range test
+    /// only to be caught by the guard, and removing it would not change behaviour.
+    fn trunc_float_to_int(
+        operand: f64,
+        low: f64,
+        high: f64,
+        target: &str,
+    ) -> Result<f64, InstructionExecutionError> {
+        if operand.is_nan() || operand.is_infinite() {
+            return Err(InstructionExecutionError::FloatToIntTruncation(
+                operand.to_string(),
+                target.to_string(),
+            ));
+        }
+
+        let truncated = operand.trunc();
+
+        if !(low..high).contains(&truncated) {
+            return Err(InstructionExecutionError::FloatToIntTruncation(
+                operand.to_string(),
+                target.to_string(),
+            ));
+        }
+
+        Ok(truncated)
+    }
+
     fn call_func(
         &mut self,
         func_index: FuncIndex,
@@ -575,6 +646,42 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32TruncF32U => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = self.stack.pop().as_f32() as f64;
+                let truncated = Self::trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                // The result is the `u32` bit pattern held in an `i32`, so values
+                // above `i32::MAX` come back out negative.
+                self.stack.push(Val::I32(truncated as u32 as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncF32S => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = self.stack.pop().as_f32() as f64;
+                let truncated = Self::trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                self.stack.push(Val::I32(truncated as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncF64U => {
+                let a = self.stack.pop().as_f64();
+                let truncated = Self::trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                self.stack.push(Val::I32(truncated as u32 as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32TruncF64S => {
+                let a = self.stack.pop().as_f64();
+                let truncated = Self::trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                self.stack.push(Val::I32(truncated as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I32Add => {
                 let b = self.stack.pop().as_i32();
                 let a = self.stack.pop().as_i32();
@@ -870,6 +977,42 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_i32();
 
                 self.stack.push(Val::I64(a as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncF32U => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = self.stack.pop().as_f32() as f64;
+                let truncated = Self::trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                // As with the `i32` forms, the result is the unsigned bit pattern
+                // held in a signed value.
+                self.stack.push(Val::I64(truncated as u64 as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncF32S => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = self.stack.pop().as_f32() as f64;
+                let truncated = Self::trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                self.stack.push(Val::I64(truncated as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncF64U => {
+                let a = self.stack.pop().as_f64();
+                let truncated = Self::trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                self.stack.push(Val::I64(truncated as u64 as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64TruncF64S => {
+                let a = self.stack.pop().as_f64();
+                let truncated = Self::trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                self.stack.push(Val::I64(truncated as i64));
 
                 ExecutionResult::Next
             }

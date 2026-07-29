@@ -1,8 +1,12 @@
-//! End-to-end checks for the comparison instructions, covering the two things
-//! that are easy to get wrong: signed vs unsigned ordering, and the fact that
-//! *every* comparison yields an `i32` regardless of operand width.
+//! End-to-end checks for the numeric instructions, each aimed at the cases where
+//! a plausible-looking implementation diverges from the spec: signed vs unsigned
+//! ordering, comparisons always yielding an `i32` regardless of operand width,
+//! IEEE 754 corners (NaN, signed zero, ties-to-even), and the conversions —
+//! which is where the sign/zero-extension split and the trapping `trunc` bounds
+//! live.
 
 use tracewasm_core::{
+    error::FuncCallError,
     instance::traits::{ImportRegistry, ResultVals, Results, Val},
     memory::{MemoryView, linear::LinearMemory},
     module::Module,
@@ -65,6 +69,18 @@ fn call_in(wasm: &[u8], name: &str) -> i32 {
 
 /// Compiles `wasm`, instantiates it, and calls its `() -> R` export `name`.
 fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
+    match try_call_typed::<R>(wasm, name) {
+        Ok(v) => v,
+        Err(e) => panic!("calling `{name}` failed: {e}"),
+    }
+}
+
+/// As [`call_typed`], but surfaces the failure instead of panicking — needed for
+/// the trapping instructions, where the error *is* the thing under test.
+// Returns `TypedFunc::call`'s own error type unchanged; boxing it here would just
+// diverge from the signature under test.
+#[allow(clippy::result_large_err)]
+fn try_call_typed<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
     let module = Module::compile(wasm).expect("fixture should compile");
 
     let func = module
@@ -75,10 +91,7 @@ fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
         .instantiate::<LinearMemory, _>(NoImports, None)
         .expect("fixture should instantiate");
 
-    match func.call((), &mut instance) {
-        Ok(v) => v,
-        Err(e) => panic!("calling `{name}` failed: {e}"),
-    }
+    func.call((), &mut instance)
 }
 
 // `-1` is `0xFFFF_FFFF` unsigned, so it is the *largest* u32 — the unsigned and
@@ -349,7 +362,11 @@ fn i32_to_i64_signed_and_unsigned_widening_disagree_on_negatives() {
 // first would reject the first four of these.
 #[test]
 fn wrap_i64_keeps_the_low_32_bits_without_trapping() {
-    assert_eq!(extend_i32("wrap_2pow32"), 0, "0x1_0000_0000 has no low bits");
+    assert_eq!(
+        extend_i32("wrap_2pow32"),
+        0,
+        "0x1_0000_0000 has no low bits"
+    );
     assert_eq!(extend_i32("wrap_neg1"), -1);
     assert_eq!(
         extend_i32("wrap_u32_max"),
@@ -358,7 +375,11 @@ fn wrap_i64_keeps_the_low_32_bits_without_trapping() {
     );
     assert_eq!(extend_i32("wrap_i64_max"), -1, "i64::MAX wraps to -1");
     assert_eq!(extend_i32("wrap_mixed"), 0x2345_6789, "high nibble dropped");
-    assert_eq!(extend_i32("wrap_small"), 42, "in-range operands pass through");
+    assert_eq!(
+        extend_i32("wrap_small"),
+        42,
+        "in-range operands pass through"
+    );
 }
 
 // `wrap_i64` then `extend_i32_s` is a round trip for operands that fit in an
@@ -367,4 +388,113 @@ fn wrap_i64_keeps_the_low_32_bits_without_trapping() {
 fn wrap_undoes_a_signed_widening() {
     assert_eq!(extend_i64("i32_to_i64_s_neg"), -1);
     assert_eq!(extend_i32("wrap_neg1"), -1);
+}
+
+/// `i32` result of the float-to-int truncation fixture.
+fn trunc_i32(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/trunc.wasm"), name)
+}
+
+/// `i64` result of the float-to-int truncation fixture.
+fn trunc_i64(name: &str) -> i64 {
+    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/trunc.wasm"), name);
+    v
+}
+
+/// Asserts that `name` traps, and that the trap is a truncation failure naming
+/// `target` as the type it could not reach.
+///
+/// `R` is the export's declared result type; the call never produces a value, but
+/// it still has to be named for `get_typed_func` to resolve the signature.
+fn assert_traps<R: Results>(name: &str, target: &str) {
+    let err = match try_call_typed::<R>(include_bytes!("fixtures/trunc.wasm"), name) {
+        Err(e) => e,
+        Ok(_) => panic!("`{name}` should have trapped, but returned a value"),
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("float truncation"),
+        "`{name}` trapped for the wrong reason: {msg}"
+    );
+    // Also pins the error's own formatting: the target type has to appear, which
+    // it will not if the format string interpolates the operand twice.
+    assert!(
+        msg.contains(target),
+        "`{name}` should name `{target}` as the target type: {msg}"
+    );
+}
+
+// Truncation goes toward zero, so a negative operand rounds *up*. Using `floor`
+// would give -4 for these.
+#[test]
+fn truncation_rounds_toward_zero() {
+    assert_eq!(trunc_i32("s_pos"), 3);
+    assert_eq!(trunc_i32("s_neg"), -3, "floor would give -4");
+    assert_eq!(trunc_i32("f64_s_neg"), -3);
+}
+
+// `trunc_u` of an operand in (-1, 0) truncates to -0.0, which is a valid zero.
+// Rejecting negatives *before* truncating would trap here instead.
+#[test]
+fn unsigned_truncation_accepts_operands_that_truncate_to_negative_zero() {
+    assert_eq!(trunc_i32("u_neg_zero"), 0, "trunc(-0.9) is -0.0, so 0");
+    assert_eq!(trunc_i32("f64_u_neg_zero"), 0);
+    assert_eq!(trunc_i64("i64_u_neg_zero"), 0);
+}
+
+#[test]
+fn unsigned_truncation_still_rejects_operands_that_truncate_below_zero() {
+    assert_traps::<(i32,)>("u_neg_one_traps", "u32");
+}
+
+// The unsigned forms yield the bit pattern, so results above the signed maximum
+// read back as negative — the same convention as `i64.extend_i32_u`'s inverse.
+#[test]
+fn unsigned_truncation_results_are_bit_patterns() {
+    assert_eq!(trunc_i32("u_max"), -1, "4294967295 as an i32 is -1");
+    assert_eq!(trunc_i64("i64_u_big"), -8_446_744_073_709_551_616);
+}
+
+// The extremes are in range and must *not* trap. `s_min_frac_ok` is the low-side
+// counterpart of the negative-zero case: -2147483648.5 truncates to exactly
+// `i32::MIN`, so checking the operand before truncating would reject it.
+#[test]
+fn truncation_accepts_the_range_boundaries() {
+    assert_eq!(trunc_i32("s_max_ok"), i32::MAX);
+    assert_eq!(trunc_i32("s_min_ok"), i32::MIN);
+    assert_eq!(
+        trunc_i32("s_min_frac_ok"),
+        i32::MIN,
+        "-2147483648.5 truncates in"
+    );
+    assert_eq!(trunc_i64("i64_s_min_ok"), i64::MIN);
+}
+
+// The bound has to be exclusive. `i32::MAX as f32` rounds *up* to 2^31 and
+// `i64::MAX as f64` rounds up to 2^63, so an implementation comparing against a
+// cast maximum would accept exactly these four values as in range.
+#[test]
+fn truncation_traps_on_the_power_of_two_just_past_the_range() {
+    assert_traps::<(i32,)>("s_2pow31_traps", "i32");
+    assert_traps::<(i32,)>("s_f32_2pow31_traps", "i32");
+    assert_traps::<(i64,)>("i64_s_2pow63_traps", "i64");
+    assert_traps::<(i64,)>("i64_u_2pow64_traps", "u64");
+}
+
+// Rust's `as` casts saturate rather than wrapping, so an implementation whose
+// range check never fires returns `i32::MAX`/`i32::MIN` here instead of trapping.
+#[test]
+fn truncation_traps_on_far_out_of_range_operands() {
+    assert_traps::<(i32,)>("s_big_traps", "i32");
+    assert_traps::<(i32,)>("s_negbig_traps", "i32");
+    assert_traps::<(i64,)>("i64_s_big_traps", "i64");
+}
+
+#[test]
+fn truncation_traps_on_nan_and_infinity() {
+    assert_traps::<(i32,)>("nan_traps", "i32");
+    assert_traps::<(i32,)>("inf_traps", "i32");
+    assert_traps::<(i32,)>("neg_inf_traps", "i32");
+    assert_traps::<(i64,)>("i64_nan_traps", "u64");
 }

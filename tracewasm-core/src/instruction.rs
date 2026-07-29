@@ -328,6 +328,19 @@ pub enum Instruction {
     /// discards information rather than adding it. Out-of-range operands wrap
     /// rather than trapping, so `0x1_0000_0000` becomes `0`.
     I32WrapI64,
+    // The `trunc` operators round their float operand toward zero and reinterpret
+    // it as an integer. Unlike every other conversion here they can **trap**: a
+    // NaN, an infinity, or a value that truncates outside the target's range has
+    // no representation, so it fails rather than being clamped. (The `trunc_sat`
+    // family is the clamping counterpart.)
+    /// `i32.trunc_f32_u`: truncate an `f32` to an unsigned 32-bit integer.
+    I32TruncF32U,
+    /// `i32.trunc_f32_s`: truncate an `f32` to a signed 32-bit integer.
+    I32TruncF32S,
+    /// `i32.trunc_f64_u`: truncate an `f64` to an unsigned 32-bit integer.
+    I32TruncF64U,
+    /// `i32.trunc_f64_s`: truncate an `f64` to a signed 32-bit integer.
+    I32TruncF64S,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -418,6 +431,16 @@ pub enum Instruction {
     /// `i64.extend_i32_s`: widen an `i32` to `i64` by **sign**-extending, so `-1`
     /// stays `-1`.
     I64ExtendI32S,
+    /// `i64.trunc_f32_u`: truncate an `f32` to an unsigned 64-bit integer.
+    ///
+    /// Traps on unrepresentable operands, as the other `trunc` operators do.
+    I64TruncF32U,
+    /// `i64.trunc_f32_s`: truncate an `f32` to a signed 64-bit integer.
+    I64TruncF32S,
+    /// `i64.trunc_f64_u`: truncate an `f64` to an unsigned 64-bit integer.
+    I64TruncF64U,
+    /// `i64.trunc_f64_s`: truncate an `f64` to a signed 64-bit integer.
+    I64TruncF64S,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
@@ -1370,6 +1393,18 @@ impl Instruction {
                     (Instruction::I32Extend16S, StackEffectResult::UnaryOperator)
                 }
                 Operator::I32WrapI64 => (Instruction::I32WrapI64, StackEffectResult::UnaryOperator),
+                Operator::I32TruncF32U => {
+                    (Instruction::I32TruncF32U, StackEffectResult::UnaryOperator)
+                }
+                Operator::I32TruncF32S => {
+                    (Instruction::I32TruncF32S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I32TruncF64U => {
+                    (Instruction::I32TruncF64U, StackEffectResult::UnaryOperator)
+                }
+                Operator::I32TruncF64S => {
+                    (Instruction::I32TruncF64S, StackEffectResult::UnaryOperator)
+                }
                 // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
@@ -1415,6 +1450,18 @@ impl Instruction {
                 }
                 Operator::I64ExtendI32S => {
                     (Instruction::I64ExtendI32S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64TruncF32U => {
+                    (Instruction::I64TruncF32U, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64TruncF32S => {
+                    (Instruction::I64TruncF32S, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64TruncF64U => {
+                    (Instruction::I64TruncF64U, StackEffectResult::UnaryOperator)
+                }
+                Operator::I64TruncF64S => {
+                    (Instruction::I64TruncF64S, StackEffectResult::UnaryOperator)
                 }
                 // i64 binary operations
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
