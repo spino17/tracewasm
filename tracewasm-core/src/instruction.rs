@@ -315,13 +315,19 @@ pub enum Instruction {
     /// the `i64` form — it is a comparison against zero, so it follows the
     /// comparison convention.
     I32Eqz,
-    // Sign-extension operators: reinterpret the low bits of the operand as a
-    // signed value of that narrower width, then widen back. The result keeps the
+    // The `extendN_s` operators below reinterpret the low bits of the operand as a
+    // signed value of that narrower width, then widen back. Each keeps the
     // operand's type; none of them traps.
     /// `i32.extend8_s`: sign-extend the low 8 bits to `i32`.
     I32Extend8S,
     /// `i32.extend16_s`: sign-extend the low 16 bits to `i32`.
     I32Extend16S,
+    /// `i32.wrap_i64`: narrow an `i64` to an `i32` by keeping its low 32 bits.
+    ///
+    /// The inverse direction of `i64.extend_i32_*`, and the one conversion that
+    /// discards information rather than adding it. Out-of-range operands wrap
+    /// rather than trapping, so `0x1_0000_0000` becomes `0`.
+    I32WrapI64,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -1363,6 +1369,7 @@ impl Instruction {
                 Operator::I32Extend16S => {
                     (Instruction::I32Extend16S, StackEffectResult::UnaryOperator)
                 }
+                Operator::I32WrapI64 => (Instruction::I32WrapI64, StackEffectResult::UnaryOperator),
                 // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),

@@ -343,3 +343,28 @@ fn i32_to_i64_signed_and_unsigned_widening_disagree_on_negatives() {
     assert_eq!(extend_i64("i32_to_i64_s_pos"), 7, "and agree on positives");
     assert_eq!(extend_i64("i32_to_i64_u_pos"), 7);
 }
+
+// `wrap_i64` is the only conversion here that *discards* bits, and it wraps
+// instead of trapping on operands that do not fit. Anything that range-checked
+// first would reject the first four of these.
+#[test]
+fn wrap_i64_keeps_the_low_32_bits_without_trapping() {
+    assert_eq!(extend_i32("wrap_2pow32"), 0, "0x1_0000_0000 has no low bits");
+    assert_eq!(extend_i32("wrap_neg1"), -1);
+    assert_eq!(
+        extend_i32("wrap_u32_max"),
+        -1,
+        "4294967295 does not fit an i32; its low 32 bits are all ones"
+    );
+    assert_eq!(extend_i32("wrap_i64_max"), -1, "i64::MAX wraps to -1");
+    assert_eq!(extend_i32("wrap_mixed"), 0x2345_6789, "high nibble dropped");
+    assert_eq!(extend_i32("wrap_small"), 42, "in-range operands pass through");
+}
+
+// `wrap_i64` then `extend_i32_s` is a round trip for operands that fit in an
+// i32; `extend_i32_u` would not agree, which is what the pair test above pins.
+#[test]
+fn wrap_undoes_a_signed_widening() {
+    assert_eq!(extend_i64("i32_to_i64_s_neg"), -1);
+    assert_eq!(extend_i32("wrap_neg1"), -1);
+}

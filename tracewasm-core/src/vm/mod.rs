@@ -568,6 +568,13 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32WrapI64 => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I32(a as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I32Add => {
                 let b = self.stack.pop().as_i32();
                 let a = self.stack.pop().as_i32();
