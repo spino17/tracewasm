@@ -183,7 +183,7 @@ impl Val {
 /// number of elements it may grow to.
 pub(crate) struct TableVal {
     /// The table's slots, each a nullable function reference.
-    pub table: Box<[Option<FuncIndex>]>,
+    pub table: Vec<Option<FuncIndex>>,
     /// The maximum element count the table may grow to.
     pub maximum: u64,
 }

@@ -134,7 +134,7 @@ struct TraceVMState<'a, M, I> {
     /// The module's global values, shared across the call tree.
     globals: &'a mut [Val],
     /// The module's tables, shared across the call tree.
-    tables: &'a mut Vec<TableVal>,
+    tables: &'a mut [TableVal],
     datas: &'a mut [DataVal],
 }
 
@@ -327,6 +327,17 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::RefFunc { function_index } => {
                 self.stack.push(Val::Ref(Some(*function_index)));
+
+                ExecutionResult::Next
+            }
+            Instruction::RefIsNull => {
+                let func_ref = self.stack.pop().as_ref();
+
+                if func_ref.is_none() {
+                    self.stack.push(Val::I32(1));
+                } else {
+                    self.stack.push(Val::I32(0));
+                }
 
                 ExecutionResult::Next
             }
@@ -2032,7 +2043,7 @@ impl TraceVM {
         caller_base_height: u32,
         import_registry: &mut I,
         globals: &mut [Val],
-        tables: &mut Vec<TableVal>,
+        tables: &mut [TableVal],
         datas: &mut [DataVal],
         config: &Config,
     ) -> Result<(), TraceWasmError> {
@@ -2152,7 +2163,7 @@ impl TraceVM {
         memory: &mut M,
         import_registry: &mut I,
         global_vals: &mut [Val],
-        table_vals: &mut Vec<TableVal>,
+        table_vals: &mut [TableVal],
         data_vals: &mut [DataVal],
         config: &Config,
     ) -> Result<ResultVals, TraceWasmError> {

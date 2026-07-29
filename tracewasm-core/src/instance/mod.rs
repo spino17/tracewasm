@@ -31,7 +31,7 @@ pub struct Instance<M, I> {
     module: Arc<Module>,
     config: Config,
     global_vals: Box<[Val]>,
-    table_vals: Vec<TableVal>,
+    table_vals: Box<[TableVal]>,
     element_vals: Box<[ElementVal]>,
     data_vals: Box<[DataVal]>,
 }
@@ -50,7 +50,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         module: Arc<Module>,
         config: Config,
         global_vals: Box<[Val]>,
-        table_vals: Vec<TableVal>,
+        table_vals: Box<[TableVal]>,
         element_vals: Box<[ElementVal]>,
         data_vals: Box<[DataVal]>,
     ) -> Self {

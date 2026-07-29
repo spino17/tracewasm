@@ -87,6 +87,13 @@ pub enum Instruction {
         /// Index of the function whose reference is pushed.
         function_index: FuncIndex,
     },
+    /// `ref.is_null`: test whether the reference on top of the stack is null,
+    /// pushing `1` if it is and `0` otherwise.
+    ///
+    /// The result is an `i32`, not a reference — like `iNN.eqz`, this is a
+    /// predicate and follows the comparison convention, so it can feed a `br_if`
+    /// directly. Consumes the reference; it does not peek.
+    RefIsNull,
     /// `memory.size`: push the memory's current size in pages.
     MemorySize,
     /// `memory.grow`: pop a page delta and grow the memory, pushing the size
@@ -1272,6 +1279,7 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
+                Operator::RefIsNull => (Instruction::RefIsNull, StackEffectResult::UnaryOperator),
                 // memory
                 Operator::MemorySize { mem } => {
                     Self::check_memory_index(mem)?;

@@ -845,3 +845,31 @@ fn reinterpretation_preserves_nan_payloads_without_canonicalising() {
     );
     assert_eq!(rein_i64("nan_payload_f64"), 9218868437227405313);
 }
+
+/// `i32` result of the `ref.is_null` fixture.
+fn ref_null(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/ref_is_null.wasm"), name)
+}
+
+#[test]
+fn ref_is_null_distinguishes_a_null_reference_from_a_function() {
+    assert_eq!(ref_null("null_is_null"), 1);
+    assert_eq!(ref_null("func_is_not_null"), 0);
+}
+
+// `ref.is_null` is a predicate, so its result is an `i32` and not a reference.
+// Pushing a `Val::Ref` would panic the interpreter when `br_if` reads its
+// condition as an `i32` — a loud failure rather than a wrong answer, which is why
+// this is worth pinning separately from the value checks above.
+#[test]
+fn ref_is_null_result_is_an_i32_usable_as_a_branch_condition() {
+    assert_eq!(ref_null("brif_on_null"), 111, "null takes the branch");
+    assert_eq!(ref_null("brif_on_func"), 222, "a real funcref does not");
+}
+
+// The reference is consumed, not peeked at: dropping the `i32` result leaves the
+// stack back at the sentinel, with no reference stranded above it.
+#[test]
+fn ref_is_null_consumes_the_reference() {
+    assert_eq!(ref_null("consumes_the_ref"), 555);
+}

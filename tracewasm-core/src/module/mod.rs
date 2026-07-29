@@ -1724,7 +1724,7 @@ impl Module {
             };
 
             table_vals.push(TableVal {
-                table: slots.into_boxed_slice(),
+                table: slots,
                 maximum,
             });
         }
@@ -1863,7 +1863,7 @@ impl Module {
             self.clone(),
             config,
             global_vals.into_boxed_slice(),
-            table_vals,
+            table_vals.into_boxed_slice(),
             element_vals.into_boxed_slice(),
             data_vals.into_boxed_slice(),
         ))
