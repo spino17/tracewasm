@@ -239,3 +239,53 @@ fn eqz_tests_against_zero() {
 fn i64_eqz_result_is_an_i32_usable_as_a_branch_condition() {
     assert_eq!(eqz("i64_eqz_brif"), 111);
 }
+
+/// `f32` result of the float-unary fixture.
+fn unary_f32(name: &str) -> f32 {
+    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/float_unary.wasm"), name);
+    v
+}
+
+/// `f64` result of the float-unary fixture.
+fn unary_f64(name: &str) -> f64 {
+    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/float_unary.wasm"), name);
+    v
+}
+
+// `nearest` breaks ties to **even**, unlike Rust's `round`, which goes away from
+// zero. Swapping in `round()` would pass most inputs and fail exactly these.
+#[test]
+fn nearest_breaks_ties_to_even_not_away_from_zero() {
+    assert_eq!(unary_f32("nearest_2_5"), 2.0, "round() would give 3.0");
+    assert_eq!(unary_f32("nearest_3_5"), 4.0, "4 is already even");
+    assert_eq!(unary_f32("nearest_neg2_5"), -2.0, "round() would give -3.0");
+    assert_eq!(unary_f64("f64_nearest_2_5"), 2.0);
+}
+
+// `abs`/`neg` are sign-bit operations, so they are observable on `-0.0` even
+// though it compares equal to `+0.0`.
+#[test]
+fn abs_and_neg_act_on_the_sign_bit_of_negative_zero() {
+    let abs = unary_f32("abs_negzero");
+    assert_eq!(abs, 0.0);
+    assert!(abs.is_sign_positive(), "abs(-0.0) must be +0.0");
+
+    let neg = unary_f32("neg_negzero");
+    assert_eq!(neg, 0.0);
+    assert!(neg.is_sign_positive(), "-(-0.0) must be +0.0");
+}
+
+#[test]
+fn ceil_floor_and_trunc_round_in_their_own_directions() {
+    assert_eq!(unary_f32("ceil_neg"), -1.0);
+    assert_eq!(unary_f32("floor_neg"), -2.0);
+    assert_eq!(unary_f32("trunc_neg"), -1.0, "toward zero, unlike floor");
+}
+
+// A negative operand yields NaN rather than trapping — float unaries are total.
+#[test]
+fn sqrt_of_a_negative_operand_is_nan() {
+    assert!(unary_f32("sqrt_neg").is_nan());
+    assert_eq!(unary_f32("sqrt_4"), 2.0);
+    assert_eq!(unary_f64("f64_abs_neg"), 3.5);
+}

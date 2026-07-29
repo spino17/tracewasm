@@ -446,6 +446,28 @@ pub enum Instruction {
     I64GeU,
     /// `i64.ge_s`: signed greater-than-or-equal.
     I64GeS,
+    // Float unary operators. All are total — none traps — and each preserves the
+    // exact bit pattern where IEEE 754 says to, so a NaN operand yields a NaN
+    // rather than being canonicalized.
+    /// `f32.abs`: clear the sign bit. Applies to NaN and `-0.0` too.
+    F32Abs,
+    /// `f32.neg`: flip the sign bit. A sign flip, not `0 - x`, so `-(-0.0)`
+    /// is `+0.0` and a NaN keeps its payload.
+    F32Neg,
+    /// `f32.ceil`: round up to an integral value.
+    F32Ceil,
+    /// `f32.floor`: round down to an integral value.
+    F32Floor,
+    /// `f32.trunc`: round toward zero.
+    F32Trunc,
+    /// `f32.sqrt`: square root; NaN for a negative operand, and `-0.0` for
+    /// `-0.0`.
+    F32Sqrt,
+    /// `f32.nearest`: round to the nearest integral value, ties to **even**.
+    ///
+    /// Note this is *not* Rust's `round`, which breaks ties away from zero:
+    /// `2.5` rounds to `2.0` here, but to `3.0` under `round`.
+    F32Nearest,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
     // a NaN operand yields a NaN, whose payload the spec leaves nondeterministic.
@@ -493,6 +515,25 @@ pub enum Instruction {
     /// the second. A pure sign-bit transplant, so it is defined for NaN too and
     /// never traps.
     F32Copysign,
+    /// `f64.abs`: clear the sign bit. Applies to NaN and `-0.0` too.
+    F64Abs,
+    /// `f64.neg`: flip the sign bit. A sign flip, not `0 - x`, so `-(-0.0)`
+    /// is `+0.0` and a NaN keeps its payload.
+    F64Neg,
+    /// `f64.ceil`: round up to an integral value.
+    F64Ceil,
+    /// `f64.floor`: round down to an integral value.
+    F64Floor,
+    /// `f64.trunc`: round toward zero.
+    F64Trunc,
+    /// `f64.sqrt`: square root; NaN for a negative operand, and `-0.0` for
+    /// `-0.0`.
+    F64Sqrt,
+    /// `f64.nearest`: round to the nearest integral value, ties to **even**.
+    ///
+    /// Note this is *not* Rust's `round`, which breaks ties away from zero:
+    /// `2.5` rounds to `2.0` here, but to `3.0` under `round`.
+    F64Nearest,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
@@ -1354,6 +1395,14 @@ impl Instruction {
                 Operator::I64LeS => (Instruction::I64LeS, StackEffectResult::BinaryOperator),
                 Operator::I64GeU => (Instruction::I64GeU, StackEffectResult::BinaryOperator),
                 Operator::I64GeS => (Instruction::I64GeS, StackEffectResult::BinaryOperator),
+                // f32 unary operations
+                Operator::F32Abs => (Instruction::F32Abs, StackEffectResult::UnaryOperator),
+                Operator::F32Neg => (Instruction::F32Neg, StackEffectResult::UnaryOperator),
+                Operator::F32Ceil => (Instruction::F32Ceil, StackEffectResult::UnaryOperator),
+                Operator::F32Floor => (Instruction::F32Floor, StackEffectResult::UnaryOperator),
+                Operator::F32Trunc => (Instruction::F32Trunc, StackEffectResult::UnaryOperator),
+                Operator::F32Sqrt => (Instruction::F32Sqrt, StackEffectResult::UnaryOperator),
+                Operator::F32Nearest => (Instruction::F32Nearest, StackEffectResult::UnaryOperator),
                 // f32 binary operations
                 Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
@@ -1370,6 +1419,14 @@ impl Instruction {
                 Operator::F32Copysign => {
                     (Instruction::F32Copysign, StackEffectResult::BinaryOperator)
                 }
+                // f64 unary operations
+                Operator::F64Abs => (Instruction::F64Abs, StackEffectResult::UnaryOperator),
+                Operator::F64Neg => (Instruction::F64Neg, StackEffectResult::UnaryOperator),
+                Operator::F64Ceil => (Instruction::F64Ceil, StackEffectResult::UnaryOperator),
+                Operator::F64Floor => (Instruction::F64Floor, StackEffectResult::UnaryOperator),
+                Operator::F64Trunc => (Instruction::F64Trunc, StackEffectResult::UnaryOperator),
+                Operator::F64Sqrt => (Instruction::F64Sqrt, StackEffectResult::UnaryOperator),
+                Operator::F64Nearest => (Instruction::F64Nearest, StackEffectResult::UnaryOperator),
                 // f64 binary operations
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),

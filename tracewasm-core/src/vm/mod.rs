@@ -54,7 +54,7 @@ use crate::{
     vm::stack::{DataVal, Stack, TableVal, Val},
 };
 use smallvec::{SmallVec, smallvec};
-use std::ops::{BitAnd, BitOr, BitXor};
+use std::ops::{BitAnd, BitOr, BitXor, Neg};
 
 pub(crate) mod stack;
 
@@ -1045,6 +1045,55 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::F32Abs => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.abs()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Neg => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.neg()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Ceil => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.ceil()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Floor => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.floor()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Trunc => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.trunc()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Sqrt => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.sqrt()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F32Nearest => {
+                let a = self.stack.pop().as_f32();
+
+                self.stack.push(Val::F32(a.round_ties_even()));
+
+                ExecutionResult::Next
+            }
             Instruction::F32Add => {
                 let b = self.stack.pop().as_f32();
                 let a = self.stack.pop().as_f32();
@@ -1174,6 +1223,55 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // copied without inspecting the payload — so unlike `min`/`max`
                 // this needs no NaN special case, and Rust's method matches.
                 self.stack.push(Val::F32(a.copysign(b)));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Abs => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.abs()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Neg => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.neg()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Ceil => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.ceil()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Floor => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.floor()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Trunc => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.trunc()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Sqrt => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.sqrt()));
+
+                ExecutionResult::Next
+            }
+            Instruction::F64Nearest => {
+                let a = self.stack.pop().as_f64();
+
+                self.stack.push(Val::F64(a.round_ties_even()));
 
                 ExecutionResult::Next
             }
