@@ -47,10 +47,10 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// `wasmparser` operators are translated into this owned form by
-/// [`Instruction::emit_instruction_for_func`] (function bodies) and
-/// [`Instruction::emit_instruction_for_const_expr`] (constant expressions); any
-/// operator TraceWasm does not model is rejected as unsupported at lowering time.
+/// `wasmparser` operators are translated into this owned form by the crate's
+/// internal lowering pass — `emit_instruction_for_func` for function bodies and
+/// `emit_instruction_for_const_expr` for constant expressions; any operator
+/// TraceWasm does not model is rejected as unsupported at lowering time.
 /// Index fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
 /// positions into the containing `Vec<Instruction>`, i.e. runtime program
 /// counters.

@@ -1535,7 +1535,7 @@ impl Module {
     ///   active element segment does not fit its target table.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: &Arc<Module>,
-        mut import_registry: I,
+        import_registry: I,
         config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
@@ -1855,7 +1855,7 @@ impl Module {
 
         // execute start function
         if let Some(func_index) = self.start_section {
-            TraceVM::run(func_index, &[], &mut instance)?;
+            TraceVM::run(func_index, &[], &mut instance, self)?;
         }
 
         Ok(instance)

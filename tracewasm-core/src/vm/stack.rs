@@ -215,7 +215,7 @@ pub(crate) enum DataVal {
 pub(crate) struct Stack<T> {
     /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
-    inner: Vec<T>,
+    pub inner: Vec<T>,
     /// Logical height: index one past the top value. The top is
     /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
     stack_pointer: usize, // points to the top of the stack

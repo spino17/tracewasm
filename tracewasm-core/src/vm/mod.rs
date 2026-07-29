@@ -10,7 +10,7 @@
 //! `ExecutionResult` — advance (`Next`), jump (`JumpTo`), or (implicitly, by
 //! advancing past the final `End`) return from the function.
 //!
-//! ## One shared operand stack across all frames
+//! ## One shared stack across all frames — locals included
 //!
 //! Rather than giving every call its own operand stack, the whole call tree
 //! shares a single `Stack`. A call does not allocate a new stack; the callee
@@ -18,26 +18,49 @@
 //! native Rust call stack (one `TraceVM::execute` frame per active wasm call),
 //! but the potentially-large value stack is allocated exactly once.
 //!
-//! ## Frame base height vs. recorded height
-//!
-//! Because the operand stack is shared, a frame's operands do not start at
-//! absolute height 0 — they start at the height the stack had when the frame was
-//! entered. That offset is the frame's **base height** (`caller_base_height`).
-//!
-//! The lowered instructions, however, store **frame-relative** heights
-//! (`recorded_height`), computed as if the function ran on an empty stack. The
-//! interpreter therefore converts relative → absolute at every height-sensitive
-//! operation with a single rule:
+//! A frame's **locals live on that same shared stack**, not in a per-activation
+//! vector. The layout of one frame, from its base upwards, is:
 //!
 //! ```text
-//! absolute_height = caller_base_height + recorded_height (+ arity)
+//!   caller_base_height ─┐
+//!                       ▼
+//!   ... caller's stack | p0 p1 … | l0 l1 … | operands … →
+//!                        └ params ┘└ decl. ┘▲
+//!                        └──── locals ─────┘└─ frame_base_height
 //! ```
 //!
-//! A call establishes the callee's base as "current height minus the args"
-//! (the args are popped off the shared stack and rebound as the callee's
-//! locals), so the callee's results end up exactly where the caller's arguments
-//! were. Instruction indices, by contrast, are per-function: each
-//! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
+//! The arguments are *already* on the stack when the callee is entered, so they
+//! are left in place and become local slots `0..params_len` rather than being
+//! popped and copied. Frame setup then pushes zero values for the declared
+//! locals (`params_len..locals_len`), so `local.get`/`local.set` for slot `i`
+//! is a direct index at `caller_base_height + i`.
+//!
+//! ## The two base heights
+//!
+//! Because both locals and operands share the stack, a frame needs *two* bases,
+//! and conflating them corrupts memory:
+//!
+//! - **`caller_base_height`** — the bottom of the locals region, i.e. the height
+//!   the stack had on entry minus the arguments. Used only by
+//!   `get_local`/`set_local`, and as the truncation target on frame exit.
+//! - **`frame_base_height`** — the bottom of the *operand* region, i.e.
+//!   `caller_base_height + locals_len`. Used by every height-sensitive control
+//!   operation.
+//!
+//! The lowered instructions store **frame-relative** operand heights
+//! (`recorded_height`), computed as if the function ran on an empty operand
+//! stack with its locals held separately. The interpreter converts
+//! relative → absolute with a single rule:
+//!
+//! ```text
+//! absolute_height = frame_base_height + recorded_height (+ arity)
+//! ```
+//!
+//! On frame exit the stack is truncated to `caller_base_height` preserving the
+//! result arity, which drops the locals and leaves the results exactly where the
+//! caller's arguments were — so the caller does nothing after the call returns.
+//! Instruction indices, by contrast, are per-function: each `TraceVM::execute`
+//! invocation has its own `instructions` slice and `pc`.
 
 use crate::{
     error::{
@@ -46,15 +69,13 @@ use crate::{
     },
     instance::{
         Instance,
-        config::Config,
         traits::{ImportRegistry, ResultVals},
     },
     instruction::Instruction,
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, formatted_val_types},
-    vm::stack::{DataVal, Stack, TableVal, Val},
+    vm::stack::{DataVal, Stack, Val},
 };
-use smallvec::{SmallVec, smallvec};
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 
 pub(crate) mod stack;
@@ -79,33 +100,234 @@ const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
-/// A function activation's local slots: its parameters followed by its declared
-/// locals, addressed by `local.get`/`local.set` index.
-pub(crate) struct Locals {
-    inner: SmallVec<[Val; 16]>, // size = params + declared locals
-}
+pub(crate) struct TraceVM;
 
-impl Locals {
-    /// Wraps a fully-populated slot vector (params first, then zero-initialized
-    /// declared locals). The caller owns getting the length and contents right.
-    pub fn new(locals: SmallVec<[Val; 16]>) -> Self {
-        Locals { inner: locals }
+impl TraceVM {
+    /// Runs one (locally-defined) function to completion on the shared stack.
+    ///
+    /// Called both as the top-level entry (with an empty stack, so this frame's
+    /// base is 0) and recursively from the `Call`/`CallIndirect` instructions.
+    ///
+    /// **Arguments are passed on the stack, not as a slice.** The caller leaves
+    /// them as the topmost values and this function adopts them in place as the
+    /// leading local slots; it derives its own base as
+    /// `stack.height() - params_len`. Results are likewise left on `stack` for
+    /// the caller to consume, which is why this returns `()` rather than the
+    /// results. See the module docs for the full frame layout.
+    ///
+    /// # Errors
+    ///
+    /// Always a [`TraceWasmError::InstructionExecution`]: every failure — a trap,
+    /// an error from a nested call, or one from an imported function — is tagged
+    /// here with the instruction that raised it. Frame setup cannot fail, since
+    /// `Module::compile` already rejected the local types the VM does not model.
+    ///
+    /// [`FuncCallError`](crate::error::FuncCallError) depends on this being the
+    /// only error shape that escapes the interpreter.
+    fn execute<M: Memory, I: ImportRegistry>(
+        func_index: FuncIndex,
+        stack: &mut Stack<Val>,
+        instance: &mut Instance<M, I>,
+        module: &Module,
+    ) -> Result<(), TraceWasmError> {
+        // `func_bodies` holds only locally-defined functions, so shift the global
+        // function index down by the number of imports to index into it.
+        let imported_func_count = instance.module.imported_func_count;
+
+        debug_assert!(func_index.0 >= imported_func_count);
+
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let ty = &module.types[func_decl.ty.0 as usize];
+        let params_len = ty.params.len();
+        let results_len = ty.results.len();
+        let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
+        let instructions = &func_body.instructions;
+        let instruction_offsets = &func_body.instruction_offsets;
+
+        // `locals` in the body is laid out params-first, then declared locals,
+        // and `locals_ty[i]` is the declared type of local slot `i`. So
+        // `locals_len >= params_len` always, and the subtraction below cannot
+        // underflow.
+        let locals_ty = &func_body.locals;
+        let locals_len = locals_ty.len();
+
+        // Frame setup. The arguments are already the topmost values on the shared
+        // stack, so the locals region starts just below them and the args become
+        // slots `0..params_len` without being copied anywhere.
+        let caller_base_height = stack.height() - params_len as u32;
+
+        // The declared locals follow the params and must start at the zero value
+        // of their type, per the spec. Pushing them here is what makes the locals
+        // region contiguous, so `get_local` can index it directly.
+        for i in 0..(locals_len - params_len) {
+            let ty = locals_ty[i + params_len];
+
+            stack.push(Val::zero_of_ty(ty));
+        }
+
+        let mut state = TraceVMState {
+            stack,
+            caller_base_height,
+            frame_base_height: caller_base_height + locals_len as u32,
+            instance,
+        };
+
+        // Driver loop. `pc` indexes this function's instruction list only.
+        let mut pc = 0;
+
+        loop {
+            let instr = &instructions[pc];
+
+            let res = state.execute(instr, module).map_err(|err| {
+                err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
+            })?;
+
+            match res {
+                ExecutionResult::JumpTo(next_pc) => {
+                    pc = next_pc;
+
+                    continue;
+                }
+                ExecutionResult::Next => {
+                    pc += 1;
+
+                    // Advancing past the last instruction means we just executed
+                    // the function's terminating `End`: the frame is complete.
+                    // (`return` and branches out of the outermost block also land
+                    // here, since their target is that final `End`.)
+                    if pc == instructions.len() {
+                        break;
+                    }
+
+                    continue;
+                }
+            }
+        }
+
+        // Tear the frame down: truncating to `caller_base_height` (the locals
+        // base, *not* `frame_base_height`) discards this frame's locals while
+        // preserving the results on top. They therefore land in exactly the slots
+        // the caller's arguments occupied, which is what lets the caller do
+        // nothing at all after a `Call` returns.
+        stack.truncate_by_preserving_arity(caller_base_height, results_len as u32);
+
+        Ok(())
     }
 
-    /// Writes `val` into the slot addressed by `index`.
+    /// Top-level entry point: runs a locally-defined function on a fresh operand
+    /// stack and returns its result values (in declaration order).
     ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn set(&mut self, index: LocalIndex, val: Val) {
-        self.inner[index.0 as usize] = val;
+    /// This is the wrapper around [`Self::execute`] that owns the shared stack
+    /// and extracts the results, which `execute` itself leaves on the stack.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
+    /// mismatches, errors returned by imported functions, …).
+    pub(crate) fn run<M: Memory, I: ImportRegistry>(
+        func_index: FuncIndex,
+        params: &[Val],
+        instance: &mut Instance<M, I>,
+        module: &Module,
+    ) -> Result<ResultVals, TraceWasmError> {
+        let mut stack: Stack<Val> = Stack::default();
+
+        for param in params {
+            stack.push(*param);
+        }
+
+        // A fresh stack starts at height 0, so this frame's base is 0.
+        Self::execute(func_index, &mut stack, instance, module)?;
+
+        // How many result values the function leaves on the stack.
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
+
+        Ok(stack.pop_results(results_len))
     }
 
-    /// Reads the value in the slot addressed by `index` (values are `Copy`).
+    /// Evaluates a constant-expression instruction sequence to its single
+    /// resulting [`Val`], on a small dedicated stack. Used to compute
+    /// global/table/data/element initializers at instantiation.
     ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn get(&self, index: LocalIndex) -> Val {
-        self.inner[index.0 as usize]
+    /// # Errors
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
+    /// instruction not permitted in a constant expression.
+    pub(crate) fn const_expr_evaluator(
+        instructions: &[Instruction],
+        globals: &[Val],
+    ) -> Result<Val, TraceWasmError> {
+        let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
+
+        for instr in instructions {
+            match instr {
+                Instruction::I32Const { value } => {
+                    stack.push(Val::I32(*value));
+                }
+                Instruction::I64Const { value } => {
+                    stack.push(Val::I64(*value));
+                }
+                Instruction::F32Const { value } => {
+                    stack.push(Val::F32(*value));
+                }
+                Instruction::F64Const { value } => stack.push(Val::F64(*value)),
+                Instruction::GlobalGet { index } => {
+                    stack.push(globals[index.0 as usize]);
+                }
+                Instruction::RefNull => stack.push(Val::Ref(None)),
+                Instruction::RefFunc { function_index } => {
+                    stack.push(Val::Ref(Some(*function_index)));
+                }
+                Instruction::I32Add => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_add(b)));
+                }
+                Instruction::I32Sub => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_sub(b)));
+                }
+                Instruction::I32Mul => {
+                    let b = stack.pop().as_i32();
+                    let a = stack.pop().as_i32();
+
+                    stack.push(Val::I32(a.wrapping_mul(b)));
+                }
+                Instruction::I64Add => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_add(b)));
+                }
+                Instruction::I64Sub => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_sub(b)));
+                }
+                Instruction::I64Mul => {
+                    let b = stack.pop().as_i64();
+                    let a = stack.pop().as_i64();
+
+                    stack.push(Val::I64(a.wrapping_mul(b)));
+                }
+                Instruction::End { .. } => {}
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "instruction `{:?}` in const expression evaluator",
+                        instr
+                    )));
+                }
+            }
+        }
+
+        let val = stack.pop();
+
+        Ok(val)
     }
 }
 
@@ -120,18 +342,43 @@ enum ExecutionResult {
 
 /// The mutable state of a single in-flight function activation.
 ///
-/// `stack`, `memory`, `import_registry`, `globals`, and `tables` are borrowed
-/// because they are shared across the whole call tree (see the module docs);
-/// only `locals` is owned per activation.
+/// Nothing here is owned per activation: both the stack (which holds this
+/// frame's locals *and* operands) and the instance are borrowed, because they
+/// are shared across the whole call tree. The two height fields are all that
+/// distinguishes one activation from another — see the module docs for the frame
+/// layout they describe.
 struct TraceVMState<'a, M, I> {
-    /// The operand stack, shared with every other active frame.
+    /// The shared stack: the caller's values, then this frame's locals, then
+    /// this frame's operands.
     stack: &'a mut Stack<Val>,
-    /// This activation's local slots (params followed by declared locals).
-    locals: Locals,
+    /// Bottom of this frame's **locals** region: the height the stack had on
+    /// entry, minus the arguments (which are reused in place as the leading
+    /// local slots). Also the truncation target on frame exit.
+    caller_base_height: u32,
+    /// Bottom of this frame's **operand** region:
+    /// `caller_base_height + locals_len`. Every `recorded_height` is relative to
+    /// this, *not* to `caller_base_height`.
+    frame_base_height: u32,
     instance: &'a mut Instance<M, I>,
 }
 
 impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
+    /// Reads local slot `index` from this frame's locals region.
+    ///
+    /// Indexes the backing storage directly rather than going through the
+    /// stack's push/pop API: locals sit *below* the stack pointer for the whole
+    /// life of the frame, so they are always live storage that the operand
+    /// discipline never touches. Validation guarantees `index < locals_len`.
+    fn get_local(&self, index: LocalIndex) -> Val {
+        self.stack.inner[(index.0 + self.caller_base_height) as usize]
+    }
+
+    /// Writes local slot `index` in this frame's locals region. See
+    /// [`Self::get_local`] for why this indexes the backing storage directly.
+    fn set_local(&mut self, index: LocalIndex, val: Val) {
+        self.stack.inner[(index.0 + self.caller_base_height) as usize] = val;
+    }
+
     /// Truncates `operand` toward zero, checking the result is representable in an
     /// integer type spanning the half-open range `[low, high)`.
     ///
@@ -187,14 +434,16 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         &mut self,
         func_index: FuncIndex,
         params_count: u32,
+        module: &Module,
     ) -> Result<(), TraceWasmError> {
-        // The callee's frame begins just below the arguments: everything up
-        // to this height belongs to the caller and is left untouched. The
-        // args are popped off the shared stack and rebound as the callee's
-        // locals, so on return the callee's results occupy exactly the slots
-        // the arguments did.
-        let caller_base_height_for_callee = self.stack.height() - params_count;
-        let params = self.stack.pop_params(params_count);
+        // The arguments are the topmost values on the shared stack. How they are
+        // handed over depends on the callee, so neither branch below pops them
+        // up front:
+        //
+        // - a local callee adopts them in place as its leading local slots, so
+        //   they are never copied;
+        // - an imported callee needs them as a `&[Val]` for the host boundary, so
+        //   that branch pops them into a `ParamVals`.
         let imported_func_count = self.instance.module.imported_func_count;
 
         // Route on the *callee*: an imported callee is dispatched to the
@@ -212,6 +461,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 unreachable!()
             };
 
+            let params = self.stack.pop_params(params_count);
+
             // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
             let results = self.instance.import_registry.execute(
                 module_name,
@@ -226,13 +477,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
         } else {
             // local function execution
-            TraceVM::execute(
-                func_index,
-                params.as_ref(),
-                self.stack,
-                caller_base_height_for_callee,
-                self.instance,
-            )?;
+            TraceVM::execute(func_index, self.stack, self.instance, module)?;
         }
 
         Ok(())
@@ -276,7 +521,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     fn execute(
         &mut self,
         instruction: &Instruction,
-        caller_base_height: u32,
+        module: &Module,
     ) -> Result<ExecutionResult, InstructionExecutionError> {
         let res = match instruction {
             Instruction::Unreachable => {
@@ -1764,21 +2009,21 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::LocalGet { index } => {
-                self.stack.push(self.locals.get(*index));
+                self.stack.push(self.get_local(*index));
 
                 ExecutionResult::Next
             }
             Instruction::LocalSet { index } => {
                 let val = self.stack.pop();
 
-                self.locals.set(*index, val);
+                self.set_local(*index, val);
 
                 ExecutionResult::Next
             }
             Instruction::LocalTee { index } => {
                 let val = self.stack.tee();
 
-                self.locals.set(*index, val);
+                self.set_local(*index, val);
 
                 ExecutionResult::Next
             }
@@ -1798,7 +2043,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                self.call_func(*callee_func_index, *params_count)
+                self.call_func(*callee_func_index, *params_count, module)
                     .map_err(|err| {
                         InstructionExecutionError::Call(*callee_func_index, Box::new(err))
                     })?;
@@ -1859,7 +2104,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 }
 
-                self.call_func(callee_func_index, declared_params.len() as u32)
+                self.call_func(callee_func_index, declared_params.len() as u32, module)
                     .map_err(|err| {
                         InstructionExecutionError::CallIndirect(
                             *table_index,
@@ -1919,8 +2164,10 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             } => {
                 // Unwind to the target label's absolute height (frame base + its
                 // recorded height) while keeping the top `arity` values, then jump.
-                self.stack
-                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
+                self.stack.truncate_by_preserving_arity(
+                    *recorded_height + self.frame_base_height,
+                    *arity,
+                );
 
                 ExecutionResult::JumpTo(*target_index)
             }
@@ -1933,7 +2180,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 if cond != 0 {
                     self.stack.truncate_by_preserving_arity(
-                        *recorded_height + caller_base_height,
+                        *recorded_height + self.frame_base_height,
                         *arity,
                     );
 
@@ -1956,7 +2203,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 };
 
                 self.stack.truncate_by_preserving_arity(
-                    branch.recorded_height + caller_base_height,
+                    branch.recorded_height + self.frame_base_height,
                     branch.arity,
                 );
 
@@ -1967,8 +2214,10 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 arity,
                 recorded_height,
             } => {
-                self.stack
-                    .truncate_by_preserving_arity(*recorded_height + caller_base_height, *arity);
+                self.stack.truncate_by_preserving_arity(
+                    *recorded_height + self.frame_base_height,
+                    *arity,
+                );
 
                 ExecutionResult::JumpTo(*target_index)
             }
@@ -1981,7 +2230,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // Both are frame-relative, so shift by this frame's base to compare
                 // against the shared stack's absolute height.
                 debug_assert!(
-                    self.stack.height() == *recorded_height + *arity + caller_base_height
+                    self.stack.height() == *recorded_height + *arity + self.frame_base_height
                 );
 
                 ExecutionResult::Next
@@ -1989,246 +2238,5 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         };
 
         Ok(res)
-    }
-}
-
-pub(crate) struct TraceVM;
-
-impl TraceVM {
-    /// Runs one (locally-defined) function to completion on the shared stack.
-    ///
-    /// Called both as the top-level entry (with an empty stack and
-    /// `caller_base_height == 0`) and recursively from the `Call` instruction.
-    /// Arguments arrive in `params` (declaration order); results are left on
-    /// `stack` above `caller_base_height` for the caller to consume — this
-    /// function returns `()`, not the results.
-    ///
-    /// `caller_base_height` is the height the shared stack had on entry, i.e.
-    /// this frame's base; see the module docs for how it maps the instructions'
-    /// frame-relative heights onto the shared stack.
-    ///
-    /// # Errors
-    ///
-    /// Always a [`TraceWasmError::InstructionExecution`]: every failure — a trap,
-    /// an error from a nested call, or one from an imported function — is tagged
-    /// here with the instruction that raised it. Frame setup cannot fail, since
-    /// `Module::compile` already rejected the local types the VM does not model.
-    ///
-    /// [`FuncCallError`](crate::error::FuncCallError) depends on this being the
-    /// only error shape that escapes the interpreter.
-    // Threads the whole shared interpreter state (stack, memory, globals, tables,
-    // registry) down each recursive call; bundling it would add a borrow-splitting
-    // problem without simplifying anything.
-    #[allow(clippy::too_many_arguments)]
-    fn execute<M: Memory, I: ImportRegistry>(
-        func_index: FuncIndex,
-        params: &[Val],
-        stack: &mut Stack<Val>,
-        caller_base_height: u32,
-        instance: &mut Instance<M, I>,
-    ) -> Result<(), TraceWasmError> {
-        // `func_bodies` holds only locally-defined functions, so shift the global
-        // function index down by the number of imports to index into it.
-        let imported_func_count = instance.module.imported_func_count;
-        let module = instance.module.clone();
-
-        debug_assert!(func_index.0 >= imported_func_count);
-
-        let func_decl = &module.func_decls[func_index.0 as usize];
-        let ty = &module.types[func_decl.ty.0 as usize];
-        let params_ty = &ty.params;
-        let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
-        let instructions = &func_body.instructions;
-        let instruction_offsets = &func_body.instruction_offsets;
-
-        // `locals` in the body is laid out params-first, then declared locals,
-        // and `locals_ty[i]` is the declared type of local slot `i`.
-        let locals_ty = &func_body.locals;
-
-        // No runtime params check: `Module::compile` runs `Validator::validate_all`,
-        // so every call site is type-correct — the recursive `Call` arm (the common
-        // path) and the start function included, not just the typed `TypedFunc<P, R>`
-        // entry, which adds a second guard on the top-level call. Validation covers
-        // the input module but not TraceWasm's own lowering, so a `debug_assert`
-        // still guards against a lowering bug producing a wrong param count, at zero
-        // release cost.
-        debug_assert_eq!(
-            params.len(),
-            params_ty.len(),
-            "lowering produced wrong param count for func {}",
-            func_index.0,
-        );
-
-        // Build the activation's local slots. Per the WebAssembly spec, a
-        // function's locals are the parameters (bound to the incoming arguments,
-        // in order) followed by the declared locals.
-        let mut locals: SmallVec<[Val; 16]> = smallvec![]; // stack-allocated upto 16 locals per function
-
-        // Parameters occupy the first `params.len()` slots. Their count and types
-        // were already validated above, so take the values as-is.
-        locals.extend_from_slice(params);
-
-        // The remaining declared locals are default-initialized: the spec requires
-        // each to start at the zero value of its type (0 / 0.0 / null ref).
-        for i in params.len()..locals_ty.len() {
-            let ty = locals_ty[i];
-
-            locals.push(Val::zero_of_ty(ty));
-        }
-
-        let mut state = TraceVMState {
-            stack,
-            locals: Locals::new(locals),
-            instance,
-        };
-
-        // Driver loop. `pc` indexes this function's instruction list only.
-        let mut pc = 0;
-
-        loop {
-            let instr = &instructions[pc];
-
-            let res = state.execute(instr, caller_base_height).map_err(|err| {
-                err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
-            })?;
-
-            match res {
-                ExecutionResult::JumpTo(next_pc) => {
-                    pc = next_pc;
-
-                    continue;
-                }
-                ExecutionResult::Next => {
-                    pc += 1;
-
-                    // Advancing past the last instruction means we just executed
-                    // the function's terminating `End`: the frame is complete.
-                    // (`return` and branches out of the outermost block also land
-                    // here, since their target is that final `End`.)
-                    if pc == instructions.len() {
-                        break;
-                    }
-
-                    continue;
-                }
-            }
-        }
-
-        // The frame's results are now the top values on the shared stack, sitting
-        // above `caller_base_height`; the caller reads them from there.
-        Ok(())
-    }
-
-    /// Top-level entry point: runs a locally-defined function on a fresh operand
-    /// stack and returns its result values (in declaration order).
-    ///
-    /// This is the wrapper around [`Self::execute`] that owns the shared stack
-    /// and extracts the results, which `execute` itself leaves on the stack.
-    ///
-    /// # Errors
-    ///
-    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
-    /// mismatches, errors returned by imported functions, …).
-    // Mirrors `execute`'s parameter list — see the note there.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run<M: Memory, I: ImportRegistry>(
-        func_index: FuncIndex,
-        params: &[Val],
-        instance: &mut Instance<M, I>,
-    ) -> Result<ResultVals, TraceWasmError> {
-        let mut stack: Stack<Val> = Stack::default();
-
-        // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(func_index, params, &mut stack, 0, instance)?;
-
-        // How many result values the function leaves on the stack.
-        let func_decl = &instance.module.func_decls[func_index.0 as usize];
-        let results_len = instance.module.types[func_decl.ty.0 as usize].results.len() as u32;
-
-        Ok(stack.pop_results(results_len))
-    }
-
-    /// Evaluates a constant-expression instruction sequence to its single
-    /// resulting [`Val`], on a small dedicated stack. Used to compute
-    /// global/table/data/element initializers at instantiation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
-    /// instruction not permitted in a constant expression.
-    pub(crate) fn const_expr_evaluator(
-        instructions: &[Instruction],
-        globals: &[Val],
-    ) -> Result<Val, TraceWasmError> {
-        let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
-
-        for instr in instructions {
-            match instr {
-                Instruction::I32Const { value } => {
-                    stack.push(Val::I32(*value));
-                }
-                Instruction::I64Const { value } => {
-                    stack.push(Val::I64(*value));
-                }
-                Instruction::F32Const { value } => {
-                    stack.push(Val::F32(*value));
-                }
-                Instruction::F64Const { value } => stack.push(Val::F64(*value)),
-                Instruction::GlobalGet { index } => {
-                    stack.push(globals[index.0 as usize]);
-                }
-                Instruction::RefNull => stack.push(Val::Ref(None)),
-                Instruction::RefFunc { function_index } => {
-                    stack.push(Val::Ref(Some(*function_index)));
-                }
-                Instruction::I32Add => {
-                    let b = stack.pop().as_i32();
-                    let a = stack.pop().as_i32();
-
-                    stack.push(Val::I32(a.wrapping_add(b)));
-                }
-                Instruction::I32Sub => {
-                    let b = stack.pop().as_i32();
-                    let a = stack.pop().as_i32();
-
-                    stack.push(Val::I32(a.wrapping_sub(b)));
-                }
-                Instruction::I32Mul => {
-                    let b = stack.pop().as_i32();
-                    let a = stack.pop().as_i32();
-
-                    stack.push(Val::I32(a.wrapping_mul(b)));
-                }
-                Instruction::I64Add => {
-                    let b = stack.pop().as_i64();
-                    let a = stack.pop().as_i64();
-
-                    stack.push(Val::I64(a.wrapping_add(b)));
-                }
-                Instruction::I64Sub => {
-                    let b = stack.pop().as_i64();
-                    let a = stack.pop().as_i64();
-
-                    stack.push(Val::I64(a.wrapping_sub(b)));
-                }
-                Instruction::I64Mul => {
-                    let b = stack.pop().as_i64();
-                    let a = stack.pop().as_i64();
-
-                    stack.push(Val::I64(a.wrapping_mul(b)));
-                }
-                Instruction::End { .. } => {}
-                _ => {
-                    return Err(TraceWasmError::Unsupported(format!(
-                        "instruction `{:?}` in const expression evaluator",
-                        instr
-                    )));
-                }
-            }
-        }
-
-        let val = stack.pop();
-
-        Ok(val)
     }
 }

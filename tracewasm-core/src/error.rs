@@ -520,8 +520,8 @@ impl FuncCallError {
 
     /// The interpreter backtrace for this failure, innermost frame first.
     ///
-    /// Always has at least one frame: [`Self::new`] requires the cause to be a
-    /// [`TraceWasmError::InstructionExecution`].
+    /// Always has at least one frame: this type is only constructed from a
+    /// [`TraceWasmError::InstructionExecution`] cause.
     pub fn stack_trace(&self) -> StackTrace<'_> {
         let mut trace = vec![];
 

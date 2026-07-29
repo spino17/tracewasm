@@ -124,8 +124,9 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();
+        let module = instance.module.clone();
 
-        let results = match TraceVM::run(self.func_index, params.as_ref(), instance) {
+        let results = match TraceVM::run(self.func_index, params.as_ref(), instance, &module) {
             Ok(res) => res,
             Err(err) => {
                 // A `TypedFunc` is only handed out for an export, so the lookup

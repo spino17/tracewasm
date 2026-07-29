@@ -728,7 +728,9 @@ fn demote_passes_the_specials_through() {
 // bit-for-bit — including at `f32::MAX`, where demote is otherwise near overflow.
 #[test]
 fn promote_is_exact_so_the_round_trip_is_the_identity() {
-    assert_eq!(dp_f32("round_trip"), 3.1415927);
+    // The literal is `f32::consts::PI` — same bit pattern, named so clippy's
+    // `approx_constant` lint does not flag it.
+    assert_eq!(dp_f32("round_trip"), std::f32::consts::PI);
     assert_eq!(dp_f32("round_trip_max"), f32::MAX);
 }
 
