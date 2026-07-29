@@ -45,6 +45,7 @@ use crate::{
         InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
     },
     instance::{
+        Instance,
         config::Config,
         traits::{ImportRegistry, ResultVals},
     },
@@ -125,17 +126,9 @@ enum ExecutionResult {
 struct TraceVMState<'a, M, I> {
     /// The operand stack, shared with every other active frame.
     stack: &'a mut Stack<Val>,
-    /// Linear memory, shared across the module.
-    memory: &'a mut M,
     /// This activation's local slots (params followed by declared locals).
     locals: Locals,
-    /// The registry resolving imported-function calls, shared across the call tree.
-    import_registry: &'a mut I,
-    /// The module's global values, shared across the call tree.
-    globals: &'a mut [Val],
-    /// The module's tables, shared across the call tree.
-    tables: &'a mut [TableVal],
-    datas: &'a mut [DataVal],
+    instance: &'a mut Instance<M, I>,
 }
 
 impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
@@ -194,8 +187,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         &mut self,
         func_index: FuncIndex,
         params_count: u32,
-        module: &Module,
-        config: &Config,
     ) -> Result<(), TraceWasmError> {
         // The callee's frame begins just below the arguments: everything up
         // to this height belongs to the caller and is left untouched. The
@@ -204,12 +195,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         // the arguments did.
         let caller_base_height_for_callee = self.stack.height() - params_count;
         let params = self.stack.pop_params(params_count);
-        let imported_func_count = module.imported_func_count;
+        let imported_func_count = self.instance.module.imported_func_count;
 
         // Route on the *callee*: an imported callee is dispatched to the
         // registry; a local one is interpreted recursively.
         if func_index.0 < imported_func_count {
-            let func_decl = &module.func_decls[func_index.0 as usize];
+            let func_decl = &self.instance.module.func_decls[func_index.0 as usize];
 
             debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
 
@@ -222,11 +213,11 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             };
 
             // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-            let results = self.import_registry.execute(
+            let results = self.instance.import_registry.execute(
                 module_name,
                 imported_func_name,
                 params.as_ref(),
-                self.memory,
+                &mut self.instance.memory,
             )?;
 
             // push results to the stack
@@ -238,15 +229,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             TraceVM::execute(
                 func_index,
                 params.as_ref(),
-                module,
                 self.stack,
-                self.memory,
                 caller_base_height_for_callee,
-                self.import_registry,
-                self.globals,
-                self.tables,
-                self.datas,
-                config,
+                self.instance,
             )?;
         }
 
@@ -292,8 +277,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         &mut self,
         instruction: &Instruction,
         caller_base_height: u32,
-        module: &Module,
-        config: &Config,
     ) -> Result<ExecutionResult, InstructionExecutionError> {
         let res = match instruction {
             Instruction::Unreachable => {
@@ -343,7 +326,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::MemorySize => {
                 self.stack
-                    .push(Val::I32(self.memory.size_in_pages() as i32));
+                    .push(Val::I32(self.instance.memory.size_in_pages() as i32));
 
                 ExecutionResult::Next
             }
@@ -351,13 +334,11 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // The delta is an unsigned i32; going through `u32` keeps a
                 // high-bit-set value from sign-extending into a different number.
                 let delta_in_pages = self.stack.pop().as_i32() as u32 as u64;
+                let max_pages = self.instance.config.get_max_memory_size_in_pages();
 
                 // `instantiate` already narrowed this to the module's declared
                 // maximum, so the configured cap is the effective ceiling here.
-                match self
-                    .memory
-                    .grow(delta_in_pages, config.get_max_memory_size_in_pages())
-                {
+                match self.instance.memory.grow(delta_in_pages, max_pages) {
                     Ok(old_page) => self.stack.push(Val::I32(old_page as i32)),
                     // Per the spec `memory.grow` does not trap: a request it cannot
                     // satisfy reports `-1` and execution continues.
@@ -371,7 +352,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let src = self.stack.pop().as_i32() as usize;
                 let dest = self.stack.pop().as_i32() as usize;
 
-                self.memory.copy_within(dest, src, len)?;
+                self.instance.memory.copy_within(dest, src, len)?;
 
                 ExecutionResult::Next
             }
@@ -380,7 +361,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i32() as u32;
                 let dest = self.stack.pop().as_i32() as usize;
 
-                self.memory.fill(dest, val, len)?;
+                self.instance.memory.fill(dest, val, len)?;
 
                 ExecutionResult::Next
             }
@@ -393,7 +374,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // spec replaces its bytes with the empty sequence, so a
                 // zero-length `memory.init` after `data.drop` still succeeds while
                 // any non-empty read fails the bounds check below.
-                let segment: &[u8] = match &self.datas[*data_index as usize] {
+                let segment: &[u8] = match &self.instance.data_vals[*data_index as usize] {
                     DataVal::Dropped => &[],
                     DataVal::Passive(segment) => segment,
                 };
@@ -412,18 +393,18 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // `write` bounds-checks the destination, so a trap on either side
                 // leaves memory untouched.
-                self.memory.write(dest, &segment[src..end])?;
+                self.instance.memory.write(dest, &segment[src..end])?;
 
                 ExecutionResult::Next
             }
             Instruction::DataDrop { data_index } => {
-                self.datas[*data_index as usize] = DataVal::Dropped;
+                self.instance.data_vals[*data_index as usize] = DataVal::Dropped;
 
                 ExecutionResult::Next
             }
             Instruction::I32Load { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i32(effective_offset)?;
+                let val = self.instance.memory.read_i32(effective_offset)?;
 
                 self.stack.push(Val::I32(val));
 
@@ -431,7 +412,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32Load8U { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_u8(effective_offset)? as i32;
+                let val = self.instance.memory.read_u8(effective_offset)? as i32;
 
                 self.stack.push(Val::I32(val));
 
@@ -439,7 +420,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32Load8S { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i8(effective_offset)? as i32;
+                let val = self.instance.memory.read_i8(effective_offset)? as i32;
 
                 self.stack.push(Val::I32(val));
 
@@ -447,7 +428,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32Load16U { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_u16(effective_offset)? as i32;
+                let val = self.instance.memory.read_u16(effective_offset)? as i32;
 
                 self.stack.push(Val::I32(val));
 
@@ -455,7 +436,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32Load16S { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i16(effective_offset)? as i32;
+                let val = self.instance.memory.read_i16(effective_offset)? as i32;
 
                 self.stack.push(Val::I32(val));
 
@@ -463,7 +444,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i64(effective_offset)?;
+                let val = self.instance.memory.read_i64(effective_offset)?;
 
                 self.stack.push(Val::I64(val));
 
@@ -471,7 +452,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load8U { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_u8(effective_offset)? as i64;
+                let val = self.instance.memory.read_u8(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -479,7 +460,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load8S { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i8(effective_offset)? as i64;
+                let val = self.instance.memory.read_i8(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -487,7 +468,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load16U { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_u16(effective_offset)? as i64;
+                let val = self.instance.memory.read_u16(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -495,7 +476,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load16S { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i16(effective_offset)? as i64;
+                let val = self.instance.memory.read_i16(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -503,7 +484,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load32U { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_u32(effective_offset)? as i64;
+                let val = self.instance.memory.read_u32(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -511,7 +492,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64Load32S { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_i32(effective_offset)? as i64;
+                let val = self.instance.memory.read_i32(effective_offset)? as i64;
 
                 self.stack.push(Val::I64(val));
 
@@ -519,7 +500,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::F32Load { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_f32(effective_offset)?;
+                let val = self.instance.memory.read_f32(effective_offset)?;
 
                 self.stack.push(Val::F32(val));
 
@@ -527,7 +508,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::F64Load { offset, align: _ } => {
                 let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.memory.read_f64(effective_offset)?;
+                let val = self.instance.memory.read_f64(effective_offset)?;
 
                 self.stack.push(Val::F64(val));
 
@@ -537,7 +518,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i32();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u32(effective_offset, val as u32)?;
+                self.instance
+                    .memory
+                    .write_u32(effective_offset, val as u32)?;
 
                 ExecutionResult::Next
             }
@@ -545,7 +528,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i32();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u8(effective_offset, val as u8)?;
+                self.instance.memory.write_u8(effective_offset, val as u8)?;
 
                 ExecutionResult::Next
             }
@@ -553,7 +536,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i32();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u16(effective_offset, val as u16)?;
+                self.instance
+                    .memory
+                    .write_u16(effective_offset, val as u16)?;
 
                 ExecutionResult::Next
             }
@@ -561,7 +546,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i64();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u64(effective_offset, val as u64)?;
+                self.instance
+                    .memory
+                    .write_u64(effective_offset, val as u64)?;
 
                 ExecutionResult::Next
             }
@@ -569,7 +556,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i64();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u8(effective_offset, val as u8)?;
+                self.instance.memory.write_u8(effective_offset, val as u8)?;
 
                 ExecutionResult::Next
             }
@@ -577,7 +564,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i64();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u16(effective_offset, val as u16)?;
+                self.instance
+                    .memory
+                    .write_u16(effective_offset, val as u16)?;
 
                 ExecutionResult::Next
             }
@@ -585,7 +574,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_i64();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_u32(effective_offset, val as u32)?;
+                self.instance
+                    .memory
+                    .write_u32(effective_offset, val as u32)?;
 
                 ExecutionResult::Next
             }
@@ -593,7 +584,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_f32();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_f32(effective_offset, val)?;
+                self.instance.memory.write_f32(effective_offset, val)?;
 
                 ExecutionResult::Next
             }
@@ -601,7 +592,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let val = self.stack.pop().as_f64();
                 let effective_offset = self.pop_effective_address(*offset)?;
 
-                self.memory.write_f64(effective_offset, val)?;
+                self.instance.memory.write_f64(effective_offset, val)?;
 
                 ExecutionResult::Next
             }
@@ -1792,14 +1783,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::GlobalGet { index } => {
-                self.stack.push(self.globals[index.0 as usize]);
+                self.stack.push(self.instance.global_vals[index.0 as usize]);
 
                 ExecutionResult::Next
             }
             Instruction::GlobalSet { index } => {
                 let val = self.stack.pop();
 
-                self.globals[index.0 as usize] = val;
+                self.instance.global_vals[index.0 as usize] = val;
 
                 ExecutionResult::Next
             }
@@ -1807,7 +1798,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                self.call_func(*callee_func_index, *params_count, module, config)
+                self.call_func(*callee_func_index, *params_count)
                     .map_err(|err| {
                         InstructionExecutionError::Call(*callee_func_index, Box::new(err))
                     })?;
@@ -1819,7 +1810,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 results,
                 table_index,
             } => {
-                let table = &self.tables[table_index.0 as usize];
+                let table = &self.instance.table_vals[table_index.0 as usize];
                 // The index operand is an unsigned i32; a negative value becomes a
                 // large `usize` and fails the bounds check below.
                 let slot = self.stack.pop().as_i32() as u32 as usize;
@@ -1840,8 +1831,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 };
 
-                let func = &module.func_decls[callee_func_index.0 as usize];
-                let ty = &module.types[func.ty.0 as usize];
+                let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
+                let ty = &self.instance.module.types[func.ty.0 as usize];
 
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;
@@ -1868,18 +1859,13 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 }
 
-                self.call_func(
-                    callee_func_index,
-                    declared_params.len() as u32,
-                    module,
-                    config,
-                )
-                .map_err(|err| {
-                    InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        FunctionCall(callee_func_index, Box::new(err)),
-                    )
-                })?;
+                self.call_func(callee_func_index, declared_params.len() as u32)
+                    .map_err(|err| {
+                        InstructionExecutionError::CallIndirect(
+                            *table_index,
+                            FunctionCall(callee_func_index, Box::new(err)),
+                        )
+                    })?;
 
                 ExecutionResult::Next
             }
@@ -2037,19 +2023,14 @@ impl TraceVM {
     fn execute<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
-        module: &Module,
         stack: &mut Stack<Val>,
-        memory: &mut M,
         caller_base_height: u32,
-        import_registry: &mut I,
-        globals: &mut [Val],
-        tables: &mut [TableVal],
-        datas: &mut [DataVal],
-        config: &Config,
+        instance: &mut Instance<M, I>,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
-        let imported_func_count = module.imported_func_count;
+        let imported_func_count = instance.module.imported_func_count;
+        let module = instance.module.clone();
 
         debug_assert!(func_index.0 >= imported_func_count);
 
@@ -2097,12 +2078,8 @@ impl TraceVM {
 
         let mut state = TraceVMState {
             stack,
-            memory,
             locals: Locals::new(locals),
-            import_registry,
-            globals,
-            tables,
-            datas,
+            instance,
         };
 
         // Driver loop. `pc` indexes this function's instruction list only.
@@ -2111,11 +2088,9 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            let res = state
-                .execute(instr, caller_base_height, module, config)
-                .map_err(|err| {
-                    err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
-                })?;
+            let res = state.execute(instr, caller_base_height).map_err(|err| {
+                err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
+            })?;
 
             match res {
                 ExecutionResult::JumpTo(next_pc) => {
@@ -2159,34 +2134,16 @@ impl TraceVM {
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
-        module: &Module,
-        memory: &mut M,
-        import_registry: &mut I,
-        global_vals: &mut [Val],
-        table_vals: &mut [TableVal],
-        data_vals: &mut [DataVal],
-        config: &Config,
+        instance: &mut Instance<M, I>,
     ) -> Result<ResultVals, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::default();
 
         // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(
-            func_index,
-            params,
-            module,
-            &mut stack,
-            memory,
-            0,
-            import_registry,
-            global_vals,
-            table_vals,
-            data_vals,
-            config,
-        )?;
+        Self::execute(func_index, params, &mut stack, 0, instance)?;
 
         // How many result values the function leaves on the stack.
-        let func_decl = &module.func_decls[func_index.0 as usize];
-        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
+        let func_decl = &instance.module.func_decls[func_index.0 as usize];
+        let results_len = instance.module.types[func_decl.ty.0 as usize].results.len() as u32;
 
         Ok(stack.pop_results(results_len))
     }

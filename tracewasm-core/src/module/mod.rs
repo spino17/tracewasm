@@ -1842,22 +1842,7 @@ impl Module {
             }
         }
 
-        // execute start function
-        if let Some(func_index) = self.start_section {
-            TraceVM::run(
-                func_index,
-                &[],
-                self.as_ref(),
-                &mut memory,
-                &mut import_registry,
-                &mut global_vals,
-                &mut table_vals,
-                &mut data_vals,
-                &config,
-            )?;
-        }
-
-        Ok(Instance::new(
+        let mut instance = Instance::new(
             memory,
             import_registry,
             self.clone(),
@@ -1866,6 +1851,13 @@ impl Module {
             table_vals.into_boxed_slice(),
             element_vals.into_boxed_slice(),
             data_vals.into_boxed_slice(),
-        ))
+        );
+
+        // execute start function
+        if let Some(func_index) = self.start_section {
+            TraceVM::run(func_index, &[], &mut instance)?;
+        }
+
+        Ok(instance)
     }
 }

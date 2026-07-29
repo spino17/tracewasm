@@ -26,14 +26,14 @@ pub mod traits;
 /// import implementation. The module is shared via `Arc`, so one compiled
 /// module can back several instances.
 pub struct Instance<M, I> {
-    memory: M,
-    import_registry: I,
-    module: Arc<Module>,
-    config: Config,
-    global_vals: Box<[Val]>,
-    table_vals: Box<[TableVal]>,
-    element_vals: Box<[ElementVal]>,
-    data_vals: Box<[DataVal]>,
+    pub(crate) memory: M,
+    pub(crate) import_registry: I,
+    pub(crate) module: Arc<Module>,
+    pub(crate) config: Config,
+    pub(crate) global_vals: Box<[Val]>,
+    pub(crate) table_vals: Box<[TableVal]>,
+    pub(crate) element_vals: Box<[ElementVal]>,
+    pub(crate) data_vals: Box<[DataVal]>,
 }
 
 impl<M: Memory, I: ImportRegistry> Instance<M, I> {
@@ -125,17 +125,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();
 
-        let results = match TraceVM::run(
-            self.func_index,
-            params.as_ref(),
-            &instance.module,
-            &mut instance.memory,
-            &mut instance.import_registry,
-            &mut instance.global_vals,
-            &mut instance.table_vals,
-            &mut instance.data_vals,
-            &instance.config,
-        ) {
+        let results = match TraceVM::run(self.func_index, params.as_ref(), instance) {
             Ok(res) => res,
             Err(err) => {
                 // A `TypedFunc` is only handed out for an export, so the lookup
