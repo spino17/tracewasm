@@ -544,6 +544,23 @@ pub enum Instruction {
     /// Note this is *not* Rust's `round`, which breaks ties away from zero:
     /// `2.5` rounds to `2.0` here, but to `3.0` under `round`.
     F32Nearest,
+    // The `convert` operators run the opposite direction to `trunc`: integer to
+    // float. None of them traps, but they are not all exact either — a value
+    // needing more significand bits than the target has is rounded to nearest,
+    // ties to even. So `convert` can lose precision where `trunc` would refuse,
+    // and the `_u` forms read the operand as unsigned, which is the distinction
+    // that actually changes the result.
+    /// `f32.convert_i32_u`: convert an unsigned 32-bit integer to `f32`.
+    F32ConvertI32U,
+    /// `f32.convert_i32_s`: convert a signed 32-bit integer to `f32`.
+    ///
+    /// Lossy past 2^24, where `f32`'s significand runs out: `i32::MAX` converts to
+    /// `2147483648.0`, one above itself.
+    F32ConvertI32S,
+    /// `f32.convert_i64_u`: convert an unsigned 64-bit integer to `f32`.
+    F32ConvertI64U,
+    /// `f32.convert_i64_s`: convert a signed 64-bit integer to `f32`.
+    F32ConvertI64S,
     // Float arithmetic follows IEEE 754 exactly, which is what Rust's `f32`/`f64`
     // operators already provide. These never trap: overflow yields an infinity and
     // a NaN operand yields a NaN, whose payload the spec leaves nondeterministic.
@@ -610,6 +627,21 @@ pub enum Instruction {
     /// Note this is *not* Rust's `round`, which breaks ties away from zero:
     /// `2.5` rounds to `2.0` here, but to `3.0` under `round`.
     F64Nearest,
+    /// `f64.convert_i32_u`: convert an unsigned 32-bit integer to `f64`.
+    ///
+    /// Always exact, unlike the `f32` forms — every `i32` and `u32` fits `f64`'s
+    /// 53-bit significand.
+    F64ConvertI32U,
+    /// `f64.convert_i32_s`: convert a signed 32-bit integer to `f64`. Always exact.
+    F64ConvertI32S,
+    /// `f64.convert_i64_u`: convert an unsigned 64-bit integer to `f64`.
+    ///
+    /// Lossy past 2^53: `u64::MAX` converts to `2^64`, above every `u64`.
+    F64ConvertI64U,
+    /// `f64.convert_i64_s`: convert a signed 64-bit integer to `f64`.
+    ///
+    /// Lossy past 2^53: `i64::MAX` converts to `2^63`, one above itself.
+    F64ConvertI64S,
     /// `f64.add`.
     F64Add,
     /// `f64.sub`.
@@ -1557,6 +1589,22 @@ impl Instruction {
                 Operator::F32Trunc => (Instruction::F32Trunc, StackEffectResult::UnaryOperator),
                 Operator::F32Sqrt => (Instruction::F32Sqrt, StackEffectResult::UnaryOperator),
                 Operator::F32Nearest => (Instruction::F32Nearest, StackEffectResult::UnaryOperator),
+                Operator::F32ConvertI32U => (
+                    Instruction::F32ConvertI32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F32ConvertI32S => (
+                    Instruction::F32ConvertI32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F32ConvertI64U => (
+                    Instruction::F32ConvertI64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F32ConvertI64S => (
+                    Instruction::F32ConvertI64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 // f32 binary operations
                 Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
@@ -1581,6 +1629,22 @@ impl Instruction {
                 Operator::F64Trunc => (Instruction::F64Trunc, StackEffectResult::UnaryOperator),
                 Operator::F64Sqrt => (Instruction::F64Sqrt, StackEffectResult::UnaryOperator),
                 Operator::F64Nearest => (Instruction::F64Nearest, StackEffectResult::UnaryOperator),
+                Operator::F64ConvertI32U => (
+                    Instruction::F64ConvertI32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F64ConvertI32S => (
+                    Instruction::F64ConvertI32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F64ConvertI64U => (
+                    Instruction::F64ConvertI64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::F64ConvertI64S => (
+                    Instruction::F64ConvertI64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 // f64 binary operations
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),

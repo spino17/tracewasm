@@ -574,3 +574,82 @@ fn saturating_truncation_leaves_in_range_operands_alone() {
     assert_eq!(sat_i32("plain_u"), 0, "trunc(-0.9) is -0.0");
     assert_eq!(sat_i64("i64_plain_s"), -3);
 }
+
+/// `f32` result of the integer-to-float conversion fixture.
+fn conv_f32(name: &str) -> f32 {
+    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/convert.wasm"), name);
+    v
+}
+
+/// `f64` result of the integer-to-float conversion fixture.
+fn conv_f64(name: &str) -> f64 {
+    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/convert.wasm"), name);
+    v
+}
+
+// `-1` is `0xFFFFFFFF`, so the unsigned forms convert the largest u32 while the
+// signed forms convert a negative number. Reading the operand at the wrong
+// signedness is the one mistake here that changes the result outright rather than
+// by a rounding step.
+#[test]
+fn conversion_signedness_decides_how_the_operand_is_read() {
+    assert_eq!(conv_f32("s_neg1"), -1.0);
+    assert_eq!(
+        conv_f32("u_neg1"),
+        4294967296.0,
+        "0xFFFFFFFF, rounded to f32"
+    );
+    assert_eq!(conv_f64("f64_s_neg1"), -1.0);
+    assert_eq!(conv_f64("f64_u_neg1"), 4294967295.0, "exact in f64");
+    assert_eq!(conv_f64("i64_s_neg1"), -1.0);
+    assert_eq!(conv_f64("i64_u_neg1"), 18446744073709551616.0, "2^64");
+    assert_eq!(conv_f32("f32_i64_u_neg1"), 18446744073709551616.0);
+}
+
+// Conversion is not exact: an operand needing more significand bits than the
+// target has gets rounded. `f32` runs out at 2^24, so `i32::MAX` lands one *above*
+// itself — while `f64`, with 53 bits, keeps every `i32` intact.
+#[test]
+fn conversion_to_f32_rounds_where_conversion_to_f64_stays_exact() {
+    assert_eq!(conv_f32("s_i32_max"), 2147483648.0, "2^31, above i32::MAX");
+    assert_eq!(conv_f64("f64_s_i32_max"), 2147483647.0, "exact in f64");
+    assert_eq!(
+        conv_f32("s_i32_min"),
+        -2147483648.0,
+        "i32::MIN is a power of two, so it survives"
+    );
+    assert_eq!(conv_f64("f64_s_i64_max"), 9223372036854775808.0, "2^63");
+}
+
+// Rounding is to nearest with ties to even, matching the spec's roundTiesToEven.
+// 16777217 is 2^24+1, the first integer `f32` cannot hold; it and 16777219 are
+// both ties, and they resolve in opposite directions because only one neighbour
+// of each is even.
+#[test]
+fn conversion_breaks_rounding_ties_to_even() {
+    assert_eq!(conv_f32("tie_down"), 16777216.0, "2^24+1 rounds down");
+    assert_eq!(conv_f32("tie_up"), 16777220.0, "2^24+3 rounds up");
+}
+
+// `i64` -> `f32` has to round exactly once. Widening through `f64` on the way is
+// harmless for `i32` operands, which `f64` holds exactly, but for `i64` both steps
+// round and the two can disagree: this operand sits one above the `f32` tie at
+// 2^62 + 2^38, so the `f64` step rounds it back *onto* the tie and ties-to-even
+// then rounds down, landing 2^39 short.
+#[test]
+fn conversion_from_i64_to_f32_rounds_only_once() {
+    assert_eq!(
+        conv_f32("double_round_s"),
+        4611686568183201792.0,
+        "rounding via f64 would give 4611686018427387904.0"
+    );
+    assert_eq!(conv_f32("double_round_u"), 4611686568183201792.0);
+}
+
+#[test]
+fn conversion_is_exact_for_small_operands() {
+    assert_eq!(conv_f32("exact_s"), 3.0);
+    assert_eq!(conv_f32("exact_neg_s"), -3.0);
+    assert_eq!(conv_f64("f64_exact_s"), 42.0);
+    assert_eq!(conv_f32("exact_zero"), 0.0);
+}
