@@ -119,6 +119,7 @@ impl TraceVM {
         instance: &mut Instance<M, I>,
         module: &Module,
     ) -> Result<ResultVals, TraceWasmError> {
+        let mut call_stack_depth: u32 = 0;
         let mut stack: Stack<Val> = Stack::default();
 
         for param in params {
@@ -126,7 +127,13 @@ impl TraceVM {
         }
 
         // A fresh stack starts at height 0, so this frame's base is 0.
-        Self::execute(func_index, &mut stack, instance, module)?;
+        Self::execute(
+            func_index,
+            &mut stack,
+            instance,
+            module,
+            &mut call_stack_depth,
+        )?;
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
@@ -161,6 +168,7 @@ impl TraceVM {
         stack: &mut Stack<Val>,
         instance: &mut Instance<M, I>,
         module: &Module,
+        call_stack_depth: &mut u32,
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
@@ -197,6 +205,16 @@ impl TraceVM {
             stack.push(Val::zero_of_ty(ty));
         }
 
+        // Entering a frame. The matching decrement is after the driver loop; the
+        // error paths out of the loop deliberately skip it, because an error always
+        // propagates to the top-level `run` (nothing in the interpreter catches
+        // one) and the counter is a fresh local per `run`. The depth *limit* is
+        // enforced at the call site in `call_func`, not here, so that the top-level
+        // frame is always admitted — an error raised during frame setup would
+        // otherwise escape without the enclosing-instruction tag that
+        // `FuncCallError` requires.
+        *call_stack_depth += 1;
+
         let mut state = TraceVMState {
             stack,
             caller_base_height,
@@ -216,14 +234,16 @@ impl TraceVM {
             // the closure does not borrow `pc` while it is mutably lent out.
             let faulting_pc = pc;
 
-            state.execute(instr, module, &mut pc).map_err(|err| {
-                err.into_tracewasm_err(
-                    faulting_pc,
-                    func_index,
-                    instr,
-                    instruction_offsets[faulting_pc],
-                )
-            })?;
+            state
+                .execute(instr, module, &mut pc, call_stack_depth)
+                .map_err(|err| {
+                    err.into_tracewasm_err(
+                        faulting_pc,
+                        func_index,
+                        instr,
+                        instruction_offsets[faulting_pc],
+                    )
+                })?;
 
             // Advancing past the last instruction means we just executed the
             // function's terminating `End`: the frame is complete. (`return` and
@@ -234,6 +254,8 @@ impl TraceVM {
                 break;
             }
         }
+
+        *call_stack_depth -= 1;
 
         // Tear the frame down: truncating to `caller_base_height` (the locals
         // base, *not* `frame_base_height`) discards this frame's locals while
@@ -434,6 +456,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         func_index: FuncIndex,
         params_count: u32,
         module: &Module,
+        call_stack_depth: &mut u32,
     ) -> Result<(), TraceWasmError> {
         // The arguments are the topmost values on the shared stack. How they are
         // handed over depends on the callee, so neither branch below pops them
@@ -475,8 +498,27 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 self.stack.push(res);
             }
         } else {
+            // Only a local callee creates a new interpreter frame — and therefore a
+            // new native frame — so the depth limit is checked here rather than
+            // around the whole of `call_func`. An imported callee runs on the host's
+            // own stack and consumes no interpreter depth.
+            //
+            // `call_stack_depth` is this (the caller's) depth, so the callee would
+            // be at `+ 1`; `>=` is the test for "the callee would exceed".
+            let max_depth = self.instance.config().get_max_call_stack_depth();
+
+            if *call_stack_depth >= max_depth {
+                return Err(TraceWasmError::CallStackExhausted(max_depth));
+            }
+
             // local function execution
-            TraceVM::execute(func_index, self.stack, self.instance, module)?;
+            TraceVM::execute(
+                func_index,
+                self.stack,
+                self.instance,
+                module,
+                call_stack_depth,
+            )?;
         }
 
         Ok(())
@@ -529,13 +571,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         instruction: &Instruction,
         module: &Module,
         pc: &mut usize,
+        call_stack_depth: &mut u32,
     ) -> Result<(), InstructionExecutionError> {
         let res = match instruction {
             Instruction::Call {
                 func_index: callee_func_index,
                 params_count,
             } => {
-                self.call_func(*callee_func_index, *params_count, module)
+                self.call_func(*callee_func_index, *params_count, module, call_stack_depth)
                     .map_err(|err| {
                         InstructionExecutionError::Call(*callee_func_index, Box::new(err))
                     })?;
@@ -596,13 +639,18 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 }
 
-                self.call_func(callee_func_index, declared_params.len() as u32, module)
-                    .map_err(|err| {
-                        InstructionExecutionError::CallIndirect(
-                            *table_index,
-                            FunctionCall(callee_func_index, Box::new(err)),
-                        )
-                    })?;
+                self.call_func(
+                    callee_func_index,
+                    declared_params.len() as u32,
+                    module,
+                    call_stack_depth,
+                )
+                .map_err(|err| {
+                    InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        FunctionCall(callee_func_index, Box::new(err)),
+                    )
+                })?;
 
                 ExecutionResult::Next
             }

@@ -12,6 +12,7 @@ pub struct Config {
     max_table_elements: u64,
     /// Max number of locals per function (including params).
     max_locals_per_func: u64,
+    max_call_stack_depth: u32,
 }
 
 impl Default for Config {
@@ -20,11 +21,20 @@ impl Default for Config {
             max_memory_size_in_pages: 1000,
             max_table_elements: 10000,
             max_locals_per_func: 50000,
+            max_call_stack_depth: 2000,
         }
     }
 }
 
 impl Config {
+    pub fn set_max_call_stack_depth(&mut self, depth: u32) {
+        self.max_call_stack_depth = depth;
+    }
+
+    pub fn get_max_call_stack_depth(&self) -> u32 {
+        self.max_call_stack_depth
+    }
+
     /// Sets `max_memory_size_in_pages`
     pub fn set_max_memory_size_in_pages(&mut self, val: u64) {
         self.max_memory_size_in_pages = val;

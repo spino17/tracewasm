@@ -39,6 +39,23 @@ pub enum TraceWasmError {
     /// current memory length in bytes.
     #[error("{0:?}")]
     MemoryError(MemoryError),
+    /// A call would have nested deeper than
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config::get_max_call_stack_depth).
+    /// Field: the limit that was reached.
+    ///
+    /// Each active wasm frame costs a native Rust frame, so an unbounded guest
+    /// recursion would overflow the *host* stack — which aborts the process
+    /// instead of unwinding, leaving the embedder no way to recover. Trapping
+    /// first keeps the failure an ordinary error.
+    ///
+    /// Raised at the call site, so it reaches the caller wrapped in an
+    /// [`InstructionExecutionError::Call`] / [`CallIndirectError::FunctionCall`]
+    /// and carries the usual backtrace.
+    ///
+    /// The message deliberately contains "call stack exhausted", the string the
+    /// WebAssembly spec testsuite's `assert_exhaustion` directive matches on.
+    #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
+    CallStackExhausted(u32),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, or non-function imports). The string
     /// describes the specific unsupported feature.
