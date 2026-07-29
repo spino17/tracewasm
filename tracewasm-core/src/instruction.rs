@@ -297,6 +297,18 @@ pub enum Instruction {
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
+    // Unary bit-counting operators: each pops one value and pushes a count of the
+    // same type as its operand (not an `i32`, unlike the comparisons). All three
+    // are total — `clz`/`ctz` of `0` return the full operand width.
+    /// `i32.clz`: count leading zero bits;
+    /// `32` when the operand is `0`.
+    I32Clz,
+    /// `i32.ctz`: count trailing zero bits;
+    /// `32` when the operand is `0`.
+    I32Ctz,
+    /// `i32.popcnt`: count set bits, over the two's-complement representation,
+    /// so a negative operand counts its sign bits too.
+    I32Popcnt,
     /// `i32.add`.
     I32Add,
     /// `i32.sub`.
@@ -360,6 +372,15 @@ pub enum Instruction {
     I32GeU,
     /// `i32.ge_s`: signed greater-than-or-equal.
     I32GeS,
+    /// `i64.clz`: count leading zero bits;
+    /// `64` when the operand is `0`.
+    I64Clz,
+    /// `i64.ctz`: count trailing zero bits;
+    /// `64` when the operand is `0`.
+    I64Ctz,
+    /// `i64.popcnt`: count set bits, over the two's-complement representation,
+    /// so a negative operand counts its sign bits too.
+    I64Popcnt,
     /// `i64.add`.
     I64Add,
     /// `i64.sub`.
@@ -1019,6 +1040,7 @@ impl Instruction {
                     (Instruction::Unreachable, StackEffectResult::NoEffect)
                 }
                 Operator::Nop => (Instruction::Nop, StackEffectResult::NoEffect),
+                // constants
                 Operator::I32Const { value } => (
                     Instruction::I32Const { value },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
@@ -1049,6 +1071,7 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
+                // memory
                 Operator::MemorySize { mem } => {
                     Self::check_memory_index(mem)?;
 
@@ -1094,6 +1117,7 @@ impl Instruction {
                     Instruction::DataDrop { data_index },
                     StackEffectResult::NoEffect,
                 ),
+                // loads
                 Operator::I32Load { memarg } => (
                     Instruction::I32Load {
                         offset: memarg.offset,
@@ -1192,6 +1216,7 @@ impl Instruction {
                     },
                     StackEffectResult::Loads,
                 ),
+                // stores
                 Operator::I32Store { memarg } => (
                     Instruction::I32Store {
                         offset: memarg.offset,
@@ -1255,6 +1280,11 @@ impl Instruction {
                     },
                     StackEffectResult::Stores,
                 ),
+                // i32 unary operations
+                Operator::I32Clz => (Instruction::I32Clz, StackEffectResult::UnaryOperator),
+                Operator::I32Ctz => (Instruction::I32Ctz, StackEffectResult::UnaryOperator),
+                Operator::I32Popcnt => (Instruction::I32Popcnt, StackEffectResult::UnaryOperator),
+                // i32 binary operations
                 Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
                 Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
                 Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
@@ -1280,6 +1310,11 @@ impl Instruction {
                 Operator::I32LeS => (Instruction::I32LeS, StackEffectResult::BinaryOperator),
                 Operator::I32GeU => (Instruction::I32GeU, StackEffectResult::BinaryOperator),
                 Operator::I32GeS => (Instruction::I32GeS, StackEffectResult::BinaryOperator),
+                // i32 unary operations
+                Operator::I64Clz => (Instruction::I64Clz, StackEffectResult::UnaryOperator),
+                Operator::I64Ctz => (Instruction::I64Ctz, StackEffectResult::UnaryOperator),
+                Operator::I64Popcnt => (Instruction::I64Popcnt, StackEffectResult::UnaryOperator),
+                // i32 binary operations
                 Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
                 Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
                 Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
@@ -1305,6 +1340,7 @@ impl Instruction {
                 Operator::I64LeS => (Instruction::I64LeS, StackEffectResult::BinaryOperator),
                 Operator::I64GeU => (Instruction::I64GeU, StackEffectResult::BinaryOperator),
                 Operator::I64GeS => (Instruction::I64GeS, StackEffectResult::BinaryOperator),
+                // f32 binary operations
                 Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
                 Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
                 Operator::F32Mul => (Instruction::F32Mul, StackEffectResult::BinaryOperator),
@@ -1320,6 +1356,7 @@ impl Instruction {
                 Operator::F32Copysign => {
                     (Instruction::F32Copysign, StackEffectResult::BinaryOperator)
                 }
+                // f64 binary operations
                 Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
                 Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
                 Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
@@ -1335,6 +1372,7 @@ impl Instruction {
                 Operator::F64Copysign => {
                     (Instruction::F64Copysign, StackEffectResult::BinaryOperator)
                 }
+                // locals
                 Operator::LocalGet { local_index } => (
                     Instruction::LocalGet {
                         index: LocalIndex(local_index),
@@ -1353,6 +1391,7 @@ impl Instruction {
                     },
                     StackEffectResult::NoEffect,
                 ),
+                // globals
                 Operator::GlobalGet { global_index } => (
                     Instruction::GlobalGet {
                         index: GlobalIndex(global_index),
@@ -1365,6 +1404,7 @@ impl Instruction {
                     },
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
+                // call
                 Operator::Call { function_index } => {
                     let func_decl = &func_decls[function_index as usize];
                     let ty = &types[func_decl.ty.0 as usize];
@@ -1412,6 +1452,7 @@ impl Instruction {
                     Instruction::Drop,
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
+                // blocks
                 Operator::Block { blockty } => {
                     control_stack.add_block(
                         BlockKind::Block {
@@ -1491,6 +1532,7 @@ impl Instruction {
                         StackEffectResult::SetHeight(recorded_height + params),
                     )
                 }
+                // branching
                 Operator::Br { relative_depth } => {
                     // NOTE on Branching: each branch instruction will resolve to a particular block based on the relative_depth provided.
                     // This block dictates the recorded_height and arity which this branch instruction should leave the stack in.
@@ -1634,6 +1676,7 @@ impl Instruction {
                         StackEffectResult::Unreachable,
                     )
                 }
+                // end
                 Operator::End => {
                     let Some(block) = control_stack.pop() else {
                         unreachable!(
@@ -1757,10 +1800,12 @@ impl Instruction {
                     control_stack.apply_stack_effects_to_height(2, 1);
                 }
                 StackEffectResult::SetHeight(height) => control_stack.set_height(height),
+                // Loads and unary operators each pop one value and push one, so
+                // like the genuinely effect-free cases they leave the height alone.
                 StackEffectResult::NoEffect
                 | StackEffectResult::Unreachable
                 | StackEffectResult::UnaryOperator
-                | StackEffectResult::Loads => {} // loads pop 1 and push 1 value so no net effect
+                | StackEffectResult::Loads => {}
             }
 
             // Offsets are bounded by the module's byte length, so this cannot

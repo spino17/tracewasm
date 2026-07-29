@@ -183,3 +183,38 @@ fn copysign_takes_magnitude_from_the_first_and_sign_from_the_second() {
     assert_eq!(min_max_f32("copysign_pos"), 5.0);
     assert_eq!(min_max_f64("f64_copysign"), -5.0);
 }
+
+/// `i32` result of the bit-counting fixture.
+fn bits_i32(name: &str) -> i32 {
+    call_in(include_bytes!("fixtures/bit_counting.wasm"), name)
+}
+
+/// `i64` result of the bit-counting fixture.
+fn bits_i64(name: &str) -> i64 {
+    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/bit_counting.wasm"), name);
+    v
+}
+
+// Zero is the edge case: `clz`/`ctz` of `0` are the full operand width, not `0`.
+#[test]
+fn clz_and_ctz_of_zero_are_the_operand_width() {
+    assert_eq!(bits_i32("clz_zero"), 32);
+    assert_eq!(bits_i32("ctz_zero"), 32);
+    assert_eq!(bits_i64("i64_clz_zero"), 64, "i64 width, not 32");
+    assert_eq!(bits_i64("i64_ctz_zero"), 64);
+}
+
+#[test]
+fn clz_ctz_count_ordinary_values() {
+    assert_eq!(bits_i32("clz_one"), 31);
+    assert_eq!(bits_i32("ctz_8"), 3);
+    assert_eq!(bits_i32("clz_neg1"), 0, "-1 has the high bit set");
+}
+
+// `popcnt` works on the two's-complement bits, so `-1` is all ones.
+#[test]
+fn popcnt_counts_sign_bits_of_negative_operands() {
+    assert_eq!(bits_i32("popcnt_neg1"), 32);
+    assert_eq!(bits_i32("popcnt_5"), 2, "0b101");
+    assert_eq!(bits_i64("i64_popcnt_neg1"), 64);
+}

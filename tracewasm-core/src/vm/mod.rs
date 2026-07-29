@@ -39,8 +39,6 @@
 //! were. Instruction indices, by contrast, are per-function: each
 //! `TraceVM::execute` invocation has its own `instructions` slice and `pc`.
 
-use std::ops::{BitAnd, BitOr, BitXor};
-
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
@@ -56,6 +54,7 @@ use crate::{
     vm::stack::{DataVal, Stack, TableVal, Val},
 };
 use smallvec::{SmallVec, smallvec};
+use std::ops::{BitAnd, BitOr, BitXor};
 
 pub(crate) mod stack;
 
@@ -524,6 +523,30 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 ExecutionResult::Next
             }
+            Instruction::I32Clz => {
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.leading_zeros() as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Ctz => {
+                let a = self.stack.pop().as_i32();
+
+                self.stack.push(Val::I32(a.trailing_zeros() as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I32Popcnt => {
+                let a = self.stack.pop().as_i32();
+
+                // Counts set bits in the two's-complement representation, so a
+                // negative operand counts its sign bits too — which is what the
+                // spec's bit-level definition asks for.
+                self.stack.push(Val::I32(a.count_ones() as i32));
+
+                ExecutionResult::Next
+            }
             Instruction::I32Add => {
                 let b = self.stack.pop().as_i32();
                 let a = self.stack.pop().as_i32();
@@ -753,6 +776,30 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.stack.pop().as_i32();
 
                 self.stack.push(Val::I32((a >= b) as i32));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Clz => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.leading_zeros() as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Ctz => {
+                let a = self.stack.pop().as_i64();
+
+                self.stack.push(Val::I64(a.trailing_zeros() as i64));
+
+                ExecutionResult::Next
+            }
+            Instruction::I64Popcnt => {
+                let a = self.stack.pop().as_i64();
+
+                // See `I32Popcnt`. The count is at most 64, but the result type is
+                // `i64` — unary integer ops keep their operand's width, unlike the
+                // comparisons.
+                self.stack.push(Val::I64(a.count_ones() as i64));
 
                 ExecutionResult::Next
             }
