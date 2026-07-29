@@ -7,3 +7,7 @@ edition = "2024"
 tracewasm-core = { path = "../../tracewasm-core" }
 tracewasm-macros = { path = "../../tracewasm-macros" }
 anyhow = { version = "1" }
+rustc-demangle = { workspace = true }
+gimli = { workspace = true }
+serde = { workspace = true }
+addr2line = { workspace = true }

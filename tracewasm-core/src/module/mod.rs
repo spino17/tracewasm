@@ -32,6 +32,8 @@ use crate::{
     },
 };
 use core::fmt::{self, Debug};
+use gimli::{Dwarf, EndianArcSlice, EndianReader, RunTimeEndian, SectionId};
+use phf::phf_set;
 use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
@@ -44,7 +46,13 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 ///
 /// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB, and
 /// cap the initial allocation against the instance [`Config`].
-pub const WASM_MEMORY_PAGE_SIZE: usize = 64 * 1024; // 64 KiB (one wasm page)
+pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
+
+/// The module's parsed DWARF, as loaded from its `.debug_*` custom sections.
+///
+/// Shared behind an `Arc` because the sections are large and every consumer of
+/// the debug info reads the same copy.
+pub type ModuleDwarf = Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>;
 
 /// The type of a WebAssembly global: its value type plus mutability.
 ///
@@ -238,7 +246,10 @@ pub trait EntityIndex: From<u32> {}
 
 /// Index into the function index space (imports first, then defined functions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FuncIndex(pub u32);
+pub struct FuncIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FuncIndex {
     fn from(value: u32) -> Self {
@@ -251,7 +262,10 @@ impl EntityIndex for FuncIndex {}
 /// Index used by the `ref.func` "exact" reference form (function-references
 /// proposal); addresses the function index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FuncExactIndex(pub u32);
+pub struct FuncExactIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FuncExactIndex {
     fn from(value: u32) -> Self {
@@ -263,7 +277,10 @@ impl EntityIndex for FuncExactIndex {}
 
 /// Index into the type section ([`Module::types`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TyIndex(pub u32);
+pub struct TyIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TyIndex {
     fn from(value: u32) -> Self {
@@ -275,7 +292,10 @@ impl EntityIndex for TyIndex {}
 
 /// Index into the global index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GlobalIndex(pub u32);
+pub struct GlobalIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for GlobalIndex {
     fn from(value: u32) -> Self {
@@ -287,7 +307,10 @@ impl EntityIndex for GlobalIndex {}
 
 /// Index into the table index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TableIndex(pub u32);
+pub struct TableIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TableIndex {
     fn from(value: u32) -> Self {
@@ -299,7 +322,10 @@ impl EntityIndex for TableIndex {}
 
 /// Index into the memory index space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MemoryIndex(pub u32);
+pub struct MemoryIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for MemoryIndex {
     fn from(value: u32) -> Self {
@@ -311,7 +337,10 @@ impl EntityIndex for MemoryIndex {}
 
 /// Index into the tag index space (exception-handling proposal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TagIndex(pub u32);
+pub struct TagIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for TagIndex {
     fn from(value: u32) -> Self {
@@ -323,7 +352,10 @@ impl EntityIndex for TagIndex {}
 
 /// Index into the element segment space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ElementIndex(pub u32);
+pub struct ElementIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for ElementIndex {
     fn from(value: u32) -> Self {
@@ -335,7 +367,10 @@ impl EntityIndex for ElementIndex {}
 
 /// Index into the data segment space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DataIndex(pub u32);
+pub struct DataIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for DataIndex {
     fn from(value: u32) -> Self {
@@ -347,7 +382,10 @@ impl EntityIndex for DataIndex {}
 
 /// Index of a local within a function (params first, then declared locals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LocalIndex(pub u32);
+pub struct LocalIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for LocalIndex {
     fn from(value: u32) -> Self {
@@ -359,7 +397,10 @@ impl EntityIndex for LocalIndex {}
 
 /// Index of a field within a struct type (GC proposal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FieldIndex(pub u32);
+pub struct FieldIndex(
+    /// The raw index value.
+    pub u32,
+);
 
 impl From<u32> for FieldIndex {
     fn from(value: u32) -> Self {
@@ -381,17 +422,26 @@ pub struct Module {
     /// The function index space: imported functions first, then locally-defined
     /// ones. The split point is [`Self::imported_func_count`].
     pub func_decls: Box<[FuncDecl]>,
+    /// The table section.
     pub tables: Box<[Table]>,
+    /// The memory section (TraceWasm currently allows at most one memory).
     pub memories: Box<[MemoryType]>,
+    /// The tag section (exception-handling proposal).
     pub tags: Box<[TagType]>,
+    /// The global index space: imported globals first, then locally-defined ones.
+    /// The split point is [`Self::imported_global_count`].
     pub globals: Box<[Global]>,
+    /// The export section, keyed by export name.
     pub exports: FxHashMap<String, Export>,
+    pub exported_func_index_to_name: FxHashMap<FuncIndex, String>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
+    /// The element section.
     pub elements: Box<[Element]>,
     /// The declared data-segment count from the data-count section, if present
     /// (required by the bulk-memory proposal for validating `data.drop`, etc.).
     pub data_count: Option<u32>,
+    /// The data section.
     pub datas: Box<[Data]>,
     /// Declared entry count of the code section (should match `func_bodies.len()`).
     pub code_sec_count: u32,
@@ -409,16 +459,34 @@ pub struct Module {
     pub func_bodies: Box<[FuncBody]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
+    /// Decoded `name`-section maps plus the raw bytes of other custom sections.
     pub custom_section: CustomSection,
+    /// The module's DWARF debug info, parsed from its `.debug_*` custom sections,
+    /// or `None` if the module carries none (no `.debug_info`).
+    ///
+    /// Behind an `Arc` because the sections are large and shared by every
+    /// consumer; read it through [`Self::dwarf`].
+    dwarf: Option<ModuleDwarf>,
 }
 
 impl Module {
+    /// The module's export map, keyed by export name.
     pub fn exports(&self) -> &FxHashMap<String, Export> {
         &self.exports
     }
 
+    /// Looks up the export named `name`, if any.
     pub fn export(&self, name: &str) -> Option<Export> {
         self.exports.get(name).cloned()
+    }
+
+    /// The module's DWARF debug info, or `None` if it was built without any.
+    ///
+    /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
+    /// instruction's byte offset (see [`FuncBody::instruction_offsets`]) back to a
+    /// source location.
+    pub fn dwarf(&self) -> Option<ModuleDwarf> {
+        self.dwarf.clone()
     }
 
     /// Looks up an exported function by name and returns a typed handle to it,
@@ -469,7 +537,11 @@ impl Module {
             ));
         }
 
-        Ok(TypedFunc::new(func_index, name))
+        Ok(TypedFunc::new(func_index))
+    }
+
+    pub fn exported_func_name(&self, index: FuncIndex) -> Option<&String> {
+        self.exported_func_index_to_name.get(&index)
     }
 }
 
@@ -481,23 +553,43 @@ pub struct FuncBody {
     /// The body lowered by [`crate::instruction`] (control flow resolved to
     /// absolute indices).
     pub instructions: Box<[Instruction]>,
+    /// Source positions for [`Self::instructions`], used to point diagnostics at
+    /// the original binary.
+    ///
+    /// **Invariant:** parallel to `instructions` — `instruction_offsets[i]` is the
+    /// byte offset in the module binary of the operator that produced
+    /// `instructions[i]`, and both slices always have the same length. Lowering
+    /// pushes the two together, which is what upholds this.
+    pub instruction_offsets: Box<[u32]>,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
 /// `name` section (one map per subsection) plus the raw bytes of any other custom
 /// sections, keyed by section name.
 pub struct CustomSection {
+    /// The module's name from the `name` section (empty if none).
     pub module_name: String,
+    /// Function names.
     pub func: NameMap<FuncIndex>,
+    /// Local-variable names, per function.
     pub local: IndirectNameMap<FuncIndex, LocalIndex>,
+    /// Label names, per function.
     pub label: IndirectNameMap<FuncIndex, LocalIndex>,
+    /// Type names.
     pub ty: NameMap<TyIndex>,
+    /// Table names.
     pub table: NameMap<TableIndex>,
+    /// Memory names.
     pub mem: NameMap<MemoryIndex>,
+    /// Global names.
     pub global: NameMap<GlobalIndex>,
+    /// Element-segment names.
     pub element: NameMap<ElementIndex>,
+    /// Data-segment names.
     pub data: NameMap<DataIndex>,
+    /// Struct-field names, per type (GC proposal).
     pub field: IndirectNameMap<TyIndex, FieldIndex>,
+    /// Tag names.
     pub tag: NameMap<TagIndex>,
     /// Unrecognized `name`-section subsections, keyed by subsection type byte.
     pub name_unknown: FxHashMap<u8, Box<[u8]>>,
@@ -581,7 +673,9 @@ impl CustomSection {
 
 /// A data segment.
 pub struct Data {
+    /// Whether the segment is passive or actively initializes memory.
     pub kind: DataKind,
+    /// The segment's raw bytes.
     pub data: Box<[u8]>,
 }
 
@@ -592,7 +686,9 @@ pub enum DataKind {
     /// Copied into `memory_index` at instantiation, at the offset computed by
     /// `offset_expr`.
     Active {
+        /// Target memory index.
         memory_index: MemoryIndex,
+        /// Constant expression computing the destination offset.
         offset_expr: Box<[Instruction]>,
     },
 }
@@ -604,7 +700,9 @@ pub enum ElementKind {
     /// Copied into `table_index` at instantiation at `offset_expr` (a `None`
     /// table index means table 0).
     Active {
+        /// Target table index (`None` means table 0).
         table_index: Option<TableIndex>,
+        /// Constant expression computing the destination offset.
         offset_expr: Box<[Instruction]>,
     },
     /// Forward-declares references (for `ref.func`); contributes no table data.
@@ -621,7 +719,9 @@ pub enum ElementItems {
 
 /// An element segment.
 pub struct Element {
+    /// Whether the segment is passive, active, or declared.
     pub kind: ElementKind,
+    /// The segment's payload (function indices or constant expressions).
     pub items: ElementItems,
 }
 
@@ -635,24 +735,37 @@ pub enum TableInit {
 
 /// A table definition: its type plus initialization.
 pub struct Table {
+    /// The table's element reference type (always `funcref` in TraceWasm).
     pub element_ty: RefType,
+    /// How the table's slots are initialized.
     pub init: TableInit,
+    /// Initial size, in elements.
     pub initial: u64,
+    /// Optional maximum size, in elements.
     pub maximum: Option<u64>,
 }
 
 /// A named export and the entity it exposes.
 #[derive(Debug, Clone, Copy)]
 pub enum Export {
+    /// An exported function.
     Func(FuncIndex),
+    /// An exported table.
     Table(TableIndex),
+    /// An exported memory.
     Memory(MemoryIndex),
+    /// An exported global.
     Global(GlobalIndex),
+    /// An exported tag (exception-handling proposal).
     Tag(TagIndex),
+    /// An exported function in the "exact" reference form (function-references
+    /// proposal).
     FuncExact(FuncExactIndex),
 }
 
 impl Export {
+    /// Returns the function index if this is a [`Export::Func`], otherwise
+    /// [`TraceWasmError::ExportNotA`].
     pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
         let Export::Func(func_index) = self else {
             return Err(TraceWasmError::ExportNotA("function".to_string()));
@@ -662,42 +775,57 @@ impl Export {
     }
 }
 
+/// Whether a global is imported or locally defined.
 pub enum GlobalKind {
+    /// Imported from `module`::`name`; its value is supplied at instantiation.
     Imported { module: String, name: String },
+    /// Locally defined; the constant expression computes its initial value.
     Local(Box<[Instruction]>),
 }
 
 /// A global definition: its type plus the constant expression for its initial
 /// value.
 pub struct Global {
+    /// The global's value type and mutability.
     pub ty: GlobalType,
+    /// Whether the global is imported or locally defined (with its init expr).
     pub kind: GlobalKind,
 }
 
 /// A function type: parameter and result value types.
 pub struct FuncType {
+    /// Parameter value types.
     pub params: Box<[ValType]>,
+    /// Result value types.
     pub results: Box<[ValType]>,
 }
 
 /// Whether a function is defined locally or imported.
 pub enum FuncKind {
+    /// Defined locally, with a body in [`Module::func_bodies`].
     Local,
+    /// Imported from `module_name`::`imported_func_name`.
     Imported {
+        /// Name of the module the function is imported from.
         module_name: String,
+        /// Name of the imported function within that module.
         imported_func_name: String,
     },
 }
 
 /// A function declaration: its origin and its type-section index.
 pub struct FuncDecl {
+    /// Whether the function is defined locally or imported.
     pub kind: FuncKind,
     /// Index into [`Module::types`] giving this function's signature.
     pub ty: TyIndex,
 }
 
 /// A `name`-section map from a typed entity index to its name.
-pub struct NameMap<T: PartialEq + Eq + Hash + EntityIndex>(pub FxHashMap<T, String>);
+pub struct NameMap<T: PartialEq + Eq + Hash + EntityIndex>(
+    /// Map from typed index to name.
+    pub FxHashMap<T, String>,
+);
 
 impl<T: PartialEq + Eq + Hash + EntityIndex> Default for NameMap<T> {
     fn default() -> Self {
@@ -731,7 +859,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
 pub struct IndirectNameMap<
     T: PartialEq + Eq + Hash + EntityIndex,
     V: PartialEq + Eq + Hash + EntityIndex,
->(pub FxHashMap<T, NameMap<V>>);
+>(
+    /// Map from outer index to the nested [`NameMap`] of inner names.
+    pub FxHashMap<T, NameMap<V>>,
+);
 
 impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIndex> Default
     for IndirectNameMap<T, V>
@@ -762,6 +893,39 @@ impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIn
         Ok(())
     }
 }
+
+/// Custom-section names that carry DWARF debug info, routed to the DWARF loader
+/// instead of being kept as opaque bytes in [`CustomSection`].
+///
+/// The names match [`gimli::SectionId::name`] (leading dot included), so a hit
+/// here is exactly a section the loader will ask for.
+static DEBUG_SECTION_NAMES: phf::Set<&'static str> = phf_set! {
+    ".debug_abbrev",
+    ".debug_addr",
+    ".debug_aranges",
+    ".debug_cu_index",
+    ".debug_frame",
+    ".eh_frame",
+    ".eh_frame_hdr",
+    ".debug_gnu_pubnames",
+    ".debug_gnu_pubtypes",
+    ".debug_info",
+    ".debug_line",
+    ".debug_line_str",
+    ".debug_loc",
+    ".debug_loclists",
+    ".debug_macinfo",
+    ".debug_macro",
+    ".debug_names",
+    ".debug_pubnames",
+    ".debug_pubtypes",
+    ".debug_ranges",
+    ".debug_rnglists",
+    ".debug_str",
+    ".debug_str_offsets",
+    ".debug_tu_index",
+    ".debug_types"
+};
 
 impl Module {
     /// Validates `buf` as a core WebAssembly module and builds an owned
@@ -797,6 +961,8 @@ impl Module {
         let mut func_bodies = vec![];
         let mut tags = vec![];
         let mut unknown_sections = vec![];
+        let mut debug_sections: FxHashMap<String, &[u8]> = FxHashMap::default();
+        let mut possible_dwarf: Option<ModuleDwarf> = None;
         let mut custom_section_unknowns: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_others: FxHashMap<String, Box<[u8]>> = FxHashMap::default();
         let mut custom_section_module_name: String = "".to_string();
@@ -815,6 +981,7 @@ impl Module {
             IndirectNameMap::default();
         let mut custom_section_tag: NameMap<TagIndex> = NameMap::default();
         let mut custom_section_name_unknown: FxHashMap<u8, Box<[u8]>> = FxHashMap::default();
+        let mut exported_func_index_to_name: FxHashMap<FuncIndex, String> = FxHashMap::default();
 
         for payload in Parser::new(0).parse_all(buf) {
             let payload = payload?;
@@ -977,7 +1144,11 @@ impl Module {
                         exports.insert(
                             export.name.to_string(),
                             match export.kind {
-                                ExternalKind::Func => Export::Func(FuncIndex(index)),
+                                ExternalKind::Func => {
+                                    exported_func_index_to_name
+                                        .insert(FuncIndex(index), export.name.to_string());
+                                    Export::Func(FuncIndex(index))
+                                }
                                 ExternalKind::Table => Export::Table(TableIndex(index)),
                                 ExternalKind::Memory => Export::Memory(MemoryIndex(index)),
                                 ExternalKind::Global => Export::Global(GlobalIndex(index)),
@@ -1109,24 +1280,35 @@ impl Module {
 
                     for local in locals_reader {
                         let (count, ty) = local?;
+                        let ty = ValType::from_wasmparser(ty);
+
+                        // Rejected here rather than when the frame is built: the
+                        // local's type is static, so failing at compile time gives
+                        // a clearer error and keeps every runtime error out of
+                        // `TraceVM::execute` an `InstructionExecution` (the
+                        // invariant `FuncCallError` relies on).
+                        if ty == ValType::V128 {
+                            return Err(TraceWasmError::Unsupported("v128 local".to_string()));
+                        }
 
                         for _ in 0..count {
-                            locals.push(ValType::from_wasmparser(ty));
+                            locals.push(ty);
                         }
                     }
 
-                    let instructions = Instruction::emit_instruction_for_func(
-                        code_sec_entry.get_operators_reader()?,
-                        params.len() as u32,
-                        results.len() as u32,
-                        &types,
-                        &func_decls,
-                    )?
-                    .into_boxed_slice();
+                    let (instructions, instruction_offsets) =
+                        Instruction::emit_instruction_for_func(
+                            code_sec_entry.get_operators_reader()?,
+                            params.len() as u32,
+                            results.len() as u32,
+                            &types,
+                            &func_decls,
+                        )?;
 
                     func_bodies.push(FuncBody {
                         locals: locals.into_boxed_slice(), // params + declared locals
-                        instructions,
+                        instructions: instructions.into_boxed_slice(),
+                        instruction_offsets: instruction_offsets.into_boxed_slice(),
                     });
                 }
                 CustomSection(custom_sec) => {
@@ -1224,10 +1406,15 @@ impl Module {
                             }
                         }
                         wasmparser::KnownCustom::Unknown => {
-                            custom_section_unknowns.insert(
-                                custom_sec.name().to_string(),
-                                custom_sec.data().to_vec().into_boxed_slice(),
-                            );
+                            if DEBUG_SECTION_NAMES.contains(custom_sec.name()) {
+                                debug_sections
+                                    .insert(custom_sec.name().to_string(), custom_sec.data());
+                            } else {
+                                custom_section_unknowns.insert(
+                                    custom_sec.name().to_string(),
+                                    custom_sec.data().to_vec().into_boxed_slice(),
+                                );
+                            }
                         }
                         _ => {
                             custom_section_others.insert(
@@ -1257,6 +1444,34 @@ impl Module {
             ));
         }
 
+        // DWARF in a WebAssembly binary is always little-endian.
+        let endian = RunTimeEndian::Little;
+
+        // `.debug_info` is the root of the DWARF tree: without it there is nothing
+        // to resolve. Gate on it so a module built without debug info reports
+        // `None` — `Dwarf::load` itself cannot fail here (the loader below returns
+        // `Ok` on every path, using an empty slice for absent sections), so
+        // without this check every module would come back as `Some(..)` holding a
+        // shell of empty sections.
+        if debug_sections.contains_key(SectionId::DebugInfo.name()) {
+            let loaded = Dwarf::load(
+                |id: SectionId| -> Result<EndianArcSlice<RunTimeEndian>, gimli::Error> {
+                    let bytes: Arc<[u8]> = match debug_sections.get(id.name()) {
+                        Some(v) => Arc::from(v.to_vec().into_boxed_slice()),
+                        None => Arc::from(&[][..]),
+                    };
+
+                    Ok(EndianArcSlice::new(bytes, endian))
+                },
+            );
+
+            // Debug info is diagnostic-only: a malformed section degrades the
+            // stack traces rather than failing the whole compile.
+            if let Ok(dwarf) = loaded {
+                possible_dwarf = Some(Arc::from(dwarf));
+            }
+        }
+
         Ok(Arc::new(Module {
             types: types.into_boxed_slice(),
             func_decls: func_decls.into_boxed_slice(),
@@ -1268,6 +1483,7 @@ impl Module {
             tags: tags.into_iter().map(TagType::from_wasmparser).collect(),
             globals: globals.into_boxed_slice(),
             exports,
+            exported_func_index_to_name,
             elements: elements.into_boxed_slice(),
             start_section,
             data_count,
@@ -1295,6 +1511,7 @@ impl Module {
                 other: custom_section_others,
                 unknown: custom_section_unknowns,
             },
+            dwarf: possible_dwarf,
         }))
     }
 
@@ -1307,12 +1524,17 @@ impl Module {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::ImportCountMismatch`] if the counts differ,
-    /// [`TraceWasmError::ImportedFunctionNotFound`] if the registry lacks a
-    /// declared import, and [`TraceWasmError::ImportSignatureMismatch`] if an
-    /// import's signature disagrees with the module.
+    /// - [`TraceWasmError::ImportCountMismatch`] / [`TraceWasmError::ImportGlobalCountMismatch`]
+    ///   if the registry's function or global count disagrees with the module.
+    /// - [`TraceWasmError::ImportNotFound`] if the registry lacks a declared import.
+    /// - [`TraceWasmError::ImportSignatureMismatch`] if an imported function's
+    ///   signature disagrees, or [`TraceWasmError::ImportGlobalTypeMismatch`] if
+    ///   an imported global's type disagrees.
+    /// - [`TraceWasmError::TableTooLarge`] if a table's initial size exceeds the
+    ///   configured cap, and [`TraceWasmError::ElementSegmentOutOfBounds`] if an
+    ///   active element segment does not fit its target table.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
-        self: Arc<Module>,
+        self: &Arc<Module>,
         mut import_registry: I,
         config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
@@ -1322,7 +1544,9 @@ impl Module {
             0
         };
 
-        let config = config.unwrap_or_default();
+        // Narrowed below to the module's declared memory maximum, so the instance
+        // carries the *effective* limits rather than only the requested ones.
+        let mut config = config.unwrap_or_default();
 
         // Validate the registry against the module's declared imports: the counts
         // must agree, and every imported function must exist in the registry with
@@ -1383,10 +1607,34 @@ impl Module {
             }
         }
 
-        // TODO: use config to validate the module against it! including below TODO.
+        // Resolve the instance's effective memory ceiling once: the module's own
+        // declared maximum, narrowed by the configured cap. Folding it into the
+        // config means `memory.grow` reads a single limit instead of re-deriving it
+        // per instruction — and, critically, that growth respects the maximum the
+        // module declared, which its own code is entitled to rely on.
+        let config_max_pages = config.get_max_memory_size_in_pages();
 
-        let initial_pages = initial_pages.min(config.get_max_memory_size_in_pages());
-        let mut memory = M::allocate_initial_memory(initial_pages as usize * WASM_MEMORY_PAGE_SIZE);
+        let max_memory_pages = self
+            .memories
+            .first()
+            .and_then(|memory| memory.maximum())
+            .unwrap_or(config_max_pages)
+            .min(config_max_pages);
+
+        config.set_max_memory_size_in_pages(max_memory_pages);
+
+        // Reject rather than truncate: handing a module less memory than it
+        // declared would make it trap on accesses it is entitled to make.
+        // Validation guarantees `initial <= declared maximum`, so this can only
+        // fire when the configured cap is the binding limit.
+        if initial_pages > max_memory_pages {
+            return Err(TraceWasmError::MemoryTooLarge(
+                initial_pages,
+                max_memory_pages,
+            ));
+        }
+
+        let mut memory = M::allocate_initial_memory(initial_pages);
 
         // Globals Initialization
         if import_registry.global_count() != self.imported_global_count {
@@ -1476,7 +1724,7 @@ impl Module {
             };
 
             table_vals.push(TableVal {
-                table: slots.into_boxed_slice(),
+                table: slots,
                 maximum,
             });
         }
@@ -1598,13 +1846,14 @@ impl Module {
         if let Some(func_index) = self.start_section {
             TraceVM::run(
                 func_index,
-                None,
                 &[],
                 self.as_ref(),
                 &mut memory,
                 &mut import_registry,
                 &mut global_vals,
                 &mut table_vals,
+                &mut data_vals,
+                &config,
             )?;
         }
 
@@ -1614,7 +1863,7 @@ impl Module {
             self.clone(),
             config,
             global_vals.into_boxed_slice(),
-            table_vals,
+            table_vals.into_boxed_slice(),
             element_vals.into_boxed_slice(),
             data_vals.into_boxed_slice(),
         ))

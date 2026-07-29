@@ -21,9 +21,10 @@
 //!
 //! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
 //! in two flavors that differ only in the order of the returned `Vec`:
-//! `pops` returns top-first, `pops_and_reverse` returns push order
-//! (deepest-first). Callers pick whichever matches the consumer (e.g. branch
-//! result handling vs. binding call arguments into callee locals).
+//! `pops` returns top-first (the former top at `v[0]`), `pops_and_reverse`
+//! returns push order (deepest-first). Both are currently test-only utilities;
+//! execution instead uses `truncate_by_preserving_arity` for branch unwinding
+//! and `pop_params`/`pop_results` for call arguments and results.
 //!
 //! ## Preconditions
 //!
@@ -33,13 +34,12 @@
 //! truncate downward). Violations panic via index/underflow rather than
 //! returning an error.
 
-use smallvec::{SmallVec, smallvec};
-
 use crate::{
     error::TraceWasmError,
     instance::traits::{ParamVals, ResultVals},
     module::{FuncIndex, ValType},
 };
+use smallvec::smallvec;
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.
@@ -52,10 +52,15 @@ pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
 /// holds an optional function index — `None` is a null reference.
 #[derive(Debug, Copy, Clone)]
 pub enum Val {
+    /// A 32-bit integer value.
     I32(i32),
+    /// A 64-bit integer value.
     I64(i64),
+    /// A 32-bit float value.
     F32(f32),
+    /// A 64-bit float value.
     F64(f64),
+    /// A nullable function reference (`None` is a null reference).
     Ref(Option<FuncIndex>),
 }
 
@@ -134,21 +139,22 @@ impl Val {
     /// Returns the zero/default value for `ty`, as used to initialize declared
     /// locals per the WebAssembly spec.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`TraceWasmError::Unsupported`] for `V128`, which the VM does not
-    /// model.
-    pub fn zero_of_ty(ty: ValType) -> Result<Self, TraceWasmError> {
-        let val = match ty {
+    /// Panics on `V128`, which the VM does not model. Infallible in practice:
+    /// `Module::compile` rejects a `v128` local, so no compiled module can reach
+    /// this with one.
+    pub fn zero_of_ty(ty: ValType) -> Self {
+        match ty {
             ValType::I32 => Self::i32_zero(),
             ValType::I64 => Self::i64_zero(),
             ValType::F32 => Self::f32_zero(),
             ValType::F64 => Self::f64_zero(),
             ValType::Ref(_) => Self::ref_zero(),
-            ValType::V128 => return Err(TraceWasmError::Unsupported("v128 type".to_string())),
-        };
-
-        Ok(val)
+            ValType::V128 => unreachable!(
+                "hitting this means the validation in `compile` method in module/mod.rs is incorrect"
+            ),
+        }
     }
 
     /// Whether this value's variant matches the WebAssembly type `ty`.
@@ -173,49 +179,31 @@ impl Val {
     }
 }
 
+/// A materialized table instance: its function-reference slots and the maximum
+/// number of elements it may grow to.
 pub(crate) struct TableVal {
-    pub table: Box<[Option<FuncIndex>]>,
+    /// The table's slots, each a nullable function reference.
+    pub table: Vec<Option<FuncIndex>>,
+    /// The maximum element count the table may grow to.
     pub maximum: u64,
 }
 
+/// A passive element segment's runtime state: its remaining function references,
+/// or dropped once consumed.
 pub(crate) enum ElementVal {
+    /// The segment has been dropped (via `elem.drop` or an active init).
     Dropped,
+    /// A still-live passive segment holding nullable function references.
     Passive(Box<[Option<FuncIndex>]>),
 }
 
+/// A passive data segment's runtime state: its remaining bytes, or dropped once
+/// consumed.
 pub(crate) enum DataVal {
+    /// The segment has been dropped (via `data.drop` or an active init).
     Dropped,
+    /// A still-live passive segment holding its raw byte blob.
     Passive(Box<[u8]>), // data blob
-}
-
-/// A function activation's local slots: its parameters followed by its declared
-/// locals, addressed by `local.get`/`local.set` index.
-pub(crate) struct Locals {
-    inner: SmallVec<[Val; 16]>, // size = params + declared locals
-}
-
-impl Locals {
-    /// Wraps a fully-populated slot vector (params first, then zero-initialized
-    /// declared locals). The caller owns getting the length and contents right.
-    pub fn new(locals: SmallVec<[Val; 16]>) -> Self {
-        Locals { inner: locals }
-    }
-
-    /// Writes `val` into slot `index`.
-    ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn set(&mut self, index: usize, val: Val) {
-        self.inner[index] = val;
-    }
-
-    /// Reads the value in slot `index` (values are `Copy`).
-    ///
-    /// Panics if `index` is out of range; validation guarantees in-range indices
-    /// for well-formed modules.
-    pub fn get(&self, index: usize) -> Val {
-        self.inner[index]
-    }
 }
 
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
@@ -245,6 +233,8 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    /// Creates an empty stack sized for constant-expression evaluation, which
+    /// needs only a handful of slots, avoiding the large `Default` reservation.
     pub(crate) fn for_const_expr_evaluation() -> Self {
         Stack {
             inner: Vec::with_capacity(2), // needs very small stack
@@ -252,6 +242,7 @@ impl<T: Clone> Stack<T> {
         }
     }
 
+    /// The current logical height (number of live values).
     pub fn height(&self) -> u32 {
         self.stack_pointer as u32
     }
@@ -365,6 +356,10 @@ impl<T: Clone> Stack<T> {
 }
 
 impl Stack<Val> {
+    /// Removes the top `num` values and returns them as a callee's parameters, in
+    /// push order (`arg0..argN-1`) for binding into the callee's locals.
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pop_params(&mut self, num: u32) -> ParamVals {
         let mut s = smallvec![];
 
@@ -377,6 +372,10 @@ impl Stack<Val> {
         ParamVals::new(s)
     }
 
+    /// Removes the top `num` values and returns them as a function's results, in
+    /// push order (`result0..resultN-1`).
+    ///
+    /// Precondition: at least `num` values are present.
     pub fn pop_results(&mut self, num: u32) -> ResultVals {
         let mut s = smallvec![];
 
@@ -784,25 +783,20 @@ mod tests {
 
     #[test]
     fn zero_of_ty_produces_typed_zeroes() {
-        assert!(matches!(
-            Val::zero_of_ty(ValType::I32).unwrap(),
-            Val::I32(0)
-        ));
-        assert!(matches!(
-            Val::zero_of_ty(ValType::I64).unwrap(),
-            Val::I64(0)
-        ));
-        assert!(matches!(Val::zero_of_ty(ValType::F32).unwrap(), Val::F32(x) if x == 0.0));
-        assert!(matches!(Val::zero_of_ty(ValType::F64).unwrap(), Val::F64(x) if x == 0.0));
-        assert!(matches!(
-            Val::zero_of_ty(ValType::FUNCREF).unwrap(),
-            Val::Ref(None)
-        ));
+        assert!(matches!(Val::zero_of_ty(ValType::I32), Val::I32(0)));
+        assert!(matches!(Val::zero_of_ty(ValType::I64), Val::I64(0)));
+        assert!(matches!(Val::zero_of_ty(ValType::F32), Val::F32(x) if x == 0.0));
+        assert!(matches!(Val::zero_of_ty(ValType::F64), Val::F64(x) if x == 0.0));
+        assert!(matches!(Val::zero_of_ty(ValType::FUNCREF), Val::Ref(None)));
     }
 
+    // `v128` locals are rejected by `Module::compile`, so reaching here is a bug
+    // in that validation rather than a supported input — hence a panic, not an
+    // error.
     #[test]
-    fn zero_of_ty_rejects_v128() {
-        assert!(Val::zero_of_ty(ValType::V128).is_err());
+    #[should_panic(expected = "module/mod.rs")]
+    fn zero_of_ty_panics_on_v128() {
+        Val::zero_of_ty(ValType::V128);
     }
 
     #[test]

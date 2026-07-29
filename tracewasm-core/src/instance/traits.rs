@@ -1,12 +1,13 @@
 //! The typed-function API's value-conversion traits.
 //!
 //! [`WasmTy`] maps a Rust scalar to a single WebAssembly value type; the
-//! [`Params`]/[`Results`] traits — implemented for tuples up to arity 5 and for
-//! the empty tuple `()` — let a whole function signature be expressed as Rust
-//! types, so [`crate::instance::TypedFunc`] can convert arguments and results
-//! without the caller touching raw `Val`s.
+//! [`Params`]/[`Results`] traits — implemented for the empty tuple `()` and for
+//! tuples up to arity 5 (`Params`) and arity 3 (`Results`) — let a whole
+//! function signature be expressed as Rust types, so
+//! [`crate::instance::TypedFunc`] can convert arguments and results without the
+//! caller touching raw `Val`s.
 
-use crate::{error::TraceWasmError, module::ValType};
+use crate::{error::TraceWasmError, memory::MemoryView, module::ValType};
 use smallvec::{Array, SmallVec, smallvec};
 
 // The runtime value type lives in the crate-internal `vm` module; re-export it
@@ -83,28 +84,36 @@ impl WasmTy for f64 {
 }
 
 // These structs are wrappers over `SmallVec` to avoid heap allocations in the VM hot path.
+
+/// A function's parameter value types, stack-allocated for arities up to 5.
 #[derive(Debug)]
 pub struct ParamValTypes(SmallVec<[ValType; 5]>);
+/// A function's parameter values, stack-allocated for arities up to 5.
 #[derive(Debug)]
 pub struct ParamVals(SmallVec<[Val; 5]>);
 
+/// A function's result value types, stack-allocated for arities up to 3.
 #[derive(Debug)]
 pub struct ResultValTypes(SmallVec<[ValType; 3]>);
+/// A function's result values, stack-allocated for arities up to 3.
 #[derive(Debug)]
 pub struct ResultVals(SmallVec<[Val; 3]>);
 
 impl ParamVals {
+    /// Wraps a `SmallVec` of param values.
     pub fn new(s: SmallVec<[Val; 5]>) -> Self {
         ParamVals(s)
     }
 }
 
 impl ResultVals {
+    /// Wraps a `SmallVec` of result values.
     pub fn new(s: SmallVec<[Val; 3]>) -> Self {
         ResultVals(s)
     }
 }
 
+/// Owning iterator over the [`Val`]s of a [`ResultVals`], in order.
 pub struct ResultValsIter {
     results: ResultVals,
     index: usize,
@@ -162,7 +171,11 @@ impl AsRef<[ValType]> for ResultValTypes {
     }
 }
 
+/// Internal helper for wrapping a `SmallVec` into one of the newtype wrappers
+/// ([`ParamVals`], [`ResultVals`], and their type counterparts); used by the
+/// tuple impls to build their marshalled values.
 pub trait FromSmallVec<A: Array> {
+    /// Wraps `s` into the newtype.
     fn from_small_vec(s: SmallVec<A>) -> Self;
 }
 
@@ -342,11 +355,12 @@ pub type ImportSignature = (ParamValTypes, ResultValTypes);
 pub trait ImportRegistry {
     /// Invokes the imported function `module_name::func_name` with `params`,
     /// returning its results.
-    fn execute(
+    fn execute<V: MemoryView>(
         &mut self,
         module_name: &str,
         func_name: &str,
         params: &[Val],
+        memory_view: &mut V,
     ) -> Result<ResultVals, TraceWasmError>;
 
     /// Returns the `(params, results)` signature of `module_name::func_name`, or

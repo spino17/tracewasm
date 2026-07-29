@@ -2,13 +2,13 @@
 //! type-safe [`TypedFunc`] handle for calling its functions.
 
 use crate::{
-    error::TraceWasmError,
+    error::FuncCallError,
     instance::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
     memory::Memory,
-    module::{FuncIndex, Module, formatted_val_types},
+    module::{FuncIndex, Module},
     vm::{
         TraceVM,
         stack::{DataVal, ElementVal, TableVal, Val},
@@ -31,7 +31,7 @@ pub struct Instance<M, I> {
     module: Arc<Module>,
     config: Config,
     global_vals: Box<[Val]>,
-    table_vals: Vec<TableVal>,
+    table_vals: Box<[TableVal]>,
     element_vals: Box<[ElementVal]>,
     data_vals: Box<[DataVal]>,
 }
@@ -41,13 +41,16 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
     /// the registry against the module's imports first.
+    // Assembles every piece of instance state; grouping them into a struct would
+    // just move the same fields behind another type.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         memory: M,
         import_registry: I,
         module: Arc<Module>,
         config: Config,
         global_vals: Box<[Val]>,
-        table_vals: Vec<TableVal>,
+        table_vals: Box<[TableVal]>,
         element_vals: Box<[ElementVal]>,
         data_vals: Box<[DataVal]>,
     ) -> Self {
@@ -63,14 +66,21 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         }
     }
 
+    /// The resource limits in force for this instance.
+    ///
+    /// These are the *effective* limits: instantiation narrows the configured
+    /// memory cap to the module's own declared maximum, so this can report a lower
+    /// value than was supplied.
     pub fn config(&self) -> &Config {
         &self.config
     }
 
+    /// Shared access to the instance's linear [`Memory`].
     pub fn memory_view(&self) -> &M {
         &self.memory
     }
 
+    /// Mutable access to the instance's linear [`Memory`].
     pub fn memory_view_mut(&mut self) -> &mut M {
         &mut self.memory
     }
@@ -81,17 +91,16 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
 ///
 /// The type parameters let [`Self::call`] accept native Rust values and return
 /// native Rust values, converting to/from runtime `Val`s internally.
+#[derive(Clone, Copy)]
 pub struct TypedFunc<P, R> {
     func_index: FuncIndex,
-    func_name: String,
     phantom: PhantomData<(P, R)>,
 }
 
 impl<P: Params, R: Results> TypedFunc<P, R> {
-    pub(crate) fn new(func_index: FuncIndex, func_name: &str) -> Self {
+    pub(crate) fn new(func_index: FuncIndex) -> Self {
         TypedFunc {
             func_index,
-            func_name: func_name.to_string(),
             phantom: PhantomData,
         }
     }
@@ -100,36 +109,58 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::IncorrectParamsResultsStructure`] if the
-    /// function's actual results do not match `R`, and propagates any
-    /// [`TraceWasmError`] produced during execution (traps, etc.).
+    /// Returns a [`FuncCallError`] if execution fails (a trap, or an error from an
+    /// imported function). It wraps the underlying cause together with the entry
+    /// function and module, so callers can get a rendered backtrace from
+    /// [`FuncCallError::stack_trace`] without threading those in themselves.
+    ///
+    /// Params and results are not re-checked here: `TypedFunc<P, R>` is only
+    /// handed out after [`Module::get_typed_func`](crate::module::Module::get_typed_func)
+    /// has matched `P`/`R` against the module's declared signature.
     pub fn call<M: Memory, I: ImportRegistry>(
         &self,
         params: P,
         instance: &mut Instance<M, I>,
-    ) -> Result<R, TraceWasmError> {
+    ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();
 
-        let results = TraceVM::run(
+        let results = match TraceVM::run(
             self.func_index,
-            Some(&self.func_name),
             params.as_ref(),
             &instance.module,
             &mut instance.memory,
             &mut instance.import_registry,
             &mut instance.global_vals,
             &mut instance.table_vals,
-        )?;
+            &mut instance.data_vals,
+            &instance.config,
+        ) {
+            Ok(res) => res,
+            Err(err) => {
+                // A `TypedFunc` is only handed out for an export, so the lookup
+                // resolves; fall back rather than unwrapping, since panicking
+                // while building an error would replace a diagnosable failure
+                // with a crash.
+                let func_name = instance
+                    .module
+                    .exported_func_name(self.func_index)
+                    .map(String::as_str)
+                    .unwrap_or("<unknown>");
 
-        let Some(res) = R::from_vals(results.as_ref()) else {
-            return Err(TraceWasmError::IncorrectParamsResultsStructure(
-                "results".to_string(),
-                self.func_index.0,
-                formatted_val_types(R::types().as_ref()),
-                format!("{:?}", results),
-            ));
+                return Err(FuncCallError::new(
+                    func_name.to_string(),
+                    err,
+                    instance.module.clone(),
+                ));
+            }
         };
+
+        // `get_typed_func` already matched `R` against the module's declared
+        // results, so this holds. It cannot be reported as a `FuncCallError`
+        // either, since that type's invariant is an `InstructionExecution` cause.
+        let res = R::from_vals(results.as_ref())
+            .expect("panicking this means the logic of function signature validation in `get_typed_func` in module/mod.rs is incorrect");
 
         Ok(res)
     }

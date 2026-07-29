@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/playground","tracewasm-core", "tracewasm-macros", "tracewasm-scratch"]
+members = ["bin/playground", "trace-rs","tracewasm-core", "tracewasm-macros", "tracewasm-scratch"]
 
 resolver = "3"
 
@@ -8,3 +8,7 @@ anyhow = "1.0.103"
 thiserror = "2.0.19"
 rustc-hash = "2.1.3"
 smallvec = "1.15.2"
+rustc-demangle = "0.1.28"
+gimli = "0.34.0"
+serde = { version = "1.0.229", features = ["derive"] }
+addr2line = "0.27.0"
