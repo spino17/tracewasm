@@ -450,6 +450,32 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         Ok(truncated)
     }
 
+    /// Pops the address operand of a memory access and resolves it to an
+    /// effective address by adding the instruction's static `memarg` offset.
+    ///
+    /// Shared by every load/store arm, so they all inherit the same overflow and
+    /// offset-range trapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::OffsetTooLarge`] if the static offset does not fit
+    /// a 32-bit address space, and [`MemoryError::EffectiveAddressOverflow`] if
+    /// the sum leaves it. The access itself is bounds-checked by [`Memory`].
+    fn pop_effective_address(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
+        let addr = self.stack.pop().as_i32() as u32;
+        let static_offset =
+            u32::try_from(memarg_offset).map_err(|_| MemoryError::OffsetTooLarge)?;
+
+        // Effective address = popped address + static offset, computed with
+        // a checked add: a u32 overflow is past the 32-bit memory space, so
+        // it traps rather than wrapping to a wrong (in-bounds) address.
+        let effective_offset = addr
+            .checked_add(static_offset)
+            .ok_or(MemoryError::EffectiveAddressOverflow(addr, static_offset))?;
+
+        Ok(effective_offset as usize)
+    }
+
     fn call_func(
         &mut self,
         func_index: FuncIndex,
@@ -521,32 +547,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         }
 
         Ok(())
-    }
-
-    /// Pops the address operand of a memory access and resolves it to an
-    /// effective address by adding the instruction's static `memarg` offset.
-    ///
-    /// Shared by every load/store arm, so they all inherit the same overflow and
-    /// offset-range trapping.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::OffsetTooLarge`] if the static offset does not fit
-    /// a 32-bit address space, and [`MemoryError::EffectiveAddressOverflow`] if
-    /// the sum leaves it. The access itself is bounds-checked by [`Memory`].
-    fn pop_effective_address(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
-        let addr = self.stack.pop().as_i32() as u32;
-        let static_offset =
-            u32::try_from(memarg_offset).map_err(|_| MemoryError::OffsetTooLarge)?;
-
-        // Effective address = popped address + static offset, computed with
-        // a checked add: a u32 overflow is past the 32-bit memory space, so
-        // it traps rather than wrapping to a wrong (in-bounds) address.
-        let effective_offset = addr
-            .checked_add(static_offset)
-            .ok_or(MemoryError::EffectiveAddressOverflow(addr, static_offset))?;
-
-        Ok(effective_offset as usize)
     }
 
     /// Executes a single instruction against this activation's state and returns
