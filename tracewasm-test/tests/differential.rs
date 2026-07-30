@@ -51,21 +51,37 @@ use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 mod g_arithmetic;
 #[path = "../guests/control_flow.rs"]
 mod g_control_flow;
+#[path = "../guests/exotic.rs"]
+mod g_exotic;
+#[path = "../guests/frames.rs"]
+mod g_frames;
 #[path = "../guests/heap.rs"]
 mod g_heap;
 #[path = "../guests/memory.rs"]
 mod g_memory;
-#[path = "../guests/frames.rs"]
-mod g_frames;
-#[path = "../guests/exotic.rs"]
-mod g_exotic;
 
 /// Argument values every `(i32) -> i64` export is checked against.
 ///
 /// Includes 0 and 1 (guests clamp, so these hit the degenerate paths), a few
 /// midsize values, and the signed extremes to catch anything that multiplies the
 /// argument without wrapping.
-const ARGS: &[i32] = &[0, 1, 2, 3, 7, 16, 31, 64, 100, 255, 1_000, -1, -7, i32::MIN, i32::MAX];
+const ARGS: &[i32] = &[
+    0,
+    1,
+    2,
+    3,
+    7,
+    16,
+    31,
+    64,
+    100,
+    255,
+    1_000,
+    -1,
+    -7,
+    i32::MIN,
+    i32::MAX,
+];
 
 /// Runs one `(i32) -> i64` export under both engines at every argument.
 ///
@@ -112,10 +128,30 @@ fn check_f64(guest: &mut Guest, name: &str, native: extern "C" fn(i32) -> f64, a
 fn arithmetic_integer_edges_match_native() {
     let mut g = Guest::new(guests::ARITHMETIC);
 
-    check_i64(&mut g, "arith_div_rem_edges", g_arithmetic::arith_div_rem_edges, ARGS);
-    check_i64(&mut g, "arith_bit_counting", g_arithmetic::arith_bit_counting, ARGS);
-    check_i64(&mut g, "arith_extend_wrap", g_arithmetic::arith_extend_wrap, ARGS);
-    check_i64(&mut g, "arith_comparisons", g_arithmetic::arith_comparisons, ARGS);
+    check_i64(
+        &mut g,
+        "arith_div_rem_edges",
+        g_arithmetic::arith_div_rem_edges,
+        ARGS,
+    );
+    check_i64(
+        &mut g,
+        "arith_bit_counting",
+        g_arithmetic::arith_bit_counting,
+        ARGS,
+    );
+    check_i64(
+        &mut g,
+        "arith_extend_wrap",
+        g_arithmetic::arith_extend_wrap,
+        ARGS,
+    );
+    check_i64(
+        &mut g,
+        "arith_comparisons",
+        g_arithmetic::arith_comparisons,
+        ARGS,
+    );
     check_i64(
         &mut g,
         "arith_overflow_families",
@@ -142,14 +178,24 @@ fn arithmetic_shifts_match_native() {
 fn arithmetic_float_edges_match_native() {
     let mut g = Guest::new(guests::ARITHMETIC);
 
-    check_f64(&mut g, "arith_float_minmax", g_arithmetic::arith_float_minmax, ARGS);
+    check_f64(
+        &mut g,
+        "arith_float_minmax",
+        g_arithmetic::arith_float_minmax,
+        ARGS,
+    );
     check_f64(
         &mut g,
         "arith_float_rounding",
         g_arithmetic::arith_float_rounding,
         ARGS,
     );
-    check_f64(&mut g, "arith_int_to_float", g_arithmetic::arith_int_to_float, ARGS);
+    check_f64(
+        &mut g,
+        "arith_int_to_float",
+        g_arithmetic::arith_int_to_float,
+        ARGS,
+    );
 }
 
 #[test]
@@ -168,7 +214,12 @@ fn arithmetic_float_specials_match_native() {
         g_arithmetic::arith_float_to_int_saturating,
         ARGS,
     );
-    check_i64(&mut g, "arith_reinterpret", g_arithmetic::arith_reinterpret, ARGS);
+    check_i64(
+        &mut g,
+        "arith_reinterpret",
+        g_arithmetic::arith_reinterpret,
+        ARGS,
+    );
     check_i64(
         &mut g,
         "arith_demote_promote",
@@ -192,21 +243,36 @@ fn control_flow_loops_and_branches_match_native() {
         g_control_flow::cf_nested_loops,
         &[0, 1, 2, 3, 8, 12],
     );
-    check_i64(&mut g, "cf_br_table_dense", g_control_flow::cf_br_table_dense, ARGS);
+    check_i64(
+        &mut g,
+        "cf_br_table_dense",
+        g_control_flow::cf_br_table_dense,
+        ARGS,
+    );
     check_i64(
         &mut g,
         "cf_br_table_sparse",
         g_control_flow::cf_br_table_sparse,
         ARGS,
     );
-    check_i64(&mut g, "cf_if_else_chain", g_control_flow::cf_if_else_chain, ARGS);
+    check_i64(
+        &mut g,
+        "cf_if_else_chain",
+        g_control_flow::cf_if_else_chain,
+        ARGS,
+    );
 }
 
 #[test]
 fn control_flow_exits_match_native() {
     let mut g = Guest::new(guests::CONTROL_FLOW);
 
-    check_i64(&mut g, "cf_early_return", g_control_flow::cf_early_return, ARGS);
+    check_i64(
+        &mut g,
+        "cf_early_return",
+        g_control_flow::cf_early_return,
+        ARGS,
+    );
     check_i64(
         &mut g,
         "cf_unreachable_regions",
@@ -219,7 +285,12 @@ fn control_flow_exits_match_native() {
         g_control_flow::cf_loop_with_value,
         ARGS,
     );
-    check_i64(&mut g, "cf_labelled_block", g_control_flow::cf_labelled_block, ARGS);
+    check_i64(
+        &mut g,
+        "cf_labelled_block",
+        g_control_flow::cf_labelled_block,
+        ARGS,
+    );
     check_i64(
         &mut g,
         "cf_select_and_eqz",
@@ -261,7 +332,12 @@ fn control_flow_iterators_match_native() {
         g_control_flow::cf_iterator_chains,
         ARGS,
     );
-    check_i64(&mut g, "cf_question_mark", g_control_flow::cf_question_mark, ARGS);
+    check_i64(
+        &mut g,
+        "cf_question_mark",
+        g_control_flow::cf_question_mark,
+        ARGS,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +465,12 @@ fn frames_recursion_matches_native() {
             .filter(|d| *d <= MAX_TEST_RECURSION)
             .collect();
 
-        check_i64(&mut g, "fr_recurse_depth", g_frames::fr_recurse_depth, &depths);
+        check_i64(
+            &mut g,
+            "fr_recurse_depth",
+            g_frames::fr_recurse_depth,
+            &depths,
+        );
         check_i64(
             &mut g,
             "fr_recurse_indirect",
@@ -423,7 +504,12 @@ fn exotic_enums_and_options_match_native() {
         g_exotic::ex_option_result_chains,
         ARGS,
     );
-    check_i64(&mut g, "ex_slice_patterns", g_exotic::ex_slice_patterns, ARGS);
+    check_i64(
+        &mut g,
+        "ex_slice_patterns",
+        g_exotic::ex_slice_patterns,
+        ARGS,
+    );
 }
 
 #[test]

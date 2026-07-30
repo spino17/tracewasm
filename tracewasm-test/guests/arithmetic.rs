@@ -28,7 +28,9 @@ pub extern "C" fn arith_div_rem_edges(_: i32) -> i64 {
     // wrapping_div avoids the trap so we can observe the wrapped value
     acc = acc.wrapping_add(i32::MIN.wrapping_div(-1) as i64);
     // the spec-defined non-trapping case
-    acc = acc.wrapping_mul(31).wrapping_add(i32::MIN.wrapping_rem(-1) as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(i32::MIN.wrapping_rem(-1) as i64);
     acc = acc.wrapping_mul(31).wrapping_add(i64::MIN.wrapping_rem(-1));
     // signed remainder takes the sign of the dividend
     acc = acc.wrapping_mul(31).wrapping_add((-7i32 % 3) as i64);
@@ -113,7 +115,13 @@ pub extern "C" fn arith_extend_wrap(_: i32) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn arith_comparisons(_: i32) -> i64 {
     let mut acc = 0i64;
-    let pairs32: [(i32, i32); 5] = [(-1, 1), (i32::MIN, 1), (0, 0), (i32::MAX, i32::MIN), (-5, -6)];
+    let pairs32: [(i32, i32); 5] = [
+        (-1, 1),
+        (i32::MIN, 1),
+        (0, 0),
+        (i32::MAX, i32::MIN),
+        (-5, -6),
+    ];
 
     for (a, b) in pairs32 {
         let (a, b) = (black_box(a), black_box(b));
@@ -154,7 +162,9 @@ pub extern "C" fn arith_overflow_families(_: i32) -> i64 {
     let big = black_box(i32::MAX);
 
     acc = acc.wrapping_add(big.wrapping_add(1) as i64);
-    acc = acc.wrapping_mul(31).wrapping_add(big.saturating_add(1) as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(big.saturating_add(1) as i64);
     acc = acc
         .wrapping_mul(31)
         .wrapping_add(big.checked_add(1).unwrap_or(-1) as i64);
@@ -245,12 +255,18 @@ pub extern "C" fn arith_float_specials(_: i32) -> i64 {
         .wrapping_mul(3)
         .wrapping_add(1.0f64.copysign(-0.0).is_sign_negative() as i64);
     // infinity arithmetic
-    acc = acc.wrapping_mul(3).wrapping_add((inf - inf).is_nan() as i64);
-    acc = acc.wrapping_mul(3).wrapping_add((1.0 / 0.0f64 == inf) as i64);
+    acc = acc
+        .wrapping_mul(3)
+        .wrapping_add((inf - inf).is_nan() as i64);
+    acc = acc
+        .wrapping_mul(3)
+        .wrapping_add((1.0 / 0.0f64 == inf) as i64);
     acc = acc
         .wrapping_mul(3)
         .wrapping_add((0.0f64 / 0.0).is_nan() as i64);
-    acc = acc.wrapping_mul(3).wrapping_add((-1.0f64).sqrt().is_nan() as i64);
+    acc = acc
+        .wrapping_mul(3)
+        .wrapping_add((-1.0f64).sqrt().is_nan() as i64);
     acc = acc
         .wrapping_mul(3)
         .wrapping_add((-0.0f64).sqrt().is_sign_negative() as i64);

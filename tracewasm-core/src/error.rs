@@ -706,20 +706,6 @@ impl From<MemoryError> for InstructionExecutionError {
     }
 }
 
-/// Lets `?` lift a [`MemoryError`] straight into the boxed error the interpreter's
-/// per-instruction dispatch returns.
-///
-/// That dispatch returns `Box<InstructionExecutionError>` because the unboxed
-/// error is 56 bytes and would force every *successful* instruction to return
-/// through memory (see `TraceVMState::execute`). Without this impl, `?` cannot
-/// bridge `MemoryError` to the boxed target and each of the ~50 memory-access
-/// sites would need an explicit conversion.
-impl From<MemoryError> for Box<InstructionExecutionError> {
-    fn from(value: MemoryError) -> Self {
-        Box::new(InstructionExecutionError::Memory(value))
-    }
-}
-
 impl From<MemoryError> for TraceWasmError {
     fn from(value: MemoryError) -> Self {
         TraceWasmError::MemoryError(value)

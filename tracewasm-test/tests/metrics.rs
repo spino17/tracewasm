@@ -40,7 +40,11 @@ const REPS: u64 = 5;
 ///
 /// Fewer in debug, where the interpreter is roughly an order of magnitude slower
 /// and 200k calls would make `cargo test` noticeably slow for no extra signal.
-const CALL_REPS: u64 = if cfg!(debug_assertions) { 20_000 } else { 200_000 };
+const CALL_REPS: u64 = if cfg!(debug_assertions) {
+    20_000
+} else {
+    200_000
+};
 
 /// Loose upper bound on per-call overhead, scaled to the build profile.
 ///
@@ -48,7 +52,11 @@ const CALL_REPS: u64 = if cfg!(debug_assertions) { 20_000 } else { 200_000 };
 /// linear scan of the export table — not to police performance. The release
 /// figure at the time of writing was ~350 ns, so the bound is deliberately many
 /// times that, and higher again in debug where every operation is slower.
-const MAX_PER_CALL_NS: u128 = if cfg!(debug_assertions) { 20_000 } else { 2_000 };
+const MAX_PER_CALL_NS: u128 = if cfg!(debug_assertions) {
+    20_000
+} else {
+    2_000
+};
 
 /// Throughput by workload category, which is what localises a regression.
 ///
@@ -61,14 +69,24 @@ fn report_throughput_by_category() {
     let mut table = Table::new("throughput by workload category (release)");
 
     let mut arith = Guest::new(guests::ARITHMETIC);
-    table.measure("arithmetic (i64 + f64 mix)", REPS, Some(WORK as u64), || {
-        arith.i32_i64("arith_mixed_workload", WORK);
-    });
+    table.measure(
+        "arithmetic (i64 + f64 mix)",
+        REPS,
+        Some(WORK as u64),
+        || {
+            arith.i32_i64("arith_mixed_workload", WORK);
+        },
+    );
 
     let mut cf = Guest::new(guests::CONTROL_FLOW);
-    table.measure("control flow (match + loops)", REPS, Some(WORK as u64), || {
-        cf.i32_i64("cf_mixed_workload", WORK);
-    });
+    table.measure(
+        "control flow (match + loops)",
+        REPS,
+        Some(WORK as u64),
+        || {
+            cf.i32_i64("cf_mixed_workload", WORK);
+        },
+    );
 
     let mut mem = Guest::new(guests::MEMORY);
     table.measure("memory (load/store)", REPS, Some(WORK as u64), || {
@@ -76,9 +94,14 @@ fn report_throughput_by_category() {
     });
 
     let mut frames = Guest::new(guests::FRAMES);
-    table.measure("calls (one indirect per iter)", REPS, Some(WORK as u64), || {
-        frames.i32_i64("fr_mixed_workload", WORK);
-    });
+    table.measure(
+        "calls (one indirect per iter)",
+        REPS,
+        Some(WORK as u64),
+        || {
+            frames.i32_i64("fr_mixed_workload", WORK);
+        },
+    );
 
     let mut heap = Guest::new(guests::HEAP);
     table.measure("heap (alloc + collections)", REPS, None, || {
@@ -214,7 +237,8 @@ fn deep_recursion_body() {
 
     // And the guard is what stops it, not the stack: just past the limit traps.
     assert!(
-        g.try_i32_i64("fr_recurse_depth", SAFE_LIMIT as i32 + 100).is_err(),
+        g.try_i32_i64("fr_recurse_depth", SAFE_LIMIT as i32 + 100)
+            .is_err(),
         "recursion past the configured limit should trap"
     );
 }

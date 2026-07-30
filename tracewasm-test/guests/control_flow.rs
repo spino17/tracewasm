@@ -256,11 +256,19 @@ pub extern "C" fn cf_recursion_direct(n: i32) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn cf_recursion_mutual(n: i32) -> i64 {
     fn even(k: i32) -> i64 {
-        if k == 0 { 1 } else { odd(k - 1).wrapping_mul(2) }
+        if k == 0 {
+            1
+        } else {
+            odd(k - 1).wrapping_mul(2)
+        }
     }
 
     fn odd(k: i32) -> i64 {
-        if k == 0 { 0 } else { even(k - 1).wrapping_add(3) }
+        if k == 0 {
+            0
+        } else {
+            even(k - 1).wrapping_add(3)
+        }
     }
 
     even(n.clamp(0, 200))

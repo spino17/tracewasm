@@ -584,7 +584,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         module: &Module,
         pc: usize,
         call_stack_depth: &mut u32,
-    ) -> Result<usize, Box<InstructionExecutionError>> {
+    ) -> Result<usize, InstructionExecutionError> {
         let res = match instruction {
             Instruction::Call {
                 func_index: callee_func_index,
@@ -612,8 +612,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::TableSlotOutOfBounds,
-                    )
-                    .into());
+                    ));
                 };
 
                 // Trap on a null element (wasm: "uninitialized element").
@@ -621,8 +620,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::NullElementInTable,
-                    )
-                    .into());
+                    ));
                 };
 
                 let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
@@ -650,8 +648,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                                 formatted_val_types(results)
                             ),
                         ),
-                    )
-                    .into());
+                    ));
                 }
 
                 self.call_func(
@@ -670,7 +667,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::Unreachable => {
-                return Err(InstructionExecutionError::Unreachable.into());
+                return Err(InstructionExecutionError::Unreachable);
             }
             Instruction::Nop => ExecutionResult::Next,
             Instruction::I32Const { value } => {
@@ -1186,8 +1183,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    }
-                    .into());
+                    });
                 }
 
                 self.stack.push(Val::I32(a.wrapping_rem(b)));
@@ -1555,8 +1551,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    }
-                    .into());
+                    });
                 }
 
                 self.stack.push(Val::I64(a.wrapping_rem(b)));

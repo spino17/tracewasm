@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hint::black_box;
 use std::rc::Rc;
 
@@ -54,13 +54,17 @@ pub extern "C" fn heap_sort_dedup(n: i32) -> i64 {
     v.sort_unstable();
     v.dedup();
 
-    let a = v.iter().fold(0i64, |acc, x| acc.wrapping_mul(3).wrapping_add(*x as i64));
+    let a = v
+        .iter()
+        .fold(0i64, |acc, x| acc.wrapping_mul(3).wrapping_add(*x as i64));
 
     // sort_by with a reversing comparator, then a stable sort by key
     v.sort_by(|x, y| y.cmp(x));
     v.sort_by_key(|x| *x % 17);
 
-    let b = v.iter().fold(0i64, |acc, x| acc.wrapping_mul(5).wrapping_add(*x as i64));
+    let b = v
+        .iter()
+        .fold(0i64, |acc, x| acc.wrapping_mul(5).wrapping_add(*x as i64));
 
     v.retain(|x| x % 2 == 0);
     v.reverse();
@@ -156,16 +160,18 @@ pub extern "C" fn heap_btreemap(n: i32) -> i64 {
     }
 
     // ordered, so this is a stable fold
-    let ordered = m
-        .iter()
-        .fold(0i64, |a, (k, v)| a.wrapping_mul(3).wrapping_add(*k as i64 ^ *v));
+    let ordered = m.iter().fold(0i64, |a, (k, v)| {
+        a.wrapping_mul(3).wrapping_add(*k as i64 ^ *v)
+    });
 
     let first = m.keys().next().copied().unwrap_or(-1) as i64;
     let last = m.keys().next_back().copied().unwrap_or(-1) as i64;
     let range: i64 = m.range(100..500).map(|(_, v)| *v).sum();
 
     let set: BTreeSet<i32> = (0..n).map(|i| (i * 13) % 97).collect();
-    let set_fold = set.iter().fold(0i64, |a, x| a.wrapping_mul(3).wrapping_add(*x as i64));
+    let set_fold = set
+        .iter()
+        .fold(0i64, |a, x| a.wrapping_mul(3).wrapping_add(*x as i64));
 
     ordered
         .wrapping_mul(31)

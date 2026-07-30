@@ -94,7 +94,10 @@ pub extern "C" fn ex_option_result_chains(n: i32) -> i64 {
             .and_then(|x| if x % 3 == 0 { Err(0) } else { Ok(x) })
             .unwrap_or_else(|e| e - 1) as i64;
 
-        let d = Some(i).zip(Some(i * 2)).map(|(x, y)| (x ^ y) as i64).unwrap_or(0);
+        let d = Some(i)
+            .zip(Some(i * 2))
+            .map(|(x, y)| (x ^ y) as i64)
+            .unwrap_or(0);
         let e = Option::<i32>::None.unwrap_or_default() as i64;
         let f = Some(Some(i)).flatten().unwrap_or(-7) as i64;
 
@@ -197,7 +200,19 @@ pub extern "C" fn ex_utf8(n: i32) -> i64 {
 pub extern "C" fn ex_casts(_: i32) -> i64 {
     let mut acc = 0i64;
 
-    for v in [0i64, 1, -1, 127, 128, 255, 256, 32_767, 65_535, i64::MIN, i64::MAX] {
+    for v in [
+        0i64,
+        1,
+        -1,
+        127,
+        128,
+        255,
+        256,
+        32_767,
+        65_535,
+        i64::MIN,
+        i64::MAX,
+    ] {
         let v = black_box(v);
 
         acc = acc.wrapping_mul(31).wrapping_add(v as i8 as i64);
@@ -264,11 +279,21 @@ pub extern "C" fn ex_repr_layouts(_: i32) -> i64 {
 
     let mut acc = 0i64;
 
-    acc = acc.wrapping_mul(31).wrapping_add(size_of::<CLayout>() as i64);
-    acc = acc.wrapping_mul(31).wrapping_add(align_of::<CLayout>() as i64);
-    acc = acc.wrapping_mul(31).wrapping_add(size_of::<Packed>() as i64);
-    acc = acc.wrapping_mul(31).wrapping_add(size_of::<Aligned>() as i64);
-    acc = acc.wrapping_mul(31).wrapping_add(align_of::<Aligned>() as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(size_of::<CLayout>() as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(align_of::<CLayout>() as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(size_of::<Packed>() as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(size_of::<Aligned>() as i64);
+    acc = acc
+        .wrapping_mul(31)
+        .wrapping_add(align_of::<Aligned>() as i64);
 
     acc = acc.wrapping_mul(31).wrapping_add(c.a as i64);
     acc = acc.wrapping_mul(31).wrapping_add(c.b as i64);
@@ -301,7 +326,9 @@ pub extern "C" fn ex_const_and_static(n: i32) -> i64 {
 
     const FIB20: u64 = fib(20);
     const TABLE: [i64; 8] = [1, 1, 2, 6, 24, 120, 720, 5_040];
-    static LOOKUP: [u8; 16] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225];
+    static LOOKUP: [u8; 16] = [
+        0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225,
+    ];
 
     let mut acc = FIB20 as i64;
 
@@ -546,9 +573,9 @@ pub extern "C" fn ex_realistic_program(n: i32) -> i64 {
         }
     }
 
-    let sym_fold = syms
-        .iter()
-        .fold(0i64, |a, (k, v)| a.wrapping_mul(31).wrapping_add(*k as i64 ^ *v));
+    let sym_fold = syms.iter().fold(0i64, |a, (k, v)| {
+        a.wrapping_mul(31).wrapping_add(*k as i64 ^ *v)
+    });
 
     acc.wrapping_mul(31)
         .wrapping_add(sym_fold)

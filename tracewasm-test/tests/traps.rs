@@ -102,26 +102,26 @@ fn a_trap_reports_the_wasm_call_chain() {
 #[test]
 fn runaway_recursion_traps_instead_of_aborting_the_process() {
     with_large_stack(|| {
-    let mut cfg = Config::default();
+        let mut cfg = Config::default();
 
-    // deliberately low: the point is to prove the guard fires, and a small limit
-    // keeps the test fast. The default is higher.
-    cfg.set_max_call_stack_depth(512);
+        // deliberately low: the point is to prove the guard fires, and a small limit
+        // keeps the test fast. The default is higher.
+        cfg.set_max_call_stack_depth(512);
 
-    let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+        let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
 
-    let err = g
-        .try_i32_i64("fr_trap_infinite_recursion", 0)
-        .expect_err("infinite recursion should hit the call-depth guard");
+        let err = g
+            .try_i32_i64("fr_trap_infinite_recursion", 0)
+            .expect_err("infinite recursion should hit the call-depth guard");
 
-    let rendered = err.to_string();
+        let rendered = err.to_string();
 
-    assert!(
-        rendered.contains("call stack exhausted"),
-        "expected a call-depth trap, got:\n{}",
-        // the message nests one layer per frame, so truncate it for readability
-        &rendered[..rendered.len().min(400)]
-    );
+        assert!(
+            rendered.contains("call stack exhausted"),
+            "expected a call-depth trap, got:\n{}",
+            // the message nests one layer per frame, so truncate it for readability
+            &rendered[..rendered.len().min(400)]
+        );
     });
 }
 
@@ -134,26 +134,26 @@ fn runaway_recursion_traps_instead_of_aborting_the_process() {
 #[test]
 fn the_depth_guard_counts_depth_not_total_calls() {
     with_large_stack(|| {
-    let mut cfg = Config::default();
-    cfg.set_max_call_stack_depth(64);
+        let mut cfg = Config::default();
+        cfg.set_max_call_stack_depth(64);
 
-    let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+        let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
 
-    // `fr_call_chain` nests only ~5 deep but makes thousands of calls in total,
-    // so it must succeed under a limit of 64
-    let deep_but_narrow = g.try_i32_i64("fr_call_chain", 2_000);
+        // `fr_call_chain` nests only ~5 deep but makes thousands of calls in total,
+        // so it must succeed under a limit of 64
+        let deep_but_narrow = g.try_i32_i64("fr_call_chain", 2_000);
 
-    assert!(
-        deep_but_narrow.is_ok(),
-        "a shallow function called many times must not trip a depth limit of 64: {:?}",
-        deep_but_narrow.err().map(|e| e.to_string())
-    );
+        assert!(
+            deep_but_narrow.is_ok(),
+            "a shallow function called many times must not trip a depth limit of 64: {:?}",
+            deep_but_narrow.err().map(|e| e.to_string())
+        );
 
-    // and recursion just under the limit still works
-    assert!(
-        g.try_i32_i64("fr_recurse_depth", 50).is_ok(),
-        "recursion to depth 50 must succeed under a limit of 64"
-    );
+        // and recursion just under the limit still works
+        assert!(
+            g.try_i32_i64("fr_recurse_depth", 50).is_ok(),
+            "recursion to depth 50 must succeed under a limit of 64"
+        );
     });
 }
 
@@ -162,27 +162,27 @@ fn the_depth_guard_counts_depth_not_total_calls() {
 #[test]
 fn the_depth_limit_is_configurable() {
     with_large_stack(|| {
-    // capped for debug builds, where each frame costs ~30 KB of native stack
-    let depth = 300.min(MAX_TEST_RECURSION);
+        // capped for debug builds, where each frame costs ~30 KB of native stack
+        let depth = 300.min(MAX_TEST_RECURSION);
 
-    let mut low = Config::default();
-    low.set_max_call_stack_depth((depth as u32) / 3);
+        let mut low = Config::default();
+        low.set_max_call_stack_depth((depth as u32) / 3);
 
-    let mut high = Config::default();
-    high.set_max_call_stack_depth(4_000);
+        let mut high = Config::default();
+        high.set_max_call_stack_depth(4_000);
 
-    let mut g_low = Guest::with_config(guests::FRAMES, Some(low));
-    let mut g_high = Guest::with_config(guests::FRAMES, Some(high));
+        let mut g_low = Guest::with_config(guests::FRAMES, Some(low));
+        let mut g_high = Guest::with_config(guests::FRAMES, Some(high));
 
-    assert!(
-        g_low.try_i32_i64("fr_recurse_depth", depth).is_err(),
-        "depth {depth} should exceed a limit of 100"
-    );
+        assert!(
+            g_low.try_i32_i64("fr_recurse_depth", depth).is_err(),
+            "depth {depth} should exceed a limit of 100"
+        );
 
-    assert!(
-        g_high.try_i32_i64("fr_recurse_depth", depth).is_ok(),
-        "depth {depth} should fit within a limit of 4000"
-    );
+        assert!(
+            g_high.try_i32_i64("fr_recurse_depth", depth).is_ok(),
+            "depth {depth} should fit within a limit of 4000"
+        );
     });
 }
 
