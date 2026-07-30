@@ -9,13 +9,17 @@ All file references are `tracewasm-core/src/...`.
 
 ## 1. Baseline
 
+Current numbers, after the call-boundary work in §5:
+
 | workload | tracewasm | ns/instr | what it isolates |
 | --- | --- | --- | --- |
-| `loop_arith` | 11.9 ms | **5.16** | pure dispatch + i64 arithmetic |
-| `call_heavy` | 31.0 ms | — | `call_indirect` per iteration |
+| `loop_arith` | 12.4 ms | **5.16** | pure dispatch + i64 arithmetic |
+| `call_heavy` | 29.5 ms | — | `call_indirect` per iteration |
 | `mem_heavy` | 35.5 ms | — | load/store through linear memory |
-| `locals_heavy` | 25.1 ms | **3.14** | 8 live locals, frame-layout bound |
+| `locals_heavy` | 24.3 ms | **3.14** | 8 live locals, frame-layout bound |
 | `noop` | 74 ns | — | per-invocation setup/teardown |
+
+Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
 
 **~3-5 ns per wasm instruction ≈ 10-15 cycles** at 3 GHz. A well-tuned stack-machine
 interpreter runs 4-6 cycles per instruction, so roughly **2-3× is available inside the
@@ -40,29 +44,34 @@ Work performed per driver-loop iteration, for something as cheap as `local.get`:
 
 1. `&instructions[pc]` — bounds check, then a **40-byte** load (straddles a cache line ~40%
    of the time)
-2. call into `TraceVMState::execute` — 5 arguments, real call/ret
+2. call into `TraceVMState::execute` — real call/ret
 3. jump-table dispatch over a 192-variant discriminant
 4. `get_local` → `stack.inner[base + i]` — `Vec` pointer load, bounds check, 16-byte load
 5. `push` → `inner.len()` load, compare, branch, **second** bounds check, 16-byte store,
    `sp` increment
-6. `ExecutionResult` match → `*pc += 1`
-7. loop condition → another `instructions.len()` load
 
 Roughly **2 bounds checks and 5 bookkeeping loads to move one 16-byte value.** The
 measurement is consistent with the code; there is no hidden cost elsewhere.
+
+Items 1, 4 and 5 are levers A, C and E. The plumbing that *used* to appear here — an `sret`
+round-trip for the `Result`, a spilled `pc`, and a per-iteration `len()` reload — has been
+removed, and removing it bought almost nothing; see §5.
 
 ---
 
 ## 3. Levers, ranked
 
-| # | Lever | Expected | Effort |
-| --- | --- | --- | --- |
-| A | Shrink `Instruction` 40 → 24 B | high | mechanical |
-| B | Per-function metadata table | high for call-heavy | small |
-| C | Remove redundant bounds checks | 10-25% | small |
-| D | Hoist loop invariants | 5-10% | trivial |
-| E | `Val` 16 → 8 B untagged | high | invasive |
-| F | Reuse the operand stack across calls | latency spikes only | trivial |
+| # | Lever | Expected | Effort | Status |
+| --- | --- | --- | --- | --- |
+| B | Per-function metadata table | high for call-heavy | small | **next** |
+| A | Shrink `Instruction` 40 → 24 B | high | mechanical | open |
+| E | `Val` 16 → 8 B untagged | high | invasive | open |
+| C | Remove redundant bounds checks | 10-25% | small | open |
+| F | Reuse the operand stack across calls | latency spikes only | trivial | open |
+| D | Hoist loop invariants | 5-10% | trivial | **done** — no measurable gain |
+
+B is promoted to first because `call_heavy` is the only workload that has responded to any
+change so far (−5%), which is evidence that per-call work is where the remaining slack is.
 
 ### A. `Instruction` is 40 bytes, and one variant causes it
 
@@ -164,7 +173,7 @@ from 5,895 to 1,575 frames, below the original baseline. Bad trade.
 
 A `&mut pc` refactor to remove the `ExecutionResult` round-trip gave **zero throughput
 gain** (the enum was already returned in a register), but incidentally shrank the frame
-1,423 → 1,311 B, so it was kept for depth.
+1,423 → 1,311 B. It was later reverted in favour of returning the next `pc` — see §5.
 
 **The lesson: inlining is not the bottleneck.** LLVM is already making reasonable choices.
 The cost is memory traffic and redundant work per instruction, which is why A, B, C and E
@@ -176,13 +185,97 @@ the inlined remainder is slim and the big spill slots live off the recursive pat
 
 ---
 
-## 5. Suggested order
+## 5. Completed: the call boundary (boxed error + `pc` by value)
 
-1. **B and D** — small, safe, and B targets the worst workload.
+Two changes to the per-instruction boundary, both verified in the disassembly and both
+**almost entirely without effect on throughput**. Recorded in full because the reasoning was
+sound and the outcome was still negative — that is the useful part.
+
+### What was wrong
+
+`TraceVMState::execute` returned `Result<(), InstructionExecutionError>`. That error is
+**56 bytes** (variants carry `String`s and a `Box<TraceWasmError>`), and aarch64 returns
+anything over 16 bytes through an `sret` pointer. So *every successful instruction* paid a
+56-byte stack write plus a discriminant reload, to report a failure that essentially never
+happens. Separately, `pc` was lent out as `&mut usize`, which gives it an address and forces
+it to a stack slot reloaded on every iteration.
+
+### What changed
+
+- `execute` now returns `Result<usize, Box<InstructionExecutionError>>` — the next `pc` on
+  success. Boxing shrinks the error to 8 B, so the whole `Result` is 16 B and comes back in
+  two registers.
+- `pc` is passed **by value** and returned, so it stays in a register.
+- `instructions.len()` hoisted out of the loop condition (lever D).
+- Added `impl From<MemoryError> for Box<InstructionExecutionError>` (`error.rs`) so `?` still
+  bridges at the ~50 memory-access sites.
+
+### Verified in the disassembly
+
+Before:
+
+```asm
+ldr  x25, [x28, #0x18]   ; instructions.len() reloaded every iteration
+add  x0,  sp, #0x48      ; sret pointer — Result returned via MEMORY
+add  x4,  sp, #0x40      ; &mut pc — a stack address
+bl   ...execute
+ldr  x8,  [sp, #0x48]    ; reload Result discriminant from memory
+ldr  x26, [sp, #0x40]    ; reload pc from memory
+```
+
+After:
+
+```asm
+mov  x3, x26             ; pc passed in a register
+bl   ...execute
+mov  x24, x1             ; next pc returned in x1
+tbnz w0, #0x0, ...        ; discriminant tested in w0
+```
+
+### Result
+
+| workload | before | after |
+| --- | --- | --- |
+| `loop_arith` | 12,160 µs | 12,403 |
+| `call_heavy` | 31,032 | **29,521** (−5%) |
+| `mem_heavy` | 35,524 | 35,522 |
+| `locals_heavy` | 24,368 | 24,266 |
+| `noop` | 74 ns | 74 ns |
+
+Frame size unchanged (1,311 B / 6,396 frames), 147/147 tests, differential checks match
+native, depth guard still traps.
+
+**Why it did so little:** the `sret` store and its reload target the *same hot stack slot* —
+L1-resident, and store-to-load forwarding hides most of the latency. A 56-byte round trip
+sounds expensive and is not.
+
+Keep the change: it is strictly less work, it removed a spill, and it cost nothing. But it
+is the fourth prediction in a row about the call boundary that did not pay — so **stop
+optimising the plumbing around dispatch** and go after the work itself (A, B, E).
+
+### Measurement trap discovered here
+
+The depth rig initially reported a regression to 1,995 frames / 4,204 B. That was the binary
+search hitting `Config::max_call_stack_depth` (default 2000), not the native stack. Any
+frame-size measurement must raise the guard first — `probe` now sets it to `u32::MAX`.
+
+---
+
+## 6. Suggested order
+
+1. **B** — per-function metadata table. Contained, and `call_heavy` is the only workload
+   that has responded to anything.
 2. **A** — mechanical, but touches lowering plus every arm reading those fields.
 3. **C**.
-4. **E** — only after measuring the first four; it may look different once the instruction
+4. **E** — only after measuring the others; it may look different once the instruction
    stream is 24 B.
+
+D is done (no measurable gain). F is worth doing whenever convenient — it is a footprint and
+tail-latency fix rather than a throughput one, so it will not show up in these benchmarks.
+
+**Measure after each step with `probe --verify`, not just `cargo test`.** The existing 147
+tests are all single-function fixtures with no declared locals; they went green through two
+real bugs in the locals-on-stack work. The differential check caught both in one run.
 
 ---
 

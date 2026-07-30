@@ -223,26 +223,25 @@ impl TraceVM {
         };
 
         // Driver loop. `pc` indexes this function's instruction list only.
+        //
+        // `pc` is passed to `execute` by value and the next one comes back as the
+        // return value, deliberately: lending it out as `&mut` would give it an
+        // address and force it to a stack slot, reloaded on every iteration.
+        // `instr_count` is hoisted for the same reason — reading
+        // `instructions.len()` in the condition reloads the slice length each time
+        // round.
         let mut pc = 0;
+        let instr_count = instructions.len();
 
         loop {
             let instr = &instructions[pc];
 
-            // `execute` advances `pc` itself, but only on success — a failing
-            // instruction returns before the update — so this still identifies the
-            // faulting instruction for the error context. Bound before the call so
-            // the closure does not borrow `pc` while it is mutably lent out.
-            let faulting_pc = pc;
-
-            state
-                .execute(instr, module, &mut pc, call_stack_depth)
+            pc = state
+                .execute(instr, module, pc, call_stack_depth)
                 .map_err(|err| {
-                    err.into_tracewasm_err(
-                        faulting_pc,
-                        func_index,
-                        instr,
-                        instruction_offsets[faulting_pc],
-                    )
+                    // `pc` is unchanged on the error path (the failing arm returns
+                    // before the update), so it still names the faulting instruction.
+                    err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
                 })?;
 
             // Advancing past the last instruction means we just executed the
@@ -250,7 +249,7 @@ impl TraceVM {
             // branches out of the outermost block also land here, since their
             // target is that final `End`.) Branch targets are always real
             // instruction indices, so only a fall-through can reach `len`.
-            if pc == instructions.len() {
+            if pc == instr_count {
                 break;
             }
         }
@@ -554,25 +553,38 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// the control-flow decision for the driver loop.
     ///
     /// Heights are resolved against `frame_base_height` (see the module docs).
-    /// `module` is needed to resolve callees on `Call`. Errors are returned bare
-    /// as [`InstructionExecutionError`]; the driver loop tags them with the
-    /// enclosing function and instruction index.
+    /// `module` is needed to resolve callees on `Call`.
     ///
-    /// Advances `pc` itself rather than returning the decision to the driver loop.
-    /// Keeping the `ExecutionResult` match *inside* this function is what makes
-    /// that worth doing: the enum never crosses the return boundary, so LLVM can
-    /// see each arm's constant result and fold it straight into the `pc` update,
-    /// collapsing two dispatches per instruction (the callee's arm plus the
-    /// caller's match) into one. Across a function boundary it cannot do that
-    /// without inlining the whole 192-arm body, which balloons the recursive
-    /// frame — measured at 3.7x — so this is the cheap half of that win.
+    /// ## Why this signature, precisely
+    ///
+    /// This is the hottest boundary in the interpreter — crossed once per wasm
+    /// instruction — so both halves of it are shaped around the aarch64/SysV rule
+    /// that a return value over 16 bytes comes back through an `sret` pointer
+    /// (i.e. memory) instead of registers:
+    ///
+    /// * **`pc` is taken by value and the next `pc` is returned.** Taking
+    ///   `&mut usize` instead forces the caller's `pc` to have an address, so it
+    ///   cannot stay in a register across this (non-inlined) call: the caller then
+    ///   spills it and reloads it every iteration. Returning it keeps it in a
+    ///   register.
+    /// * **The error is boxed.** [`InstructionExecutionError`] is 56 bytes — its
+    ///   variants carry `String`s and a `Box<TraceWasmError>` — so an unboxed
+    ///   `Result` would be returned via `sret`, making *every successful
+    ///   instruction* pay a 56-byte stack write plus a reload to report a failure
+    ///   that essentially never happens. `Box` shrinks the error to 8 bytes, so
+    ///   `Result<usize, _>` fits in two registers. The cost is one allocation on
+    ///   the error path, which is already the slow path.
+    ///
+    /// The `ExecutionResult` match stays inside this function so the enum never
+    /// crosses the boundary either; LLVM folds each arm's constant straight into
+    /// the returned `pc`.
     fn execute(
         &mut self,
         instruction: &Instruction,
         module: &Module,
-        pc: &mut usize,
+        pc: usize,
         call_stack_depth: &mut u32,
-    ) -> Result<(), InstructionExecutionError> {
+    ) -> Result<usize, Box<InstructionExecutionError>> {
         let res = match instruction {
             Instruction::Call {
                 func_index: callee_func_index,
@@ -600,7 +612,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::TableSlotOutOfBounds,
-                    ));
+                    )
+                    .into());
                 };
 
                 // Trap on a null element (wasm: "uninitialized element").
@@ -608,7 +621,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::NullElementInTable,
-                    ));
+                    )
+                    .into());
                 };
 
                 let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
@@ -636,7 +650,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                                 formatted_val_types(results)
                             ),
                         ),
-                    ));
+                    )
+                    .into());
                 }
 
                 self.call_func(
@@ -655,7 +670,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::Unreachable => {
-                return Err(InstructionExecutionError::Unreachable);
+                return Err(InstructionExecutionError::Unreachable.into());
             }
             Instruction::Nop => ExecutionResult::Next,
             Instruction::I32Const { value } => {
@@ -1171,7 +1186,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    });
+                    }
+                    .into());
                 }
 
                 self.stack.push(Val::I32(a.wrapping_rem(b)));
@@ -1539,7 +1555,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     return Err(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    });
+                    }
+                    .into());
                 }
 
                 self.stack.push(Val::I64(a.wrapping_rem(b)));
@@ -2292,13 +2309,11 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
         };
 
-        // Fold the control-flow decision into `pc` here, in the same function that
-        // produced it — see the note on this fn for why that placement matters.
-        match res {
-            ExecutionResult::Next => *pc += 1,
-            ExecutionResult::JumpTo(target) => *pc = target,
-        }
-
-        Ok(())
+        // Resolve the control-flow decision into the next `pc` here, in the same
+        // function that produced it — see the note on this fn for why.
+        Ok(match res {
+            ExecutionResult::Next => pc + 1,
+            ExecutionResult::JumpTo(target) => target,
+        })
     }
 }

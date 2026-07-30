@@ -1,0 +1,16 @@
+[package]
+name = "tracewasm-test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A test harness crate. The library half holds the shared plumbing (import
+# registry, call helpers, guest loading, metric collection); everything under
+# `tests/` consumes it.
+#
+# `build.rs` compiles each program in `guests/` to `wasm32-unknown-unknown`. The
+# same sources are also `include!`d natively by the differential tests, so every
+# guest has a ground truth that cannot drift from the wasm under test.
+[dependencies]
+tracewasm-core = { path = "../tracewasm-core" }
+tracewasm-macros = { path = "../tracewasm-macros" }
