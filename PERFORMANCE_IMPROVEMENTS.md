@@ -9,17 +9,111 @@ All file references are `tracewasm-core/src/...`.
 
 ## 1. Baseline
 
-Current numbers, after the call-boundary work in §5:
+**Recorded at `2066ab8`** (after the `Instruction` 40 → 16 B work in §3A). This is the
+reference every future optimisation compares against.
 
-| workload | tracewasm | ns/instr | what it isolates |
+### How to reproduce — read this before comparing
+
+```sh
+cargo test --release -p tracewasm-test --test metrics -- --nocapture --test-threads=1
+```
+
+`--test-threads=1` is **not optional**. The metric tests are timing loops, and letting
+cargo run them concurrently inflates the throughput rows and pushes run-to-run spread from
+~3% to ~11% — wide enough to swallow any realistic single optimisation. Numbers taken
+without it are not comparable to this table.
+
+Also: the *first* run after a rebuild is unusable (one row was observed at 232 ns/op cold
+versus 145 warm on the same binary). Discard it, then take the median of ≥3 runs.
+
+Everything below is the median of 5 warm single-threaded runs, aarch64-apple-darwin, on a
+laptop — so treat <5% movement as noise, not signal.
+
+### Throughput by workload category — the primary signal
+
+`ns/op` here is **per guest loop iteration**, not per wasm instruction: one op is one pass
+of the guest's `while i < n` body (`WORK = 20_000` iterations, `REPS = 5` invocations),
+which is on the order of 10-30 wasm instructions. Do not read these as cycles-per-instruction.
+
+| workload | median ns/op | min | max | spread |
+| --- | --- | --- | --- | --- |
+| arithmetic (i64 + f64 mix) | **142.89** | 141.83 | 146.47 | 3.2% |
+| control flow (match + loops) | **138.55** | 136.69 | 141.21 | 3.3% |
+| memory (load/store) | **177.33** | 172.25 | 177.49 | 3.0% |
+| calls (one indirect per iter) | **116.57** | 115.98 | 117.39 | 1.2% |
+| heap (alloc + collections) | **16.01 ms** | 15.68 | 16.93 | 7.8% |
+
+The four `ns/op` rows are the ones to watch — each isolates a different interpreter cost
+(dispatch, control flow, linear memory, indirect calls), which is what localises a
+regression that a single blended number would hide.
+
+### Host-boundary and frame cost
+
+| measurement | median | min | max | spread |
+| --- | --- | --- | --- | --- |
+| trivial call, n=1 | **317.43 ns** | 312.08 | 322.32 | 3.2% |
+| 5-param call | **237.69 ns** | 236.18 | 239.13 | 1.2% |
+| direct recursion, depth 100 | **111.62 ns/op** | 111.27 | 113.92 | 2.4% |
+| direct recursion, depth 1000 | **113.58 ns/op** | 112.15 | 116.45 | 3.8% |
+| direct recursion, depth 3000 | **118.27 ns/op** | 116.82 | 118.76 | 1.6% |
+
+Recursion cost is flat in depth (112 → 118 ns/op from depth 100 to 3000), so frame setup is
+not super-linear. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
+
+### Compile and instantiate
+
+The guests are ~1.4-1.5 MB each because they link `std`, so this is dominated by lowering
+the whole module, not by the small part any one test executes.
+
+| measurement | median | min | max | spread |
+| --- | --- | --- | --- | --- |
+| compile + instantiate: arithmetic | **0.12 ms** | 0.11 | 0.13 | 16.6% |
+| compile + instantiate: exotic | **0.52 ms** | 0.52 | 0.54 | 2.7% |
+| compile + instantiate: heap | **1.15 ms** | 1.09 | 1.16 | 6.1% |
+
+### Guest linear-memory growth
+
+| measurement | median | min | max | spread |
+| --- | --- | --- | --- | --- |
+| allocate ~1 page | **0.01 ms** | — | — | 19.5% |
+| allocate ~8 pages | **0.04 ms** | — | — | 18.4% |
+| allocate ~32 pages | **0.15 ms** | 0.15 | 0.16 | 6.5% |
+| vec growth to 20k elements | **4.83 ms** | 4.78 | 4.88 | 2.1% |
+| 4k short-lived allocations | **19.58 ms** | 19.42 | 19.80 | 1.9% |
+
+The small-page rows have ~20% spread because they are microseconds — ignore them unless a
+change moves them by an order of magnitude.
+
+### Instruction-stream footprint — deterministic, no timing
+
+Instruction count per guest × `size_of::<Instruction>()`. This has no measurement noise, so
+any movement is real. Recompute it by summing `func_bodies[i].instructions.len()`.
+
+| guest | instructions | stream @ 16 B | was @ 40 B |
 | --- | --- | --- | --- |
-| `loop_arith` | 12.4 ms | **5.16** | pure dispatch + i64 arithmetic |
-| `call_heavy` | 29.5 ms | — | `call_indirect` per iteration |
-| `mem_heavy` | 35.5 ms | — | load/store through linear memory |
-| `locals_heavy` | 24.3 ms | **3.14** | 8 live locals, frame-layout bound |
-| `noop` | 74 ns | — | per-invocation setup/teardown |
+| arithmetic | 2,626 | 41 KB | 102 KB |
+| control_flow | 7,884 | 123 KB | 307 KB |
+| memory | 10,501 | 164 KB | 410 KB |
+| frames | 8,230 | 128 KB | 321 KB |
+| heap | 39,972 | 624 KB | 1,561 KB |
+| exotic | 16,695 | 260 KB | 652 KB |
+| **total** | **85,908** | **1,342 KB** | **3,355 KB** |
 
-Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
+### What the 40 → 16 B work actually bought
+
+**Footprint: 2.5×, measured and exact** — 2 MB across the six guests.
+
+**Throughput: no measurable change.** A/B against `495edde` on the same harness and machine
+put every row within ~2%, i.e. inside the noise band, and the sign flipped between median
+and minimum on two rows. The instruction stream is evidently not the binding constraint at
+these sizes. Recorded so nobody re-runs this expecting a throughput win — the memory win is
+the reason to keep it.
+
+The older figures in this section (`loop_arith` at 5.16 ns/instr, `call_heavy`, `mem_heavy`,
+`locals_heavy`, `noop`) came from an ad-hoc harness that is not in the repo and cannot be
+reproduced; those workload names exist nowhere in the source tree. The
+cycles-per-instruction analysis just below, and §2, still derive from them — treat both as
+estimates awaiting a re-measurement against a real per-instruction counter.
 
 **~3-5 ns per wasm instruction ≈ 10-15 cycles** at 3 GHz. A well-tuned stack-machine
 interpreter runs 4-6 cycles per instruction, so roughly **2-3× is available inside the
@@ -42,8 +136,8 @@ bought them 2-6×. That is what the architectural step is worth.
 
 Work performed per driver-loop iteration, for something as cheap as `local.get`:
 
-1. `&instructions[pc]` — bounds check, then a **40-byte** load (straddles a cache line ~40%
-   of the time)
+1. `&instructions[pc]` — bounds check, then a **16-byte** load, 4 per cache line and never
+   straddling one (was 40 bytes, straddling ~40% of the time; see §3A)
 2. call into `TraceVMState::execute` — real call/ret
 3. jump-table dispatch over a 192-variant discriminant
 4. `get_local` → `stack.inner[base + i]` — `Vec` pointer load, bounds check, 16-byte load
@@ -53,9 +147,11 @@ Work performed per driver-loop iteration, for something as cheap as `local.get`:
 Roughly **2 bounds checks and 5 bookkeeping loads to move one 16-byte value.** The
 measurement is consistent with the code; there is no hidden cost elsewhere.
 
-Items 1, 4 and 5 are levers A, C and E. The plumbing that *used* to appear here — an `sret`
-round-trip for the `Result`, a spilled `pc`, and a per-iteration `len()` reload — has been
-removed, and removing it bought almost nothing; see §5.
+Item 1 is lever A and is done — and notably it did *not* move throughput (§1), which is
+evidence the driver loop is bound by items 2-5 rather than by instruction fetch. Items 4 and
+5 are levers C and E. The plumbing that *used* to appear here — an `sret` round-trip for the
+`Result`, a spilled `pc`, and a per-iteration `len()` reload — has been removed, and removing
+it bought almost nothing; see §5.
 
 ---
 
