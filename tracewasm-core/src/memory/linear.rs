@@ -169,6 +169,146 @@ impl MemoryView for LinearMemory {
 
         Ok(())
     }
+
+    /// Reads a `u8` at `offset`. Errors if the access is out of bounds.
+    fn read_u8(&self, offset: usize) -> Result<u8, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(1).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(u8::from_le_bytes(
+            self.inner[offset..(offset + 1)].try_into().unwrap(),
+        ))
+    }
+
+    /// Reads a little-endian `u16` at `offset`. Errors if the access is out of bounds.
+    fn read_u16(&self, offset: usize) -> Result<u16, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(2).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(u16::from_le_bytes(
+            self.inner[offset..(offset + 2)].try_into().unwrap(),
+        ))
+    }
+
+    /// Reads a little-endian `u32` at `offset`. Errors if the access is out of bounds.
+    fn read_u32(&self, offset: usize) -> Result<u32, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(4).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(u32::from_le_bytes(
+            self.inner[offset..(offset + 4)].try_into().unwrap(),
+        ))
+    }
+
+    /// Reads a little-endian `u64` at `offset`. Errors if the access is out of bounds.
+    fn read_u64(&self, offset: usize) -> Result<u64, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(8).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(u64::from_le_bytes(
+            self.inner[offset..(offset + 8)].try_into().unwrap(),
+        ))
+    }
+
+    /// Reads a little-endian `f32` at `offset`, preserving the exact bit pattern
+    /// (no NaN canonicalization). Errors if the access is out of bounds.
+    fn read_f32(&self, offset: usize) -> Result<f32, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(4).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(f32::from_bits(u32::from_le_bytes(
+            self.inner[offset..(offset + 4)].try_into().unwrap(),
+        )))
+    }
+
+    /// Reads a little-endian `f64` at `offset`, preserving the exact bit pattern
+    /// (no NaN canonicalization). Errors if the access is out of bounds.
+    fn read_f64(&self, offset: usize) -> Result<f64, MemoryError> {
+        let mem_len = self.inner.len();
+
+        let end = offset.checked_add(8).ok_or(MemoryError::OutOfBoundsAccess(
+            MemoryAccessKind::Read,
+            offset,
+            mem_len,
+        ))?;
+
+        if mem_len < end {
+            return Err(MemoryError::OutOfBoundsAccess(
+                MemoryAccessKind::Read,
+                offset,
+                mem_len,
+            ));
+        }
+
+        Ok(f64::from_bits(u64::from_le_bytes(
+            self.inner[offset..(offset + 8)].try_into().unwrap(),
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +628,100 @@ mod tests {
         // usize::MAX + 1 would wrap; checked_add must turn this into a trap.
         let res = m.read(usize::MAX, &mut buf);
         assert!(is_oob(&res, usize::MAX, 4));
+    }
+
+    #[test]
+    fn write_offset_addition_overflow_traps_instead_of_panicking() {
+        let mut m = LinearMemory::with_byte_len(4);
+        // The `write` counterpart of the `read` case above: the same wraparound,
+        // reported against the write kind.
+        assert!(is_oob(&m.write(usize::MAX, &[0u8; 1]), usize::MAX, 4));
+
+        // `write_uN` marshals into a buffer and delegates to `write`, so it
+        // inherits the check — pinned so a future specialisation of the writes
+        // (as was done for the reads) cannot quietly drop it.
+        assert!(is_oob(&m.write_u32(usize::MAX, 0), usize::MAX, 4));
+    }
+
+    #[test]
+    fn copy_within_dest_addition_overflow_traps_instead_of_wrapping() {
+        let mut m = LinearMemory::with_byte_len(4);
+
+        // `copy_within` adds `len` to *both* ends, and the existing length-overflow
+        // test only reaches the `src` one: a huge `len` always trips `src` first.
+        // Hitting the `dest` addition needs `src + len` to stay in bounds while
+        // `dest + len` overflows, so `len` is small and `dest` is enormous.
+        assert!(is_oob(&m.copy_within(usize::MAX, 0, 1), usize::MAX, 4));
+    }
+
+    /// The sized reads each re-derive `offset + width`, so each needs its own
+    /// overflow check.
+    ///
+    /// `LinearMemory` overrides `read_u8`/`u16`/`u32`/`u64`/`f32`/`f64` to skip the
+    /// `&mut [u8]` round-trip of the default `MemoryView` implementations, which
+    /// means each one now owns a copy of this bounds logic instead of inheriting
+    /// the single check in `read`. Written as `offset + width`, a large offset wraps,
+    /// the comparison passes, and the slice range comes out reversed — a panic
+    /// rather than a trap.
+    ///
+    /// Reachable in practice: host functions are handed a `MemoryView` and call
+    /// `read_u32(addr as usize)`, and a negative guest `i32` sign-extends to a
+    /// `usize::MAX`-adjacent value. `host_imports.rs` requires that to trap.
+    #[test]
+    fn sized_read_offset_addition_overflow_traps_instead_of_panicking() {
+        let m = LinearMemory::with_byte_len(4);
+
+        // `offset + width` overflows exactly when `offset > usize::MAX - width`, so
+        // `usize::MAX - width + 1` is the *first* offset that wraps — the tightest
+        // input that distinguishes `checked_add` from `+`.
+        macro_rules! assert_overflow_traps {
+            ($($read:ident => $width:expr),* $(,)?) => {
+                $(
+                    let first_overflowing = usize::MAX - $width + 1;
+                    for offset in [usize::MAX, first_overflowing] {
+                        assert!(
+                            is_oob(&m.$read(offset), offset, 4),
+                            concat!(stringify!($read), " must trap on an offset whose \
+                                     `+ width` overflows, not panic (offset {})"),
+                            offset
+                        );
+                    }
+
+                    // One below the threshold does not overflow, so this exercises the
+                    // *bounds* comparison rather than the addition. Both must trap, by
+                    // different routes — and a `checked_add` that swallowed the error
+                    // instead of reporting it would show up here.
+                    let last_non_overflowing = usize::MAX - $width;
+                    assert!(
+                        is_oob(&m.$read(last_non_overflowing), last_non_overflowing, 4),
+                        concat!(stringify!($read), " must trap on a huge but \
+                                 non-overflowing offset")
+                    );
+                )*
+            };
+        }
+
+        assert_overflow_traps! {
+            read_u8 => 1,
+            read_u16 => 2,
+            read_u32 => 4,
+            read_u64 => 8,
+            read_f32 => 4,
+            read_f64 => 8,
+        }
+    }
+
+    #[test]
+    fn signed_sized_read_offset_addition_overflow_traps() {
+        let m = LinearMemory::with_byte_len(4);
+
+        // The signed reads delegate to the unsigned ones, so they inherit the
+        // overflow check — asserted so the delegation cannot be replaced by a
+        // hand-written body that reintroduces a bare `offset + width`.
+        assert!(is_oob(&m.read_i8(usize::MAX), usize::MAX, 4));
+        assert!(is_oob(&m.read_i16(usize::MAX - 1), usize::MAX - 1, 4));
+        assert!(is_oob(&m.read_i32(usize::MAX - 3), usize::MAX - 3, 4));
+        assert!(is_oob(&m.read_i64(usize::MAX - 7), usize::MAX - 7, 4));
     }
 
     // ------------------------------------------------------------------
