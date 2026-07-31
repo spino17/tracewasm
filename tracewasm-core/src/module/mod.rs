@@ -1108,6 +1108,20 @@ impl Module {
                     for mem in mem_iter {
                         let mem = mem?;
 
+                        // Rejected up front rather than trapping later: `wasmparser`
+                        // enables the memory64 proposal by default, but the
+                        // interpreter is 32-bit throughout — addresses are popped
+                        // with `Val::as_i32` and `memarg` offsets are stored as
+                        // `u32`. Both of those silently misbehave on a 64-bit
+                        // memory, so it cannot be allowed past compile time.
+                        //
+                        // Imported memories need no equivalent check: the import
+                        // section arm rejects every non-function, non-global import,
+                        // so the memory section is the only way a memory gets in.
+                        if mem.memory64 {
+                            return Err(TraceWasmError::Unsupported("64-bit memory".to_string()));
+                        }
+
                         memories.push(mem);
                     }
                 }

@@ -172,7 +172,7 @@ impl TraceVM {
     ) -> Result<(), TraceWasmError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
-        let imported_func_count = instance.module.imported_func_count;
+        let imported_func_count = module.imported_func_count;
 
         debug_assert!(func_index.0 >= imported_func_count);
 
@@ -458,20 +458,22 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::OffsetTooLarge`] if the static offset does not fit
-    /// a 32-bit address space, and [`MemoryError::EffectiveAddressOverflow`] if
-    /// the sum leaves it. The access itself is bounds-checked by [`Memory`].
-    fn pop_effective_address(&mut self, memarg_offset: u64) -> Result<usize, MemoryError> {
+    /// Returns [`MemoryError::EffectiveAddressOverflow`] if the sum leaves the
+    /// 32-bit address space. The access itself is bounds-checked by [`Memory`].
+    ///
+    /// The static offset needs no range check of its own: `wasmparser` rejects a
+    /// `memarg` offset above `u32::MAX` on an `i32`-indexed memory, and 64-bit
+    /// memories are refused at compile time (see `Module::compile`), so the only
+    /// memories that reach here are 32-bit.
+    fn pop_effective_address(&mut self, memarg_offset: u32) -> Result<usize, MemoryError> {
         let addr = self.stack.pop().as_i32() as u32;
-        let static_offset =
-            u32::try_from(memarg_offset).map_err(|_| MemoryError::OffsetTooLarge)?;
 
         // Effective address = popped address + static offset, computed with
         // a checked add: a u32 overflow is past the 32-bit memory space, so
         // it traps rather than wrapping to a wrong (in-bounds) address.
         let effective_offset = addr
-            .checked_add(static_offset)
-            .ok_or(MemoryError::EffectiveAddressOverflow(addr, static_offset))?;
+            .checked_add(memarg_offset)
+            .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
 
         Ok(effective_offset as usize)
     }
@@ -491,12 +493,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         //   they are never copied;
         // - an imported callee needs them as a `&[Val]` for the host boundary, so
         //   that branch pops them into a `ParamVals`.
-        let imported_func_count = self.instance.module.imported_func_count;
+        let imported_func_count = module.imported_func_count;
 
         // Route on the *callee*: an imported callee is dispatched to the
         // registry; a local one is interpreted recursively.
         if func_index.0 < imported_func_count {
-            let func_decl = &self.instance.module.func_decls[func_index.0 as usize];
+            let func_decl = &module.func_decls[func_index.0 as usize];
 
             debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
 
@@ -598,8 +600,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 ExecutionResult::Next
             }
             Instruction::CallIndirect {
-                params,
-                results,
+                ty_index,
                 table_index,
             } => {
                 let table = &self.instance.table_vals[table_index.0 as usize];
@@ -623,8 +624,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ));
                 };
 
-                let func = &self.instance.module.func_decls[callee_func_index.0 as usize];
-                let ty = &self.instance.module.types[func.ty.0 as usize];
+                let func_ty = &module.types[ty_index.0 as usize];
+                let params = &func_ty.params;
+                let results = &func_ty.results;
+
+                let func = &module.func_decls[callee_func_index.0 as usize];
+                let ty = &module.types[func.ty.0 as usize];
 
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;

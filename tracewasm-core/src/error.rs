@@ -677,9 +677,6 @@ pub enum MemoryError {
     /// write, the byte offset attempted, and the current memory length.
     #[error("out of bounds access: {0} at {1} on memory with length {2}")]
     OutOfBoundsAccess(MemoryAccessKind, usize, usize), // (kind, offset, mem_len)
-    /// A static `memarg` offset did not fit in a 32-bit memory's address space.
-    #[error("offset too large for 32-bit memory")]
-    OffsetTooLarge,
     /// The effective address (popped address + static offset) overflowed the
     /// 32-bit address space, so it is necessarily out of bounds. Fields: the
     /// popped address and the static offset.

@@ -38,10 +38,35 @@
 //! are no-ops while the current block is traversing dead code, so height updates
 //! placed in unreachable code are safely dropped rather than underflowing the
 //! `u32` height on a stack-polymorphic operand.
+//!
+//! ## Keeping [`Instruction`] small
+//!
+//! One `Instruction` is 24 bytes, and a function body holds one per operator, so
+//! the widest variant sets the memory cost of every compiled module. Two choices
+//! below exist only to hold that size down, and both are easy to regress:
+//!
+//! * **Immediates are narrowed to their real range.** `memarg` offsets are stored
+//!   as `u32` even though [`wasmparser`] reports them as `u64`. The narrowing is
+//!   lossless because `wasmparser` rejects an offset above `u32::MAX` on an
+//!   `i32`-indexed memory, and `Module::compile` refuses 64-bit memories outright
+//!   — so a `u64` offset can never reach here. Widening a field back to 64 bits
+//!   costs 8 bytes on *every* instruction, not just the one variant.
+//!
+//! * **Variable-length payloads are boxed slices, never `Vec`.** A `Vec` carries a
+//!   capacity word the instruction list never uses; `Box<[T]>` is 8 bytes smaller
+//!   and is what `BrTable::targets` stores. Build into a `Vec` during the pass,
+//!   then finish with `into_boxed_slice`.
+//!
+//! Signatures are the related case: [`Instruction::CallIndirect`] keeps a
+//! [`TyIndex`] and resolves the type at execution instead of carrying the
+//! parameter and result slices inline, which would make the variant 40 bytes and
+//! drag the whole enum with it.
 
 use crate::{
     error::TraceWasmError,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, ValType},
+    module::{
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex,
+    },
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -139,84 +164,84 @@ pub enum Instruction {
     /// `i32.load`: load 4 bytes as the `i32` result.
     I32Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load8_u`: load 1 byte, zero-extend to `i32`.
     I32Load8U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load8_s`: load 1 byte, sign-extend to `i32`.
     I32Load8S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load16_u`: load 2 bytes, zero-extend to `i32`.
     I32Load16U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load16_s`: load 2 bytes, sign-extend to `i32`.
     I32Load16S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load`: load 8 bytes as the `i64` result.
     I64Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load8_u`: load 1 byte, zero-extend to `i64`.
     I64Load8U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load8_s`: load 1 byte, sign-extend to `i64`.
     I64Load8S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load16_u`: load 2 bytes, zero-extend to `i64`.
     I64Load16U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load16_s`: load 2 bytes, sign-extend to `i64`.
     I64Load16S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load32_u`: load 4 bytes, zero-extend to `i64`.
     I64Load32U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load32_s`: load 4 bytes, sign-extend to `i64`.
     I64Load32S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -224,7 +249,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F32Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -232,7 +257,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F64Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -242,49 +267,49 @@ pub enum Instruction {
     /// `i32.store`: pop an `i32` value and an address, write the value's 4 bytes.
     I32Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.store8`: write the low 1 byte of the popped `i32` (wrapping).
     I32Store8 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.store16`: write the low 2 bytes of the popped `i32` (wrapping).
     I32Store16 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store`: pop an `i64` value and an address, write the value's 8 bytes.
     I64Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store8`: write the low 1 byte of the popped `i64` (wrapping).
     I64Store8 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store16`: write the low 2 bytes of the popped `i64` (wrapping).
     I64Store16 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store32`: write the low 4 bytes of the popped `i64` (wrapping).
     I64Store32 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -292,7 +317,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F32Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -300,7 +325,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F64Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -764,12 +789,16 @@ pub enum Instruction {
     ///
     /// Traps if the index is out of the table's bounds, the slot is null, or the
     /// callee's signature differs from the type recorded here — that last check is
-    /// why the expected signature travels with the instruction.
+    /// why the expected type index travels with the instruction.
     CallIndirect {
-        /// The callee signature's parameter types.
-        params: Box<[ValType]>,
-        /// The callee signature's result types.
-        results: Box<[ValType]>,
+        /// Index into the module's type section of the signature this call site
+        /// expects. Only the index is stored: the signature itself is looked up
+        /// on demand, which keeps this variant from dominating the size of
+        /// [`Instruction`] (two boxed slices would make it 40 bytes rather than
+        /// 24). The lookup compares the signature *structurally* against the
+        /// callee's, not by index, since a module may declare two identical
+        /// types under different indices.
+        ty_index: TyIndex,
         /// Table holding the callee function references.
         table_index: TableIndex,
     },
@@ -836,7 +865,7 @@ pub enum Instruction {
     BrTable {
         /// One [`TargetBranch`] per explicit label, in order, followed by the
         /// default label as the final element.
-        targets: Vec<TargetBranch>,
+        targets: Box<[TargetBranch]>,
     },
     /// `return`: branch to the function's outermost label, leaving the frame's
     /// results on the stack.
@@ -1329,98 +1358,98 @@ impl Instruction {
                 // loads
                 Operator::I32Load { memarg } => (
                     Instruction::I32Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8U { memarg } => (
                     Instruction::I32Load8U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8S { memarg } => (
                     Instruction::I32Load8S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16U { memarg } => (
                     Instruction::I32Load16U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16S { memarg } => (
                     Instruction::I32Load16S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load { memarg } => (
                     Instruction::I64Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8U { memarg } => (
                     Instruction::I64Load8U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8S { memarg } => (
                     Instruction::I64Load8S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16U { memarg } => (
                     Instruction::I64Load16U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16S { memarg } => (
                     Instruction::I64Load16S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32U { memarg } => (
                     Instruction::I64Load32U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32S { memarg } => (
                     Instruction::I64Load32S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F32Load { memarg } => (
                     Instruction::F32Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F64Load { memarg } => (
                     Instruction::F64Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
@@ -1428,63 +1457,63 @@ impl Instruction {
                 // stores
                 Operator::I32Store { memarg } => (
                     Instruction::I32Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store8 { memarg } => (
                     Instruction::I32Store8 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store16 { memarg } => (
                     Instruction::I32Store16 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store { memarg } => (
                     Instruction::I64Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store8 { memarg } => (
                     Instruction::I64Store8 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store16 { memarg } => (
                     Instruction::I64Store16 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store32 { memarg } => (
                     Instruction::I64Store32 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F32Store { memarg } => (
                     Instruction::F32Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F64Store { memarg } => (
                     Instruction::F64Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
@@ -1786,18 +1815,19 @@ impl Instruction {
                     table_index,
                 } => {
                     let func_ty = &types[type_index as usize];
-                    let params = func_ty.params.clone();
-                    let results = func_ty.results.clone();
 
+                    // Only the arities are read here — the signature itself is
+                    // resolved from `ty_index` at execution rather than copied into
+                    // the instruction. The extra pop is the table index the callee
+                    // is resolved through.
                     let stack_effect = StackEffectResult::PopPush {
-                        pops: 1 + params.len() as u32,
-                        pushes: results.len() as u32,
+                        pops: 1 + func_ty.params.len() as u32,
+                        pushes: func_ty.results.len() as u32,
                     };
 
                     (
                         Instruction::CallIndirect {
-                            params,
-                            results,
+                            ty_index: TyIndex(type_index),
                             table_index: TableIndex(table_index),
                         },
                         stack_effect,
@@ -2008,7 +2038,7 @@ impl Instruction {
 
                     (
                         Instruction::BrTable {
-                            targets: br_targets,
+                            targets: br_targets.into_boxed_slice(),
                         },
                         StackEffectResult::Unreachable,
                     )
