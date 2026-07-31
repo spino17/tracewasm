@@ -15,10 +15,10 @@
 //! 1. **Backpatching of forward references.** WebAssembly control flow is
 //!    structured (`block`/`loop`/`if`/`else`/`end`), but a *forward* branch or a
 //!    block's own `end` position is not known until that `end` is reached later
-//!    in the stream. Such fields are emitted with the sentinel [`usize::MAX`] and
-//!    filled in when the matching `End` operator is processed. `usize::MAX` (not
+//!    in the stream. Such fields are emitted with the sentinel [`u32::MAX`] and
+//!    filled in when the matching `End` operator is processed. `u32::MAX` (not
 //!    `0`) is used deliberately: `0` is a valid instruction index, so a missed
-//!    backpatch would silently jump to the first instruction, whereas `usize::MAX`
+//!    backpatch would silently jump to the first instruction, whereas `u32::MAX`
 //!    makes the bug trap on an out-of-bounds access.
 //!
 //! 2. **Operand-stack height precomputation.** `ControlStack::curr_height`
@@ -39,34 +39,44 @@
 //! placed in unreachable code are safely dropped rather than underflowing the
 //! `u32` height on a stack-polymorphic operand.
 //!
-//! ## Keeping [`Instruction`] small
+//! ## Keeping [`Instruction`] small (load-bearing)
 //!
-//! One `Instruction` is 24 bytes, and a function body holds one per operator, so
-//! the widest variant sets the memory cost of every compiled module. Two choices
-//! below exist only to hold that size down, and both are easy to regress:
+//! One `Instruction` is **16 bytes** — asserted just below the enum, so a
+//! regression is a compile error rather than a silent cost. A function body holds
+//! one per operator, so the widest variant sets the memory cost of every compiled
+//! module, and at 16 bytes four of them share a cache line.
+//!
+//! Getting there took three separate narrowings, and *any one* of them regressing
+//! puts the enum back to 24 bytes on its own — they only pay off together, because
+//! the size is set by whichever variant is currently widest:
+//!
+//! * **Instruction indices are `u32`, not `usize`.** Every backpatched index
+//!   (`Br::target_index`, `Block::end_index`, …) is a `u32`, which is what lets
+//!   those variants fit three fields in 12 bytes at align 4. The bound holds
+//!   because a function body's size is a `u32` in the binary and each operator is
+//!   at least one byte, so the instruction count cannot reach `u32::MAX`. This is
+//!   the same bound `instruction_offsets` already relies on.
 //!
 //! * **Immediates are narrowed to their real range.** `memarg` offsets are stored
 //!   as `u32` even though [`wasmparser`] reports them as `u64`. The narrowing is
 //!   lossless because `wasmparser` rejects an offset above `u32::MAX` on an
 //!   `i32`-indexed memory, and `Module::compile` refuses 64-bit memories outright
-//!   — so a `u64` offset can never reach here. Widening a field back to 64 bits
-//!   costs 8 bytes on *every* instruction, not just the one variant.
+//!   — so a `u64` offset can never reach here.
 //!
-//! * **Variable-length payloads are boxed slices, never `Vec`.** A `Vec` carries a
-//!   capacity word the instruction list never uses; `Box<[T]>` is 8 bytes smaller
-//!   and is what `BrTable::targets` stores. Build into a `Vec` during the pass,
-//!   then finish with `into_boxed_slice`.
+//! * **Variable-length payloads live in side tables, not in the variant.** A
+//!   `Box<[T]>` is a 16-byte fat pointer at align 8, which by itself would hold the
+//!   enum at 24. [`Instruction::BrTable`] therefore stores an
+//!   `(start_index, len)` range into the function's flat
+//!   [`FuncBody::br_table_targets`](crate::module::FuncBody) array — 8 bytes, and a
+//!   plain slice index at execution rather than a pointer chase.
 //!
-//! Signatures are the related case: [`Instruction::CallIndirect`] keeps a
-//! [`TyIndex`] and resolves the type at execution instead of carrying the
-//! parameter and result slices inline, which would make the variant 40 bytes and
-//! drag the whole enum with it.
+//! Signatures are the same idea: [`Instruction::CallIndirect`] keeps a [`TyIndex`]
+//! and resolves the type at execution instead of carrying the parameter and result
+//! slices inline, which would make that variant 40 bytes on its own.
 
 use crate::{
     error::TraceWasmError,
-    module::{
-        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex,
-    },
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -811,7 +821,7 @@ pub enum Instruction {
     Block {
         /// Absolute index of this block's matching `End`. Backpatched; a branch
         /// that targets this block jumps here.
-        end_index: usize,
+        end_index: u32,
     },
     /// Opens a loop. Branches targeting a loop jump back to this instruction
     /// (the loop start), so no `end` index is needed.
@@ -821,9 +831,9 @@ pub enum Instruction {
     If {
         /// Absolute index of the matching `Else`, if one exists. Backpatched at
         /// `End`.
-        else_index: Option<usize>,
+        else_index: Option<u32>,
         /// Absolute index of this `if`'s matching `End`. Backpatched.
-        end_index: usize,
+        end_index: u32,
     },
     /// Reached only by falling out of a taken then-branch, which must skip the
     /// else-branch entirely — control jumps straight to the owning `if`'s `End`.
@@ -833,15 +843,15 @@ pub enum Instruction {
     Else {
         /// Absolute index of the owning `if`'s `End`. When the then-branch falls
         /// through into `else`, control skips to this `End`. Backpatched.
-        if_end_index: usize,
+        if_end_index: u32,
     },
     /// `br`: unconditional branch to an enclosing label, unwinding the stack to
     /// that label's height while preserving the top `arity` values.
     Br {
         /// Absolute jump target. For a `loop` label this is the `Loop`
         /// instruction (a back-edge / "continue"); otherwise it is the label's
-        /// `End`. Backpatched (with `usize::MAX` sentinel) for non-loop targets.
-        target_index: usize,
+        /// `End`. Backpatched (with `u32::MAX` sentinel) for non-loop targets.
+        target_index: u32,
         /// Number of values transferred to the label (loop params, else results).
         arity: u32,
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
@@ -851,7 +861,7 @@ pub enum Instruction {
     /// otherwise fall through.
     BrIf {
         /// See `Br::target_index`. Same target rules as `Br`.
-        target_index: usize,
+        target_index: u32,
         /// Number of values transferred to the label; see `Br::arity`.
         arity: u32,
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
@@ -862,17 +872,26 @@ pub enum Instruction {
     ///
     /// The index is unsigned, so a negative value selects the default rather than
     /// wrapping to a valid arm.
+    ///
+    /// The targets are *not* stored inline: a `Box<[TargetBranch]>` here would be a
+    /// 16-byte fat pointer and would hold the whole enum at 24 bytes (see the module
+    /// docs). Instead this is a range into the flat per-function array, which keeps
+    /// the variant at 8 bytes and makes resolution a slice index.
     BrTable {
-        /// One [`TargetBranch`] per explicit label, in order, followed by the
-        /// default label as the final element.
-        targets: Box<[TargetBranch]>,
+        /// Offset of this table's first [`TargetBranch`] in the owning function's
+        /// [`FuncBody::br_table_targets`](crate::module::FuncBody).
+        start_index: u32,
+        /// Number of targets in this table: one per explicit label, in order,
+        /// followed by the default label as the final element. So `len` is always
+        /// at least 1, and the default lives at `start_index + len - 1`.
+        len: u32,
     },
     /// `return`: branch to the function's outermost label, leaving the frame's
     /// results on the stack.
     Return {
-        /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
+        /// Absolute index of the function's `End`. Backpatched (`u32::MAX`
         /// sentinel) — `return` is a branch to the outermost function label.
-        target_index: usize,
+        target_index: u32,
         /// Number of result values the function returns.
         arity: u32,
         /// Stack height the function frame unwinds to before the `arity` results
@@ -892,6 +911,16 @@ pub enum Instruction {
     },
 }
 
+// A function body holds one `Instruction` per operator, so this size is multiplied
+// across every compiled module — see "Keeping `Instruction` small" in the module
+// docs for the three narrowings that hold it here, and why widening any one of them
+// costs 8 bytes on *every* instruction rather than just the variant touched.
+const _: () = assert!(
+    size_of::<Instruction>() <= 16,
+    "Instruction grew past 16 bytes: some variant's payload now exceeds 12 bytes, \
+     or a field's alignment forced padding. See the module docs before relaxing this."
+);
+
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
 ///
 /// Each arm carries its own `recorded_height`/`arity` because a single
@@ -902,12 +931,20 @@ pub enum Instruction {
 pub struct TargetBranch {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
-    pub target_index: usize,
+    pub target_index: u32,
     /// Number of values transferred to the label (loop params, else results).
     pub arity: u32,
     /// Stack height the target label unwinds to; see `Block::recorded_height`.
     pub recorded_height: u32,
 }
+
+/// The three parallel outputs of lowering one function body: the instruction list,
+/// the source-offset sidecar indexed alongside it, and the flat `br_table` target
+/// array the [`Instruction::BrTable`] ranges point into.
+///
+/// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
+/// three together.
+type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, Box<[TargetBranch]>);
 
 /// What kind of label a control-stack entry represents, plus the data needed to
 /// backpatch its originating instruction once its `end` is seen.
@@ -918,17 +955,14 @@ enum BlockKind {
     Func,
     /// A `block`. `index` is the position of its `Instruction::Block`, so the
     /// `end_index` field can be filled in later.
-    Block { index: usize },
+    Block { index: u32 },
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
-    Loop { index: usize },
+    Loop { index: u32 },
     /// An `if`. `index` locates the `Instruction::If`; `else_index` is filled in
     /// when the `Else` operator is seen (if any) so both can be backpatched at
     /// `end`.
-    If {
-        index: usize,
-        else_index: Option<usize>,
-    },
+    If { index: u32, else_index: Option<u32> },
 }
 
 impl BlockKind {
@@ -938,7 +972,7 @@ impl BlockKind {
     /// target is known immediately (the loop start) and whose arity is the
     /// loop's *params*; a branch to any other label is a forward jump to its
     /// `end` whose arity is the label's *results*.
-    fn is_loop(&self) -> Option<usize> {
+    fn is_loop(&self) -> Option<u32> {
         if let BlockKind::Loop { index } = self {
             Some(*index)
         } else {
@@ -987,10 +1021,13 @@ struct Block {
     /// function frame) that target this block's `end` and therefore need their
     /// `target_index` backpatched once that `end` is reached.
     ///
-    /// Each entry is `(instruction_index, brtable_target_slot)`. The second
-    /// field selects which arm of a `BrTable::targets` vec to patch; it is
-    /// `usize::MAX` (unused) for `Br`/`BrIf`, which have a single `target_index`.
-    attached_breaks: Vec<(usize, usize)>,
+    /// Each entry is `(instruction_index, brtable_target_slot)`. The second field
+    /// is an **absolute** index into the function's flat `br_table` target array —
+    /// not an arm number relative to the table's own `start_index` — so patching is
+    /// a direct write and never has to read the range back out of the instruction.
+    /// It is `u32::MAX` (unused) for `Br`/`BrIf`/`Return`, which have a single
+    /// `target_index` in the variant itself.
+    attached_breaks: Vec<(u32, u32)>,
 }
 
 /// The stack of currently-open control-flow labels, plus the running
@@ -1245,16 +1282,24 @@ impl Instruction {
     /// offsets: element `i` is the byte offset in the module binary of the
     /// operator that produced instruction `i`. The two are pushed together on
     /// every iteration, so they always have the same length and indexing.
+    ///
+    /// The third element is the function's flat `br_table` target array, holding
+    /// every table's arms concatenated in lowering order. Each
+    /// [`Instruction::BrTable`] owns the contiguous run named by its
+    /// `(start_index, len)`, which is why the targets are not stored in the variant
+    /// (see "Keeping [`Instruction`] small" in the module docs). Functions with no
+    /// `br_table` get an empty slice, which does not allocate.
     pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
         types: &[FuncType],
         func_decls: &[FuncDecl],
-    ) -> Result<(Vec<Instruction>, Vec<u32>), TraceWasmError> {
+    ) -> Result<LoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
+        let mut br_table_target_branches = vec![];
 
         control_stack.inner.push(Block {
             kind: BlockKind::Func,
@@ -1845,7 +1890,7 @@ impl Instruction {
                 Operator::Block { blockty } => {
                     control_stack.add_block(
                         BlockKind::Block {
-                            index: instructions.len(),
+                            index: instructions.len() as u32,
                         },
                         &blockty,
                         types,
@@ -1853,7 +1898,7 @@ impl Instruction {
 
                     (
                         Instruction::Block {
-                            end_index: usize::MAX, // dummy value! will backpath when we see END for this block
+                            end_index: u32::MAX, // dummy value! will backpath when we see END for this block
                         },
                         StackEffectResult::NoEffect,
                     )
@@ -1861,7 +1906,7 @@ impl Instruction {
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
                         BlockKind::Loop {
-                            index: instructions.len(),
+                            index: instructions.len() as u32,
                         },
                         &blockty,
                         types,
@@ -1872,7 +1917,7 @@ impl Instruction {
                 Operator::If { blockty } => {
                     control_stack.add_block(
                         BlockKind::If {
-                            index: instructions.len(),
+                            index: instructions.len() as u32,
                             else_index: None,
                         },
                         &blockty,
@@ -1882,13 +1927,13 @@ impl Instruction {
                     (
                         Instruction::If {
                             else_index: None,
-                            end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
+                            end_index: u32::MAX, // dummy value! will backpath when we see END for this `if`
                         },
                         StackEffectResult::PopPush { pops: 1, pushes: 0 },
                     )
                 }
                 Operator::Else => {
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
                     let block = control_stack.get_curr_block_mut();
                     let recorded_height = block.recorded_height;
                     let params = block.params;
@@ -1916,7 +1961,7 @@ impl Instruction {
 
                     (
                         Instruction::Else {
-                            if_end_index: usize::MAX,
+                            if_end_index: u32::MAX,
                         }, // dummy value! will backpatch when we see END for the `if` of this `else`
                         StackEffectResult::SetHeight(recorded_height + params),
                     )
@@ -1933,7 +1978,7 @@ impl Instruction {
                     let params = block.params;
                     let results = block.results;
                     let recorded_height = block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     // brs with a depth resolved to a "loop" block targets the loop start and so the arity
                     // will be params of the loop. For other blocks, the br targets the end of that block
@@ -1944,10 +1989,10 @@ impl Instruction {
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push((index, usize::MAX));
+                        block.attached_breaks.push((index, u32::MAX));
 
                         Instruction::Br {
-                            target_index: usize::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
+                            target_index: u32::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
                             arity: results,
                             recorded_height,
                         }
@@ -1973,7 +2018,7 @@ impl Instruction {
                     let params = block.params;
                     let results = block.results;
                     let recorded_height = block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
                         Instruction::BrIf {
@@ -1982,10 +2027,10 @@ impl Instruction {
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push((index, usize::MAX));
+                        block.attached_breaks.push((index, u32::MAX));
 
                         Instruction::BrIf {
-                            target_index: usize::MAX,
+                            target_index: u32::MAX,
                             arity: results,
                             recorded_height,
                         } // dummy value! will backpatch when we see END for the block this `br` is attached to
@@ -2005,8 +2050,9 @@ impl Instruction {
 
                     targets.push(table.default()); // default (last element) is taken when the popped index is out of range, i.e. i >= number of explicit targets
 
-                    let index = instructions.len();
-                    let mut br_targets = vec![];
+                    let index = instructions.len() as u32;
+                    let br_targets_start = br_table_target_branches.len() as u32;
+                    let mut br_targets_len: u32 = 0;
 
                     for (i, &relative_depth) in targets.iter().enumerate() {
                         let block_index = control_stack.len() - 1 - relative_depth as usize;
@@ -2016,21 +2062,27 @@ impl Instruction {
                         let recorded_height = block.recorded_height;
 
                         if let Some(loop_index) = block.kind.is_loop() {
-                            br_targets.push(TargetBranch {
+                            br_table_target_branches.push(TargetBranch {
                                 target_index: loop_index,
                                 arity: params,
                                 recorded_height,
                             });
+
+                            br_targets_len += 1;
                         } else {
                             // record which arm (`i`) of this `br_table` to backpatch at the target's `end`
-                            block.attached_breaks.push((index, i));
+                            block
+                                .attached_breaks
+                                .push((index, br_targets_start + i as u32));
 
                             // dummy value! will backpatch when we see END for the block this `br` is attached to
-                            br_targets.push(TargetBranch {
-                                target_index: usize::MAX,
+                            br_table_target_branches.push(TargetBranch {
+                                target_index: u32::MAX,
                                 arity: results,
                                 recorded_height,
                             });
+
+                            br_targets_len += 1;
                         };
                     }
 
@@ -2038,7 +2090,8 @@ impl Instruction {
 
                     (
                         Instruction::BrTable {
-                            targets: br_targets.into_boxed_slice(),
+                            start_index: br_targets_start,
+                            len: br_targets_len,
                         },
                         StackEffectResult::Unreachable,
                     )
@@ -2051,14 +2104,14 @@ impl Instruction {
                     let func_block = control_stack.get_block_mut(0); // function is top-most block
                     let results = func_block.results;
                     let recorded_height = func_block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
-                    func_block.attached_breaks.push((index, usize::MAX));
+                    func_block.attached_breaks.push((index, u32::MAX));
                     control_stack.set_unreachable_traversing();
 
                     (
                         Instruction::Return {
-                            target_index: usize::MAX,
+                            target_index: u32::MAX,
                             arity: results,
                             recorded_height,
                         },
@@ -2076,14 +2129,15 @@ impl Instruction {
                     let results = block.results;
                     let recorded_height = block.recorded_height;
                     let attached_breaks = &block.attached_breaks;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     // Backpatch every forward branch that targeted this block: its jump target is this
-                    // `end`. For `br`/`br_if` there is a single `target_index`; for `br_table` the second
-                    // tuple field selects the specific arm to patch. Loops never appear here because a
-                    // branch to a loop resolves to the loop start immediately and is not attached.
+                    // `end`. For `br`/`br_if`/`return` there is a single `target_index` in the variant;
+                    // for `br_table` the second tuple field is an absolute slot in the flat target array,
+                    // so the write lands there rather than in the instruction. Loops never appear here
+                    // because a branch to a loop resolves to the loop start immediately and is not attached.
                     for (br_index, br_targets_index) in attached_breaks {
-                        match &mut instructions[*br_index] {
+                        match &mut instructions[*br_index as usize] {
                             Instruction::Br {
                                 target_index,
                                 arity: _arity,
@@ -2098,8 +2152,11 @@ impl Instruction {
                             } => {
                                 *target_index = index;
                             }
-                            Instruction::BrTable { targets } => {
-                                targets[*br_targets_index].target_index = index;
+                            Instruction::BrTable { .. } => {
+                                // `br_targets_index` is already absolute, so the table's own
+                                // range is not needed here.
+                                br_table_target_branches[*br_targets_index as usize].target_index =
+                                    index;
                             }
                             Instruction::Return {
                                 target_index,
@@ -2119,7 +2176,8 @@ impl Instruction {
                     match block.kind {
                         BlockKind::Func | BlockKind::Loop { .. } => {} // no backpatching required
                         BlockKind::Block { index: block_index } => {
-                            let Instruction::Block { end_index } = &mut instructions[block_index]
+                            let Instruction::Block { end_index } =
+                                &mut instructions[block_index as usize]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
@@ -2136,7 +2194,7 @@ impl Instruction {
                             let Instruction::If {
                                 else_index,
                                 end_index,
-                            } = &mut instructions[if_index]
+                            } = &mut instructions[if_index as usize]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
@@ -2150,7 +2208,7 @@ impl Instruction {
                             // that falls through into `else` knows where the construct closes.
                             if let Some(else_index) = ei {
                                 let Instruction::Else { if_end_index } =
-                                    &mut instructions[else_index]
+                                    &mut instructions[else_index as usize]
                                 else {
                                     unreachable!(
                                         "hitting this means TraceWasm has a bug recording the instructions"
@@ -2206,7 +2264,11 @@ impl Instruction {
             instructions.push(instruction);
         }
 
-        Ok((instructions, instruction_offsets))
+        Ok((
+            instructions,
+            instruction_offsets,
+            br_table_target_branches.into_boxed_slice(),
+        ))
     }
 
     pub(crate) fn emit_instruction_for_const_expr(

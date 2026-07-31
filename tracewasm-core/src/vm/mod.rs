@@ -71,7 +71,7 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ResultVals},
     },
-    instruction::Instruction,
+    instruction::{Instruction, TargetBranch},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, formatted_val_types},
     vm::stack::{DataVal, Stack, Val},
@@ -183,6 +183,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let instruction_offsets = &func_body.instruction_offsets;
+        let br_table_targets = &func_body.br_table_targets;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -237,7 +238,7 @@ impl TraceVM {
             let instr = &instructions[pc];
 
             pc = state
-                .execute(instr, module, pc, call_stack_depth)
+                .execute(instr, module, pc, call_stack_depth, br_table_targets)
                 .map_err(|err| {
                     // `pc` is unchanged on the error path (the failing arm returns
                     // before the update), so it still names the faulting instruction.
@@ -354,7 +355,7 @@ impl TraceVM {
 /// What the driver loop should do after executing one instruction.
 enum ExecutionResult {
     /// Set `pc` to this absolute (per-function) instruction index.
-    JumpTo(usize),
+    JumpTo(u32),
     /// Advance to the next instruction (`pc + 1`); falling off the end of the
     /// function's instruction list ends the frame.
     Next,
@@ -586,6 +587,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         module: &Module,
         pc: usize,
         call_stack_depth: &mut u32,
+        br_table_targets: &[TargetBranch],
     ) -> Result<usize, InstructionExecutionError> {
         let res = match instruction {
             Instruction::Call {
@@ -2261,7 +2263,13 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     ExecutionResult::Next
                 }
             }
-            Instruction::BrTable { targets } => {
+            Instruction::BrTable { start_index, len } => {
+                // Widen before adding: the sum is bounded by the function's target
+                // count, but doing it in `u32` would make an overflow a debug panic
+                // rather than a wider add.
+                let start = *start_index as usize;
+                let targets = &br_table_targets[start..start + *len as usize];
+
                 // the branch index is an unsigned i32; go through u32 so a
                 // high-bit-set value maps to a large index (→ default), not a
                 // sign-extended one.
@@ -2313,7 +2321,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         // function that produced it — see the note on this fn for why.
         Ok(match res {
             ExecutionResult::Next => pc + 1,
-            ExecutionResult::JumpTo(target) => target,
+            ExecutionResult::JumpTo(target) => target as usize,
         })
     }
 }

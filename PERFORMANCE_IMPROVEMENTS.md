@@ -64,7 +64,7 @@ removed, and removing it bought almost nothing; see §5.
 | # | Lever | Expected | Effort | Status |
 | --- | --- | --- | --- | --- |
 | B | Per-function metadata table | high for call-heavy | small | **next** |
-| A | Shrink `Instruction` 40 → 24 B | high | mechanical | open |
+| A | Shrink `Instruction` 40 → 16 B | high | mechanical | **done** — see below |
 | E | `Val` 16 → 8 B untagged | high | invasive | open |
 | C | Remove redundant bounds checks | 10-25% | small | open |
 | F | Reuse the operand stack across calls | latency spikes only | trivial | open |
@@ -73,34 +73,59 @@ removed, and removing it bought almost nothing; see §5.
 B is promoted to first because `call_heavy` is the only workload that has responded to any
 change so far (−5%), which is evidence that per-call work is where the remaining slack is.
 
-### A. `Instruction` is 40 bytes, and one variant causes it
+### A. `Instruction` was 40 bytes — now 16 B (done)
 
-Measured payload sizes:
+Starting payload sizes:
 
 | variant | payload |
 | --- | --- |
-| `CallIndirect { Box<[ValType]>, Box<[ValType]>, TableIndex }` | **40 B** ← sets the size |
+| `CallIndirect { Box<[ValType]>, Box<[ValType]>, TableIndex }` | **40 B** ← set the size |
 | `BrTable { Vec<TargetBranch> }` | 24 B |
 | `If { Option<usize>, usize }` | 24 B |
 | `Load { offset: u64, align: u8 }` | 16 B |
 | `Br { usize, u32, u32 }` | 16 B |
 
-Fixes, in order:
+The original plan predicted 24 B and called 16 B unreachable. That was wrong on both counts.
+It also mis-modelled two things worth recording, since both cost a round of work:
 
-1. Box the `CallIndirect` payload into one `Box<CallIndirectMeta>` → 8 B.
-2. `Vec<TargetBranch>` → `Box<[TargetBranch]>` → 16 B.
-3. `Option<usize>` → a `usize::MAX` sentinel — the idiom already used for backpatching
-   (`instruction.rs` module docs) → 16 B.
+- **`Box<[T]>` is a 16-byte fat pointer, not 8.** `[T]` is unsized, so the length rides in
+  the pointer. Boxing the `CallIndirect` payload into `Box<CallIndirectMeta>` would have
+  worked (sized → 8 B), but the two boxed *slices* were 16 B each, which is what made the
+  variant 40 B.
+- **`If` was already the widest variant at 24 B, not `CallIndirect`'s equal.** The enum
+  measured 24 B rather than 32 only because `Option<usize>`'s tag has spare values, so
+  rustc niche-packed the ~400-variant discriminant into it for free. That made `If` look
+  cheaper than it was.
 
-Result: **24 B**, a 1.67× reduction in instruction-stream traffic, 2.7 instructions per
-cache line instead of 1.6.
+What actually landed, in order — note that steps 2-4 each buy **nothing alone**, because the
+size is set by whichever variant is widest at the time:
 
-16 B is *not* reachable without side tables, because `Br { target_index, arity,
-recorded_height }` needs 16 B of payload by itself and the discriminant pushes the enum to
-24 B.
+1. `CallIndirect` → `{ ty_index: TyIndex, table_index: TableIndex }` (8 B), resolving the
+   signature from `module.types` at execution. **40 → 24 B.**
+2. Every backpatched instruction index `usize` → `u32`, and `If`'s `Option<usize>` →
+   `Option<u32>`. Bound: a function body's size is a `u32` in the binary and each operator
+   is ≥1 byte, so the instruction count cannot reach `u32::MAX`. Br-family 16 → 12 B.
+3. `memarg` `offset: u64` → `u32`. Loads/stores 16 → 8 B.
+4. `BrTable { Vec<TargetBranch> }` → `{ start_index: u32, len: u32 }` naming a range in a
+   flat per-function `Box<[TargetBranch]>` on `FuncBody`. 24 → 8 B, and the last 8-aligned
+   payload is gone. **→ 16 B.**
 
-Also free while in there: `offset: u64` on every load/store can be `u32`. memory64 is
-unsupported, and `pop_effective_address` already traps with `OffsetTooLarge` above `u32`.
+Result: **16 B**, a 2.5× reduction in instruction-stream traffic — 4 instructions per
+64-byte cache line instead of 1.6. Enforced by a `const _: () = assert!(size_of::<Instruction>() <= 16)`
+next to the enum, so a regression is a compile error.
+
+An `FxHashMap<u32, _>` keyed by `pc` was tried for step 4 first. It reached the same 16 B,
+but put a hash on the `br_table` path (`match` in a hot loop is one static site with
+unbounded dynamic count), needed a per-execution `.expect()`, and cost 32 inline bytes on
+every `FuncBody` including the majority that have no `br_table`. The flat range wins on all
+four and is the same amount of code.
+
+16 B is now the floor: `I64Const`/`F64Const` carry 8-byte immediates at align 8, so going
+lower needs a constant pool, which is not worth it.
+
+Beyond the enum, `TargetBranch` itself went 16 → 12 B (`usize` → `u32` plus the padding it
+was carrying), cutting every `br_table`'s heap array by 25% — and rustc emits wide
+`br_table`s for `match`.
 
 ### B. Frame setup re-derives everything on every call
 
@@ -265,10 +290,11 @@ frame-size measurement must raise the guard first — `probe` now sets it to `u3
 
 1. **B** — per-function metadata table. Contained, and `call_heavy` is the only workload
    that has responded to anything.
-2. **A** — mechanical, but touches lowering plus every arm reading those fields.
+2. ~~**A**~~ — done; the instruction stream is 16 B. Not yet re-benchmarked, so the
+   throughput effect is unmeasured.
 3. **C**.
-4. **E** — only after measuring the others; it may look different once the instruction
-   stream is 24 B.
+4. **E** — only after measuring the others; it may look different now that the instruction
+   stream is 16 B.
 
 D is done (no measurable gain). F is worth doing whenever convenient — it is a footprint and
 tail-latency fix rather than a throughput one, so it will not show up in these benchmarks.
