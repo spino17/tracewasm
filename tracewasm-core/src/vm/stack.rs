@@ -242,6 +242,10 @@ impl<T: Clone> Stack<T> {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.stack_pointer = 0;
+    }
+
     /// The current logical height (number of live values).
     pub fn height(&self) -> u32 {
         self.stack_pointer as u32
