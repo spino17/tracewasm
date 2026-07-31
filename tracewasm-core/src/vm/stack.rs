@@ -256,13 +256,30 @@ impl<T: Clone> Stack<T> {
     /// Reuses a stale slot when the pointer is below `inner.len()` (i.e. after a
     /// prior pop/truncate), only growing the backing vector when the pointer is
     /// already at the high-water mark. Either way `stack_pointer` advances by one.
+    ///
+    /// Growth is outlined into [`Self::push_grow`] because `push` is inlined into
+    /// all ~200 arms of `TraceVMState::execute`, so expanding `Vec::push` there
+    /// costs 5-10% of interpreter throughput. Not the branch — pre-filling the
+    /// store so the compare always passed changed nothing. `#[cold]` on top of
+    /// `#[inline(never)]` measured *worse*, so it is deliberately absent.
     pub fn push(&mut self, val: T) {
         if self.stack_pointer < self.inner.len() {
             self.inner[self.stack_pointer] = val;
+            self.stack_pointer += 1;
         } else {
-            self.inner.push(val);
+            self.push_grow(val);
         }
+    }
 
+    /// The high-water-mark case of [`Self::push`]: extends the backing storage.
+    ///
+    /// Runs once per stack slot per *instance*, not per call — the stack lives on the
+    /// `Instance`, so `inner.len()` stays at the high-water mark across invocations.
+    /// Measured at 9-33 calls against ~580k pushes for a 20k-iteration workload, and
+    /// zero on every call after the first.
+    #[inline(never)]
+    fn push_grow(&mut self, val: T) {
+        self.inner.push(val);
         self.stack_pointer += 1;
     }
 
