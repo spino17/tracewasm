@@ -386,13 +386,62 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// life of the frame, so they are always live storage that the operand
     /// discipline never touches. Validation guarantees `index < locals_len`.
     fn get_local(&self, index: LocalIndex) -> Val {
-        self.instance.stack.inner[(index.0 + self.caller_base_height) as usize]
+        let slot = (index.0 + self.caller_base_height) as usize;
+
+        // Mirrors the SAFETY argument below, so a broken link shows up as a failed
+        // test rather than as a silent out-of-bounds read. Compiled out in release.
+        debug_assert!(
+            slot < self.instance.stack.inner.len(),
+            "local slot {slot} is outside the operand stack's backing storage \
+             (len {}) — one of the invariants in the SAFETY comment no longer holds",
+            self.instance.stack.inner.len()
+        );
+
+        // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
+        // first belongs to `wasmparser`; the other three are this crate's own and
+        // are the ones that can rot:
+        //
+        // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
+        //    whole module in `Module::compile` before any lowering.
+        // 2. `stack_pointer == caller_base_height + locals_len` once the frame is
+        //    set up: `execute` derives `caller_base_height` by subtracting the
+        //    arguments already on the stack, then pushes the remaining declared
+        //    locals. Changing that setup invalidates this.
+        // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
+        //    in `vm::stack`.
+        // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
+        //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
+        //    any such call would break this.
+        //
+        // Together: `caller_base_height + index.0 < stack_pointer <= inner.len()`.
+        //
+        // Constant expressions cannot reach here at all — they run on the much
+        // smaller `Stack::for_const_expr_evaluation`, and
+        // `emit_instruction_for_const_expr` accepts a closed whitelist of operators
+        // that excludes `local.get`/`local.set`/`local.tee`.
+        unsafe { *self.instance.stack.inner.get_unchecked(slot) }
     }
 
     /// Writes local slot `index` in this frame's locals region. See
     /// [`Self::get_local`] for why this indexes the backing storage directly.
     fn set_local(&mut self, index: LocalIndex, val: Val) {
-        self.instance.stack.inner[(index.0 + self.caller_base_height) as usize] = val;
+        let slot = (index.0 + self.caller_base_height) as usize;
+
+        debug_assert!(
+            slot < self.instance.stack.inner.len(),
+            "local slot {slot} is outside the operand stack's backing storage \
+             (len {}) — one of the invariants in `get_local`'s SAFETY comment no \
+             longer holds",
+            self.instance.stack.inner.len()
+        );
+
+        // SAFETY: identical to [`Self::get_local`] — see the four invariants
+        // enumerated there. Writing rather than reading needs nothing extra: the
+        // slot is inside this frame's locals region, which the operand discipline
+        // never touches for the life of the frame.
+        unsafe {
+            *self.instance.stack.inner.get_unchecked_mut(slot) = val;
+        }
     }
 
     /// Truncates `operand` toward zero, checking the result is representable in an
