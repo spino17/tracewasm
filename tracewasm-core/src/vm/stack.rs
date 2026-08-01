@@ -75,6 +75,40 @@ pub enum Val {
     Ref(Option<FuncIndex>),
 }
 
+/// Reports an operand whose variant is not the one the instruction expected.
+///
+/// The accessors below are called once or more per interpreted instruction, so
+/// their failure path is outlined rather than written inline. `panic!` in the body
+/// would put a call there, and anything the accessor holds across it would have to
+/// occupy a callee-saved register — whose save and restore is emitted at the
+/// function's entry and exit, and so is paid on every call.
+///
+/// One helper per type, each taking no arguments, so there is nothing to keep
+/// live. They diverge, which lets the compiler reach them with a plain branch
+/// instead of a call.
+mod wrong_ty {
+    #[inline(never)]
+    pub fn i32() -> ! {
+        panic!("value is not i32")
+    }
+    #[inline(never)]
+    pub fn i64() -> ! {
+        panic!("value is not i64")
+    }
+    #[inline(never)]
+    pub fn f32() -> ! {
+        panic!("value is not f32")
+    }
+    #[inline(never)]
+    pub fn f64() -> ! {
+        panic!("value is not f64")
+    }
+    #[inline(never)]
+    pub fn reference() -> ! {
+        panic!("value is not ref")
+    }
+}
+
 impl Val {
     /// The default `i32` value (`0`).
     pub fn i32_zero() -> Self {
@@ -104,36 +138,28 @@ impl Val {
     /// Unwraps an `i32` value. Panics if this value is not an `I32`; callers rely
     /// on validation having already type-checked the operand.
     pub fn as_i32(&self) -> i32 {
-        let Val::I32(val) = self else {
-            panic!("value is not i32")
-        };
+        let Val::I32(val) = self else { wrong_ty::i32() };
 
         *val
     }
 
     /// Unwraps an `i64` value. Panics if this value is not an `I64`.
     pub fn as_i64(&self) -> i64 {
-        let Val::I64(val) = self else {
-            panic!("value is not i64")
-        };
+        let Val::I64(val) = self else { wrong_ty::i64() };
 
         *val
     }
 
     /// Unwraps an `f32` value. Panics if this value is not an `F32`.
     pub fn as_f32(&self) -> f32 {
-        let Val::F32(val) = self else {
-            panic!("value is not f32")
-        };
+        let Val::F32(val) = self else { wrong_ty::f32() };
 
         *val
     }
 
     /// Unwraps an `f64` value. Panics if this value is not an `F64`.
     pub fn as_f64(&self) -> f64 {
-        let Val::F64(val) = self else {
-            panic!("value is not f64")
-        };
+        let Val::F64(val) = self else { wrong_ty::f64() };
 
         *val
     }
@@ -141,7 +167,7 @@ impl Val {
     /// Unwraps a reference value. Panics if this value is not a `Ref`.
     pub fn as_ref(&self) -> Option<FuncIndex> {
         let Val::Ref(val) = self else {
-            panic!("value is not ref")
+            wrong_ty::reference()
         };
 
         *val
@@ -215,6 +241,15 @@ pub(crate) enum DataVal {
     Dropped,
     /// A still-live passive segment holding its raw byte blob.
     Passive(Box<[u8]>), // data blob
+}
+
+/// Reports a pop from an empty stack.
+///
+/// Not generic and takes no arguments, so one copy is shared by every `Stack<T>`
+/// and callers keep nothing live for it.
+#[inline(never)]
+fn pop_underflow() -> ! {
+    panic!("pop from an empty operand stack")
 }
 
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
@@ -313,8 +348,18 @@ impl<T: Clone> Stack<T> {
     /// Precondition: the stack is non-empty. Popping an empty stack underflows
     /// `stack_pointer` and panics.
     pub fn pop(&mut self) -> T {
-        let val = self.inner[self.stack_pointer - 1].clone();
-        self.stack_pointer -= 1;
+        // Indexing would reach `panic_bounds_check`, which takes the index and the
+        // length as arguments — both must be materialised and held to the call, and
+        // a value live across a call has to occupy a callee-saved register whose
+        // save and restore is then paid on every pop. `pop_underflow` takes nothing.
+        let sp = self.stack_pointer.wrapping_sub(1);
+
+        let Some(val) = self.inner.get(sp) else {
+            pop_underflow()
+        };
+
+        let val = val.clone();
+        self.stack_pointer = sp;
 
         val
     }
