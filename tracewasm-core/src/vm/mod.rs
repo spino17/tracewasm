@@ -107,6 +107,7 @@ enum Step {
     Call {
         func_index: FuncIndex,
         params_count: u32,
+        is_indirect: Option<TableIndex>,
     },
     JumpTo(usize),
 }
@@ -303,9 +304,9 @@ impl TraceVM {
             frame_base_height: u32,
             br_table_targets: &'a Box<[TargetBranch]>,
             instruction_offsets: &'a Box<[u32]>,
-            call_instruction_index: u32,
-            call_instruction_offset: u32,
             callee_results_len: u32,
+            callee_func_index: FuncIndex,
+            callee_is_indirect: Option<TableIndex>,
         }
 
         let mut frames: Vec<Frame> = Vec::with_capacity(10);
@@ -359,6 +360,7 @@ impl TraceVM {
                 Step::Call {
                     func_index: callee_func_index,
                     params_count: callee_params_count,
+                    is_indirect,
                 } => {
                     // only local function calls come here
                     debug_assert!(callee_func_index.0 >= imported_func_count);
@@ -381,9 +383,9 @@ impl TraceVM {
                         frame_base_height,
                         br_table_targets,
                         instruction_offsets,
-                        call_instruction_index: pc as u32,
-                        call_instruction_offset: instruction_offsets[pc],
                         callee_results_len: callee_results_len as u32,
+                        callee_func_index,
+                        callee_is_indirect: is_indirect,
                     });
 
                     let callee_locals_len = callee_locals_ty.len();
@@ -453,60 +455,72 @@ impl TraceVM {
                 func_index: callee_func_index,
                 params_count: callee_params_count,
             } => {
-                if callee_func_index.0 >= imported_func_count {
-                    return Ok(Step::Call {
-                        func_index: *callee_func_index,
-                        params_count: *callee_params_count,
-                    });
-                }
+                return Self::call_func(
+                    *callee_func_index,
+                    *callee_params_count,
+                    imported_func_count,
+                    module,
+                    instance,
+                    None,
+                );
+            }
+            Instruction::CallIndirect {
+                ty_index,
+                table_index,
+            } => {
+                let table = &instance.table_vals[table_index.0 as usize];
+                // The index operand is an unsigned i32; a negative value becomes a
+                // large `usize` and fails the bounds check below.
+                let slot = instance.stack.pop().as_i32() as u32 as usize;
 
-                // execute imported function!
-                let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
-                let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
-
-                debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
-
-                let FuncKind::Imported {
-                    module_name,
-                    imported_func_name,
-                } = &callee_func_decl.kind
-                else {
-                    unreachable!()
+                // Trap if the index is past the table's end (wasm: "undefined element").
+                let Some(func_ref) = table.table.get(slot).copied() else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::TableSlotOutOfBounds,
+                    ));
                 };
 
-                // The stack holds untagged `Value`s, so the host boundary re-tags them
-                // from the callee's declared parameter types. Collected into a
-                // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
-                // import of five or fewer parameters costs no allocation.
-                let callee_params = ParamVals::new(
-                    instance
-                        .stack
-                        .pop_params(*callee_params_count)
-                        .iter()
-                        .zip(callee_params_ty)
-                        .map(|(param, ty)| param.into_val(ty))
-                        .collect(),
-                );
+                // Trap on a null element (wasm: "uninitialized element").
+                let Some(callee_func_index) = func_ref else {
+                    return Err(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::NullElementInTable,
+                    ));
+                };
 
-                // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-                let results = instance
-                    .import_registry
-                    .execute(
-                        module_name,
-                        imported_func_name,
-                        callee_params.as_ref(),
-                        &mut instance.memory,
-                    )
-                    .map_err(|err| {
-                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
-                    })?;
+                let func_ty = &module.types[ty_index.0 as usize];
+                let params = &func_ty.params;
+                let results = &func_ty.results;
 
-                // push results to the stack
-                for res in results {
-                    instance.stack.push(res.into());
+                let func = &module.func_decls[callee_func_index.0 as usize];
+                let ty = &module.types[func.ty.0 as usize];
+
+                let declared_params = &ty.params;
+                let declared_results = &ty.results;
+
+                // Trap if the callee's signature differs from the type the
+                // instruction expects (wasm: "indirect call type mismatch").
+                if params.as_ref() != declared_params.as_ref()
+                    || results.as_ref() != declared_results.as_ref()
+                {
+                    return Err(signature_mismatch(
+                        *table_index,
+                        declared_params,
+                        declared_results,
+                        params,
+                        results,
+                    ));
                 }
 
-                Step::Next
+                return Self::call_func(
+                    callee_func_index,
+                    declared_params.len() as u32,
+                    imported_func_count,
+                    module,
+                    instance,
+                    Some(*table_index),
+                );
             }
             Instruction::I32Store {
                 offset: memarg_offset,
@@ -531,6 +545,76 @@ impl TraceVM {
         };
 
         Ok(res)
+    }
+
+    fn call_func<M: Memory, I: ImportRegistry>(
+        callee_func_index: FuncIndex,
+        callee_params_count: u32,
+        imported_func_count: u32,
+        module: &Module,
+        instance: &mut Instance<M, I>,
+        is_indirect: Option<TableIndex>,
+    ) -> Result<Step, InstructionExecutionError> {
+        // local function
+        if callee_func_index.0 >= imported_func_count {
+            return Ok(Step::Call {
+                func_index: callee_func_index,
+                params_count: callee_params_count,
+                is_indirect,
+            });
+        }
+
+        // execute imported function!
+        let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
+        let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
+
+        debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
+
+        let FuncKind::Imported {
+            module_name,
+            imported_func_name,
+        } = &callee_func_decl.kind
+        else {
+            unreachable!()
+        };
+
+        // The stack holds untagged `Value`s, so the host boundary re-tags them
+        // from the callee's declared parameter types. Collected into a
+        // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
+        // import of five or fewer parameters costs no allocation.
+        let callee_params = ParamVals::new(
+            instance
+                .stack
+                .pop_params(callee_params_count)
+                .iter()
+                .zip(callee_params_ty)
+                .map(|(param, ty)| param.into_val(ty))
+                .collect(),
+        );
+
+        // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
+        let results = instance
+            .import_registry
+            .execute(
+                module_name,
+                imported_func_name,
+                callee_params.as_ref(),
+                &mut instance.memory,
+            )
+            .map_err(|err| match is_indirect {
+                Some(table_index) => InstructionExecutionError::CallIndirect(
+                    table_index,
+                    FunctionCall(callee_func_index, Box::new(err)),
+                ),
+                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
+            })?;
+
+        // push results to the stack
+        for res in results {
+            instance.stack.push(res.into());
+        }
+
+        Ok(Step::Next)
     }
 
     /// Evaluates a constant-expression instruction sequence to its single
