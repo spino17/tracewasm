@@ -31,7 +31,7 @@ impl LinearMemory {
     /// Creates a memory of exactly `len` bytes, zero-initialized.
     ///
     /// Byte-granular, unlike the page-granular public API: a length that is not a
-    /// whole number of pages rounds down in [`Memory::size_in_pages`]. Crate-internal
+    /// whole number of pages rounds down in [`MemoryView::size_in_pages`]. Crate-internal
     /// so the bounds-checking tests can work at byte granularity.
     pub(crate) fn with_byte_len(len: usize) -> Self {
         LinearMemory {
@@ -170,7 +170,15 @@ impl MemoryView for LinearMemory {
         Ok(())
     }
 
-    /// Reads a `u8` at `offset`. Errors if the access is out of bounds.
+    // The sized reads below are specialised: they decode straight out of `inner`
+    // rather than marshalling through a stack buffer and deferring to `read`, which
+    // is what the trait's defaults do. Doc comments are deliberately omitted so
+    // rustdoc shows the trait's, which still describe the contract exactly.
+    //
+    // Each therefore carries its own bound. `checked_add` is required, not stylistic:
+    // `offset + width` wraps for an offset near `usize::MAX`, the comparison passes,
+    // and the slice range comes out reversed — a panic instead of a trap.
+
     fn read_u8(&self, offset: usize) -> Result<u8, MemoryError> {
         let mem_len = self.inner.len();
 
@@ -193,7 +201,6 @@ impl MemoryView for LinearMemory {
         ))
     }
 
-    /// Reads a little-endian `u16` at `offset`. Errors if the access is out of bounds.
     fn read_u16(&self, offset: usize) -> Result<u16, MemoryError> {
         let mem_len = self.inner.len();
 
@@ -216,7 +223,6 @@ impl MemoryView for LinearMemory {
         ))
     }
 
-    /// Reads a little-endian `u32` at `offset`. Errors if the access is out of bounds.
     fn read_u32(&self, offset: usize) -> Result<u32, MemoryError> {
         let mem_len = self.inner.len();
 
@@ -239,7 +245,6 @@ impl MemoryView for LinearMemory {
         ))
     }
 
-    /// Reads a little-endian `u64` at `offset`. Errors if the access is out of bounds.
     fn read_u64(&self, offset: usize) -> Result<u64, MemoryError> {
         let mem_len = self.inner.len();
 
@@ -262,8 +267,6 @@ impl MemoryView for LinearMemory {
         ))
     }
 
-    /// Reads a little-endian `f32` at `offset`, preserving the exact bit pattern
-    /// (no NaN canonicalization). Errors if the access is out of bounds.
     fn read_f32(&self, offset: usize) -> Result<f32, MemoryError> {
         let mem_len = self.inner.len();
 
@@ -286,8 +289,6 @@ impl MemoryView for LinearMemory {
         )))
     }
 
-    /// Reads a little-endian `f64` at `offset`, preserving the exact bit pattern
-    /// (no NaN canonicalization). Errors if the access is out of bounds.
     fn read_f64(&self, offset: usize) -> Result<f64, MemoryError> {
         let mem_len = self.inner.len();
 

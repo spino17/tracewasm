@@ -9,8 +9,8 @@ All file references are `tracewasm-core/src/...`.
 
 ## 1. Baseline
 
-**Recorded at `2066ab8`** (after the `Instruction` 40 → 16 B work in §3A). This is the
-reference every future optimisation compares against.
+Re-recorded after levers A, C (locals) and F. This is the reference every future
+optimisation compares against.
 
 ### How to reproduce — read this before comparing
 
@@ -37,11 +37,11 @@ which is on the order of 10-30 wasm instructions. Do not read these as cycles-pe
 
 | workload | median ns/op | min | max | spread |
 | --- | --- | --- | --- | --- |
-| arithmetic (i64 + f64 mix) | **142.89** | 141.83 | 146.47 | 3.2% |
-| control flow (match + loops) | **138.55** | 136.69 | 141.21 | 3.3% |
-| memory (load/store) | **177.33** | 172.25 | 177.49 | 3.0% |
-| calls (one indirect per iter) | **116.57** | 115.98 | 117.39 | 1.2% |
-| heap (alloc + collections) | **16.01 ms** | 15.68 | 16.93 | 7.8% |
+| arithmetic (i64 + f64 mix) | **137.48** | 136.76 | 140.36 | 2.6% |
+| control flow (match + loops) | **137.14** | 135.63 | 151.33 | 11.4% |
+| memory (load/store) | **159.41** | 153.60 | 173.75 | 12.6% |
+| calls (one indirect per iter) | **111.31** | 108.55 | 113.73 | 4.7% |
+| heap (alloc + collections) | **14.96 ms** | 14.74 | 15.02 | 1.9% |
 
 The four `ns/op` rows are the ones to watch — each isolates a different interpreter cost
 (dispatch, control flow, linear memory, indirect calls), which is what localises a
@@ -51,14 +51,18 @@ regression that a single blended number would hide.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| trivial call, n=1 | **317.43 ns** | 312.08 | 322.32 | 3.2% |
-| 5-param call | **237.69 ns** | 236.18 | 239.13 | 1.2% |
-| direct recursion, depth 100 | **111.62 ns/op** | 111.27 | 113.92 | 2.4% |
-| direct recursion, depth 1000 | **113.58 ns/op** | 112.15 | 116.45 | 3.8% |
-| direct recursion, depth 3000 | **118.27 ns/op** | 116.82 | 118.76 | 1.6% |
+| trivial call, n=1 | **251.28 ns** | 248.16 | 258.87 | 4.3% |
+| 5-param call | **169.48 ns** | 167.63 | 179.47 | 7.0% |
+| direct recursion, depth 100 | **103.35 ns/op** | 100.15 | 118.44 | 17.7% |
+| direct recursion, depth 1000 | **112.17 ns/op** | 108.10 | 126.79 | 16.7% |
+| direct recursion, depth 3000 | **114.68 ns/op** | 111.98 | 126.23 | 12.4% |
 
-Recursion cost is flat in depth (112 → 118 ns/op from depth 100 to 3000), so frame setup is
-not super-linear. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
+Recursion cost is flat in depth (103 → 115 ns/op from depth 100 to 3000), so frame setup is
+not super-linear — though these three rows carry the widest spread in the table, so read the
+trend rather than the numbers. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
+
+The two invocation rows are separate exports on separate guests, so the gap between them is
+not the cost of extra parameters.
 
 ### Compile and instantiate
 
@@ -67,19 +71,19 @@ the whole module, not by the small part any one test executes.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| compile + instantiate: arithmetic | **0.12 ms** | 0.11 | 0.13 | 16.6% |
-| compile + instantiate: exotic | **0.52 ms** | 0.52 | 0.54 | 2.7% |
-| compile + instantiate: heap | **1.15 ms** | 1.09 | 1.16 | 6.1% |
+| compile + instantiate: arithmetic | **0.13 ms** | 0.11 | 0.14 | 20.1% |
+| compile + instantiate: exotic | **0.54 ms** | 0.52 | 0.59 | 12.9% |
+| compile + instantiate: heap | **1.11 ms** | 1.05 | 1.14 | 8.1% |
 
 ### Guest linear-memory growth
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| allocate ~1 page | **0.01 ms** | — | — | 19.5% |
-| allocate ~8 pages | **0.04 ms** | — | — | 18.4% |
-| allocate ~32 pages | **0.15 ms** | 0.15 | 0.16 | 6.5% |
-| vec growth to 20k elements | **4.83 ms** | 4.78 | 4.88 | 2.1% |
-| 4k short-lived allocations | **19.58 ms** | 19.42 | 19.80 | 1.9% |
+| allocate ~1 page | **0.01 ms** | 0.01 | 0.01 | 42.1% |
+| allocate ~8 pages | **0.04 ms** | 0.04 | 0.05 | 22.2% |
+| allocate ~32 pages | **0.17 ms** | 0.15 | 0.18 | 17.9% |
+| vec growth to 20k elements | **4.66 ms** | 4.54 | 4.97 | 9.2% |
+| 4k short-lived allocations | **19.11 ms** | 18.75 | 20.66 | 10.0% |
 
 The small-page rows have ~20% spread because they are microseconds — ignore them unless a
 change moves them by an order of magnitude.
@@ -98,6 +102,24 @@ any movement is real. Recompute it by summing `func_bodies[i].instructions.len()
 | heap | 39,972 | 624 KB | 1,561 KB |
 | exotic | 16,695 | 260 KB | 652 KB |
 | **total** | **85,908** | **1,342 KB** | **3,355 KB** |
+
+### What the completed levers bought
+
+Against the figures recorded before this round of work, on the same harness and machine:
+
+| row | before | now | change |
+| --- | --- | --- | --- |
+| trivial call, n=1 | 317.43 ns | **251.28** | −20.8% |
+| 5-param call | 237.69 ns | **169.48** | −28.7% |
+| memory (load/store) | 177.33 | **159.41** | −10.1% |
+| heap | 16.01 ms | **14.96** | −6.6% |
+| calls (one indirect per iter) | 116.57 | **111.31** | −4.5% |
+| arithmetic | 142.89 | **137.48** | −3.8% |
+| control flow | 138.55 | **137.14** | −1.0% |
+
+The two invocation rows moved most, which is F: the operand stack is no longer allocated per
+call. The throughput rows are mostly §3C's outlining of `Stack::push`'s growth path. Control
+flow is inside its own spread and should not be counted.
 
 ### What the 40 → 16 B work actually bought
 
@@ -140,11 +162,12 @@ Work performed per driver-loop iteration, for something as cheap as `local.get`:
    straddling one (was 40 bytes, straddling ~40% of the time; see §3A)
 2. call into `TraceVMState::execute` — real call/ret
 3. jump-table dispatch over a 192-variant discriminant
-4. `get_local` → `stack.inner[base + i]` — `Vec` pointer load, bounds check, 16-byte load
-5. `push` → `inner.len()` load, compare, branch, **second** bounds check, 16-byte store,
-   `sp` increment
+4. `get_local` → `stack.inner[base + i]` — `Vec` pointer load, 16-byte load. Unchecked
+   (`get_unchecked` behind a `debug_assert!`), so no bounds check in release
+5. `push` → `inner.len()` load, compare, branch, bounds check, 16-byte store, `sp`
+   increment. The growth path is outlined, so the branch falls through to a store
 
-Roughly **2 bounds checks and 5 bookkeeping loads to move one 16-byte value.** The
+Roughly **1 bounds check and 5 bookkeeping loads to move one 16-byte value.** The
 measurement is consistent with the code; there is no hidden cost elsewhere.
 
 Item 1 is lever A and is done — and notably it did *not* move throughput (§1), which is
@@ -162,12 +185,13 @@ it bought almost nothing; see §5.
 | B | Per-function metadata table | high for call-heavy | small | **next** |
 | A | Shrink `Instruction` 40 → 16 B | high | mechanical | **done** — see below |
 | E | `Val` 16 → 8 B untagged | high | invasive | open |
-| C | Remove redundant bounds checks | 10-25% | small | open |
-| F | Reuse the operand stack across calls | latency spikes only | trivial | open |
+| C | Remove redundant bounds checks | 10-25% | small | **partly done** — locals unchecked |
+| F | Reuse the operand stack across calls | latency spikes only | trivial | **done** — see below |
 | D | Hoist loop invariants | 5-10% | trivial | **done** — no measurable gain |
 
-B is promoted to first because `call_heavy` is the only workload that has responded to any
-change so far (−5%), which is evidence that per-call work is where the remaining slack is.
+B is first because per-call work is where the slack has consistently been: the call-heavy
+workload is the one that has responded most, and moving the operand stack off the per-call
+path (F) cut invocation latency 12-17%.
 
 ### A. `Instruction` was 40 bytes — now 16 B (done)
 
@@ -190,7 +214,7 @@ It also mis-modelled two things worth recording, since both cost a round of work
   variant 40 B.
 - **`If` was already the widest variant at 24 B, not `CallIndirect`'s equal.** The enum
   measured 24 B rather than 32 only because `Option<usize>`'s tag has spare values, so
-  rustc niche-packed the ~400-variant discriminant into it for free. That made `If` look
+  rustc niche-packed the 192-variant discriminant into it for free. That made `If` look
   cheaper than it was.
 
 What actually landed, in order — note that steps 2-4 each buy **nothing alone**, because the
@@ -232,7 +256,7 @@ instruction**.
 
 Precompute a `Box<[FuncMeta]>` at compile time and index it once per call.
 
-This is the top lever for `call_heavy` (31 ms, the worst absolute number) and it matters
+This is the top lever for call-heavy work and it matters
 disproportionately for real Rust output, which is full of small functions.
 
 ### C. `push` does redundant work
@@ -240,18 +264,24 @@ disproportionately for real Rust output, which is full of small functions.
 ```rust
 if self.stack_pointer < self.inner.len() {
     self.inner[self.stack_pointer] = val;   // bounds-checked store
+    self.stack_pointer += 1;
 } else {
-    self.inner.push(val);                    // capacity check + maybe realloc
+    self.push_grow(val);                     // #[inline(never)]
 }
 ```
 
-That is a length load, a branch, **and** a bounds check on the indexed store. Filling the
-backing `Vec` to capacity once at construction so `len() == capacity` always removes the
-branch permanently and one length load with it.
+A length load, a branch, and a bounds check on the indexed store remain. Filling the backing
+`Vec` to capacity once so `len() == capacity` always would remove the branch and one length
+load — but measurement says that is worth ~0: the branch is perfectly predicted, and the cost
+that outlining removed was the callee-saved spilling forced by a value live across
+`Vec::push`'s allocator call, not the compare. See `OUTLINING_COLD_PATHS.md`.
 
-Same for `get_local`/`set_local` (`vm/mod.rs`): validation already guarantees the index is
-in range — the invariant already documented for indexing `inner` directly — so
-`get_unchecked` behind a `debug_assert!` is defensible.
+The same treatment is worth trying on `Stack::pop` (242 call sites) and `Val::as_*`, whose
+bounds check and `panic!` are the equivalent hidden calls. Untested.
+
+**Locals: done.** `get_local`/`set_local` now use `get_unchecked` behind a `debug_assert!`,
+justified by the frame-layout invariants enumerated in `vm/mod.rs`. Worth ~3% on arithmetic,
+inside noise elsewhere.
 
 ### D. Hoist loop invariants
 
@@ -266,15 +296,24 @@ on every push, pop and local access.
 
 Biggest remaining win and the most invasive. This is what wasmi does internally.
 
-### F. `Stack::default()` reserves 8 MiB per top-level call
+### F. The 8 MiB operand-stack reservation (done)
 
-`VM_STACK_INITIAL_ALLOCATION_SIZE = 512 * 1024` **elements** × 16 B = **8 MiB**, allocated
-fresh in `TraceVM::run` on every top-level call. (The comment saying `// 512Kib` is wrong by
-16×.)
+`VM_STACK_INITIAL_ALLOCATION_SIZE = 512 * 1024` **elements** × 16 B = **8 MiB**. (The comment
+saying `// 512Kib` is wrong by 16×.)
 
-Invisible in these benchmarks because the allocator recycles the block, but it is 8 MiB of
-footprint per concurrent execution and a latency cliff whenever pages actually fault. Hang
-one stack off the `Instance` and reuse it.
+The stack is now a field on `Instance`, allocated once at instantiation and reset at each
+top-level entry, rather than constructed per call. That cut per-call latency by 12-17% at
+p50 and p99. Resetting on entry rather than on exit is what keeps an instance usable after a
+trap, which returns early with values still on the stack.
+
+Two consequences worth noting. The 8 MiB is now held for an instance's whole lifetime, so an
+embedder holding many idle instances pays it per instance. And because `Stack::reset` leaves
+the backing storage alone, the high-water mark survives across calls — growth happens on the
+order of tens of times per instance rather than on every call, which is what makes outlining
+it in §3C worthwhile.
+
+Still open: 512 Ki slots is a guess. Growth is cheap and rare now, so a much smaller initial
+reservation would cut the per-instance footprint at little cost.
 
 ---
 
@@ -323,13 +362,17 @@ it to a stack slot reloaded on every iteration.
 
 ### What changed
 
-- `execute` now returns `Result<usize, Box<InstructionExecutionError>>` — the next `pc` on
-  success. Boxing shrinks the error to 8 B, so the whole `Result` is 16 B and comes back in
-  two registers.
-- `pc` is passed **by value** and returned, so it stays in a register.
+- `execute` returns the next `pc` on success rather than taking `&mut pc`, so the `pc` stays
+  in a register instead of being spilled to a stack address.
 - `instructions.len()` hoisted out of the loop condition (lever D).
-- Added `impl From<MemoryError> for Box<InstructionExecutionError>` (`error.rs`) so `?` still
-  bridges at the ~50 memory-access sites.
+- The error was boxed at the time, making the whole `Result` 16 B and returnable in two
+  registers, with `impl From<MemoryError> for Box<InstructionExecutionError>` bridging `?` at
+  the ~50 memory-access sites.
+
+  **The box is no longer there** — it was removed in `d8ac131`, a nine-file test-suite commit,
+  with no rationale recorded and no measurement either way. So `execute` currently returns a
+  56-byte `Result` via `sret`. Re-boxing is an untested lever, not a completed one; the "After"
+  disassembly below was captured while the box was in place.
 
 ### Verified in the disassembly
 
@@ -363,7 +406,7 @@ tbnz w0, #0x0, ...        ; discriminant tested in w0
 | `locals_heavy` | 24,368 | 24,266 |
 | `noop` | 74 ns | 74 ns |
 
-Frame size unchanged (1,311 B / 6,396 frames), 147/147 tests, differential checks match
+Frame size unchanged (1,311 B / 6,396 frames), all tests passing, differential checks match
 native, depth guard still traps.
 
 **Why it did so little:** the `sret` store and its reload target the *same hot stack slot* —
@@ -378,30 +421,35 @@ optimising the plumbing around dispatch** and go after the work itself (A, B, E)
 
 The depth rig initially reported a regression to 1,995 frames / 4,204 B. That was the binary
 search hitting `Config::max_call_stack_depth` (default 2000), not the native stack. Any
-frame-size measurement must raise the guard first — `probe` now sets it to `u32::MAX`.
+frame-size measurement must raise the guard first, as `tests/metrics.rs` does via
+`Config::set_max_call_stack_depth`.
 
 ---
 
 ## 6. Suggested order
 
-1. **B** — per-function metadata table. Contained, and `call_heavy` is the only workload
-   that has responded to anything.
-2. ~~**A**~~ — done; the instruction stream is 16 B. Not yet re-benchmarked, so the
-   throughput effect is unmeasured.
-3. **C**.
-4. **E** — only after measuring the others; it may look different now that the instruction
-   stream is 16 B.
+1. **B** — per-function metadata table. Contained, and the call-heavy row is the one that
+   has responded most.
+2. **E** — the biggest remaining win, and the instruction-stream and stack work is out of
+   the way.
+3. **C**'s remaining half — the `-> !` cold-path treatment on `Stack::pop` and `Val::as_*`,
+   which needs no `unsafe`. Re-boxing `execute`'s error (§5) is a separate untested lever.
 
-D is done (no measurable gain). F is worth doing whenever convenient — it is a footprint and
-tail-latency fix rather than a throughput one, so it will not show up in these benchmarks.
+A, D and F are done. D produced no measurable gain; A moved footprint but not throughput;
+F moved latency but not throughput.
 
-**Measure after each step with `probe --verify`, not just `cargo test`.** The existing 147
-tests are all single-function fixtures with no declared locals; they went green through two
-real bugs in the locals-on-stack work. The differential check caught both in one run.
+**Measure after each step with `--test metrics` (regression bounds) or `--test perf_report`
+(distributions), not just `cargo test`.** The unit fixtures are mostly single-function with
+no declared locals and went green through two real bugs in the locals-on-stack work; the
+differential suite caught both in one run.
 
 ---
 
-## Appendix: reproducing the measurements
+## Appendix: the original ad-hoc harness
+
+**This harness is not in the repo and these workloads cannot be run.** The names below appear
+nowhere in the source tree; they are kept because §3B, §4 and §5 quote their numbers. Anything
+attributed to them is historical and unverifiable — see §1 for the reproducible baseline.
 
 - Workloads: `loop_arith` (pure dispatch), `call_heavy` (`call_indirect` per iteration),
   `mem_heavy` (linear-memory load/store), `locals_heavy` (8 live locals), `noop`

@@ -46,9 +46,8 @@
 //! one per operator, so the widest variant sets the memory cost of every compiled
 //! module, and at 16 bytes four of them share a cache line.
 //!
-//! Getting there took three separate narrowings, and *any one* of them regressing
-//! puts the enum back to 24 bytes on its own — they only pay off together, because
-//! the size is set by whichever variant is currently widest:
+//! Three narrowings keep it there. The size is set by whichever variant is widest,
+//! so relaxing *any one* of them puts the enum back to 24 bytes on its own:
 //!
 //! * **Instruction indices are `u32`, not `usize`.** Every backpatched index
 //!   (`Br::target_index`, `Block::end_index`, …) is a `u32`, which is what lets
@@ -802,12 +801,16 @@ pub enum Instruction {
     /// why the expected type index travels with the instruction.
     CallIndirect {
         /// Index into the module's type section of the signature this call site
-        /// expects. Only the index is stored: the signature itself is looked up
-        /// on demand, which keeps this variant from dominating the size of
-        /// [`Instruction`] (two boxed slices would make it 40 bytes rather than
-        /// 24). The lookup compares the signature *structurally* against the
-        /// callee's, not by index, since a module may declare two identical
-        /// types under different indices.
+        /// expects.
+        ///
+        /// Storing the parameter and result lists inline instead would make this
+        /// variant 40 bytes — two fat pointers plus the table index — and it alone
+        /// would set the size of every [`Instruction`]. Resolving the index against
+        /// `module.types` at execution costs one indexing operation.
+        ///
+        /// The check compares the signature *structurally* against the callee's,
+        /// not by index: a module may declare two identical types under different
+        /// indices, and both satisfy the call.
         ty_index: TyIndex,
         /// Table holding the callee function references.
         table_index: TableIndex,
@@ -982,6 +985,8 @@ impl BlockKind {
 
 /// A live control-flow label on the [`ControlStack`].
 struct Block {
+    /// Which label this is, carrying the instruction index its opener sits at so
+    /// that index can be backpatched at the matching `end`. See [`BlockKind`].
     kind: BlockKind,
     /// Operand-stack height this label unwinds to, *excluding* the label's own
     /// arity values.
@@ -1176,16 +1181,13 @@ impl ControlStack {
         self.inner.pop()
     }
 
-    /// The only writer of [`Self::curr_height`], so [`Self::max_height`] cannot
-    /// drift behind it.
+    /// The only writer of [`Self::curr_height`].
     ///
-    /// Every height write goes through here deliberately. An earlier version updated
-    /// the maximum at the two obvious assignment sites and missed the third — the
-    /// empty-control-stack path in [`Self::set_height`], which the function body's
-    /// final `end` reaches after popping its `Func` block. That case happened to be
-    /// harmless (the results it sets the height to were pushed by the body first, so
-    /// the maximum already covered them), but relying on that is exactly the kind of
-    /// argument that stops holding when a handler is reordered.
+    /// Routing every write through one place is what makes [`Self::max_height`] a
+    /// true upper bound rather than a recently-seen value. Assigning `curr_height`
+    /// directly anywhere else breaks that, including on paths that look
+    /// inconsequential — [`Self::set_height`] reaches this with an empty control
+    /// stack when a function body's final `end` has popped its `Func` block.
     fn note_height(&mut self, height: u32) {
         self.curr_height = height;
 
@@ -1254,10 +1256,7 @@ impl ControlStack {
 enum StackEffectResult {
     /// The operator pops `pops` values and pushes `pushes`; the net change is
     /// applied to `curr_height` (skipped while traversing dead code).
-    PopPush {
-        pops: u32,
-        pushes: u32,
-    },
+    PopPush { pops: u32, pushes: u32 },
     /// The operator resets the height to a known absolute value, e.g. `else`/`end`
     /// restoring `recorded_height + arity`.
     SetHeight(u32),
@@ -1279,6 +1278,9 @@ enum StackEffectResult {
     /// comparison operators — the comparisons included, since they push an `i32`
     /// boolean rather than nothing.
     BinaryOperator,
+    /// Net-zero: pops one operand and pushes one result, leaving the height
+    /// unchanged. Covers the numeric conversions and the unary integer/float
+    /// operators.
     UnaryOperator,
 }
 
@@ -2099,7 +2101,8 @@ impl Instruction {
 
                             br_targets_len += 1;
                         } else {
-                            // record which arm (`i`) of this `br_table` to backpatch at the target's `end`
+                            // record the absolute slot in the flat target array to backpatch
+                            // at the target's `end`
                             block
                                 .attached_breaks
                                 .push((index, br_targets_start + i as u32));
@@ -2300,6 +2303,17 @@ impl Instruction {
         ))
     }
 
+    /// Lowers a constant expression — a global, element, or data initializer.
+    ///
+    /// Accepts only the const-expr subset: the four `*.const` operators,
+    /// `global.get`, `ref.null`, `ref.func`, and `i32`/`i64` add/sub/mul. Anything
+    /// else is [`TraceWasmError::Unsupported`]. The terminating `end` closes the
+    /// expression and is consumed rather than emitted.
+    ///
+    /// Unlike [`Self::emit_instruction_for_func`] there is no control stack, no
+    /// height tracking, and no backpatching, because the subset contains no
+    /// branches — so this returns the instruction list alone, with no source-offset
+    /// sidecar and no `br_table` target array.
     pub(crate) fn emit_instruction_for_const_expr(
         mut operator_reader: OperatorsReader<'_>,
     ) -> Result<Vec<Instruction>, TraceWasmError> {

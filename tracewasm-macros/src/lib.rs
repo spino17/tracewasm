@@ -14,9 +14,9 @@
 //!         (a + b,)
 //!     }
 //!
-//!     // A trailing `&mut M` gives the host access to the guest's linear memory.
+//!     // A trailing `&mut V` gives the host access to the guest's linear memory.
 //!     #[module("env")]
-//!     fn store_byte<M: Memory>(&mut self, addr: i32, b: i32, mem: &mut M) -> () {
+//!     fn store_byte<V: MemoryView>(&mut self, addr: i32, b: i32, mem: &mut V) -> () {
 //!         let _ = mem.write_u8(addr as usize, b as u8);
 //!     }
 //! }
@@ -32,12 +32,19 @@
 //!
 //! ## The memory view
 //!
-//! A method may end with a `&mut M` parameter (where `M: Memory`) to read and
+//! A method may end with a `&mut V` parameter (where `V: MemoryView`) to read and
 //! write the instance's linear memory. It is **optional and must come last**: the
 //! macro strips it from the wasm signature and forwards the caller's memory after
 //! the decoded arguments, so a host function that ignores guest memory can simply
 //! leave it off. A `&mut` parameter anywhere else is rejected, since it would
 //! shift the wasm arguments.
+//!
+//! The bound is [`MemoryView`], not [`Memory`]: the generated `execute` is
+//! `fn execute<V: MemoryView>(..)`, so a method bounded on the wider `Memory`
+//! does not type-check against it. That is the intended capability, not a
+//! limitation — `MemoryView` reads and writes but cannot resize, and only the
+//! interpreter knows the module's declared maximum and the instance's configured
+//! cap that a resize must respect.
 //!
 //! ## Trapping
 //!
@@ -47,7 +54,7 @@
 //!
 //! ```ignore
 //! #[module("env")]
-//! fn read_byte<M: Memory>(&mut self, addr: i32, mem: &mut M)
+//! fn read_byte<V: MemoryView>(&mut self, addr: i32, mem: &mut V)
 //!     -> Result<(i32,), TraceWasmError>
 //! {
 //!     Ok((mem.read_u8(addr as usize)? as i32,))   // OOB pointer → trap
@@ -145,10 +152,14 @@ struct GlobalEntry {
     ret_type: Type,
 }
 
-/// Whether a method takes `&self` (a shared-reference receiver). Imported
-/// functions are validated by the `ImportedFunc` trait enforcer, but imported
-/// globals have no such enforcer, so the macro requires `&self` explicitly to
-/// give a clear error rather than a raw borrow-check failure in `get_global`.
+/// Whether a method takes `&self` (a shared-reference receiver).
+///
+/// The generated `get_global` takes `&self`, so a `#[global("...")]` getter
+/// declared any other way cannot be called from it. Rejecting the receiver here
+/// puts the error on the method the author wrote, instead of surfacing it as a
+/// borrow-check failure inside macro-generated code they cannot see. Imported
+/// functions need no equivalent check: `execute` takes `&mut self`, which
+/// accommodates every receiver shape.
 fn takes_shared_ref(func: &syn::ImplItemFn) -> bool {
     matches!(
         func.sig.inputs.first(),
@@ -371,9 +382,10 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         // the parameters form a `Params` tuple and the return type a `Results`
         // tuple.
         //
-        // Asserted on the types directly rather than by closing over the method:
-        // one taking `&mut M` is generic, so there is no single concrete `Fn`
-        // shape to check it against.
+        // Asserted on the types directly rather than by coercing the method into
+        // a bounded `Fn`: a method taking the memory view is generic over
+        // `V: MemoryView`, so it has no single concrete `Fn` shape to check
+        // against.
         asserts.push(quote! {
             {
                 fn __assert_params<T: ::tracewasm_core::instance::traits::Params>() {}
@@ -449,8 +461,14 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             }
         }
 
-        // Never called; exists only so the closures type-check, asserting each
-        // tagged method's signature satisfies `ImportedFunc`.
+        // Never called; type-checking its body is the entire point. Each block
+        // instantiates `__assert_params`/`__assert_results` at one tagged
+        // method's parameter tuple and return type, so a signature wasm cannot
+        // express is rejected here — at the `#[imports]` impl — rather than
+        // wherever the generated `execute` or `signature` is first used.
+        //
+        // Wrapped in a `const _` so the helper is scoped to the expansion and
+        // cannot collide with anything the embedder declares.
         const _: () = {
             #[allow(dead_code, non_snake_case, unused_parens, clippy::unused_unit)]
             fn __tracewasm_assert_import_signatures() {

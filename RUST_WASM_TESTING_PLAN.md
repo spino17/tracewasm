@@ -97,7 +97,7 @@ it is unnecessary.**
 | `table.get/set/size/grow/fill/copy/init`, `elem.drop` | not emitted; `call_indirect` is the only table op rustc uses, and it works |
 | **`Store` + linker + imported tables/memories** | rustc emits no table/memory imports. This was the single most expensive item on the old plan. |
 | **`spectest` host module** | only needed by files that import it — all of which are being skipped |
-| **`assert_invalid` / `assert_malformed` split** | 4,652 assertions that test *wasmparser*, not TraceWasm. Validation is delegated to `Validator::validate_all` (`module/mod.rs:945`); asserting on it is testing a dependency. |
+| **`assert_invalid` / `assert_malformed` split** | 4,652 assertions that test *wasmparser*, not TraceWasm. Validation is delegated to `Validator::validate_all` (`module/mod.rs:957`); asserting on it is testing a dependency. |
 
 Skipping the two validation directives is the biggest simplification: it removes the
 `TraceWasmError::Parsing` → `{Malformed, Invalid}` refactor entirely.
@@ -106,39 +106,35 @@ Skipping the two validation directives is the biggest simplification: it removes
 
 ## 4. What is genuinely broken — found by testing, not by reading
 
-### 4.1 Process abort at ~2–4k call frames (top priority)
+### 4.1 Process abort at ~2–4k call frames — **fixed**
 
-Calls are recursive native Rust calls (`vm/mod.rs:193-254`) with **no depth counter, no
-stack probe, no fuel**. Measured with recursion through a function pointer (LLVM cannot
-flatten an indirect call, so these are genuine wasm frames):
+Calls are recursive native Rust calls, and originally had no depth counter, no stack probe
+and no fuel. Measured with recursion through a function pointer (LLVM cannot flatten an
+indirect call, so these are genuine wasm frames), the process aborted with
+`fatal runtime error: stack overflow` somewhere between **2,000 and 4,000 wasm frames** on a
+default 8 MB main thread — a `SIGABRT`, not a catchable error.
 
-| depth | result |
-| --- | --- |
-| 1,000 | OK |
-| 2,000 | OK |
-| 4,000 | `fatal runtime error: stack overflow, aborting` |
-| 20,000+ | same |
+`call_func`'s local-callee branch now checks the running depth against
+`Config::max_call_stack_depth` before recursing and returns
+`TraceWasmError::CallStackExhausted`. The default is 2,000 frames. Imported callees run on
+the host's own stack and are not counted.
 
-The threshold is between **2,000 and 4,000 wasm frames** on a default 8 MB main thread.
-This is **not a catchable error** — it is a `SIGABRT` that kills the host process.
+What remains: the guard is a fixed frame count, not a measurement of native stack left.
+2,000 is sized for a release build on a normal main-thread stack — a debug build costs
+roughly 30 KB of native stack per wasm frame, so raising the limit, or running on a small
+thread stack, can still overflow underneath it. The recursion tests spawn a large-stack
+thread for that reason.
 
-This matters far more for the stated goal than for spec compliance. A recursive-descent
-parser, a deep tree walk, `serde_json` on nested input, or `Drop` on a long linked list
-will all reach a few thousand frames in ordinary use and take the embedder down with them.
-
-Note the first version of this test appeared to survive 2M frames; LLVM had turned it into
-a `loop`. Accumulator recursion gets flattened, indirect and tree recursion do not.
-
-Fix: a depth counter in the VM's call path, `Config::max_call_depth`, and a real
-`CallStackExhausted` error. Small, self-contained, and it converts a process abort into an
-ordinary trap.
+Worth keeping in mind when writing depth tests: the first version of this one appeared to
+survive 2M frames because LLVM had turned it into a `loop`. Accumulator recursion gets
+flattened; indirect and tree recursion do not.
 
 ### 4.2 Calling ergonomics
 
 `TypedFunc` requires static generics with params arity ≤ 5, results arity ≤ 3, and `WasmTy`
-only for `i32/i64/f32/f64` (`instance/traits.rs:328-337`). There is no
+only for `i32/i64/f32/f64` (`instance/traits.rs:30-85`). There is no
 `invoke(name, &[Val]) -> Vec<Val>` path, and **no way to read an exported global**
-(`Export::Global` exists but only `to_func()` has an accessor, `module/mod.rs:769`).
+(`Export::Global` exists but only `to_func()` has an accessor, `module/mod.rs:780`).
 
 Any test harness needs the dynamic path. So does any embedder that does not know export
 signatures at compile time.
@@ -147,21 +143,23 @@ signatures at compile time.
 
 Fine for humans, not machine-matchable, and two distinct traps are collapsed:
 divide-by-zero and `INT_MIN / -1` overflow are both
-`InstructionExecutionError::Division` (`error.rs:589`), separable only by parsing
+`InstructionExecutionError::Division` (`error.rs:293`), separable only by parsing
 interpolated operands. Worth splitting on its own merits.
 
 ### 4.4 Smaller items
 
-- `Validator::new()` (`module/mod.rs:945`) uses `WasmFeatures::default()`, which enables GC,
+- `Validator::new()` (`module/mod.rs:957`) uses `WasmFeatures::default()`, which enables GC,
   SIMD, memory64, threads, exceptions and the component model — far more than the second
   parse pass can represent. Pin the feature set to what rustc emits, so unsupported input
   is rejected at validation with a clear message instead of surfacing as `Unsupported` from
   a deeper layer.
-- `Config::max_memory_size_in_pages` defaults to 1000 (`instance/config.rs:20`) ≈ 64 MB.
+- `Config::max_memory_size_in_pages` defaults to 1000 (`instance/config.rs:27`) ≈ 64 MB.
   Test binaries start at 17 pages, but any real workload will want more.
 - `Config::max_locals_per_func` is never read anywhere in the repo.
-- `memory64`/`table64` input **panics** rather than erroring: `.as_i32()` on an `i64`
-  const-expr result (`module/mod.rs:1776`, panic at `vm/stack.rs:95`). Not reachable from
+- `table64` input **panics** rather than erroring: `.as_i32()` on an `i64` const-expr result
+  (`module/mod.rs:1806`, panic at `vm/stack.rs:108`). 64-bit *memory* no longer reaches that
+  path — `Module::compile` rejects it as `Unsupported("64-bit memory")` — but tables are not
+  guarded. Not reachable from
   `wasm32-*`, but it is a panic on untrusted input.
 - `cargo build` fails at the workspace root: `tracewasm-scratch` is a `cdylib` guest crate
   that will not link for the host target. Blocks any CI.
@@ -233,8 +231,9 @@ Two implementation details that bite:
 
 1. Exclude `tracewasm-scratch` from workspace default members (or gate on
    `target_arch = "wasm32"`) so `cargo build`/`cargo test` work at the root.
-2. Add `Config::max_call_depth`, a depth counter in the VM call path, and a
-   `CallStackExhausted` error. Turns a `SIGABRT` into a trap.
+2. ~~Add `Config::max_call_depth`, a depth counter in the VM call path, and a
+   `CallStackExhausted` error.~~ **Done** — shipped as `Config::max_call_stack_depth`;
+   see §4.1.
 3. Raise `Config::max_memory_size_in_pages`; either enforce or delete
    `max_locals_per_func`.
 4. Pin `WasmFeatures` to the set rustc emits.
@@ -245,11 +244,14 @@ Two implementation details that bite:
 2. Exported-global read (and memory/table accessors while there).
 3. Split `Division` into divide-by-zero and overflow; align trap message text.
 4. Relax `FuncCallError::new`'s `debug_assert!` that the cause is always
-   `InstructionExecution` (`error.rs:504`) — a dynamic path can fail otherwise.
+   `InstructionExecution` (`error.rs:206`) — a dynamic path can fail otherwise.
 
-### Phase 3 — Tier 1 differential harness
+### Phase 3 — Tier 1 differential harness — **built**
 
-Native-vs-wasm corpus, run in CI. This is the main ongoing investment.
+Native-vs-wasm corpus. `tracewasm-test/build.rs` compiles each `guests/*.rs` program to
+`wasm32-unknown-unknown`, and `tests/differential.rs` `include!`s the same sources natively,
+so every guest has a ground truth that cannot drift from the wasm under test — 23 cases
+today. Remains the main ongoing investment: the corpus grows with the guests.
 
 ### Phase 4 — Tier 3 spec subset
 
@@ -273,7 +275,7 @@ only `TypedFunc` needs widening).
 | error-classification split for `assert_invalid`/`assert_malformed` | **dropped** — tests wasmparser, not TraceWasm |
 | SIMD / GC / memory64 / multi-memory / threads / exceptions | **dropped** |
 | 257 spec files | ~55, as third-tier coverage |
-| depth guard as "Phase 2, for `assert_exhaustion`" | **Phase 1, top priority** — it is a live process-abort bug at ~2–4k frames |
+| depth guard as "Phase 2, for `assert_exhaustion`" | was **Phase 1, top priority** — a process-abort bug at ~2–4k frames; now fixed, see §4.1 |
 | spec suite as primary harness | differential-vs-native as primary |
 
 Net: the expensive architectural work comes off the table, and the one item that was

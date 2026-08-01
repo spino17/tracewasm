@@ -16,7 +16,8 @@
 //! ## Scope
 //!
 //! The parser targets core WebAssembly. It rejects the component model, GC
-//! types, and non-function imports as [`error::TraceWasmError::Unsupported`];
+//! types, imports other than functions and globals, and 64-bit memory as
+//! [`error::TraceWasmError::Unsupported`];
 //! anything the second pass cannot represent surfaces as the same error rather
 //! than a panic.
 //!

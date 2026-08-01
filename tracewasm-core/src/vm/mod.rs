@@ -100,14 +100,22 @@ const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
+/// Namespace for the interpreter's entry points. Carries no state of its own:
+/// everything mutable lives on the [`Instance`], and per-frame data on
+/// [`TraceVMState`].
 pub(crate) struct TraceVM;
 
 impl TraceVM {
-    /// Top-level entry point: runs a locally-defined function on a fresh operand
-    /// stack and returns its result values (in declaration order).
+    /// Top-level entry point: runs a locally-defined function and returns its
+    /// result values (in declaration order).
     ///
-    /// This is the wrapper around [`Self::execute`] that owns the shared stack
-    /// and extracts the results, which `execute` itself leaves on the stack.
+    /// Resets [`Instance::stack`] to empty, pushes `params`, and delegates to
+    /// [`Self::execute`], which leaves the results on that stack for this function
+    /// to pop.
+    ///
+    /// Resetting on entry rather than on exit is what makes an instance reusable
+    /// after a trap: a failing call returns early with values still on the stack,
+    /// and the next call clears them.
     ///
     /// # Errors
     ///
@@ -126,7 +134,7 @@ impl TraceVM {
             instance.stack.push(*param);
         }
 
-        // A fresh stack starts at height 0, so this frame's base is 0.
+        // The reset above put the stack at height 0, so this frame's base is 0.
         Self::execute(func_index, instance, module, &mut call_stack_depth)?;
 
         // How many result values the function leaves on the stack.
@@ -361,11 +369,10 @@ enum ExecutionResult {
 
 /// The mutable state of a single in-flight function activation.
 ///
-/// Nothing here is owned per activation: both the stack (which holds this
-/// frame's locals *and* operands) and the instance are borrowed, because they
-/// are shared across the whole call tree. The two height fields are all that
-/// distinguishes one activation from another — see the module docs for the frame
-/// layout they describe.
+/// Nothing here is owned per activation: the instance is borrowed, and the stack
+/// holding this frame's locals *and* operands lives on it, shared across the whole
+/// call tree. The two height fields are all that distinguishes one activation from
+/// another — see the module docs for the frame layout they describe.
 struct TraceVMState<'a, M, I> {
     /// Bottom of this frame's **locals** region: the height the stack had on
     /// entry, minus the arguments (which are reused in place as the leading
@@ -375,6 +382,8 @@ struct TraceVMState<'a, M, I> {
     /// `caller_base_height + locals_len`. Every `recorded_height` is relative to
     /// this, *not* to `caller_base_height`.
     frame_base_height: u32,
+    /// The instance being run: linear memory, imports, globals, tables, and
+    /// [`Instance::stack`], on which this frame's locals and operands sit.
     instance: &'a mut Instance<M, I>,
 }
 
@@ -498,8 +507,8 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// Pops the address operand of a memory access and resolves it to an
     /// effective address by adding the instruction's static `memarg` offset.
     ///
-    /// Shared by every load/store arm, so they all inherit the same overflow and
-    /// offset-range trapping.
+    /// Shared by every load/store arm, so they all trap identically on an
+    /// effective address that leaves the 32-bit space.
     ///
     /// # Errors
     ///
@@ -523,6 +532,21 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         Ok(effective_offset as usize)
     }
 
+    /// Invokes `func_index`, routing an imported callee to the [`ImportRegistry`]
+    /// and a locally-defined one back into [`TraceVM::execute`].
+    ///
+    /// Backs `call` and `call_indirect`. The callee's arguments must already be the
+    /// topmost `params_count` values on the stack; its results are left there.
+    ///
+    /// `call_stack_depth` is incremented for the local branch only, and checked
+    /// against [`Config::max_call_stack_depth`] before recursing — an imported
+    /// callee runs on the host's stack, not this one.
+    ///
+    /// # Errors
+    ///
+    /// [`TraceWasmError::CallStackExhausted`] when the depth limit is reached, plus
+    /// anything the callee itself raises: a trap from a local callee, or whatever
+    /// an imported one returns.
     fn call_func(
         &mut self,
         func_index: FuncIndex,
@@ -594,29 +618,22 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// the control-flow decision for the driver loop.
     ///
     /// Heights are resolved against `frame_base_height` (see the module docs).
-    /// `module` is needed to resolve callees on `Call`.
+    /// `module` is needed to resolve callees on `Call`. `br_table_targets` is the
+    /// enclosing function's flat target array, which [`Instruction::BrTable`]'s
+    /// `(start_index, len)` range indexes into.
     ///
     /// ## Why this signature, precisely
     ///
-    /// This is the hottest boundary in the interpreter — crossed once per wasm
-    /// instruction — so both halves of it are shaped around the aarch64/SysV rule
-    /// that a return value over 16 bytes comes back through an `sret` pointer
-    /// (i.e. memory) instead of registers:
+    /// Crossed once per wasm instruction, so the signature is shaped around the
+    /// aarch64/SysV rule that a return value over 16 bytes comes back through an
+    /// `sret` pointer — memory — instead of registers.
     ///
-    /// * **`pc` is taken by value and the next `pc` is returned.** Taking
-    ///   `&mut usize` instead forces the caller's `pc` to have an address, so it
-    ///   cannot stay in a register across this (non-inlined) call: the caller then
-    ///   spills it and reloads it every iteration. Returning it keeps it in a
-    ///   register.
-    /// * **The error is boxed.** [`InstructionExecutionError`] is 56 bytes — its
-    ///   variants carry `String`s and a `Box<TraceWasmError>` — so an unboxed
-    ///   `Result` would be returned via `sret`, making *every successful
-    ///   instruction* pay a 56-byte stack write plus a reload to report a failure
-    ///   that essentially never happens. `Box` shrinks the error to 8 bytes, so
-    ///   `Result<usize, _>` fits in two registers. The cost is one allocation on
-    ///   the error path, which is already the slow path.
+    /// `pc` is taken by value and the next one returned. The ordinary shape,
+    /// `&mut usize`, forces the caller's `pc` to have an address, so it cannot stay
+    /// in a register across this (non-inlined) call and is spilled and reloaded
+    /// every iteration.
     ///
-    /// The `ExecutionResult` match stays inside this function so the enum never
+    /// The [`ExecutionResult`] match stays inside this function so that enum never
     /// crosses the boundary either; LLVM folds each arm's constant straight into
     /// the returned `pc`.
     fn execute(

@@ -8,7 +8,14 @@
 //! * [`Guest`] — a `guests/*.rs` program compiled to wasm by `build.rs`,
 //!   instantiated once so a test file with 40 cases does not pay 40
 //!   compilations.
-//! * [`metrics`] — timing and reporting used by `tests/metrics.rs`.
+//! * [`metrics`] — timing and reporting used by `tests/metrics.rs`, the
+//!   loose-bounds performance regression check.
+//!
+//! The other performance test, `tests/perf_report.rs`, is a consolidated report
+//! — distributions and percentiles, startup, memory, scaling, trap cost — and
+//! deliberately does not use [`metrics`]; it computes its own statistics.
+//! `tests/metrics.rs` answers "did something regress", `tests/perf_report.rs`
+//! answers "how does the VM perform".
 //!
 //! ## Why guests are built from source
 //!
@@ -317,19 +324,32 @@ where
 // Metrics
 // ---------------------------------------------------------------------------
 
-/// Timing and reporting for the tests that produce numbers rather than verdicts.
+/// Timing and reporting for `tests/metrics.rs`, which produces numbers rather
+/// than verdicts.
 ///
 /// These deliberately *print* measurements instead of asserting on wall-clock
 /// time: a throughput threshold that fails on a loaded CI box is worse than no
 /// test at all. Where something is asserted it is a correctness-adjacent
 /// invariant — a ratio, an ordering, a count — not an absolute duration.
+///
+/// The suite's other numeric test, `tests/perf_report.rs`, does not go through
+/// here. A [`Row`] summarises a whole batch as one mean, which is the right
+/// shape for a regression check and the wrong one for the distributions and
+/// percentiles that report is built around, so it keeps its own statistics.
 pub mod metrics {
     use super::{Duration, Instant};
 
     /// One measured row of a metric table.
     pub struct Row {
+        /// What was measured. Printed in the first column, and the key
+        /// [`Table::row`] looks up.
         pub label: String,
+        /// Counted iterations behind [`Self::elapsed`]. The warm-up iteration is
+        /// not one of them.
         pub iterations: u64,
+        /// Wall-clock **total** across all `iterations` — not the per-iteration
+        /// figure, which is [`Self::per_iter`]. Excludes the warm-up iteration
+        /// [`Table::measure`] runs before starting the clock.
         pub elapsed: Duration,
         /// Guest-level operations per iteration, where the test knows it. `None`
         /// when only wall-clock per call is meaningful.
@@ -361,6 +381,8 @@ pub mod metrics {
     }
 
     impl Table {
+        /// An empty table titled `title`, which [`Self::report`] prints as its
+        /// heading.
         pub fn new(title: impl Into<String>) -> Self {
             Table {
                 title: title.into(),
@@ -398,6 +420,10 @@ pub mod metrics {
             });
         }
 
+        /// Every row recorded so far, in the order [`Self::measure`] added them.
+        ///
+        /// For the assertions that walk the whole table — checking a row actually
+        /// ran, say. To pull out one row by name, use [`Self::row`].
         pub fn rows(&self) -> &[Row] {
             &self.rows
         }

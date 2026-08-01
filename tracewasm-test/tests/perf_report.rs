@@ -23,20 +23,18 @@
 //!
 //! ## How to read it honestly
 //!
-//! * **Discard the first run after a rebuild.** A cold row has been observed at
-//!   232 ns/op against 145 warm on the same binary.
+//! * **Discard the first run after a rebuild.** A cold row can read well over
+//!   half again its warm value.
 //! * **Ignore `max`.** §2 calibrates the timer against an empty measurement; its
 //!   own max lands in the microseconds because the OS deschedules the thread. Any
 //!   `max` at that scale is scheduler noise, not the VM. Trust p99, distrust max.
 //! * **Treat movement below the spread column as nothing.** That column exists so
 //!   a future change can be judged against measured noise rather than hope.
 //! * **Compare this report only against itself.** §3 reads a few percent higher
-//!   than the same workloads in `metrics.rs`, for two structural reasons: that file
-//!   times N iterations in one block and divides (a mean), whereas this one times
-//!   each rep and takes the median; and §3 runs after §1-2 have already done ~400k
-//!   invocations, so the machine is in a different thermal and cache state. Neither
-//!   number is wrong — they measure slightly different things. Cross-comparing them
-//!   will invent regressions that do not exist.
+//!   than the same workloads in `metrics.rs`: that file times N iterations in one
+//!   block and divides (a mean), this one times each rep and takes the median, and
+//!   §3 runs after §1-2 have already done ~400k invocations. Both are right; they
+//!   measure slightly different things. Cross-comparing invents regressions.
 //!
 //! Nothing here asserts on wall-clock time: a throughput threshold that fails on a
 //! loaded machine is worse than no test at all. The only assertions are that the
@@ -61,10 +59,9 @@ const WORK: i32 = 20_000;
 
 /// Repeats behind every median in §3 and §5.
 ///
-/// Was 5, which was too few to trust: §3's `arithmetic` row read 3.09 ms while §2
-/// measured the *identical* call at 2.88 ms over 2,000 samples — a 7% disagreement
-/// inside one report, on the table that is supposed to be the baseline. Five
-/// samples put the median one sample away from an outlier.
+/// Sized so §3 agrees with §2's 2,000-sample distribution on the one call they both
+/// measure; a handful of reps puts the median one sample away from an outlier and
+/// the two sections disagree by several percent.
 const REPEATS: usize = if cfg!(debug_assertions) { 5 } else { 25 };
 
 /// Samples for latency distributions. Large enough for a meaningful p99.9.
@@ -88,9 +85,9 @@ struct Workload {
     /// by it yields a meaningful per-op figure.
     ///
     /// False for `heap`: its body allocates and its total cost is nearly flat in
-    /// `n` (2k iterations measure 8,024 ns/op against 1,008 ns/op for 20k — same
-    /// total time). Reporting ns/op there would invite a comparison against the
-    /// other rows that means nothing.
+    /// `n`, so dividing by `n` yields a figure that changes with the work size
+    /// while the wall clock does not. Reporting ns/op there would invite a
+    /// comparison against the other rows that means nothing.
     scales_with_work: bool,
 }
 
@@ -165,10 +162,10 @@ impl Dist {
 
     /// Spread as a percentage of the median — the "is this signal?" column.
     ///
-    /// Deliberately p99-to-min rather than max-to-min: `max` is contaminated by OS
-    /// descheduling (see the timer floor in §2), so building the noise-floor column
-    /// out of it would contradict the report's own advice to distrust `max`. With
-    /// only a handful of samples p99 *is* the max; with thousands it isn't.
+    /// p99-to-min rather than max-to-min: `max` is contaminated by OS descheduling
+    /// (see the timer floor in §2), so a noise-floor column built from it would
+    /// contradict this report's own advice to distrust `max`. With a handful of
+    /// samples p99 *is* the max; with thousands it is not.
     fn spread_pct(&self) -> f64 {
         let med = self.at(0.5);
         if med == 0.0 {

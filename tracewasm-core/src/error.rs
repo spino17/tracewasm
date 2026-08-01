@@ -11,7 +11,8 @@ use std::{
 };
 use thiserror::Error;
 
-/// Any failure while validating, parsing, or lowering a WebAssembly module.
+/// Any failure while validating, parsing, lowering, instantiating, or executing
+/// a WebAssembly module.
 ///
 /// The `From<wasmparser::Error>` impl lets decode/validation failures propagate
 /// through `?` in the parser and lowering code.
@@ -34,9 +35,9 @@ pub enum TraceWasmError {
         InstructionExecutionError,
         u32,
     ),
-    /// A linear-memory access that ran past the memory's bounds (a wasm trap).
-    /// Fields: a description of the access, the byte offset attempted, and the
-    /// current memory length in bytes.
+    /// A linear-memory failure raised outside instruction execution — for example
+    /// a data-segment write during instantiation. Field: the specific
+    /// [`MemoryError`].
     #[error("{0:?}")]
     MemoryError(MemoryError),
     /// A call would have nested deeper than
@@ -57,8 +58,9 @@ pub enum TraceWasmError {
     #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
     CallStackExhausted(u32),
     /// A well-formed construct that TraceWasm deliberately does not handle
-    /// (e.g. the component model, GC types, or non-function imports). The string
-    /// describes the specific unsupported feature.
+    /// (e.g. the component model, GC types, imports other than functions and
+    /// globals, or 64-bit memory). The string describes the specific unsupported
+    /// feature.
     #[error("not supported in TraceWasm: {0}")]
     Unsupported(String),
     /// The params or results supplied to / produced by a typed call don't match
@@ -281,12 +283,16 @@ pub enum InstructionExecutionError {
     /// and the specific [`CallIndirectError`].
     #[error("call_indirect via table({0:?}): {1}")]
     CallIndirect(TableIndex, CallIndirectError),
-    /// A memory access failed (out of bounds, offset too large, or effective-
-    /// address overflow). Field: the specific [`MemoryError`].
+    /// A memory access failed (out of bounds, or effective-address overflow).
+    /// Field: the specific [`MemoryError`].
     #[error("{0}")]
     Memory(MemoryError),
+    /// An integer division trapped: a zero divisor, or the signed overflow case
+    /// `MIN / -1`. Fields: the rendered dividend and divisor.
     #[error("division failed: {num}/{deno}")]
     Division { num: String, deno: String },
+    /// An integer remainder trapped, which only happens on a zero divisor —
+    /// `MIN % -1` is defined as `0`. Fields: the rendered operands.
     #[error("remainder failed: {left} % {right}")]
     Remainder { left: String, right: String },
     /// A `trunc` conversion could not represent its operand in the target integer

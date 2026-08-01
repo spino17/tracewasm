@@ -17,6 +17,11 @@
 //! once (`VM_STACK_INITIAL_ALLOCATION_SIZE`) so steady-state execution does not
 //! reallocate.
 //!
+//! One `Stack` is held per [`Instance`](crate::instance::Instance) and shared by
+//! every frame of a call tree; [`Stack::reset`] empties it at each top-level entry
+//! without releasing the storage. Locals live below the operand region — see the
+//! frame layout in [`crate::vm`].
+//!
 //! ## Ordering conventions
 //!
 //! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
@@ -28,11 +33,17 @@
 //!
 //! ## Preconditions
 //!
-//! For speed the stack methods are unchecked: they assume the caller respects
+//! The stack methods are infallible in signature: they assume the caller respects
 //! the operand-stack discipline that WebAssembly validation already guarantees
 //! (never pop below zero, never preserve more values than are present, only
-//! truncate downward). Violations panic via index/underflow rather than
-//! returning an error.
+//! truncate downward). Violations panic via index or underflow rather than
+//! returning an error, so the bounds check remains as a backstop.
+//!
+//! [`Instance::stack`](crate::instance::Instance)'s backing storage is also read
+//! directly, bypassing these methods, by the locals accessors in [`crate::vm`]:
+//! locals sit below `stack_pointer` for the whole life of a frame, so the operand
+//! discipline never touches them. Those accessors index unchecked and carry the
+//! safety argument for it.
 
 use crate::{
     error::TraceWasmError,
@@ -242,6 +253,12 @@ impl<T: Clone> Stack<T> {
         }
     }
 
+    /// Empties the stack in O(1) by moving the pointer back to 0.
+    ///
+    /// The backing storage is left untouched, so both the allocation and the
+    /// high-water mark (`inner.len()`) survive. That is what keeps
+    /// [`Self::push_grow`] rare across the life of an instance rather than rare
+    /// only within a single call.
     pub fn reset(&mut self) {
         self.stack_pointer = 0;
     }
@@ -257,11 +274,17 @@ impl<T: Clone> Stack<T> {
     /// prior pop/truncate), only growing the backing vector when the pointer is
     /// already at the high-water mark. Either way `stack_pointer` advances by one.
     ///
-    /// Growth is outlined into [`Self::push_grow`] because `push` is inlined into
-    /// all ~200 arms of `TraceVMState::execute`, so expanding `Vec::push` there
-    /// costs 5-10% of interpreter throughput. Not the branch — pre-filling the
-    /// store so the compare always passed changed nothing. `#[cold]` on top of
-    /// `#[inline(never)]` measured *worse*, so it is deliberately absent.
+    /// Growth is outlined into [`Self::push_grow`] rather than calling `Vec::push`
+    /// here, and that is worth 5-10% of interpreter throughput. `Vec::push`'s body
+    /// calls the allocator, and values this function loads before the branch would
+    /// then be live across that call — forcing them into callee-saved registers,
+    /// whose save and restore is emitted at the function's entry and exit and so is
+    /// paid on every push. Keeping the call in a separate function leaves nothing
+    /// on the common path live across it, so the frame setup sinks into the cold
+    /// branch.
+    ///
+    /// Do not add `#[cold]` to the helper: it measures slower than `#[inline(never)]`
+    /// alone.
     pub fn push(&mut self, val: T) {
         if self.stack_pointer < self.inner.len() {
             self.inner[self.stack_pointer] = val;
@@ -273,10 +296,12 @@ impl<T: Clone> Stack<T> {
 
     /// The high-water-mark case of [`Self::push`]: extends the backing storage.
     ///
-    /// Runs once per stack slot per *instance*, not per call — the stack lives on the
-    /// `Instance`, so `inner.len()` stays at the high-water mark across invocations.
-    /// Measured at 9-33 calls against ~580k pushes for a 20k-iteration workload, and
-    /// zero on every call after the first.
+    /// Runs at most once per stack slot over the life of the stack. Since the stack
+    /// lives on the [`Instance`](crate::instance::Instance) and [`Self::reset`]
+    /// leaves `inner` alone, that is once per slot per instance rather than per
+    /// call — on the order of tens of calls against hundreds of thousands of pushes.
+    ///
+    /// Kept out of line so [`Self::push`] stays cheap; see the note there.
     #[inline(never)]
     fn push_grow(&mut self, val: T) {
         self.inner.push(val);

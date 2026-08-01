@@ -96,10 +96,39 @@ pub trait MemoryView {
     }
 
     /// Reads `data.len()` bytes starting from the `offset`.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::OutOfBoundsAccess`] with [`MemoryAccessKind::Read`] if the
+    /// access is not wholly inside the memory. All-or-nothing: on error `data` is
+    /// left untouched. A zero-length read at `offset == size_in_bytes()` succeeds;
+    /// any `offset` beyond that traps.
     fn read(&self, offset: usize, data: &mut [u8]) -> Result<(), MemoryError>;
 
     /// Writes `data.len()` bytes from `data` to the memory at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::OutOfBoundsAccess`] with [`MemoryAccessKind::Write`] if the
+    /// access is not wholly inside the memory. All-or-nothing: on error no byte is
+    /// modified. Same zero-length boundary rule as [`Self::read`].
     fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), MemoryError>;
+
+    // The sized accessors below default to marshalling through a stack buffer and
+    // deferring to `read`/`write`. A backend with direct access to its buffer is
+    // expected to override them and decode in place — that is the interpreter's
+    // hottest memory path, and the round-trip is pure overhead there.
+    //
+    // An override must reproduce two things, neither of which the type system
+    // enforces:
+    //
+    // * the same `OutOfBoundsAccess` shape as the default, carrying the requested
+    //   `offset` and the current length;
+    // * an `offset.checked_add(width)` bound. Written as `offset + width` it wraps
+    //   for an offset near `usize::MAX`, the comparison then passes, and the slice
+    //   range comes out reversed — a panic instead of a trap. That offset is
+    //   reachable: host functions receive a `MemoryView` and a negative guest `i32`
+    //   sign-extends into exactly that range.
 
     /// Reads a `u8` at `offset`. Errors if the access is out of bounds.
     fn read_u8(&self, offset: usize) -> Result<u8, MemoryError> {

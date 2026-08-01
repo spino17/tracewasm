@@ -12,6 +12,12 @@ pub struct Config {
     max_table_elements: u64,
     /// Max number of locals per function (including params).
     max_locals_per_func: u64,
+    /// Max depth of nested wasm calls before
+    /// [`TraceWasmError::CallStackExhausted`](crate::error::TraceWasmError::CallStackExhausted).
+    ///
+    /// Each wasm frame costs a native frame, so this bounds guest recursion below
+    /// the host stack's own limit, where an overflow would abort the process
+    /// instead of unwinding.
     max_call_stack_depth: u32,
 }
 
@@ -27,10 +33,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Sets `max_call_stack_depth`
     pub fn set_max_call_stack_depth(&mut self, depth: u32) {
         self.max_call_stack_depth = depth;
     }
 
+    /// Returns `max_call_stack_depth`
     pub fn get_max_call_stack_depth(&self) -> u32 {
         self.max_call_stack_depth
     }

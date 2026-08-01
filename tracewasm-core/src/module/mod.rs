@@ -44,8 +44,7 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 /// where `initial_pages` comes from the module's declared memory limits (see
 /// [`Module::instantiate`]).
 ///
-/// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB, and
-/// cap the initial allocation against the instance [`Config`].
+/// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB.
 pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The module's parsed DWARF, as loaded from its `.debug_*` custom sections.
@@ -433,6 +432,9 @@ pub struct Module {
     pub globals: Box<[Global]>,
     /// The export section, keyed by export name.
     pub exports: FxHashMap<String, Export>,
+    /// Reverse index over the function entries of [`Self::exports`]: exported
+    /// function index to export name. Lets an error name the function it came from
+    /// without scanning the export table.
     pub exported_func_index_to_name: FxHashMap<FuncIndex, String>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
@@ -540,6 +542,7 @@ impl Module {
         Ok(TypedFunc::new(func_index))
     }
 
+    /// The export name of function `index`, or `None` if it is not exported.
     pub fn exported_func_name(&self, index: FuncIndex) -> Option<&String> {
         self.exported_func_index_to_name.get(&index)
     }
@@ -944,8 +947,9 @@ impl Module {
     ///
     /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails, and
     /// [`TraceWasmError::Unsupported`] for valid modules using features TraceWasm
-    /// does not model (components, GC types, non-function imports, or any
-    /// operator the lowering pass rejects).
+    /// does not model: components, GC types, imports other than functions and
+    /// globals, 64-bit memory, more than one memory, tables of anything but
+    /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
     pub fn compile(buf: &[u8]) -> Result<Arc<Module>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
@@ -1553,9 +1557,12 @@ impl Module {
     /// - [`TraceWasmError::ImportSignatureMismatch`] if an imported function's
     ///   signature disagrees, or [`TraceWasmError::ImportGlobalTypeMismatch`] if
     ///   an imported global's type disagrees.
-    /// - [`TraceWasmError::TableTooLarge`] if a table's initial size exceeds the
-    ///   configured cap, and [`TraceWasmError::ElementSegmentOutOfBounds`] if an
-    ///   active element segment does not fit its target table.
+    /// - [`TraceWasmError::TableTooLarge`] / [`TraceWasmError::MemoryTooLarge`] if
+    ///   a table's or memory's initial size exceeds the configured cap, and
+    ///   [`TraceWasmError::ElementSegmentOutOfBounds`] if an active element segment
+    ///   does not fit its target table.
+    /// - Anything the module's `start` function raises, since it runs before this
+    ///   returns.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: &Arc<Module>,
         import_registry: I,

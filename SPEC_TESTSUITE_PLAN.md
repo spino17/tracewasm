@@ -9,7 +9,7 @@ All file references are `tracewasm-core/src/...` unless otherwise noted.
 
 ## 1. What exists today
 
-**12.2k LOC**, 5-crate workspace; `tracewasm-core` is the engine.
+**17.6k LOC**, 6-crate workspace; `tracewasm-core` is the engine (10.4k of it).
 
 Pipeline:
 
@@ -22,7 +22,7 @@ bytes
   → TypedFunc<P, R>::call
 ```
 
-147 tests pass. Fixtures are checked-in `.wasm` binaries pulled in with `include_bytes!`.
+186 tests pass. Fixtures are checked-in `.wasm` binaries pulled in with `include_bytes!`.
 **There is no `.wat`/`.wast` anywhere in the tree and no `wast`/`wat` dependency.**
 
 ### Already spec-correct
@@ -60,11 +60,11 @@ that will not link for the host target. Any CI harness needs it excluded first.
 
 `vm` is `pub(crate)`. The only public call path is `TypedFunc<P, R>::call` with **static
 generics**: params arity ≤ 5, results arity ≤ 3, and `WasmTy` implemented only for
-`i32/i64/f32/f64` (`instance/traits.rs:328-337`). A `.wast` runner needs
+`i32/i64/f32/f64` (`instance/traits.rs:30-85`). A `.wast` runner needs
 `invoke(name, &[Val]) -> Result<Vec<Val>, Trap>`.
 
 There is **no way to read an exported global**. `Export::Global` exists but only
-`to_func()` has an accessor (`module/mod.rs:769`), and `Instance` exposes nothing but
+`to_func()` has an accessor (`module/mod.rs:780`), and `Instance` exposes nothing but
 `memory_view()`. `exports.wast`, `linking.wast` and `globals.wast` need `(get "g")`.
 
 `Module::compile` fuses decode and validate into a single
@@ -101,8 +101,9 @@ problem. It is the largest single change on the list, and `linking.wast`, `impor
   runtime.
 - **Zero table instructions exist.** `table.get`, `table.set`, `table.size`, `table.grow`,
   `table.fill`, `table.copy`, `table.init` and `elem.drop` have no `Instruction` variant
-  and no lowering arm — they hit `Unsupported` at *compile* time
-  (`instruction.rs:2143-2148`), so `table_*.wast`, `elem.wast`, `bulk.wast` and `ref_*.wast`
+  and no lowering arm — they fall through to the lowering match's catch-all and hit
+  `Unsupported` at *compile* time
+  (`instruction/mod.rs:2264`), so `table_*.wast`, `elem.wast`, `bulk.wast` and `ref_*.wast`
   never load at all.
 - `select t` (`Operator::TypedSelect`) is likewise unsupported, which takes down plain
   `select.wast` too.
@@ -110,15 +111,27 @@ problem. It is the largest single change on the list, and `linking.wast`, `impor
   (`instance/mod.rs:35`) but **never passed to the VM** — dead state waiting for
   `table.init` / `elem.drop`.
 
-### 2.4 No call-depth guard — the runner will abort, not fail
+### 2.4 Call-depth guard — **done**
 
-Calls are recursive native Rust calls (`vm/mod.rs:193-254`) with **no depth counter, no
-stack probe, no fuel**. `Config` has three knobs and `max_locals_per_func` is never read
-anywhere in the repo.
+Calls are still recursive native Rust calls (`vm/mod.rs:172`), but the local-callee branch
+of `call_func` now tests the running depth against `Config::max_call_stack_depth` before
+recursing and returns `TraceWasmError::CallStackExhausted` (`vm/mod.rs:604-607`). The
+default limit is **2000** frames (`instance/config.rs:30`), and the error's `Display` text
+deliberately contains the substring `call stack exhausted` so `assert_exhaustion` matches
+it verbatim (`error.rs:59`). Imported callees run on the host's own stack and are
+excluded from the count.
 
-`assert_exhaustion "call stack exhausted"` (15 assertions across `call.wast`,
-`call_indirect.wast`, `fac.wast`, `skip-stack-guard-page.wast`) will overflow the native
-stack and **kill the test process**. Fix this early or those four files poison every run.
+So the 15 `assert_exhaustion` assertions across `call.wast`, `call_indirect.wast`,
+`fac.wast` and `skip-stack-guard-page.wast` now produce an ordinary trap instead of
+killing the test process. `Config` has four knobs now; `max_locals_per_func` is still
+never read anywhere in the repo.
+
+What is left: the guard is a fixed *frame count*, not a measurement of native stack
+remaining, and there is still no stack probe and no fuel. 2000 is sized for a release
+build on a normal main-thread stack — a debug build costs roughly 30 KB of native stack
+per wasm frame, so a runner that raises the limit, or runs on a small thread stack, can
+still overflow underneath the guard. The suite's recursion tests spawn a large-stack
+thread for exactly this reason.
 
 ### 2.5 Trap messages do not match, and two traps are collapsed
 
@@ -135,13 +148,13 @@ The suite matches with `actual.contains(expected)`. Current text is TraceWasm pr
 | `float truncation of \`{0}\` to {1} failed` | `invalid conversion to integer` / `integer overflow` |
 
 Critically, divide-by-zero and `INT_MIN / -1` overflow are both
-`InstructionExecutionError::Division` (`error.rs:589`), distinguishable only by parsing the
+`InstructionExecutionError::Division` (`error.rs:293`), distinguishable only by parsing the
 interpolated operands. `Division` needs splitting, and a variant→spec-string mapping layer
 is required.
 
 ### 2.6 Validator features are unpinned, which mis-classifies errors
 
-`Validator::new()` (`module/mod.rs:945`) means `WasmFeatures::default()`, which enables GC,
+`Validator::new()` (`module/mod.rs:957`) means `WasmFeatures::default()`, which enables GC,
 SIMD, memory64, threads, exceptions **and the component model**. The second parse pass then
 rejects most of that as `Unsupported`.
 
@@ -152,10 +165,11 @@ must stay distinct from `Invalid`.
 
 ### 2.7 Limits and smaller items
 
-- `Config::max_memory_size_in_pages` defaults to **1000** (`instance/config.rs:20`);
+- `Config::max_memory_size_in_pages` defaults to **1000** (`instance/config.rs:27`);
   `memory_grow.wast` grows toward 65536. The runner needs the full ceiling.
-- Multiple memories are rejected in three places (`module/mod.rs:1441`, `module/mod.rs:1826`,
-  `instruction.rs:1191`). Note the flattened testsuite root contains **41 multi-memory
+- Multiple memories are rejected in three places (`module/mod.rs:1470`, `module/mod.rs:1857`,
+  and `Instruction::check_memory_index`, `instruction/mod.rs:1288`). Note the flattened
+  testsuite root contains **41 multi-memory
   files** — the numeric-suffixed `address0`, `load0..2`, `linking0..3` etc. are the
   multi-memory variants of the same-named core tests, not fragments — *including* the only
   `memory_grow.wast`.
