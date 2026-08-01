@@ -11,7 +11,6 @@
 //! one operand pair, where a compiled Rust guest necessarily drags in a lot of
 //! surrounding code. Keep both.
 
-use tracewasm_core::error::FuncCallError;
 use tracewasm_core::instance::traits::Results;
 use tracewasm_test::{call_i32, call_typed, try_call};
 

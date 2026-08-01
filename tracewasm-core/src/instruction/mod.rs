@@ -1041,6 +1041,18 @@ struct ControlStack {
     /// Current operand-stack depth at the point the pass has reached. See the
     /// module-level "Height-tracking invariant".
     curr_height: u32,
+    /// The largest [`Self::curr_height`] seen anywhere in this function body, i.e.
+    /// the deepest the operand stack can get while executing it.
+    ///
+    /// **Operands only.** Heights are relative to the frame's operand base, so a
+    /// consumer sizing storage for a call needs
+    /// `caller_base_height + locals_len + max_height`, not `max_height` alone.
+    ///
+    /// Maintained by [`Self::note_height`], which every write to `curr_height` goes
+    /// through — that is what makes this an upper bound rather than merely a
+    /// recently-seen value. Dead code is excluded, which is correct: unreachable
+    /// instructions never execute, so they cannot deepen the stack at runtime.
+    max_height: u32,
 }
 
 impl ControlStack {
@@ -1164,6 +1176,24 @@ impl ControlStack {
         self.inner.pop()
     }
 
+    /// The only writer of [`Self::curr_height`], so [`Self::max_height`] cannot
+    /// drift behind it.
+    ///
+    /// Every height write goes through here deliberately. An earlier version updated
+    /// the maximum at the two obvious assignment sites and missed the third — the
+    /// empty-control-stack path in [`Self::set_height`], which the function body's
+    /// final `end` reaches after popping its `Func` block. That case happened to be
+    /// harmless (the results it sets the height to were pushed by the body first, so
+    /// the maximum already covered them), but relying on that is exactly the kind of
+    /// argument that stops holding when a handler is reordered.
+    fn note_height(&mut self, height: u32) {
+        self.curr_height = height;
+
+        if height > self.max_height {
+            self.max_height = height;
+        }
+    }
+
     /// Sets `curr_height`, unless the current block is traversing dead code.
     ///
     /// The dead-code guard is what makes it safe for branch/`end` handlers to
@@ -1179,7 +1209,7 @@ impl ControlStack {
     /// the current one instead of requiring the caller to compute it.
     fn set_height(&mut self, height: u32) {
         if self.inner.is_empty() {
-            self.curr_height = height;
+            self.note_height(height);
 
             return;
         }
@@ -1190,7 +1220,7 @@ impl ControlStack {
             return;
         }
 
-        self.curr_height = height;
+        self.note_height(height);
     }
 
     /// Applies an operator's net stack effect as the single expression
@@ -1212,7 +1242,7 @@ impl ControlStack {
             return;
         }
 
-        self.curr_height = self.curr_height - pops + pushes;
+        self.note_height(self.curr_height - pops + pushes);
     }
 }
 
