@@ -11,7 +11,7 @@ use crate::{
     module::{FuncIndex, Module},
     vm::{
         TraceVM,
-        stack::{DataVal, ElementVal, Stack, TableVal, Val},
+        stack::{DataVal, ElementVal, Stack, TableVal, Val, Value},
     },
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -27,7 +27,7 @@ pub mod traits;
 /// module can back several instances.
 pub struct Instance<M, I> {
     pub(crate) memory: M,
-    pub(crate) stack: Stack<Val>,
+    pub(crate) stack: Stack<Value>,
     pub(crate) import_registry: I,
     pub(crate) module: Arc<Module>,
     pub(crate) config: Config,

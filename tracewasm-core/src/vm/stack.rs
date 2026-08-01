@@ -47,10 +47,9 @@
 
 use crate::{
     error::TraceWasmError,
-    instance::traits::{ParamVals, ResultVals},
     module::{FuncIndex, ValType},
 };
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.
@@ -223,7 +222,21 @@ impl Val {
     }
 }
 
+impl From<&Val> for Value {
+    #[inline(always)]
+    fn from(value: &Val) -> Self {
+        match value {
+            Val::I32(val) => Value::from_i32(*val),
+            Val::I64(val) => Value::from_i64(*val),
+            Val::F32(val) => Value::from_f32(*val),
+            Val::F64(val) => Value::from_f64(*val),
+            Val::Ref(func_ref) => Value::from_ref(*func_ref),
+        }
+    }
+}
+
 impl From<Val> for Value {
+    #[inline(always)]
     fn from(value: Val) -> Self {
         match value {
             Val::I32(val) => Value::from_i32(val),
@@ -269,9 +282,9 @@ impl Value {
             None => 0,
         } as u64;
 
-        let tag = func_ref.is_some() as u64;
+        let tag = if func_ref.is_some() { TAG_SOME } else { 0 };
 
-        Value((tag << TAG_SHIFT) | x)
+        Value(tag | x)
     }
 
     #[inline(always)]
@@ -309,6 +322,18 @@ impl Value {
             ValType::F32 => Value::from_f32(0.0),
             ValType::F64 => Value::from_f64(0.0),
             ValType::Ref(_) => Value::from_i32(0),
+            ValType::V128 => tracewasm_unreachable::unreachable(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn into_val(self, ty: &ValType) -> Val {
+        match ty {
+            ValType::I32 => Val::I32(self.as_i32()),
+            ValType::I64 => Val::I64(self.as_i64()),
+            ValType::F32 => Val::F32(self.as_f32()),
+            ValType::F64 => Val::F64(self.as_f64()),
+            ValType::Ref(_) => Val::Ref(self.as_ref()),
             ValType::V128 => tracewasm_unreachable::unreachable(),
         }
     }
@@ -544,12 +569,12 @@ impl<T: Clone> Stack<T> {
     }
 }
 
-impl Stack<Val> {
+impl Stack<Value> {
     /// Removes the top `num` values and returns them as a callee's parameters, in
     /// push order (`arg0..argN-1`) for binding into the callee's locals.
     ///
     /// Precondition: at least `num` values are present.
-    pub fn pop_params(&mut self, num: u32) -> ParamVals {
+    pub fn pop_params(&mut self, num: u32) -> SmallVec<[Value; 5]> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
@@ -558,14 +583,14 @@ impl Stack<Val> {
 
         self.stack_pointer -= num as usize;
 
-        ParamVals::new(s)
+        s
     }
 
     /// Removes the top `num` values and returns them as a function's results, in
     /// push order (`result0..resultN-1`).
     ///
     /// Precondition: at least `num` values are present.
-    pub fn pop_results(&mut self, num: u32) -> ResultVals {
+    pub fn pop_results(&mut self, num: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
@@ -574,7 +599,7 @@ impl Stack<Val> {
 
         self.stack_pointer -= num as usize;
 
-        ResultVals::new(s)
+        s
     }
 }
 

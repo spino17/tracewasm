@@ -62,6 +62,8 @@
 //! Instruction indices, by contrast, are per-function: each `TraceVM::execute`
 //! invocation has its own `instructions` slice and `pc`.
 
+use smallvec::{SmallVec, smallvec};
+
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
@@ -69,12 +71,12 @@ use crate::{
     },
     instance::{
         Instance,
-        traits::{ImportRegistry, ResultVals},
+        traits::{ImportRegistry, ParamVals, ResultVals},
     },
     instruction::{Instruction, TargetBranch},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
-    vm::stack::{DataVal, Stack, Val},
+    vm::stack::{DataVal, Stack, Val, Value},
 };
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 
@@ -131,7 +133,7 @@ impl TraceVM {
         instance.stack.reset();
 
         for param in params {
-            instance.stack.push(*param);
+            instance.stack.push(param.into());
         }
 
         // The reset above put the stack at height 0, so this frame's base is 0.
@@ -139,13 +141,19 @@ impl TraceVM {
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
-        let results_len = module.types[func_decl.ty.0 as usize].results.len() as u32;
+        let results_ty = &module.types[func_decl.ty.0 as usize].results;
+        let results_len = results_ty.len() as u32;
 
         let results = instance.stack.pop_results(results_len);
+        let mut s: SmallVec<[Val; 3]> = smallvec![];
+
+        for (i, result) in results.iter().enumerate() {
+            s.push(result.into_val(&results_ty[i]));
+        }
 
         debug_assert!(instance.stack.height() == 0);
 
-        Ok(results)
+        Ok(ResultVals::new(s))
     }
 
     /// Runs one (locally-defined) function to completion on the shared stack.
@@ -208,7 +216,7 @@ impl TraceVM {
         for i in 0..(locals_len - params_len) {
             let ty = locals_ty[i + params_len];
 
-            instance.stack.push(Val::zero_of_ty(ty));
+            instance.stack.push(Value::zero_of_ty(ty));
         }
 
         // Entering a frame. The matching decrement is after the driver loop; the
@@ -394,7 +402,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// stack's push/pop API: locals sit *below* the stack pointer for the whole
     /// life of the frame, so they are always live storage that the operand
     /// discipline never touches. Validation guarantees `index < locals_len`.
-    fn get_local(&self, index: LocalIndex) -> Val {
+    fn get_local(&self, index: LocalIndex) -> Value {
         let slot = (index.0 + self.caller_base_height) as usize;
 
         // Mirrors the SAFETY argument below, so a broken link shows up as a failed
@@ -433,7 +441,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
     /// Writes local slot `index` in this frame's locals region. See
     /// [`Self::get_local`] for why this indexes the backing storage directly.
-    fn set_local(&mut self, index: LocalIndex, val: Val) {
+    fn set_local(&mut self, index: LocalIndex, val: Value) {
         let slot = (index.0 + self.caller_base_height) as usize;
 
         debug_assert!(
@@ -517,6 +525,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         // registry; a local one is interpreted recursively.
         if func_index.0 < imported_func_count {
             let func_decl = &module.func_decls[func_index.0 as usize];
+            let params_ty = &module.types[func_decl.ty.0 as usize].params;
 
             debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
 
@@ -528,7 +537,19 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 unreachable!()
             };
 
-            let params = self.instance.stack.pop_params(params_count);
+            // The stack holds untagged `Value`s, so the host boundary re-tags them
+            // from the callee's declared parameter types. Collected into a
+            // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
+            // import of five or fewer parameters costs no allocation.
+            let params = ParamVals::new(
+                self.instance
+                    .stack
+                    .pop_params(params_count)
+                    .iter()
+                    .zip(params_ty)
+                    .map(|(param, ty)| param.into_val(ty))
+                    .collect(),
+            );
 
             // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
             let results = self.instance.import_registry.execute(
@@ -540,7 +561,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
             // push results to the stack
             for res in results {
-                self.instance.stack.push(res);
+                self.instance.stack.push(res.into());
             }
         } else {
             // Only a local callee creates a new interpreter frame — and therefore a
@@ -685,32 +706,34 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::Nop => ExecutionResult::Next,
             Instruction::I32Const { value } => {
-                self.instance.stack.push(Val::I32(*value));
+                self.instance.stack.push(Value::from_i32(*value));
 
                 ExecutionResult::Next
             }
             Instruction::I64Const { value } => {
-                self.instance.stack.push(Val::I64(*value));
+                self.instance.stack.push(Value::from_i64(*value));
 
                 ExecutionResult::Next
             }
             Instruction::F32Const { value } => {
-                self.instance.stack.push(Val::F32(*value));
+                self.instance.stack.push(Value::from_f32(*value));
 
                 ExecutionResult::Next
             }
             Instruction::F64Const { value } => {
-                self.instance.stack.push(Val::F64(*value));
+                self.instance.stack.push(Value::from_f64(*value));
 
                 ExecutionResult::Next
             }
             Instruction::RefNull => {
-                self.instance.stack.push(Val::Ref(None));
+                self.instance.stack.push(Value::from_ref(None));
 
                 ExecutionResult::Next
             }
             Instruction::RefFunc { function_index } => {
-                self.instance.stack.push(Val::Ref(Some(*function_index)));
+                self.instance
+                    .stack
+                    .push(Value::from_ref(Some(*function_index)));
 
                 ExecutionResult::Next
             }
@@ -718,9 +741,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let func_ref = self.instance.stack.pop().as_ref();
 
                 if func_ref.is_none() {
-                    self.instance.stack.push(Val::I32(1));
+                    self.instance.stack.push(Value::from_i32(1));
                 } else {
-                    self.instance.stack.push(Val::I32(0));
+                    self.instance.stack.push(Value::from_i32(0));
                 }
 
                 ExecutionResult::Next
@@ -728,7 +751,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::MemorySize => {
                 self.instance
                     .stack
-                    .push(Val::I32(self.instance.memory.size_in_pages() as i32));
+                    .push(Value::from_i32(self.instance.memory.size_in_pages() as i32));
 
                 ExecutionResult::Next
             }
@@ -741,10 +764,10 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // `instantiate` already narrowed this to the module's declared
                 // maximum, so the configured cap is the effective ceiling here.
                 match self.instance.memory.grow(delta_in_pages, max_pages) {
-                    Ok(old_page) => self.instance.stack.push(Val::I32(old_page as i32)),
+                    Ok(old_page) => self.instance.stack.push(Value::from_i32(old_page as i32)),
                     // Per the spec `memory.grow` does not trap: a request it cannot
                     // satisfy reports `-1` and execution continues.
-                    Err(_) => self.instance.stack.push(Val::I32(-1)),
+                    Err(_) => self.instance.stack.push(Value::from_i32(-1)),
                 }
 
                 ExecutionResult::Next
@@ -808,7 +831,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i32(effective_offset)?;
 
-                self.instance.stack.push(Val::I32(val));
+                self.instance.stack.push(Value::from_i32(val));
 
                 ExecutionResult::Next
             }
@@ -816,7 +839,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_u8(effective_offset)? as i32;
 
-                self.instance.stack.push(Val::I32(val));
+                self.instance.stack.push(Value::from_i32(val));
 
                 ExecutionResult::Next
             }
@@ -824,7 +847,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i8(effective_offset)? as i32;
 
-                self.instance.stack.push(Val::I32(val));
+                self.instance.stack.push(Value::from_i32(val));
 
                 ExecutionResult::Next
             }
@@ -832,7 +855,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_u16(effective_offset)? as i32;
 
-                self.instance.stack.push(Val::I32(val));
+                self.instance.stack.push(Value::from_i32(val));
 
                 ExecutionResult::Next
             }
@@ -840,7 +863,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i16(effective_offset)? as i32;
 
-                self.instance.stack.push(Val::I32(val));
+                self.instance.stack.push(Value::from_i32(val));
 
                 ExecutionResult::Next
             }
@@ -848,7 +871,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i64(effective_offset)?;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -856,7 +879,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_u8(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -864,7 +887,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i8(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -872,7 +895,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_u16(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -880,7 +903,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i16(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -888,7 +911,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_u32(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -896,7 +919,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_i32(effective_offset)? as i64;
 
-                self.instance.stack.push(Val::I64(val));
+                self.instance.stack.push(Value::from_i64(val));
 
                 ExecutionResult::Next
             }
@@ -904,7 +927,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_f32(effective_offset)?;
 
-                self.instance.stack.push(Val::F32(val));
+                self.instance.stack.push(Value::from_f32(val));
 
                 ExecutionResult::Next
             }
@@ -912,7 +935,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let effective_offset = self.pop_effective_address(*offset)?;
                 let val = self.instance.memory.read_f64(effective_offset)?;
 
-                self.instance.stack.push(Val::F64(val));
+                self.instance.stack.push(Value::from_f64(val));
 
                 ExecutionResult::Next
             }
@@ -1001,7 +1024,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::I32Clz => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.leading_zeros() as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.leading_zeros() as i32));
 
                 ExecutionResult::Next
             }
@@ -1010,7 +1035,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I32(a.trailing_zeros() as i32));
+                    .push(Value::from_i32(a.trailing_zeros() as i32));
 
                 ExecutionResult::Next
             }
@@ -1020,7 +1045,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // Counts set bits in the two's-complement representation, so a
                 // negative operand counts its sign bits too — which is what the
                 // spec's bit-level definition asks for.
-                self.instance.stack.push(Val::I32(a.count_ones() as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.count_ones() as i32));
 
                 ExecutionResult::Next
             }
@@ -1029,28 +1056,28 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I32(if a == 0 { 1 } else { 0 }));
+                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
 
                 ExecutionResult::Next
             }
             Instruction::I32Extend8S => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a as i8 as i32));
+                self.instance.stack.push(Value::from_i32(a as i8 as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32Extend16S => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a as i16 as i32));
+                self.instance.stack.push(Value::from_i32(a as i16 as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32WrapI64 => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32(a as i32));
+                self.instance.stack.push(Value::from_i32(a as i32));
 
                 ExecutionResult::Next
             }
@@ -1061,7 +1088,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // The result is the `u32` bit pattern held in an `i32`, so values
                 // above `i32::MAX` come back out negative.
-                self.instance.stack.push(Val::I32(truncated as u32 as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(truncated as u32 as i32));
 
                 ExecutionResult::Next
             }
@@ -1070,7 +1099,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
-                self.instance.stack.push(Val::I32(truncated as i32));
+                self.instance.stack.push(Value::from_i32(truncated as i32));
 
                 ExecutionResult::Next
             }
@@ -1078,7 +1107,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
-                self.instance.stack.push(Val::I32(truncated as u32 as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(truncated as u32 as i32));
 
                 ExecutionResult::Next
             }
@@ -1086,21 +1117,21 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
-                self.instance.stack.push(Val::I32(truncated as i32));
+                self.instance.stack.push(Value::from_i32(truncated as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32TruncSatF32U => {
                 let a = self.instance.stack.pop().as_f32() as u32;
 
-                self.instance.stack.push(Val::I32(a as i32));
+                self.instance.stack.push(Value::from_i32(a as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32TruncSatF32S => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32(a as i32));
+                self.instance.stack.push(Value::from_i32(a as i32));
 
                 ExecutionResult::Next
             }
@@ -1109,21 +1140,23 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // would clamp at the wrong bound and then wrap on the way down.
                 let a = self.instance.stack.pop().as_f64() as u32;
 
-                self.instance.stack.push(Val::I32(a as i32));
+                self.instance.stack.push(Value::from_i32(a as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32TruncSatF64S => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32(a as i32));
+                self.instance.stack.push(Value::from_i32(a as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I32ReinterpretF32 => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32(a.to_bits() as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.to_bits() as i32));
 
                 ExecutionResult::Next
             }
@@ -1131,7 +1164,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.wrapping_add(b)));
+                self.instance.stack.push(Value::from_i32(a.wrapping_add(b)));
 
                 ExecutionResult::Next
             }
@@ -1139,7 +1172,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.wrapping_sub(b)));
+                self.instance.stack.push(Value::from_i32(a.wrapping_sub(b)));
 
                 ExecutionResult::Next
             }
@@ -1147,7 +1180,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.wrapping_mul(b)));
+                self.instance.stack.push(Value::from_i32(a.wrapping_mul(b)));
 
                 ExecutionResult::Next
             }
@@ -1155,12 +1188,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32(a.checked_div(b).ok_or(
-                    InstructionExecutionError::Division {
-                        num: a.to_string(),
-                        deno: b.to_string(),
-                    },
-                )? as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )? as i32));
 
                 ExecutionResult::Next
             }
@@ -1168,12 +1203,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.checked_div(b).ok_or(
-                    InstructionExecutionError::Division {
-                        num: a.to_string(),
-                        deno: b.to_string(),
-                    },
-                )?));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )?));
 
                 ExecutionResult::Next
             }
@@ -1181,12 +1218,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32(a.checked_rem(b).ok_or(
-                    InstructionExecutionError::Remainder {
-                        left: a.to_string(),
-                        right: b.to_string(),
-                    },
-                )? as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.checked_rem(b).ok_or(
+                        InstructionExecutionError::Remainder {
+                            left: a.to_string(),
+                            right: b.to_string(),
+                        },
+                    )? as i32));
 
                 ExecutionResult::Next
             }
@@ -1205,7 +1244,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     });
                 }
 
-                self.instance.stack.push(Val::I32(a.wrapping_rem(b)));
+                self.instance.stack.push(Value::from_i32(a.wrapping_rem(b)));
 
                 ExecutionResult::Next
             }
@@ -1213,7 +1252,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.bitand(b)));
+                self.instance.stack.push(Value::from_i32(a.bitand(b)));
 
                 ExecutionResult::Next
             }
@@ -1221,7 +1260,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.bitor(b)));
+                self.instance.stack.push(Value::from_i32(a.bitor(b)));
 
                 ExecutionResult::Next
             }
@@ -1229,7 +1268,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.bitxor(b)));
+                self.instance.stack.push(Value::from_i32(a.bitxor(b)));
 
                 ExecutionResult::Next
             }
@@ -1241,7 +1280,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32(a.wrapping_shl(b as u32)));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shl(b as u32)));
 
                 ExecutionResult::Next
             }
@@ -1250,7 +1291,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_i32() as u32;
 
                 // Logical shift: done on `u32` so the vacated high bits are zeros.
-                self.instance.stack.push(Val::I32(a.wrapping_shr(b) as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shr(b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1259,7 +1302,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_i32();
 
                 // Arithmetic shift: on `i32` the sign bit is replicated.
-                self.instance.stack.push(Val::I32(a.wrapping_shr(b as u32)));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shr(b as u32)));
 
                 ExecutionResult::Next
             }
@@ -1267,7 +1312,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32(a.rotate_left(b) as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.rotate_left(b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1275,7 +1322,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32(a.rotate_right(b) as i32));
+                self.instance
+                    .stack
+                    .push(Value::from_i32(a.rotate_right(b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1283,7 +1332,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a == b) as i32));
+                self.instance.stack.push(Value::from_i32((a == b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1291,7 +1340,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a != b) as i32));
+                self.instance.stack.push(Value::from_i32((a != b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1299,7 +1348,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1307,7 +1356,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1315,7 +1364,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1323,7 +1372,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1331,7 +1380,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1339,7 +1388,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1347,7 +1396,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32() as u32;
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1355,14 +1404,16 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i32();
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
             Instruction::I64Clz => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.leading_zeros() as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.leading_zeros() as i64));
 
                 ExecutionResult::Next
             }
@@ -1371,7 +1422,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I64(a.trailing_zeros() as i64));
+                    .push(Value::from_i64(a.trailing_zeros() as i64));
 
                 ExecutionResult::Next
             }
@@ -1381,7 +1432,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // See `I32Popcnt`. The count is at most 64, but the result type is
                 // `i64` — unary integer ops keep their operand's width, unlike the
                 // comparisons.
-                self.instance.stack.push(Val::I64(a.count_ones() as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.count_ones() as i64));
 
                 ExecutionResult::Next
             }
@@ -1390,42 +1443,42 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I32(if a == 0 { 1 } else { 0 }));
+                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
 
                 ExecutionResult::Next
             }
             Instruction::I64Extend8S => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a as i8 as i64));
+                self.instance.stack.push(Value::from_i64(a as i8 as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64Extend16S => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a as i16 as i64));
+                self.instance.stack.push(Value::from_i64(a as i16 as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64Extend32S => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a as i32 as i64));
+                self.instance.stack.push(Value::from_i64(a as i32 as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64ExtendI32U => {
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64ExtendI32S => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
@@ -1436,7 +1489,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // As with the `i32` forms, the result is the unsigned bit pattern
                 // held in a signed value.
-                self.instance.stack.push(Val::I64(truncated as u64 as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(truncated as u64 as i64));
 
                 ExecutionResult::Next
             }
@@ -1445,7 +1500,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
-                self.instance.stack.push(Val::I64(truncated as i64));
+                self.instance.stack.push(Value::from_i64(truncated as i64));
 
                 ExecutionResult::Next
             }
@@ -1453,7 +1508,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
-                self.instance.stack.push(Val::I64(truncated as u64 as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(truncated as u64 as i64));
 
                 ExecutionResult::Next
             }
@@ -1461,7 +1518,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
-                self.instance.stack.push(Val::I64(truncated as i64));
+                self.instance.stack.push(Value::from_i64(truncated as i64));
 
                 ExecutionResult::Next
             }
@@ -1470,35 +1527,37 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // first would lose every value an `i64` can still represent.
                 let a = self.instance.stack.pop().as_f32() as u64;
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64TruncSatF32S => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64TruncSatF64U => {
                 let a = self.instance.stack.pop().as_f64() as u64;
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64TruncSatF64S => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I64(a as i64));
+                self.instance.stack.push(Value::from_i64(a as i64));
 
                 ExecutionResult::Next
             }
             Instruction::I64ReinterpretF64 => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I64(a.to_bits() as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.to_bits() as i64));
 
                 ExecutionResult::Next
             }
@@ -1506,7 +1565,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.wrapping_add(b)));
+                self.instance.stack.push(Value::from_i64(a.wrapping_add(b)));
 
                 ExecutionResult::Next
             }
@@ -1514,7 +1573,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.wrapping_sub(b)));
+                self.instance.stack.push(Value::from_i64(a.wrapping_sub(b)));
 
                 ExecutionResult::Next
             }
@@ -1522,7 +1581,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.wrapping_mul(b)));
+                self.instance.stack.push(Value::from_i64(a.wrapping_mul(b)));
 
                 ExecutionResult::Next
             }
@@ -1530,12 +1589,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I64(a.checked_div(b).ok_or(
-                    InstructionExecutionError::Division {
-                        num: a.to_string(),
-                        deno: b.to_string(),
-                    },
-                )? as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )? as i64));
 
                 ExecutionResult::Next
             }
@@ -1543,12 +1604,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.checked_div(b).ok_or(
-                    InstructionExecutionError::Division {
-                        num: a.to_string(),
-                        deno: b.to_string(),
-                    },
-                )?));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )?));
 
                 ExecutionResult::Next
             }
@@ -1556,12 +1619,14 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I64(a.checked_rem(b).ok_or(
-                    InstructionExecutionError::Remainder {
-                        left: a.to_string(),
-                        right: b.to_string(),
-                    },
-                )? as i64));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.checked_rem(b).ok_or(
+                        InstructionExecutionError::Remainder {
+                            left: a.to_string(),
+                            right: b.to_string(),
+                        },
+                    )? as i64));
 
                 ExecutionResult::Next
             }
@@ -1577,7 +1642,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     });
                 }
 
-                self.instance.stack.push(Val::I64(a.wrapping_rem(b)));
+                self.instance.stack.push(Value::from_i64(a.wrapping_rem(b)));
 
                 ExecutionResult::Next
             }
@@ -1585,7 +1650,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.bitand(b)));
+                self.instance.stack.push(Value::from_i64(a.bitand(b)));
 
                 ExecutionResult::Next
             }
@@ -1593,7 +1658,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.bitor(b)));
+                self.instance.stack.push(Value::from_i64(a.bitor(b)));
 
                 ExecutionResult::Next
             }
@@ -1601,7 +1666,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.bitxor(b)));
+                self.instance.stack.push(Value::from_i64(a.bitxor(b)));
 
                 ExecutionResult::Next
             }
@@ -1612,7 +1677,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I64(a.wrapping_shl(b as u32)));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.wrapping_shl(b as u32)));
 
                 ExecutionResult::Next
             }
@@ -1623,7 +1690,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // Logical shift: done on `u64` so the vacated high bits are zeros.
                 self.instance
                     .stack
-                    .push(Val::I64(a.wrapping_shr(b as u32) as i64));
+                    .push(Value::from_i64(a.wrapping_shr(b as u32) as i64));
 
                 ExecutionResult::Next
             }
@@ -1632,7 +1699,9 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_i64();
 
                 // Arithmetic shift: on `i64` the sign bit is replicated.
-                self.instance.stack.push(Val::I64(a.wrapping_shr(b as u32)));
+                self.instance
+                    .stack
+                    .push(Value::from_i64(a.wrapping_shr(b as u32)));
 
                 ExecutionResult::Next
             }
@@ -1642,7 +1711,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I64(a.rotate_left(b as u32) as i64));
+                    .push(Value::from_i64(a.rotate_left(b as u32) as i64));
 
                 ExecutionResult::Next
             }
@@ -1652,7 +1721,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 self.instance
                     .stack
-                    .push(Val::I64(a.rotate_right(b as u32) as i64));
+                    .push(Value::from_i64(a.rotate_right(b as u32) as i64));
 
                 ExecutionResult::Next
             }
@@ -1660,7 +1729,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a == b) as i32));
+                self.instance.stack.push(Value::from_i32((a == b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1668,7 +1737,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a != b) as i32));
+                self.instance.stack.push(Value::from_i32((a != b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1676,7 +1745,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1684,7 +1753,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1692,7 +1761,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1700,7 +1769,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1708,7 +1777,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1716,7 +1785,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1724,7 +1793,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64() as u64;
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1732,98 +1801,100 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_i64();
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
             Instruction::F32Abs => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.abs()));
+                self.instance.stack.push(Value::from_f32(a.abs()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Neg => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.neg()));
+                self.instance.stack.push(Value::from_f32(a.neg()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Ceil => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.ceil()));
+                self.instance.stack.push(Value::from_f32(a.ceil()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Floor => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.floor()));
+                self.instance.stack.push(Value::from_f32(a.floor()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Trunc => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.trunc()));
+                self.instance.stack.push(Value::from_f32(a.trunc()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Sqrt => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.sqrt()));
+                self.instance.stack.push(Value::from_f32(a.sqrt()));
 
                 ExecutionResult::Next
             }
             Instruction::F32Nearest => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a.round_ties_even()));
+                self.instance
+                    .stack
+                    .push(Value::from_f32(a.round_ties_even()));
 
                 ExecutionResult::Next
             }
             Instruction::F32ConvertI32U => {
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::F32(a as f32));
+                self.instance.stack.push(Value::from_f32(a as f32));
 
                 ExecutionResult::Next
             }
             Instruction::F32ConvertI32S => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::F32(a as f32));
+                self.instance.stack.push(Value::from_f32(a as f32));
 
                 ExecutionResult::Next
             }
             Instruction::F32ConvertI64U => {
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::F32(a as f32));
+                self.instance.stack.push(Value::from_f32(a as f32));
 
                 ExecutionResult::Next
             }
             Instruction::F32ConvertI64S => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::F32(a as f32));
+                self.instance.stack.push(Value::from_f32(a as f32));
 
                 ExecutionResult::Next
             }
             Instruction::F32DemoteF64 => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F32(a as f32));
+                self.instance.stack.push(Value::from_f32(a as f32));
 
                 ExecutionResult::Next
             }
             Instruction::F32ReinterpretI32 => {
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::F32(f32::from_bits(a)));
+                self.instance.stack.push(Value::from_f32(f32::from_bits(a)));
 
                 ExecutionResult::Next
             }
@@ -1831,7 +1902,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a + b));
+                self.instance.stack.push(Value::from_f32(a + b));
 
                 ExecutionResult::Next
             }
@@ -1839,7 +1910,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a - b));
+                self.instance.stack.push(Value::from_f32(a - b));
 
                 ExecutionResult::Next
             }
@@ -1847,7 +1918,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F32(a * b));
+                self.instance.stack.push(Value::from_f32(a * b));
 
                 ExecutionResult::Next
             }
@@ -1857,7 +1928,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // Unlike the integer divides this never traps: IEEE 754 gives
                 // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
-                self.instance.stack.push(Val::F32(a / b));
+                self.instance.stack.push(Value::from_f32(a / b));
 
                 ExecutionResult::Next
             }
@@ -1865,7 +1936,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a == b) as i32));
+                self.instance.stack.push(Value::from_i32((a == b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1873,7 +1944,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a != b) as i32));
+                self.instance.stack.push(Value::from_i32((a != b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1881,7 +1952,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1889,7 +1960,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1897,7 +1968,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1905,7 +1976,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f32();
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -1924,7 +1995,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     b
                 };
 
-                self.instance.stack.push(Val::F32(r));
+                self.instance.stack.push(Value::from_f32(r));
 
                 ExecutionResult::Next
             }
@@ -1943,7 +2014,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     b
                 };
 
-                self.instance.stack.push(Val::F32(r));
+                self.instance.stack.push(Value::from_f32(r));
 
                 ExecutionResult::Next
             }
@@ -1955,98 +2026,100 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 // of `b`. Defined even when either operand is NaN — the sign is
                 // copied without inspecting the payload — so unlike `min`/`max`
                 // this needs no NaN special case, and Rust's method matches.
-                self.instance.stack.push(Val::F32(a.copysign(b)));
+                self.instance.stack.push(Value::from_f32(a.copysign(b)));
 
                 ExecutionResult::Next
             }
             Instruction::F64Abs => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.abs()));
+                self.instance.stack.push(Value::from_f64(a.abs()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Neg => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.neg()));
+                self.instance.stack.push(Value::from_f64(a.neg()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Ceil => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.ceil()));
+                self.instance.stack.push(Value::from_f64(a.ceil()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Floor => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.floor()));
+                self.instance.stack.push(Value::from_f64(a.floor()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Trunc => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.trunc()));
+                self.instance.stack.push(Value::from_f64(a.trunc()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Sqrt => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.sqrt()));
+                self.instance.stack.push(Value::from_f64(a.sqrt()));
 
                 ExecutionResult::Next
             }
             Instruction::F64Nearest => {
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a.round_ties_even()));
+                self.instance
+                    .stack
+                    .push(Value::from_f64(a.round_ties_even()));
 
                 ExecutionResult::Next
             }
             Instruction::F64ConvertI32U => {
                 let a = self.instance.stack.pop().as_i32() as u32;
 
-                self.instance.stack.push(Val::F64(a as f64));
+                self.instance.stack.push(Value::from_f64(a as f64));
 
                 ExecutionResult::Next
             }
             Instruction::F64ConvertI32S => {
                 let a = self.instance.stack.pop().as_i32();
 
-                self.instance.stack.push(Val::F64(a as f64));
+                self.instance.stack.push(Value::from_f64(a as f64));
 
                 ExecutionResult::Next
             }
             Instruction::F64ConvertI64U => {
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::F64(a as f64));
+                self.instance.stack.push(Value::from_f64(a as f64));
 
                 ExecutionResult::Next
             }
             Instruction::F64ConvertI64S => {
                 let a = self.instance.stack.pop().as_i64();
 
-                self.instance.stack.push(Val::F64(a as f64));
+                self.instance.stack.push(Value::from_f64(a as f64));
 
                 ExecutionResult::Next
             }
             Instruction::F64PromoteF32 => {
                 let a = self.instance.stack.pop().as_f32();
 
-                self.instance.stack.push(Val::F64(a as f64));
+                self.instance.stack.push(Value::from_f64(a as f64));
 
                 ExecutionResult::Next
             }
             Instruction::F64ReinterpretI64 => {
                 let a = self.instance.stack.pop().as_i64() as u64;
 
-                self.instance.stack.push(Val::F64(f64::from_bits(a)));
+                self.instance.stack.push(Value::from_f64(f64::from_bits(a)));
 
                 ExecutionResult::Next
             }
@@ -2054,7 +2127,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a + b));
+                self.instance.stack.push(Value::from_f64(a + b));
 
                 ExecutionResult::Next
             }
@@ -2062,7 +2135,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a - b));
+                self.instance.stack.push(Value::from_f64(a - b));
 
                 ExecutionResult::Next
             }
@@ -2070,7 +2143,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::F64(a * b));
+                self.instance.stack.push(Value::from_f64(a * b));
 
                 ExecutionResult::Next
             }
@@ -2080,7 +2153,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
 
                 // See `F32Div`: division by zero yields an infinity or NaN, never
                 // a trap.
-                self.instance.stack.push(Val::F64(a / b));
+                self.instance.stack.push(Value::from_f64(a / b));
 
                 ExecutionResult::Next
             }
@@ -2088,7 +2161,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a == b) as i32));
+                self.instance.stack.push(Value::from_i32((a == b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2096,7 +2169,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a != b) as i32));
+                self.instance.stack.push(Value::from_i32((a != b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2104,7 +2177,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a < b) as i32));
+                self.instance.stack.push(Value::from_i32((a < b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2112,7 +2185,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a > b) as i32));
+                self.instance.stack.push(Value::from_i32((a > b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2120,7 +2193,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a <= b) as i32));
+                self.instance.stack.push(Value::from_i32((a <= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2128,7 +2201,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let b = self.instance.stack.pop().as_f64();
                 let a = self.instance.stack.pop().as_f64();
 
-                self.instance.stack.push(Val::I32((a >= b) as i32));
+                self.instance.stack.push(Value::from_i32((a >= b) as i32));
 
                 ExecutionResult::Next
             }
@@ -2147,7 +2220,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     b
                 };
 
-                self.instance.stack.push(Val::F64(r));
+                self.instance.stack.push(Value::from_f64(r));
 
                 ExecutionResult::Next
             }
@@ -2166,7 +2239,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                     b
                 };
 
-                self.instance.stack.push(Val::F64(r));
+                self.instance.stack.push(Value::from_f64(r));
 
                 ExecutionResult::Next
             }
@@ -2175,7 +2248,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 let a = self.instance.stack.pop().as_f64();
 
                 // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
-                self.instance.stack.push(Val::F64(a.copysign(b)));
+                self.instance.stack.push(Value::from_f64(a.copysign(b)));
 
                 ExecutionResult::Next
             }
@@ -2201,14 +2274,15 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::GlobalGet { index } => {
                 self.instance
                     .stack
-                    .push(self.instance.global_vals[index.0 as usize]);
+                    .push(self.instance.global_vals[index.0 as usize].into());
 
                 ExecutionResult::Next
             }
             Instruction::GlobalSet { index } => {
                 let val = self.instance.stack.pop();
+                let ty = module.globals[index.0 as usize].ty.content_type();
 
-                self.instance.global_vals[index.0 as usize] = val;
+                self.instance.global_vals[index.0 as usize] = val.into_val(&ty);
 
                 ExecutionResult::Next
             }
