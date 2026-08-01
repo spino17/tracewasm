@@ -917,8 +917,7 @@ pub enum Instruction {
 // costs 8 bytes on *every* instruction rather than just the variant touched.
 const _: () = assert!(
     size_of::<Instruction>() <= 16,
-    "Instruction grew past 16 bytes: some variant's payload now exceeds 12 bytes, \
-     or a field's alignment forced padding. See the module docs before relaxing this."
+    "Instruction grew past 16 bytes. Need to keep it compact."
 );
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
