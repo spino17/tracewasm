@@ -1,11 +1,16 @@
-# Why `#[inline(never)]` on a rare path speeds up the common one
+# Where function boundaries go, and why it is worth 2x
 
-Measured on `Stack::push` in this repo: **5-10% of total interpreter throughput** from moving
-one rarely-executed branch into its own function. Nothing else changed — same algorithm, same
-data structures, same number of comparisons.
+Two changes in this repo, both of them only moving a boundary — no algorithm, data structure
+or comparison changed:
 
-This document explains why, from first principles, and then looks at `Stack::pop` and
-`Val::as_i32`, which appear to have the same problem.
+* Pushing a rare call **out** of `Stack::push` into its own function: **5-10%** of interpreter
+  throughput.
+* Pulling the per-instruction dispatch **in** to the driver loop: **~40%**, and about **2x**
+  across the whole interpreter when combined with the rest.
+
+They are the same rule applied in opposite directions. This document explains that rule from
+first principles, works both cases through the disassembly, and records one remedy that looked
+obviously right and measured worthless.
 
 No assembly knowledge assumed.
 
@@ -271,7 +276,7 @@ Roughly half the work in `push` was bookkeeping for a call that essentially neve
 
 ### 3.7 Measured effect
 
-ns per guest loop iteration, release, interleaved A/B (see §7 on why interleaved):
+ns per guest loop iteration, release, interleaved A/B (see §8 on why interleaved):
 
 | workload | `Vec::push` inline | `#[inline(never)]` | change |
 | --- | --- | --- | --- |
@@ -396,20 +401,137 @@ register, so there is nothing to save even in the cold branch.
 This is why diverging helpers are the standard idiom for panic paths throughout `core` and
 `hashbrown`. It is not stylistic.
 
-### 5.2 Status: untested, and less certain than it looks
+### 5.2 What it measured
 
-`pop` is the most attractive target at 242 call sites. But note the awkward fact:
-`panic_bounds_check` is *already* a diverging function, and `pop` still sets up a frame at its
-entry. So divergence alone is evidently not sufficient here — by §4, something on `pop`'s
-common path must still be live across that call, and `-> !` on a helper would not fix that by
-itself.
+Both were changed together: `pop` indexes with `.get()` and diverges to a no-argument
+`pop_underflow()`, and the five accessors call no-argument helpers in a private `wrong_ty`
+module. Interleaved A/B, four rounds:
 
-Read `pop`'s disassembly and identify which register straddles the call before predicting a
-win. The `push` result is not transferable on the strength of the analogy alone.
+| workload | before | after | delta | rounds won |
+| --- | --- | --- | --- | --- |
+| memory | 161.17 | **152.67** | −5.3% | 4/4 |
+| frames | 112.98 | **109.38** | −3.2% | 4/4 |
+| arithmetic | 136.57 | 136.82 | +0.2% | 2/4 |
+
+The memory row's ranges do not overlap (off 158.1-164.2, on 146.5-154.1), so that one is not
+ambiguous.
+
+Note what the numbers say about attribution. `arithmetic` has by far the highest `as_*`
+density — 81 + 67 call sites for `as_i32`/`as_i64` — and did not move. `memory` and `frames`
+did. Since both changes landed together they cannot be separated without another A/B, but the
+pattern points at `pop` (242 sites) carrying the whole win and the accessor change carrying
+none.
+
+An unrelated benefit of the `pop` rewrite: the old empty-stack behaviour differed by profile —
+debug panicked on the subtraction, release wrapped and hit the bounds check. Both now report
+`pop from an empty operand stack`.
+
+## 6. The mirror case: pulling a boundary *in*
+
+Everything so far moves a call **out** of a hot function. The largest win in this repo came
+from the opposite move, and it is the same rule.
+
+### 6.1 The boundary
+
+The interpreter's driver loop:
+
+```rust
+loop {
+    let instr = &instructions[pc];
+    pc = state.execute(instr, module, pc, call_stack_depth, br_table_targets)?;
+    if pc == instr_count { break; }
+}
+```
+
+`execute` is a real function, so this is one `bl` and one `ret` **per wasm instruction**. The
+call/ret pair is the smaller half of the cost. The larger half is §2.2: `pc`, and the operand
+stack's base pointer and length, are loop-carried, and a call may destroy any caller-saved
+register — so none of them can stay in a register across it. They are reloaded from memory on
+every iteration, forever.
+
+A boundary in the middle of a hot loop is where the register allocator gives up.
+
+### 6.2 What removing it bought
+
+`#[inline(always)]` on `execute`. Interleaved A/B, ns per guest loop iteration:
+
+| workload | before | after | delta |
+| --- | --- | --- | --- |
+| arithmetic | 134.70, 139.18 | 82.78, 82.44 | **−40%** |
+| memory | 150.27, 151.09 | 86.52, 88.00 | **−42%** |
+| frames | 107.85, 106.43 | 59.69, 60.40 | **−44%** |
+
+Re-measuring the whole suite afterwards, every row improved 32-46%, about **2x overall**, and
+arithmetic went from 16.5 to **8.6 cycles per wasm instruction**. That is larger than every
+other change in this document combined.
+
+### 6.3 The price, and it is not small
+
+| variant | driver frame |
+| --- | --- |
+| baseline | 416 B |
+| `#[inline(always)]` | **5,088 B** |
+
+Fusing ~200 opcode arms into one function means every arm's locals and spill slots must fit in
+that one function's frame. A frame is allocated **once at entry, sized for the worst path
+through the function** (§2.4) — so the driver now reserves what the heaviest arm needs, on
+every entry, regardless of which opcode actually runs.
+
+That would be tolerable if the driver were called once. It recurses: a wasm call runs
+`driver -> call_func -> driver`. Per nested wasm call the cost goes from ~1,311 B to ~5,100 B,
+cutting reachable depth from ~6,400 frames to ~1,650.
+
+### 6.4 The remedy that looked obvious and measured worthless
+
+The natural next step is the technique from §3 and §5: outline the cold arms so the fused
+function slims down. The heaviest cold code in dispatch is the `call_indirect`
+signature-mismatch trap, which expands `core::fmt` twice via `format!`. Outlining it:
+
+**5,088 B → 5,056 B. Thirty-two bytes. 0.6%.**
+
+The reason is that the two frames have different causes, and they are indistinguishable in the
+disassembly:
+
+| | §3's frame | §6's frame |
+| --- | --- | --- |
+| made of | callee-saved registers holding values live across a call | spill slots for locals the allocator could not keep in registers |
+| how many | a handful of registers | hundreds of slots across ~200 arms |
+| fixed by | moving the call, so nothing is live across it | nothing cheap — there is no single call to move |
+| tell | a small function with a prologue | a huge function with a prologue |
+
+Outlining an arm removes that arm's *code*. It does not help the allocator prove that the
+remaining arms' slots are mutually exclusive, and with this much control flow it largely
+cannot. **Do not spend time outlining arms to recover this frame** — measure a single one
+first, as here, and the answer arrives in one build.
+
+### 6.5 What to do about the frame instead
+
+Since the frame will not shrink, the depth limit moves to match it:
+`Config::max_call_stack_depth` defaults to 1200, sized so a full chain stays inside a typical
+8 MiB stack. This matters more than it sounds — a limit the native stack cannot hold converts
+a clean trap into a process abort, because the overflow arrives before the guard does.
+
+The real fix is to stop nesting a native frame per wasm call at all: an explicit frame stack,
+with the driver looping over it instead of recursing. Then frame size stops bounding depth, and
+inlining costs nothing but code size.
+
+### 6.6 Both directions, one rule
+
+> A function boundary is a barrier the register allocator cannot see across. Put boundaries
+> **between** hot and cold code, and **never inside** a hot loop.
+
+* **Outline** when a rare path drags state into callee-saved registers that the common path
+  then pays to preserve. Cost: none. See §3.
+* **Inline** when a boundary sits inside a hot loop and forces loop-carried state back to
+  memory each iteration. Cost: the frame grows to the union of everything fused in, which
+  matters if — and only if — that function recurses.
+
+The two are not in tension. `push` is outlined *and* inlined into the dispatch that was itself
+inlined into the loop; each boundary is placed where it belongs.
 
 ---
 
-## 6. How to find this yourself
+## 7. How to find this yourself
 
 **Step 0 — check whether the function you suspect was even inlined.**
 
@@ -443,7 +565,31 @@ problem — that is the §3.3 trace, and it is the step that actually explains t
 **Step 4 — list what your hot loop calls, and check each for a frame at entry.** This one table
 localised the whole problem and is worth automating.
 
-**Step 5 — measure, interleaved.** See §7.
+**Step 5 — measure, interleaved.** See §8.
+
+### Detecting the mirror pattern (§6)
+
+Different question, different check. For your hottest loop:
+
+**Is there a `bl` in the loop body at all?** If dispatch, or anything else the loop does every
+iteration, is a real call, that is a barrier. Cheap test: `#[inline(always)]` on it and measure
+before deciding whether the frame cost is acceptable.
+
+**Is loop-carried state reloaded every iteration?** Look at the top of the loop body for `ldr`
+of the same struct fields each time round — a loop counter, a base pointer, a length. If the
+compiler could keep them in registers it would; reloading means something in the body forced
+them out, and a call is the usual culprit.
+
+**Then work out which kind of frame you have**, because the two look identical from the
+prologue alone:
+
+| symptom | likely cause | remedy |
+| --- | --- | --- |
+| small function, prologue, one rare call in the body | callee-saved registers held across the call (§2.5) | outline the call — worth 5-10% |
+| large function, big frame, no single dominant call | spill slots across many arms (§6.3) | not recoverable by outlining; measure one arm and stop |
+
+The discriminator is size. If the function is a few dozen instructions, §3 applies. If it is
+thousands, §6 does, and outlining is a trap.
 
 ### Signatures worth memorising
 
@@ -473,7 +619,7 @@ appearing only *after* a forward branch.
 
 ---
 
-## 7. What this is *not*, and how we know
+## 8. What this is *not*, and how we know
 
 Three plausible explanations were tested and are all wrong. Recording them because each one
 looked obviously right at the time.
@@ -488,7 +634,7 @@ That attempt also filled 8 MiB on every call, which made per-call latency **363�
 (317 ns → 115 µs). The test suite's `MAX_PER_CALL_NS` bound caught it in one run.
 
 **Not code size.** `execute`'s compiled size was measured before and after: identical, to the
-byte (624-byte frame, 3,335 instructions, 171 spill operations). The reason is §6 Step 0 —
+byte (624-byte frame, 3,335 instructions, 171 spill operations). The reason is §7 Step 0 —
 `Stack::push` is a separate function that was never inlined into `execute`, so `execute`'s
 codegen is untouched by this change.
 
@@ -519,7 +665,7 @@ warm on the same binary), and use `--test-threads=1`, which narrows run-to-run s
 
 ---
 
-## 8. Summary
+## 9. Summary
 
 1. Registers are scarce and fast; RAM is plentiful and slow.
 2. Registers split into **caller-saved** (scratch, a callee may destroy them) and
@@ -533,6 +679,15 @@ warm on the same binary), and use `--test-threads=1`, which narrows run-to-run s
    range. Nothing on the common path survives a call, so the compiler **shrink-wraps** the frame
    setup into the cold branch. The function still contains a call; the common path just stops
    paying for it. Worth 5-10% here.
+6b. The same rule run backwards: a boundary *inside* a hot loop forces loop-carried state back
+   to memory every iteration. Removing it — `#[inline(always)]` on the per-instruction
+   dispatch — was worth **~40%**, the largest win in this repo. It costs frame size, because
+   the fused function reserves what its heaviest path needs on every entry, which bounds
+   recursion depth.
+6c. Those two frame costs have the same symptom and different cures. Callee-saved registers
+   held across a call are removable by outlining; spill slots spread over hundreds of arms are
+   not. Outlining the heaviest cold arm of the fused dispatch recovered **0.6%** — measure one
+   before investing in the rest.
 7. `Stack::pop` and `Val::as_*` look like the same problem, via bounds checks and `panic!`
    rather than the allocator. Unverified: `pop` sets up a frame even though its panic path is
    already diverging, so trace its registers before assuming the `push` result transfers.

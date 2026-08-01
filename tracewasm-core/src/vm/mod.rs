@@ -100,36 +100,6 @@ const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
-/// Builds the `call_indirect` signature-mismatch trap.
-///
-/// Outlined because the two `format!` calls expand `core::fmt` inline, and this
-/// arm is inlined into the driver loop along with the rest of dispatch — where
-/// that expansion inflates the loop's frame for a path taken only on a trap.
-#[inline(never)]
-fn signature_mismatch(
-    table_index: TableIndex,
-    declared_params: &[ValType],
-    declared_results: &[ValType],
-    params: &[ValType],
-    results: &[ValType],
-) -> InstructionExecutionError {
-    InstructionExecutionError::CallIndirect(
-        table_index,
-        CallIndirectError::FunctionSignatureMismatch(
-            format!(
-                "{} -> {}",
-                formatted_val_types(declared_params),
-                formatted_val_types(declared_results)
-            ),
-            format!(
-                "{} -> {}",
-                formatted_val_types(params),
-                formatted_val_types(results)
-            ),
-        ),
-    )
-}
-
 /// Namespace for the interpreter's entry points. Carries no state of its own:
 /// everything mutable lives on the [`Instance`], and per-frame data on
 /// [`TraceVMState`].
@@ -481,57 +451,6 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
         unsafe {
             *self.instance.stack.inner.get_unchecked_mut(slot) = val;
         }
-    }
-
-    /// Truncates `operand` toward zero, checking the result is representable in an
-    /// integer type spanning the half-open range `[low, high)`.
-    ///
-    /// Shared by the eight `iNN.trunc_fNN_{s,u}` instructions, which differ only in
-    /// those bounds and in how they reinterpret the result. Two details make it worth
-    /// centralising rather than repeating per arm:
-    ///
-    /// * **Truncation happens before the range test.** `trunc_u` of `-0.9` is `-0.0`,
-    ///   a valid zero — testing `operand >= 0.0` first would trap on it instead.
-    /// * **The upper bound is exclusive.** An exclusive power of two is exactly
-    ///   representable where the target's maximum often is not: `i32::MAX as f32`
-    ///   rounds *up* to 2^31, so comparing against it would wrongly admit 2^31
-    ///   itself, and `i64::MAX as f64` rounds up to 2^63 the same way. Callers
-    ///   promote `f32` operands to `f64` so the 64-bit bounds stay precise too.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InstructionExecutionError::FloatToIntTruncation`] for a NaN or
-    /// infinite operand, and for a truncated value outside `[low, high)`.
-    ///
-    /// Those are two checks but one condition: the range test alone would reject all
-    /// three special values, since NaN compares false against everything and the
-    /// infinities fall outside any finite range. The explicit guard is kept for
-    /// legibility — it states the intent without asking the reader to work through
-    /// IEEE comparison semantics — so note that no input can reach the range test
-    /// only to be caught by the guard, and removing it would not change behaviour.
-    fn trunc_float_to_int(
-        operand: f64,
-        low: f64,
-        high: f64,
-        target: &str,
-    ) -> Result<f64, InstructionExecutionError> {
-        if operand.is_nan() || operand.is_infinite() {
-            return Err(InstructionExecutionError::FloatToIntTruncation(
-                operand.to_string(),
-                target.to_string(),
-            ));
-        }
-
-        let truncated = operand.trunc();
-
-        if !(low..high).contains(&truncated) {
-            return Err(InstructionExecutionError::FloatToIntTruncation(
-                operand.to_string(),
-                target.to_string(),
-            ));
-        }
-
-        Ok(truncated)
     }
 
     /// Pops the address operand of a memory access and resolves it to an
@@ -1138,7 +1057,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::I32TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = Self::trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 // The result is the `u32` bit pattern held in an `i32`, so values
                 // above `i32::MAX` come back out negative.
@@ -1149,7 +1068,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::I32TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = Self::trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 self.instance.stack.push(Val::I32(truncated as i32));
 
@@ -1157,7 +1076,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32TruncF64U => {
                 let a = self.instance.stack.pop().as_f64();
-                let truncated = Self::trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 self.instance.stack.push(Val::I32(truncated as u32 as i32));
 
@@ -1165,7 +1084,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I32TruncF64S => {
                 let a = self.instance.stack.pop().as_f64();
-                let truncated = Self::trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 self.instance.stack.push(Val::I32(truncated as i32));
 
@@ -1513,7 +1432,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::I64TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = Self::trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 // As with the `i32` forms, the result is the unsigned bit pattern
                 // held in a signed value.
@@ -1524,7 +1443,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             Instruction::I64TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = Self::trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 self.instance.stack.push(Val::I64(truncated as i64));
 
@@ -1532,7 +1451,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64TruncF64U => {
                 let a = self.instance.stack.pop().as_f64();
-                let truncated = Self::trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 self.instance.stack.push(Val::I64(truncated as u64 as i64));
 
@@ -1540,7 +1459,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             }
             Instruction::I64TruncF64S => {
                 let a = self.instance.stack.pop().as_f64();
-                let truncated = Self::trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 self.instance.stack.push(Val::I64(truncated as i64));
 
@@ -2430,4 +2349,85 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
             ExecutionResult::JumpTo(target) => target as usize,
         })
     }
+}
+
+/// Truncates `operand` toward zero, checking the result is representable in an
+/// integer type spanning the half-open range `[low, high)`.
+///
+/// Shared by the eight `iNN.trunc_fNN_{s,u}` instructions, which differ only in
+/// those bounds and in how they reinterpret the result. Two details make it worth
+/// centralising rather than repeating per arm:
+///
+/// * **Truncation happens before the range test.** `trunc_u` of `-0.9` is `-0.0`,
+///   a valid zero — testing `operand >= 0.0` first would trap on it instead.
+/// * **The upper bound is exclusive.** An exclusive power of two is exactly
+///   representable where the target's maximum often is not: `i32::MAX as f32`
+///   rounds *up* to 2^31, so comparing against it would wrongly admit 2^31
+///   itself, and `i64::MAX as f64` rounds up to 2^63 the same way. Callers
+///   promote `f32` operands to `f64` so the 64-bit bounds stay precise too.
+///
+/// # Errors
+///
+/// Returns [`InstructionExecutionError::FloatToIntTruncation`] for a NaN or
+/// infinite operand, and for a truncated value outside `[low, high)`.
+///
+/// Those are two checks but one condition: the range test alone would reject all
+/// three special values, since NaN compares false against everything and the
+/// infinities fall outside any finite range. The explicit guard is kept for
+/// legibility — it states the intent without asking the reader to work through
+/// IEEE comparison semantics — so note that no input can reach the range test
+/// only to be caught by the guard, and removing it would not change behaviour.
+fn trunc_float_to_int(
+    operand: f64,
+    low: f64,
+    high: f64,
+    target: &str,
+) -> Result<f64, InstructionExecutionError> {
+    if operand.is_nan() || operand.is_infinite() {
+        return Err(InstructionExecutionError::FloatToIntTruncation(
+            operand.to_string(),
+            target.to_string(),
+        ));
+    }
+
+    let truncated = operand.trunc();
+
+    if !(low..high).contains(&truncated) {
+        return Err(InstructionExecutionError::FloatToIntTruncation(
+            operand.to_string(),
+            target.to_string(),
+        ));
+    }
+
+    Ok(truncated)
+}
+
+/// Builds the `call_indirect` signature-mismatch trap.
+///
+/// Outlined because the two `format!` calls expand `core::fmt` inline, and this
+/// arm is inlined into the driver loop along with the rest of dispatch — where
+/// that expansion inflates the loop's frame for a path taken only on a trap.
+#[inline(never)]
+fn signature_mismatch(
+    table_index: TableIndex,
+    declared_params: &[ValType],
+    declared_results: &[ValType],
+    params: &[ValType],
+    results: &[ValType],
+) -> InstructionExecutionError {
+    InstructionExecutionError::CallIndirect(
+        table_index,
+        CallIndirectError::FunctionSignatureMismatch(
+            format!(
+                "{} -> {}",
+                formatted_val_types(declared_params),
+                formatted_val_types(declared_results)
+            ),
+            format!(
+                "{} -> {}",
+                formatted_val_types(params),
+                formatted_val_types(results)
+            ),
+        ),
+    )
 }
