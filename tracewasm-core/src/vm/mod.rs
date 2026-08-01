@@ -102,6 +102,15 @@ const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
+enum Step {
+    Next,
+    Call {
+        func_index: FuncIndex,
+        params_count: u32,
+    },
+    JumpTo(usize),
+}
+
 /// Namespace for the interpreter's entry points. Carries no state of its own:
 /// everything mutable lives on the [`Instance`], and per-frame data on
 /// [`TraceVMState`].
@@ -279,6 +288,249 @@ impl TraceVM {
             .truncate_by_preserving_arity(caller_base_height, results_len as u32);
 
         Ok(())
+    }
+
+    fn execute_non_recursive<M: Memory, I: ImportRegistry>(
+        mut func_index: FuncIndex,
+        instance: &mut Instance<M, I>,
+        module: &Module,
+    ) -> Result<(), String> {
+        struct Frame<'a> {
+            func_index: FuncIndex,
+            instructions: &'a Box<[Instruction]>,
+            pc: u32,
+            caller_base_height: u32,
+            frame_base_height: u32,
+            br_table_targets: &'a Box<[TargetBranch]>,
+            instruction_offsets: &'a Box<[u32]>,
+            call_instruction_index: u32,
+            call_instruction_offset: u32,
+            callee_results_len: u32,
+        }
+
+        let mut frames: Vec<Frame> = Vec::with_capacity(10);
+        let imported_func_count = module.imported_func_count;
+
+        debug_assert!(func_index.0 >= imported_func_count);
+
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let ty = &module.types[func_decl.ty.0 as usize];
+        let params_len = ty.params.len();
+        let results_len = ty.results.len();
+        let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
+        let mut instructions = &func_body.instructions;
+        let mut instruction_offsets = &func_body.instruction_offsets;
+        let mut br_table_targets = &func_body.br_table_targets;
+
+        let locals_ty = &func_body.locals;
+        let locals_len = locals_ty.len();
+        let mut caller_base_height: u32 = 0;
+        let mut frame_base_height: u32 = locals_len as u32;
+        let mut pc = 0;
+
+        for i in 0..(locals_len - params_len) {
+            let ty = locals_ty[i + params_len];
+
+            instance.stack.push(Value::zero_of_ty(ty));
+        }
+
+        loop {
+            let instr = &instructions[pc];
+
+            let step = Self::execute_instruction(
+                instr,
+                caller_base_height,
+                frame_base_height,
+                module,
+                instance,
+                br_table_targets,
+                imported_func_count,
+            );
+
+            let Ok(step) = step else { todo!() }; // wire up getting the stack trace
+
+            match step {
+                Step::Next => {
+                    pc = pc + 1;
+                }
+                Step::JumpTo(target_index) => {
+                    pc = target_index;
+                }
+                Step::Call {
+                    func_index: callee_func_index,
+                    params_count: callee_params_count,
+                } => {
+                    // only local function calls come here
+                    debug_assert!(callee_func_index.0 >= imported_func_count);
+
+                    let callee_func_ty = module.func_decls[callee_func_index.0 as usize].ty;
+                    let callee_results_len = module.types[callee_func_ty.0 as usize].results.len();
+                    let callee_func_body =
+                        &module.func_bodies[(callee_func_index.0 - imported_func_count) as usize];
+                    let callee_instructions = &callee_func_body.instructions;
+                    let callee_locals_ty = &callee_func_body.locals;
+                    let callee_br_table_targets = &callee_func_body.br_table_targets;
+                    let callee_instruction_offsets = &callee_func_body.instruction_offsets;
+
+                    // save current frame's data
+                    frames.push(Frame {
+                        func_index,
+                        instructions: instructions,
+                        pc: pc as u32,
+                        caller_base_height,
+                        frame_base_height,
+                        br_table_targets,
+                        instruction_offsets,
+                        call_instruction_index: pc as u32,
+                        call_instruction_offset: instruction_offsets[pc],
+                        callee_results_len: callee_results_len as u32,
+                    });
+
+                    let callee_locals_len = callee_locals_ty.len();
+                    let callee_params_len = callee_params_count as usize;
+
+                    // override the current state with callee
+                    func_index = callee_func_index;
+                    instructions = callee_instructions;
+                    pc = 0;
+                    caller_base_height = instance.stack.height() - callee_params_count;
+                    frame_base_height = caller_base_height + callee_locals_len as u32;
+                    br_table_targets = callee_br_table_targets;
+                    instruction_offsets = callee_instruction_offsets;
+
+                    // setup the callee frame
+                    for i in 0..(callee_locals_len - callee_params_len) {
+                        let ty = callee_locals_ty[i + callee_params_len];
+
+                        instance.stack.push(Value::zero_of_ty(ty));
+                    }
+
+                    continue;
+                }
+            }
+
+            if pc == instructions.len() {
+                if frames.is_empty() {
+                    break;
+                }
+
+                // pop the frame!
+                // reset the values and continue
+                let frame = frames.pop().unwrap(); // checked above!
+
+                instance
+                    .stack
+                    .truncate_by_preserving_arity(caller_base_height, frame.callee_results_len);
+
+                func_index = frame.func_index;
+                instructions = frame.instructions;
+                pc = frame.pc as usize + 1;
+                caller_base_height = frame.caller_base_height;
+                frame_base_height = frame.frame_base_height;
+                br_table_targets = frame.br_table_targets;
+                instruction_offsets = frame.instruction_offsets;
+            }
+        }
+
+        instance
+            .stack
+            .truncate_by_preserving_arity(caller_base_height, results_len as u32);
+
+        Ok(())
+    }
+
+    fn execute_instruction<M: Memory, I: ImportRegistry>(
+        instr: &Instruction,
+        caller_base_height: u32,
+        frame_base_height: u32,
+        module: &Module,
+        instance: &mut Instance<M, I>,
+        br_table_targets: &[TargetBranch],
+        imported_func_count: u32,
+    ) -> Result<Step, InstructionExecutionError> {
+        let res = match instr {
+            Instruction::Call {
+                func_index: callee_func_index,
+                params_count: callee_params_count,
+            } => {
+                if callee_func_index.0 >= imported_func_count {
+                    return Ok(Step::Call {
+                        func_index: *callee_func_index,
+                        params_count: *callee_params_count,
+                    });
+                }
+
+                // execute imported function!
+                let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
+                let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
+
+                debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
+
+                let FuncKind::Imported {
+                    module_name,
+                    imported_func_name,
+                } = &callee_func_decl.kind
+                else {
+                    unreachable!()
+                };
+
+                // The stack holds untagged `Value`s, so the host boundary re-tags them
+                // from the callee's declared parameter types. Collected into a
+                // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
+                // import of five or fewer parameters costs no allocation.
+                let callee_params = ParamVals::new(
+                    instance
+                        .stack
+                        .pop_params(*callee_params_count)
+                        .iter()
+                        .zip(callee_params_ty)
+                        .map(|(param, ty)| param.into_val(ty))
+                        .collect(),
+                );
+
+                // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
+                let results = instance
+                    .import_registry
+                    .execute(
+                        module_name,
+                        imported_func_name,
+                        callee_params.as_ref(),
+                        &mut instance.memory,
+                    )
+                    .map_err(|err| {
+                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
+                    })?;
+
+                // push results to the stack
+                for res in results {
+                    instance.stack.push(res.into());
+                }
+
+                Step::Next
+            }
+            Instruction::I32Store {
+                offset: memarg_offset,
+                align: _,
+            } => {
+                let val = instance.stack.pop().as_i32();
+                let addr = instance.stack.pop().as_i32() as u32;
+
+                // Effective address = popped address + static offset, computed with
+                // a checked add: a u32 overflow is past the 32-bit memory space, so
+                // it traps rather than wrapping to a wrong (in-bounds) address.
+                let effective_offset = addr
+                    .checked_add(*memarg_offset)
+                    .ok_or(MemoryError::EffectiveAddressOverflow(addr, *memarg_offset))?
+                    as usize;
+
+                instance.memory.write_u32(effective_offset, val as u32)?;
+
+                Step::Next
+            }
+            _ => todo!(),
+        };
+
+        Ok(res)
     }
 
     /// Evaluates a constant-expression instruction sequence to its single
