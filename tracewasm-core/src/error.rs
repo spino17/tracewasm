@@ -135,323 +135,6 @@ impl From<wasmparser::Error> for TraceWasmError {
     }
 }
 
-/// One frame of a captured interpreter backtrace: the instruction (and its
-/// enclosing function) that either trapped or called into the next-inner frame.
-pub struct TraceRecord {
-    /// The enclosing function this frame belongs to.
-    pub func_index: FuncIndex,
-    /// The instruction's index in that function's lowered instruction list.
-    pub instr_index: usize,
-    /// The instruction at that index.
-    pub instr: Instruction,
-    /// Whether this frame is a call into a deeper frame or the trapping leaf.
-    pub kind: TraceRecordKind,
-    /// The instruction's byte offset in the module binary, for resolving a source
-    /// location against the module's DWARF (see [`Module::dwarf`](crate::module::Module::dwarf)).
-    pub instr_offset: u32,
-}
-
-/// Distinguishes a caller frame (a `call`/`call_indirect` into a deeper frame)
-/// from the innermost frame where execution actually trapped.
-pub enum TraceRecordKind {
-    /// A call frame leading into the next-inner frame. `callee_index` is the
-    /// function called; `is_indirect` is `Some(table)` for a `call_indirect` and
-    /// `None` for a direct `call`.
-    Call {
-        callee_index: FuncIndex,
-        is_indirect: Option<TableIndex>,
-    },
-    /// The innermost frame: the instruction that trapped, carrying its message.
-    NonCall(String),
-}
-
-/// A captured interpreter backtrace, innermost-first: frame `0` is where
-/// execution trapped and each later frame is the caller that led to it.
-pub struct StackTrace<'a>(Vec<TraceRecord>, &'a str, &'a Arc<Module>);
-
-impl<'a> StackTrace<'a> {
-    /// Resolves each frame of this trace against the module's `dwarf`, expanding
-    /// it into its source-level frames (including any the compiler inlined).
-    ///
-    /// The instruction offsets recorded in the trace are byte offsets into the
-    /// module binary, which is exactly how WebAssembly DWARF encodes code
-    /// addresses, so they can be used as lookup probes directly.
-    ///
-    /// Every frame yields exactly one [`SourceTraceRecord`], even when DWARF has
-    /// no coverage for it (an empty `inline_trace`), so the source trace never
-    /// drops a frame relative to this one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SourceStackTraceError::NoDebugInfo`] if the module carries no
-    /// DWARF — i.e. the wasm was **not built with debug info**, which is the
-    /// default for a release build. Resolving source locations requires the
-    /// `.debug_*` custom sections, so enable debug info when producing the module
-    /// (for a Cargo build, `debug = true` on the profile at the *workspace root*;
-    /// a profile in a member manifest is ignored).
-    ///
-    /// Also fails if the DWARF cannot be indexed or a lookup errors; see
-    /// [`SourceStackTraceError`] for the full set.
-    pub fn to_source_trace(&self) -> Result<SourceStackTrace<'_>, SourceStackTraceError> {
-        // A module built without debug info is the common case, not a bug — report
-        // it rather than panicking on a diagnostics path.
-        let Some(dwarf) = self.2.dwarf() else {
-            return Err(SourceStackTraceError::NoDebugInfo);
-        };
-
-        let mut source_trace = vec![];
-        // Built once: indexing the DWARF is proportional to its size, so doing it
-        // per frame would re-parse the whole thing for every frame.
-        let ctx = addr2line::Context::from_arc_dwarf(dwarf)
-            .map_err(|err| SourceStackTraceError::ContextLoadFailed(err.to_string()))?;
-
-        for (i, frame) in self.0.iter().enumerate() {
-            let instruction_offset = frame.instr_offset;
-
-            let mut frames = match ctx.find_frames(instruction_offset as u64) {
-                // Only returned when the DWARF points at a split/supplementary
-                // object, which a self-contained wasm module has no way to supply.
-                // Report it rather than panicking — this is a diagnostics path.
-                LookupResult::Load { .. } => {
-                    return Err(SourceStackTraceError::SplitDwarfUnsupported);
-                }
-                LookupResult::Output(output) => output,
-            }
-            .map_err(|err| SourceStackTraceError::FindFramesFailed(err.to_string()))?;
-
-            let mut inline_trace = vec![];
-
-            while let Some(frame) = frames
-                .next()
-                .map_err(|err| SourceStackTraceError::NextFrameFetchFailed(err.to_string()))?
-            {
-                // Fall back through demangled → raw → `<unknown>`; a name we cannot
-                // decode should degrade the trace, not panic while reporting it.
-                let func_name = frame
-                    .function
-                    .as_ref()
-                    .and_then(|f| {
-                        f.demangle()
-                            .or_else(|_| f.raw_name())
-                            .ok()
-                            .map(|name| name.into_owned())
-                    })
-                    .unwrap_or_else(|| "<unknown>".into());
-
-                let (file, line) = match &frame.location {
-                    Some(loc) => (loc.file.unwrap_or("<unknown>"), loc.line.unwrap_or(0)),
-                    None => ("<unknown>", 0),
-                };
-
-                inline_trace.push(InlineFrameRecord {
-                    file: file.to_string(),
-                    line,
-                    func_name,
-                });
-            }
-
-            source_trace.push(SourceTraceRecord {
-                trace_record_index: i as u32,
-                inline_trace,
-            });
-        }
-
-        Ok(SourceStackTrace(source_trace, self.1))
-    }
-
-    /// Renders the trace as a human-readable, innermost-first backtrace: frame
-    /// `#0` is where execution trapped, and each subsequent frame is the caller
-    /// that led to it.
-    ///
-    /// The header names the entry function the trace was captured for. Function
-    /// and table names come from the module's `name` section, falling back to
-    /// `func #N` / `table #N` when a name is absent.
-    pub fn render(&self) -> String {
-        let custom_section = &self.2.custom_section;
-
-        let name_of_func = |f: FuncIndex| {
-            custom_section
-                .func_name(f)
-                .map(|name| {
-                    // Some toolchains emit the WAT-style `$`-prefixed symbol; strip
-                    // it so the demangler sees the bare symbol. `{:#}` drops the
-                    // trailing `::h<hash>` disambiguator, and a non-Rust symbol
-                    // passes through unchanged.
-                    let symbol = name.strip_prefix('$').unwrap_or(name);
-
-                    format!("{:#}", demangle(symbol))
-                })
-                .unwrap_or_else(|| format!("func #{}", f.0))
-        };
-
-        let name_of_table = |t: TableIndex| {
-            custom_section
-                .table_name(t)
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("table #{}", t.0))
-        };
-
-        let mut out = format!("Stack trace of `{}` (most recent call first):\n\n", self.1);
-
-        // Pre-resolve each frame's function name so the function column aligns.
-        let frame_names: Vec<String> = self.0.iter().map(|r| name_of_func(r.func_index)).collect();
-        let width = frame_names.iter().map(String::len).max().unwrap_or(0);
-
-        for (i, (record, frame_name)) in self.0.iter().zip(&frame_names).enumerate() {
-            let detail = match &record.kind {
-                // The innermost frame: the instruction that actually trapped.
-                TraceRecordKind::NonCall(err) => {
-                    format!(
-                        "at instr {} ({:?}) — trap: {err}",
-                        record.instr_index, record.instr
-                    )
-                }
-                // A caller frame: the call that led into the next-inner frame.
-                TraceRecordKind::Call {
-                    callee_index,
-                    is_indirect,
-                } => {
-                    let via = match is_indirect {
-                        Some(table) => format!(" (indirect, via {})", name_of_table(*table)),
-                        None => String::new(),
-                    };
-
-                    format!(
-                        "at instr {} — calls `{}`{via}",
-                        record.instr_index,
-                        name_of_func(*callee_index)
-                    )
-                }
-            };
-
-            let column = format!("{frame_name:<width$}", width = width);
-
-            out.push_str(&format!("  #{i:<2} {column}  {detail}\n"));
-        }
-
-        out
-    }
-}
-
-/// One source-level frame resolved from DWARF. A single wasm instruction can map
-/// to several of these when the compiler inlined calls into it.
-pub struct InlineFrameRecord {
-    /// Source file the frame came from, or `<unknown>` if DWARF omits it.
-    pub file: String,
-    /// The function's demangled name, or `<unknown>` if DWARF omits it.
-    pub func_name: String,
-    /// Line number within [`Self::file`], or `0` if DWARF omits it.
-    pub line: u32,
-}
-
-/// The source-level expansion of one interpreter frame.
-pub struct SourceTraceRecord {
-    /// Index of the [`TraceRecord`] in the originating [`StackTrace`] that this
-    /// expands, so the two traces can be shown side by side.
-    pub trace_record_index: u32,
-    /// The source frames for that instruction, outermost call site last. Empty
-    /// when the instruction's offset has no DWARF coverage — the record is still
-    /// emitted so no interpreter frame goes missing from the trace.
-    pub inline_trace: Vec<InlineFrameRecord>,
-}
-
-impl InlineFrameRecord {
-    /// `file:line`, or just the file when DWARF recorded no line number.
-    fn location(&self) -> String {
-        if self.line == 0 {
-            self.file.clone()
-        } else {
-            format!("{}:{}", self.file, self.line)
-        }
-    }
-}
-
-impl SourceTraceRecord {
-    /// Renders this interpreter frame as a numbered block: the function the
-    /// instruction resolved to and its source location, then each function it was
-    /// inlined into, outward to the one that physically contains the code.
-    ///
-    /// The block is `\n`-terminated so records stack directly. A frame the DWARF
-    /// does not cover still renders a line, so the numbering stays aligned with
-    /// the interpreter trace.
-    pub fn render(&self) -> String {
-        let index = self.trace_record_index;
-
-        // `inline_trace` is innermost-first: entry 0 is the deepest inlined
-        // callee, and everything after it is a caller the compiler inlined it
-        // into, ending at the real function.
-        let Some((innermost, inlined_into)) = self.inline_trace.split_first() else {
-            return format!("  #{index:<3} <no source information>\n");
-        };
-
-        let mut out = format!(
-            "  #{index:<3} {}\n           at {}\n",
-            innermost.func_name,
-            innermost.location()
-        );
-
-        for caller in inlined_into {
-            out.push_str(&format!(
-                "        inlined into {}\n           at {}\n",
-                caller.func_name,
-                caller.location()
-            ));
-        }
-
-        out
-    }
-}
-
-/// A [`StackTrace`] resolved against the module's DWARF: one entry per
-/// interpreter frame, each expanded into its source-level (and inlined) frames.
-pub struct SourceStackTrace<'a>(Vec<SourceTraceRecord>, &'a str);
-
-impl<'a> SourceStackTrace<'a> {
-    /// The per-frame records, innermost frame first.
-    pub fn records(&self) -> &[SourceTraceRecord] {
-        &self.0
-    }
-
-    /// Renders the whole source trace, innermost frame first — the source-level
-    /// counterpart of [`StackTrace::render`].
-    ///
-    /// The header names the entry function, carried over from the [`StackTrace`]
-    /// this was resolved from. Frame numbers are the indices of the corresponding
-    /// [`TraceRecord`]s in that trace, so the two renderings line up.
-    pub fn render(&self) -> String {
-        let mut out = format!("Source trace of `{}` (most recent call first):\n\n", self.1);
-
-        for record in &self.0 {
-            out.push_str(&record.render());
-        }
-
-        out
-    }
-}
-
-/// A failure while resolving a [`StackTrace`] against DWARF debug info.
-#[derive(Error, Debug)]
-pub enum SourceStackTraceError {
-    /// The DWARF sections could not be indexed into an `addr2line` context.
-    #[error("context load from dwarf failed: {0}")]
-    ContextLoadFailed(String),
-    /// Looking up the frames covering an instruction's offset failed.
-    #[error("find_frames failed: {0}")]
-    FindFramesFailed(String),
-    /// Advancing to the next inlined frame failed.
-    #[error("failed to fetch the next frame: {0}")]
-    NextFrameFetchFailed(String),
-    /// The DWARF refers to a split unit (`.dwo`/`.dwp`) or a supplementary file,
-    /// which is not loadable from a self-contained wasm module.
-    #[error("split DWARF is not supported")]
-    SplitDwarfUnsupported,
-    /// The module carries no DWARF, so there is nothing to resolve against. This
-    /// is the normal case for a release build — debug info has to be enabled for
-    /// the wasm to contain `.debug_*` sections.
-    #[error("the module has no debug info; rebuild the wasm with debug info enabled")]
-    NoDebugInfo,
-}
-
 impl TraceWasmError {
     fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
         let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err, instr_offset) =
@@ -707,6 +390,323 @@ impl From<MemoryError> for TraceWasmError {
     fn from(value: MemoryError) -> Self {
         TraceWasmError::MemoryError(value)
     }
+}
+
+/// One frame of a captured interpreter backtrace: the instruction (and its
+/// enclosing function) that either trapped or called into the next-inner frame.
+pub struct TraceRecord {
+    /// The enclosing function this frame belongs to.
+    pub func_index: FuncIndex,
+    /// The instruction's index in that function's lowered instruction list.
+    pub instr_index: usize,
+    /// The instruction at that index.
+    pub instr: Instruction,
+    /// Whether this frame is a call into a deeper frame or the trapping leaf.
+    pub kind: TraceRecordKind,
+    /// The instruction's byte offset in the module binary, for resolving a source
+    /// location against the module's DWARF (see [`Module::dwarf`](crate::module::Module::dwarf)).
+    pub instr_offset: u32,
+}
+
+/// Distinguishes a caller frame (a `call`/`call_indirect` into a deeper frame)
+/// from the innermost frame where execution actually trapped.
+pub enum TraceRecordKind {
+    /// A call frame leading into the next-inner frame. `callee_index` is the
+    /// function called; `is_indirect` is `Some(table)` for a `call_indirect` and
+    /// `None` for a direct `call`.
+    Call {
+        callee_index: FuncIndex,
+        is_indirect: Option<TableIndex>,
+    },
+    /// The innermost frame: the instruction that trapped, carrying its message.
+    NonCall(String),
+}
+
+/// A captured interpreter backtrace, innermost-first: frame `0` is where
+/// execution trapped and each later frame is the caller that led to it.
+pub struct StackTrace<'a>(Vec<TraceRecord>, &'a str, &'a Arc<Module>);
+
+impl<'a> StackTrace<'a> {
+    /// Resolves each frame of this trace against the module's `dwarf`, expanding
+    /// it into its source-level frames (including any the compiler inlined).
+    ///
+    /// The instruction offsets recorded in the trace are byte offsets into the
+    /// module binary, which is exactly how WebAssembly DWARF encodes code
+    /// addresses, so they can be used as lookup probes directly.
+    ///
+    /// Every frame yields exactly one [`SourceTraceRecord`], even when DWARF has
+    /// no coverage for it (an empty `inline_trace`), so the source trace never
+    /// drops a frame relative to this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceStackTraceError::NoDebugInfo`] if the module carries no
+    /// DWARF — i.e. the wasm was **not built with debug info**, which is the
+    /// default for a release build. Resolving source locations requires the
+    /// `.debug_*` custom sections, so enable debug info when producing the module
+    /// (for a Cargo build, `debug = true` on the profile at the *workspace root*;
+    /// a profile in a member manifest is ignored).
+    ///
+    /// Also fails if the DWARF cannot be indexed or a lookup errors; see
+    /// [`SourceStackTraceError`] for the full set.
+    pub fn to_source_trace(&self) -> Result<SourceStackTrace<'_>, SourceStackTraceError> {
+        // A module built without debug info is the common case, not a bug — report
+        // it rather than panicking on a diagnostics path.
+        let Some(dwarf) = self.2.dwarf() else {
+            return Err(SourceStackTraceError::NoDebugInfo);
+        };
+
+        let mut source_trace = vec![];
+        // Built once: indexing the DWARF is proportional to its size, so doing it
+        // per frame would re-parse the whole thing for every frame.
+        let ctx = addr2line::Context::from_arc_dwarf(dwarf)
+            .map_err(|err| SourceStackTraceError::ContextLoadFailed(err.to_string()))?;
+
+        for (i, frame) in self.0.iter().enumerate() {
+            let instruction_offset = frame.instr_offset;
+
+            let mut frames = match ctx.find_frames(instruction_offset as u64) {
+                // Only returned when the DWARF points at a split/supplementary
+                // object, which a self-contained wasm module has no way to supply.
+                // Report it rather than panicking — this is a diagnostics path.
+                LookupResult::Load { .. } => {
+                    return Err(SourceStackTraceError::SplitDwarfUnsupported);
+                }
+                LookupResult::Output(output) => output,
+            }
+            .map_err(|err| SourceStackTraceError::FindFramesFailed(err.to_string()))?;
+
+            let mut inline_trace = vec![];
+
+            while let Some(frame) = frames
+                .next()
+                .map_err(|err| SourceStackTraceError::NextFrameFetchFailed(err.to_string()))?
+            {
+                // Fall back through demangled → raw → `<unknown>`; a name we cannot
+                // decode should degrade the trace, not panic while reporting it.
+                let func_name = frame
+                    .function
+                    .as_ref()
+                    .and_then(|f| {
+                        f.demangle()
+                            .or_else(|_| f.raw_name())
+                            .ok()
+                            .map(|name| name.into_owned())
+                    })
+                    .unwrap_or_else(|| "<unknown>".into());
+
+                let (file, line) = match &frame.location {
+                    Some(loc) => (loc.file.unwrap_or("<unknown>"), loc.line.unwrap_or(0)),
+                    None => ("<unknown>", 0),
+                };
+
+                inline_trace.push(InlineFrameRecord {
+                    file: file.to_string(),
+                    line,
+                    func_name,
+                });
+            }
+
+            source_trace.push(SourceTraceRecord {
+                trace_record_index: i as u32,
+                inline_trace,
+            });
+        }
+
+        Ok(SourceStackTrace(source_trace, self.1))
+    }
+
+    /// Renders the trace as a human-readable, innermost-first backtrace: frame
+    /// `#0` is where execution trapped, and each subsequent frame is the caller
+    /// that led to it.
+    ///
+    /// The header names the entry function the trace was captured for. Function
+    /// and table names come from the module's `name` section, falling back to
+    /// `func #N` / `table #N` when a name is absent.
+    pub fn render(&self) -> String {
+        let custom_section = &self.2.custom_section;
+
+        let name_of_func = |f: FuncIndex| {
+            custom_section
+                .func_name(f)
+                .map(|name| {
+                    // Some toolchains emit the WAT-style `$`-prefixed symbol; strip
+                    // it so the demangler sees the bare symbol. `{:#}` drops the
+                    // trailing `::h<hash>` disambiguator, and a non-Rust symbol
+                    // passes through unchanged.
+                    let symbol = name.strip_prefix('$').unwrap_or(name);
+
+                    format!("{:#}", demangle(symbol))
+                })
+                .unwrap_or_else(|| format!("func #{}", f.0))
+        };
+
+        let name_of_table = |t: TableIndex| {
+            custom_section
+                .table_name(t)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("table #{}", t.0))
+        };
+
+        let mut out = format!("Stack trace of `{}` (most recent call first):\n\n", self.1);
+
+        // Pre-resolve each frame's function name so the function column aligns.
+        let frame_names: Vec<String> = self.0.iter().map(|r| name_of_func(r.func_index)).collect();
+        let width = frame_names.iter().map(String::len).max().unwrap_or(0);
+
+        for (i, (record, frame_name)) in self.0.iter().zip(&frame_names).enumerate() {
+            let detail = match &record.kind {
+                // The innermost frame: the instruction that actually trapped.
+                TraceRecordKind::NonCall(err) => {
+                    format!(
+                        "at instr {} ({:?}) — trap: {err}",
+                        record.instr_index, record.instr
+                    )
+                }
+                // A caller frame: the call that led into the next-inner frame.
+                TraceRecordKind::Call {
+                    callee_index,
+                    is_indirect,
+                } => {
+                    let via = match is_indirect {
+                        Some(table) => format!(" (indirect, via {})", name_of_table(*table)),
+                        None => String::new(),
+                    };
+
+                    format!(
+                        "at instr {} — calls `{}`{via}",
+                        record.instr_index,
+                        name_of_func(*callee_index)
+                    )
+                }
+            };
+
+            let column = format!("{frame_name:<width$}", width = width);
+
+            out.push_str(&format!("  #{i:<2} {column}  {detail}\n"));
+        }
+
+        out
+    }
+}
+
+/// One source-level frame resolved from DWARF. A single wasm instruction can map
+/// to several of these when the compiler inlined calls into it.
+pub struct InlineFrameRecord {
+    /// Source file the frame came from, or `<unknown>` if DWARF omits it.
+    pub file: String,
+    /// The function's demangled name, or `<unknown>` if DWARF omits it.
+    pub func_name: String,
+    /// Line number within [`Self::file`], or `0` if DWARF omits it.
+    pub line: u32,
+}
+
+impl InlineFrameRecord {
+    /// `file:line`, or just the file when DWARF recorded no line number.
+    fn location(&self) -> String {
+        if self.line == 0 {
+            self.file.clone()
+        } else {
+            format!("{}:{}", self.file, self.line)
+        }
+    }
+}
+
+/// The source-level expansion of one interpreter frame.
+pub struct SourceTraceRecord {
+    /// Index of the [`TraceRecord`] in the originating [`StackTrace`] that this
+    /// expands, so the two traces can be shown side by side.
+    pub trace_record_index: u32,
+    /// The source frames for that instruction, outermost call site last. Empty
+    /// when the instruction's offset has no DWARF coverage — the record is still
+    /// emitted so no interpreter frame goes missing from the trace.
+    pub inline_trace: Vec<InlineFrameRecord>,
+}
+
+impl SourceTraceRecord {
+    /// Renders this interpreter frame as a numbered block: the function the
+    /// instruction resolved to and its source location, then each function it was
+    /// inlined into, outward to the one that physically contains the code.
+    ///
+    /// The block is `\n`-terminated so records stack directly. A frame the DWARF
+    /// does not cover still renders a line, so the numbering stays aligned with
+    /// the interpreter trace.
+    pub fn render(&self) -> String {
+        let index = self.trace_record_index;
+
+        // `inline_trace` is innermost-first: entry 0 is the deepest inlined
+        // callee, and everything after it is a caller the compiler inlined it
+        // into, ending at the real function.
+        let Some((innermost, inlined_into)) = self.inline_trace.split_first() else {
+            return format!("  #{index:<3} <no source information>\n");
+        };
+
+        let mut out = format!(
+            "  #{index:<3} {}\n           at {}\n",
+            innermost.func_name,
+            innermost.location()
+        );
+
+        for caller in inlined_into {
+            out.push_str(&format!(
+                "        inlined into {}\n           at {}\n",
+                caller.func_name,
+                caller.location()
+            ));
+        }
+
+        out
+    }
+}
+
+/// A [`StackTrace`] resolved against the module's DWARF: one entry per
+/// interpreter frame, each expanded into its source-level (and inlined) frames.
+pub struct SourceStackTrace<'a>(Vec<SourceTraceRecord>, &'a str);
+
+impl<'a> SourceStackTrace<'a> {
+    /// The per-frame records, innermost frame first.
+    pub fn records(&self) -> &[SourceTraceRecord] {
+        &self.0
+    }
+
+    /// Renders the whole source trace, innermost frame first — the source-level
+    /// counterpart of [`StackTrace::render`].
+    ///
+    /// The header names the entry function, carried over from the [`StackTrace`]
+    /// this was resolved from. Frame numbers are the indices of the corresponding
+    /// [`TraceRecord`]s in that trace, so the two renderings line up.
+    pub fn render(&self) -> String {
+        let mut out = format!("Source trace of `{}` (most recent call first):\n\n", self.1);
+
+        for record in &self.0 {
+            out.push_str(&record.render());
+        }
+
+        out
+    }
+}
+
+/// A failure while resolving a [`StackTrace`] against DWARF debug info.
+#[derive(Error, Debug)]
+pub enum SourceStackTraceError {
+    /// The DWARF sections could not be indexed into an `addr2line` context.
+    #[error("context load from dwarf failed: {0}")]
+    ContextLoadFailed(String),
+    /// Looking up the frames covering an instruction's offset failed.
+    #[error("find_frames failed: {0}")]
+    FindFramesFailed(String),
+    /// Advancing to the next inlined frame failed.
+    #[error("failed to fetch the next frame: {0}")]
+    NextFrameFetchFailed(String),
+    /// The DWARF refers to a split unit (`.dwo`/`.dwp`) or a supplementary file,
+    /// which is not loadable from a self-contained wasm module.
+    #[error("split DWARF is not supported")]
+    SplitDwarfUnsupported,
+    /// The module carries no DWARF, so there is nothing to resolve against. This
+    /// is the normal case for a release build — debug info has to be enabled for
+    /// the wasm to contain `.debug_*` sections.
+    #[error("the module has no debug info; rebuild the wasm with debug info enabled")]
+    NoDebugInfo,
 }
 
 #[cfg(test)]
