@@ -250,7 +250,7 @@ impl TraceVM {
             let instr = &instructions[pc];
 
             pc = state
-                .execute(instr, module, pc, call_stack_depth, br_table_targets)
+                .execute_instruction(instr, module, pc, call_stack_depth, br_table_targets)
                 .map_err(|err| {
                     // `pc` is unchanged on the error path (the failing arm returns
                     // before the update), so it still names the faulting instruction.
@@ -617,7 +617,7 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// call. [`Config::max_call_stack_depth`](crate::instance::config::Config)'s
     /// default is sized against it — read the note there before changing either.
     #[inline(always)]
-    fn execute(
+    fn execute_instruction(
         &mut self,
         instruction: &Instruction,
         module: &Module,
