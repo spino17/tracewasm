@@ -73,7 +73,7 @@ use crate::{
     },
     instruction::{Instruction, TargetBranch},
     memory::Memory,
-    module::{FuncIndex, FuncKind, LocalIndex, Module, formatted_val_types},
+    module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
     vm::stack::{DataVal, Stack, Val},
 };
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
@@ -99,6 +99,36 @@ const U32_TRUNC_HIGH: f64 = u32::MAX as f32 as f64; // 2^32 = 4294967296
 const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
+
+/// Builds the `call_indirect` signature-mismatch trap.
+///
+/// Outlined because the two `format!` calls expand `core::fmt` inline, and this
+/// arm is inlined into the driver loop along with the rest of dispatch — where
+/// that expansion inflates the loop's frame for a path taken only on a trap.
+#[inline(never)]
+fn signature_mismatch(
+    table_index: TableIndex,
+    declared_params: &[ValType],
+    declared_results: &[ValType],
+    params: &[ValType],
+    results: &[ValType],
+) -> InstructionExecutionError {
+    InstructionExecutionError::CallIndirect(
+        table_index,
+        CallIndirectError::FunctionSignatureMismatch(
+            format!(
+                "{} -> {}",
+                formatted_val_types(declared_params),
+                formatted_val_types(declared_results)
+            ),
+            format!(
+                "{} -> {}",
+                formatted_val_types(params),
+                formatted_val_types(results)
+            ),
+        ),
+    )
+}
 
 /// Namespace for the interpreter's entry points. Carries no state of its own:
 /// everything mutable lives on the [`Instance`], and per-frame data on
@@ -636,6 +666,17 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
     /// The [`ExecutionResult`] match stays inside this function so that enum never
     /// crosses the boundary either; LLVM folds each arm's constant straight into
     /// the returned `pc`.
+    /// Inlined into [`TraceVM::execute`]'s driver loop, which is worth ~40% of
+    /// interpreter throughput. Left as a real call, this boundary is crossed once
+    /// per wasm instruction, and `pc` together with the stack's base and length
+    /// cannot stay in registers across it — they are reloaded every iteration.
+    ///
+    /// The cost is paid in stack: fusing ~200 opcode arms into one function puts
+    /// all their spill slots in a single frame, roughly 5 KB, and since the
+    /// recursive call path runs through that frame it is charged per nested wasm
+    /// call. [`Config::max_call_stack_depth`](crate::instance::config::Config)'s
+    /// default is sized against it — read the note there before changing either.
+    #[inline(always)]
     fn execute(
         &mut self,
         instruction: &Instruction,
@@ -696,20 +737,12 @@ impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
                 if params.as_ref() != declared_params.as_ref()
                     || results.as_ref() != declared_results.as_ref()
                 {
-                    return Err(InstructionExecutionError::CallIndirect(
+                    return Err(signature_mismatch(
                         *table_index,
-                        CallIndirectError::FunctionSignatureMismatch(
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(declared_params),
-                                formatted_val_types(declared_results)
-                            ),
-                            format!(
-                                "{} -> {}",
-                                formatted_val_types(params),
-                                formatted_val_types(results)
-                            ),
-                        ),
+                        declared_params,
+                        declared_results,
+                        params,
+                        results,
                     ));
                 }
 

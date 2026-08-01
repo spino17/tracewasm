@@ -9,8 +9,8 @@ All file references are `tracewasm-core/src/...`.
 
 ## 1. Baseline
 
-Re-recorded after levers A, C (locals) and F. This is the reference every future
-optimisation compares against.
+Re-recorded after levers A, C, F and the dispatch inlining in §4. This is the reference
+every future optimisation compares against.
 
 ### How to reproduce — read this before comparing
 
@@ -37,11 +37,11 @@ which is on the order of 10-30 wasm instructions. Do not read these as cycles-pe
 
 | workload | median ns/op | min | max | spread |
 | --- | --- | --- | --- | --- |
-| arithmetic (i64 + f64 mix) | **137.48** | 136.76 | 140.36 | 2.6% |
-| control flow (match + loops) | **137.14** | 135.63 | 151.33 | 11.4% |
-| memory (load/store) | **159.41** | 153.60 | 173.75 | 12.6% |
-| calls (one indirect per iter) | **111.31** | 108.55 | 113.73 | 4.7% |
-| heap (alloc + collections) | **14.96 ms** | 14.74 | 15.02 | 1.9% |
+| arithmetic (i64 + f64 mix) | **74.15** | 72.91 | 74.89 | 2.7% |
+| control flow (match + loops) | **93.70** | 91.53 | 96.53 | 5.3% |
+| memory (load/store) | **89.41** | 88.20 | 90.99 | 3.1% |
+| calls (one indirect per iter) | **61.96** | 60.81 | 62.59 | 2.9% |
+| heap (alloc + collections) | **8.19 ms** | 8.12 | 8.36 | 2.9% |
 
 The four `ns/op` rows are the ones to watch — each isolates a different interpreter cost
 (dispatch, control flow, linear memory, indirect calls), which is what localises a
@@ -51,13 +51,13 @@ regression that a single blended number would hide.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| trivial call, n=1 | **251.28 ns** | 248.16 | 258.87 | 4.3% |
-| 5-param call | **169.48 ns** | 167.63 | 179.47 | 7.0% |
-| direct recursion, depth 100 | **103.35 ns/op** | 100.15 | 118.44 | 17.7% |
-| direct recursion, depth 1000 | **112.17 ns/op** | 108.10 | 126.79 | 16.7% |
-| direct recursion, depth 3000 | **114.68 ns/op** | 111.98 | 126.23 | 12.4% |
+| trivial call, n=1 | **152.35 ns** | 150.14 | 154.09 | 2.6% |
+| 5-param call | **97.75 ns** | 96.53 | 99.60 | 3.1% |
+| direct recursion, depth 100 | **65.25 ns/op** | 64.04 | 69.48 | 8.3% |
+| direct recursion, depth 1000 | **73.30 ns/op** | 70.83 | 76.86 | 8.2% |
+| direct recursion, depth 3000 | **75.13 ns/op** | 73.56 | 75.84 | 3.0% |
 
-Recursion cost is flat in depth (103 → 115 ns/op from depth 100 to 3000), so frame setup is
+Recursion cost is flat in depth (65 → 75 ns/op from depth 100 to 3000), so frame setup is
 not super-linear — though these three rows carry the widest spread in the table, so read the
 trend rather than the numbers. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
 
@@ -71,19 +71,24 @@ the whole module, not by the small part any one test executes.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| compile + instantiate: arithmetic | **0.13 ms** | 0.11 | 0.14 | 20.1% |
-| compile + instantiate: exotic | **0.54 ms** | 0.52 | 0.59 | 12.9% |
-| compile + instantiate: heap | **1.11 ms** | 1.05 | 1.14 | 8.1% |
+| compile + instantiate: arithmetic | **0.13 ms** | 0.11 | 0.31 | — |
+| compile + instantiate: exotic | **0.55 ms** | 0.54 | 0.57 | 4.4% |
+| compile + instantiate: heap | **1.13 ms** | 1.10 | 1.21 | 9.7% |
+
+Compile is untouched by the execute-path work, as expected — it does not run the interpreter.
 
 ### Guest linear-memory growth
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| allocate ~1 page | **0.01 ms** | 0.01 | 0.01 | 42.1% |
-| allocate ~8 pages | **0.04 ms** | 0.04 | 0.05 | 22.2% |
-| allocate ~32 pages | **0.17 ms** | 0.15 | 0.18 | 17.9% |
-| vec growth to 20k elements | **4.66 ms** | 4.54 | 4.97 | 9.2% |
-| 4k short-lived allocations | **19.11 ms** | 18.75 | 20.66 | 10.0% |
+| allocate ~1 page | **0.00 ms** | 0.00 | 0.01 | 10.2% |
+| allocate ~8 pages | **0.03 ms** | 0.03 | 0.03 | 6.1% |
+| allocate ~32 pages | **0.11 ms** | 0.10 | 0.12 | 12.7% |
+| vec growth to 20k elements | **2.61 ms** | 2.56 | 2.81 | 9.6% |
+| 4k short-lived allocations | **11.32 ms** | 10.95 | 12.35 | 12.4% |
+
+These move with the interpreter too: the guest's allocator is guest wasm, so growth work is
+interpreted work.
 
 The small-page rows have ~20% spread because they are microseconds — ignore them unless a
 change moves them by an order of magnitude.
@@ -109,17 +114,30 @@ Against the figures recorded before this round of work, on the same harness and 
 
 | row | before | now | change |
 | --- | --- | --- | --- |
-| trivial call, n=1 | 317.43 ns | **251.28** | −20.8% |
-| 5-param call | 237.69 ns | **169.48** | −28.7% |
-| memory (load/store) | 177.33 | **159.41** | −10.1% |
-| heap | 16.01 ms | **14.96** | −6.6% |
-| calls (one indirect per iter) | 116.57 | **111.31** | −4.5% |
-| arithmetic | 142.89 | **137.48** | −3.8% |
-| control flow | 138.55 | **137.14** | −1.0% |
+| arithmetic | 142.89 | **74.15** | −48% |
+| memory (load/store) | 177.33 | **89.41** | −50% |
+| calls (one indirect per iter) | 116.57 | **61.96** | −47% |
+| heap | 16.01 ms | **8.19** | −49% |
+| control flow | 138.55 | **93.70** | −32% |
+| trivial call, n=1 | 317.43 ns | **152.35** | −52% |
+| 5-param call | 237.69 ns | **97.75** | −59% |
 
-The two invocation rows moved most, which is F: the operand stack is no longer allocated per
-call. The throughput rows are mostly §3C's outlining of `Stack::push`'s growth path. Control
-flow is inside its own spread and should not be counted.
+Roughly **2× overall**. Almost all of it is lever G (dispatch inlining, ~40%); F accounts for
+most of the remaining invocation-latency drop, and A contributed footprint but no throughput.
+
+Per wasm instruction, dividing by the executed instruction counts in §1's method:
+
+| workload | ns/instr | cycles @ 4.05 GHz |
+| --- | --- | --- |
+| arithmetic | 2.12 | **8.6** |
+| memory | 2.62 | 10.6 |
+| calls | 2.75 | 11.2 |
+| control flow | 3.15 | 12.8 |
+
+Against 4-6 cycles for a well-tuned stack interpreter, arithmetic is now within reach of the
+band and the rest are 2-3× off it. The remaining structural levers are threaded dispatch
+(each arm dispatching to the next, so the branch predictor sees per-opcode sites instead of
+one shared site), operand fusion, and `Val` at 8 bytes (E).
 
 ### What the 40 → 16 B work actually bought
 
@@ -182,6 +200,7 @@ it bought almost nothing; see §5.
 
 | # | Lever | Expected | Effort | Status |
 | --- | --- | --- | --- | --- |
+| G | Inline dispatch into the driver loop | **~40%** | small | **done** — see §4 |
 | B | Per-function metadata table | high for call-heavy | small | **next** |
 | A | Shrink `Instruction` 40 → 16 B | high | mechanical | **done** — see below |
 | E | `Val` 16 → 8 B untagged | high | invasive | open |
@@ -327,9 +346,21 @@ Three `#[inline]` experiments produced **no measurable change**:
 | `#[inline]` on the dispatch fn as a plain hint | declined; throughput and frame size unchanged |
 | `#[inline]` on `Stack::push`/`pop`/`tee`/`height` | no measurable change |
 
-`#[inline(always)]` on the dispatch function **did** work — 27% off `call_heavy` and
-`mem_heavy` — but cost **3.7× in frame size** (1,423 → 5,326 B), dropping max call depth
-from 5,895 to 1,575 frames, below the original baseline. Bad trade.
+`#[inline(always)]` on the dispatch function is the exception, and it is now **applied**
+(lever G). It is worth **~40% across every workload**, far more than the 27% first seen: the
+boundary is crossed once per wasm instruction, and `pc` plus the stack's base and length
+cannot stay in registers across a real call.
+
+The frame cost is real and unavoidable: fusing ~200 opcode arms into one function puts every
+arm's spill slots in a single frame, ~1,311 → ~5,100 B per nested call, cutting reachable
+depth from ~6,400 to ~1,650. Outlining the cold arms does **not** recover it — the two
+`format!` calls in the `call_indirect` mismatch path were outlined first and moved the frame
+32 bytes, 0.6%. The bloat is spill slots the allocator cannot overlap across arms, not cold
+code.
+
+The mitigation is instead on the other side: `Config::max_call_stack_depth` defaults to 1200,
+sized so a full chain stays inside a typical 8 MiB stack. The real fix is to stop nesting
+native frames per wasm call at all.
 
 A `&mut pc` refactor to remove the `ExecutionResult` round-trip gave **zero throughput
 gain** (the enum was already returned in a register), but incidentally shrank the frame

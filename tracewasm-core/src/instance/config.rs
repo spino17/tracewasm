@@ -18,6 +18,16 @@ pub struct Config {
     /// Each wasm frame costs a native frame, so this bounds guest recursion below
     /// the host stack's own limit, where an overflow would abort the process
     /// instead of unwinding.
+    ///
+    /// **The default is tied to the interpreter's native frame size.** Dispatch is
+    /// inlined into the driver loop, which puts every opcode arm's spill slots in
+    /// one frame — about 5 KB per nested call. The default of 1200 keeps a full
+    /// chain near 6 MB, inside a typical 8 MiB main thread with room to spare.
+    ///
+    /// Raising it is only safe if the host stack is larger to match: run the
+    /// interpreter on a thread with an explicit `stack_size`, and size the limit
+    /// against that. A limit the native stack cannot hold turns a clean trap back
+    /// into a process abort, because the overflow arrives before the guard does.
     max_call_stack_depth: u32,
 }
 
@@ -27,7 +37,7 @@ impl Default for Config {
             max_memory_size_in_pages: 1000,
             max_table_elements: 10000,
             max_locals_per_func: 50000,
-            max_call_stack_depth: 2000,
+            max_call_stack_depth: 1200,
         }
     }
 }
