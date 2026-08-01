@@ -9,8 +9,8 @@ All file references are `tracewasm-core/src/...`.
 
 ## 1. Baseline
 
-Re-recorded after levers A, C, F and the dispatch inlining in §4. This is the reference
-every future optimisation compares against.
+Re-recorded after levers A, C, E, F and G. This is the reference every future optimisation
+compares against.
 
 ### How to reproduce — read this before comparing
 
@@ -37,11 +37,11 @@ which is on the order of 10-30 wasm instructions. Do not read these as cycles-pe
 
 | workload | median ns/op | min | max | spread |
 | --- | --- | --- | --- | --- |
-| arithmetic (i64 + f64 mix) | **74.15** | 72.91 | 74.89 | 2.7% |
-| control flow (match + loops) | **93.70** | 91.53 | 96.53 | 5.3% |
-| memory (load/store) | **89.41** | 88.20 | 90.99 | 3.1% |
-| calls (one indirect per iter) | **61.96** | 60.81 | 62.59 | 2.9% |
-| heap (alloc + collections) | **8.19 ms** | 8.12 | 8.36 | 2.9% |
+| arithmetic (i64 + f64 mix) | **58.39** | 57.85 | 62.25 | 7.5% |
+| control flow (match + loops) | **83.39** | 81.90 | 85.16 | 3.9% |
+| memory (load/store) | **61.13** | 60.55 | 61.37 | 1.3% |
+| calls (one indirect per iter) | **44.51** | 43.84 | 45.03 | 2.7% |
+| heap (alloc + collections) | **6.33 ms** | 6.28 | 6.36 | 1.3% |
 
 The four `ns/op` rows are the ones to watch — each isolates a different interpreter cost
 (dispatch, control flow, linear memory, indirect calls), which is what localises a
@@ -51,13 +51,13 @@ regression that a single blended number would hide.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| trivial call, n=1 | **152.35 ns** | 150.14 | 154.09 | 2.6% |
-| 5-param call | **97.75 ns** | 96.53 | 99.60 | 3.1% |
-| direct recursion, depth 100 | **65.25 ns/op** | 64.04 | 69.48 | 8.3% |
-| direct recursion, depth 1000 | **73.30 ns/op** | 70.83 | 76.86 | 8.2% |
-| direct recursion, depth 3000 | **75.13 ns/op** | 73.56 | 75.84 | 3.0% |
+| trivial call, n=1 | **122.74 ns** | 119.36 | 130.87 | 9.4% |
+| 5-param call | **84.16 ns** | 83.06 | 86.28 | 3.8% |
+| direct recursion, depth 100 | **53.42 ns/op** | 53.23 | 55.08 | 3.5% |
+| direct recursion, depth 1000 | **62.48 ns/op** | 61.36 | 68.79 | 11.9% |
+| direct recursion, depth 3000 | **65.70 ns/op** | 62.56 | 66.06 | 5.3% |
 
-Recursion cost is flat in depth (65 → 75 ns/op from depth 100 to 3000), so frame setup is
+Recursion cost is flat in depth (53 → 66 ns/op from depth 100 to 3000), so frame setup is
 not super-linear — though these three rows carry the widest spread in the table, so read the
 trend rather than the numbers. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
 
@@ -71,9 +71,9 @@ the whole module, not by the small part any one test executes.
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| compile + instantiate: arithmetic | **0.13 ms** | 0.11 | 0.31 | — |
-| compile + instantiate: exotic | **0.55 ms** | 0.54 | 0.57 | 4.4% |
-| compile + instantiate: heap | **1.13 ms** | 1.10 | 1.21 | 9.7% |
+| compile + instantiate: arithmetic | **0.12 ms** | 0.11 | 0.13 | 9.3% |
+| compile + instantiate: exotic | **0.53 ms** | 0.52 | 0.60 | 15.3% |
+| compile + instantiate: heap | **1.13 ms** | 1.13 | 1.15 | 1.8% |
 
 Compile is untouched by the execute-path work, as expected — it does not run the interpreter.
 
@@ -81,11 +81,11 @@ Compile is untouched by the execute-path work, as expected — it does not run t
 
 | measurement | median | min | max | spread |
 | --- | --- | --- | --- | --- |
-| allocate ~1 page | **0.00 ms** | 0.00 | 0.01 | 10.2% |
-| allocate ~8 pages | **0.03 ms** | 0.03 | 0.03 | 6.1% |
-| allocate ~32 pages | **0.11 ms** | 0.10 | 0.12 | 12.7% |
-| vec growth to 20k elements | **2.61 ms** | 2.56 | 2.81 | 9.6% |
-| 4k short-lived allocations | **11.32 ms** | 10.95 | 12.35 | 12.4% |
+| allocate ~1 page | **0.00 ms** | 0.00 | 0.00 | 13.6% |
+| allocate ~8 pages | **0.02 ms** | 0.02 | 0.03 | 10.6% |
+| allocate ~32 pages | **0.09 ms** | 0.09 | 0.09 | 6.8% |
+| vec growth to 20k elements | **2.05 ms** | 2.04 | 2.15 | 5.4% |
+| 4k short-lived allocations | **8.44 ms** | 8.33 | 8.81 | 5.7% |
 
 These move with the interpreter too: the guest's allocator is guest wasm, so growth work is
 interpreted work.
@@ -114,30 +114,39 @@ Against the figures recorded before this round of work, on the same harness and 
 
 | row | before | now | change |
 | --- | --- | --- | --- |
-| arithmetic | 142.89 | **74.15** | −48% |
-| memory (load/store) | 177.33 | **89.41** | −50% |
-| calls (one indirect per iter) | 116.57 | **61.96** | −47% |
-| heap | 16.01 ms | **8.19** | −49% |
-| control flow | 138.55 | **93.70** | −32% |
-| trivial call, n=1 | 317.43 ns | **152.35** | −52% |
-| 5-param call | 237.69 ns | **97.75** | −59% |
+| arithmetic | 142.89 | **58.39** | −59% |
+| memory (load/store) | 177.33 | **61.13** | −66% |
+| calls (one indirect per iter) | 116.57 | **44.51** | −62% |
+| heap | 16.01 ms | **6.33** | −60% |
+| control flow | 138.55 | **83.39** | −40% |
+| trivial call, n=1 | 317.43 ns | **122.74** | −61% |
+| 5-param call | 237.69 ns | **84.16** | −65% |
 
-Roughly **2× overall**. Almost all of it is lever G (dispatch inlining, ~40%); F accounts for
-most of the remaining invocation-latency drop, and A contributed footprint but no throughput.
+About **2.5x overall.** Attribution, from the interleaved A/Bs that measured each:
+
+| lever | what it moved |
+| --- | --- |
+| G — inline dispatch | ~40% everywhere; the single largest |
+| E — `Val` 16 → 8 B untagged | 7-31%, most on the stack-traffic-heavy rows |
+| F — stack on the `Instance` | invocation latency, not throughput |
+| §3/§5 outlining | 5-10% on `push`, ~5% on `pop` |
+| A — `Instruction` 40 → 16 B | footprint only; no measurable throughput |
 
 Per wasm instruction, dividing by the executed instruction counts in §1's method:
 
 | workload | ns/instr | cycles @ 4.05 GHz |
 | --- | --- | --- |
-| arithmetic | 2.12 | **8.6** |
-| memory | 2.62 | 10.6 |
-| calls | 2.75 | 11.2 |
-| control flow | 3.15 | 12.8 |
+| arithmetic | 1.67 | **6.8** |
+| memory | 1.79 | 7.3 |
+| calls | 1.98 | 8.0 |
+| control flow | 2.81 | 11.4 |
 
-Against 4-6 cycles for a well-tuned stack interpreter, arithmetic is now within reach of the
-band and the rest are 2-3× off it. The remaining structural levers are threaded dispatch
-(each arm dispatching to the next, so the branch predictor sees per-opcode sites instead of
-one shared site), operand fusion, and `Val` at 8 bytes (E).
+Three of the four are now inside the 4-8 cycle range a well-tuned stack interpreter occupies;
+arithmetic is at the top of the band. Control flow is the outlier and the obvious next target.
+
+The remaining structural levers are threaded dispatch (each arm dispatching to the next, so
+the branch predictor sees per-opcode sites instead of one shared site — most likely to help
+exactly the control-flow row), and operand fusion.
 
 ### What the 40 → 16 B work actually bought
 
@@ -203,7 +212,7 @@ it bought almost nothing; see §5.
 | G | Inline dispatch into the driver loop | **~40%** | small | **done** — see §4 |
 | B | Per-function metadata table | high for call-heavy | small | **next** |
 | A | Shrink `Instruction` 40 → 16 B | high | mechanical | **done** — see below |
-| E | `Val` 16 → 8 B untagged | high | invasive | open |
+| E | `Val` 16 → 8 B untagged | high | invasive | **done** — see below |
 | C | Remove redundant bounds checks | 10-25% | small | **partly done** — locals unchecked |
 | F | Reuse the operand stack across calls | latency spikes only | trivial | **done** — see below |
 | D | Hoist loop invariants | 5-10% | trivial | **done** — no measurable gain |
@@ -307,13 +316,27 @@ inside noise elsewhere.
 `instructions.len()` is reloaded on every iteration of the driver loop. Bind it once before
 the loop.
 
-### E. `Val` is 16 bytes because it is tagged
+### E. `Val` 16 → 8 B untagged (done)
 
-Validation proves the static type of every stack slot, so the tag is redundant *during
-execution* — it is only needed at the host boundary. An 8-byte untagged cell halves traffic
-on every push, pop and local access.
+Validation proves the static type of every stack slot, so the tag is redundant *during*
+execution — it is only needed at the host boundary. The operand stack now holds `Value`, a
+`u64` newtype with `from_i32`/`as_i32`-style accessors that reinterpret the bits, halving the
+traffic of every push, pop and local access.
 
-Biggest remaining win and the most invasive. This is what wasmi does internally.
+Worth 7-31% depending on workload, most on the rows that move the most values (memory −31%,
+calls −27%). Combined with G it took memory from 89.41 to 61.13 ns/op.
+
+Two boundaries keep the tagged `Val`:
+
+- **The host boundary.** `ImportRegistry::execute` still takes `&[Val]`; the interpreter
+  re-tags from the callee's declared parameter types via `Value::into_val(ty)`, collected into
+  a `ParamVals` so an import of five or fewer parameters costs no allocation.
+- **Constant expressions.** `const_expr_evaluator` keeps its own `Stack<Val>`. It runs at
+  instantiation, not on the hot path, and its results feed globals and table/data initializers
+  that are typed rather than positional.
+
+Note for anyone touching this: `Value` and `Val` both expose `as_i32()`, so mixing them up is
+a logic error the type checker will not catch. The differential suite is the net that will.
 
 ### F. The 8 MiB operand-stack reservation (done)
 
@@ -459,15 +482,20 @@ frame-size measurement must raise the guard first, as `tests/metrics.rs` does vi
 
 ## 6. Suggested order
 
-1. **B** — per-function metadata table. Contained, and the call-heavy row is the one that
-   has responded most.
-2. **E** — the biggest remaining win, and the instruction-stream and stack work is out of
-   the way.
-3. **C**'s remaining half — the `-> !` cold-path treatment on `Stack::pop` and `Val::as_*`,
-   which needs no `unsafe`. Re-boxing `execute`'s error (§5) is a separate untested lever.
+1. **Break the native recursion.** Not a throughput lever — an enabling one. `execute` being
+   inlined costs ~5 KB of frame per nested wasm call, which is why
+   `Config::max_call_stack_depth` had to drop to 1200. An explicit frame stack decouples
+   depth from frame size, and unblocks any further inlining.
+2. **Threaded dispatch.** Each arm dispatching to the next gives the branch predictor
+   per-opcode sites instead of one shared 192-target site. Most likely to help control flow,
+   the one row still above 10 cycles.
+3. **B** — per-function metadata table. Contained.
+4. **Operand fusion** — `local.get; local.get; i32.add` as one instruction. Cuts executed
+   instruction count rather than per-instruction cost, which is the other axis entirely.
 
-A, D and F are done. D produced no measurable gain; A moved footprint but not throughput;
-F moved latency but not throughput.
+A, D, E, F and G are done. D produced no measurable gain; A moved footprint but not
+throughput; F moved latency but not throughput; E and G moved throughput. C is half done —
+locals are unchecked; re-boxing `execute`'s error (§5) remains untested.
 
 **Measure after each step with `--test metrics` (regression bounds) or `--test perf_report`
 (distributions), not just `cargo test`.** The unit fixtures are mostly single-function with
