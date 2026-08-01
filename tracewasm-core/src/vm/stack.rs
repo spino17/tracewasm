@@ -109,6 +109,13 @@ mod wrong_ty {
     }
 }
 
+mod tracewasm_unreachable {
+    #[inline(never)]
+    pub fn unreachable() -> ! {
+        unreachable!()
+    }
+}
+
 impl Val {
     /// The default `i32` value (`0`).
     pub fn i32_zero() -> Self {
@@ -213,6 +220,97 @@ impl Val {
         };
 
         Ok(val)
+    }
+}
+
+impl From<Val> for Value {
+    fn from(value: Val) -> Self {
+        match value {
+            Val::I32(val) => Value::from_i32(val),
+            Val::I64(val) => Value::from_i64(val),
+            Val::F32(val) => Value::from_f32(val),
+            Val::F64(val) => Value::from_f64(val),
+            Val::Ref(func_ref) => Value::from_ref(func_ref),
+        }
+    }
+}
+
+const TAG_SHIFT: u32 = 56;
+const TAG_SOME: u64 = 1 << TAG_SHIFT;
+
+#[derive(Clone, Copy)]
+pub(crate) struct Value(u64);
+
+impl Value {
+    #[inline(always)]
+    pub fn from_i32(val: i32) -> Self {
+        Value(val as u32 as u64)
+    }
+
+    #[inline(always)]
+    pub fn from_i64(val: i64) -> Self {
+        Value(val as u64)
+    }
+
+    #[inline(always)]
+    pub fn from_f32(val: f32) -> Self {
+        Value(val.to_bits() as u64)
+    }
+
+    #[inline(always)]
+    pub fn from_f64(val: f64) -> Self {
+        Value(val.to_bits())
+    }
+
+    #[inline(always)]
+    pub fn from_ref(func_ref: Option<FuncIndex>) -> Self {
+        let x = match func_ref {
+            Some(x) => x.0,
+            None => 0,
+        } as u64;
+
+        let tag = func_ref.is_some() as u64;
+
+        Value((tag << TAG_SHIFT) | x)
+    }
+
+    #[inline(always)]
+    pub fn as_i32(&self) -> i32 {
+        self.0 as u32 as i32
+    }
+
+    #[inline(always)]
+    pub fn as_i64(&self) -> i64 {
+        self.0 as i64
+    }
+
+    #[inline(always)]
+    pub fn as_f32(&self) -> f32 {
+        f32::from_bits(self.0 as u32)
+    }
+
+    #[inline(always)]
+    pub fn as_f64(&self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
+    #[inline(always)]
+    pub fn as_ref(&self) -> Option<FuncIndex> {
+        let is_some = (self.0 >> TAG_SHIFT) != 0;
+        let val = self.0 as u32;
+        if is_some { Some(FuncIndex(val)) } else { None }
+    }
+
+    #[inline(always)]
+    pub fn zero_of_ty(ty: ValType) -> Self {
+        match ty {
+            ValType::I32 => Value::from_i32(0),
+            ValType::I64 => Value::from_i64(0),
+            ValType::F32 => Value::from_f32(0.0),
+            ValType::F64 => Value::from_f64(0.0),
+            ValType::Ref(_) => Value::from_i32(0),
+            ValType::V128 => tracewasm_unreachable::unreachable(),
+        }
     }
 }
 
