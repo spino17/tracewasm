@@ -77,6 +77,7 @@ use crate::{
     instruction::{Instruction, TargetBranch},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
+    tracewasm_unreachable::unreachable,
     vm::stack::{DataVal, Stack, Val, Value},
 };
 use std::{
@@ -113,7 +114,7 @@ enum Step {
         params_count: u32,
         is_indirect: Option<TableIndex>,
     },
-    JumpTo(usize),
+    JumpTo(u32),
 }
 
 struct Frame<'a> {
@@ -154,9 +155,9 @@ impl TraceVM {
         func_index: FuncIndex,
         params: &[Val],
         instance: &mut Instance<M, I>,
-        module: &Module,
+        module: &Arc<Module>,
     ) -> Result<ResultVals, TraceWasmError> {
-        let mut call_stack_depth: u32 = 0;
+        let mut call_stack_depth = 0;
         instance.stack.reset();
 
         for param in params {
@@ -164,7 +165,7 @@ impl TraceVM {
         }
 
         // The reset above put the stack at height 0, so this frame's base is 0.
-        Self::execute(func_index, instance, module, &mut call_stack_depth)?;
+        Self::execute_recursive(func_index, instance, module, &mut call_stack_depth)?;
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
@@ -204,12 +205,12 @@ impl TraceVM {
     ///
     /// [`FuncCallError`](crate::error::FuncCallError) depends on this being the
     /// only error shape that escapes the interpreter.
-    fn execute<M: Memory, I: ImportRegistry>(
+    fn execute_recursive<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         instance: &mut Instance<M, I>,
-        module: &Module,
+        module: &Arc<Module>,
         call_stack_depth: &mut u32,
-    ) -> Result<(), TraceWasmError> {
+    ) -> Result<(), FuncCallError> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
@@ -256,12 +257,6 @@ impl TraceVM {
         // `FuncCallError` requires.
         *call_stack_depth += 1;
 
-        let mut state = TraceVMState {
-            caller_base_height,
-            frame_base_height: caller_base_height + locals_len as u32,
-            instance,
-        };
-
         // Driver loop. `pc` indexes this function's instruction list only.
         //
         // `pc` is passed to `execute` by value and the next one comes back as the
@@ -276,13 +271,59 @@ impl TraceVM {
         loop {
             let instr = &instructions[pc];
 
-            pc = state
-                .execute_instruction(instr, module, pc, call_stack_depth, br_table_targets)
-                .map_err(|err| {
-                    // `pc` is unchanged on the error path (the failing arm returns
-                    // before the update), so it still names the faulting instruction.
-                    err.into_tracewasm_err(pc, func_index, instruction_offsets[pc])
-                })?;
+            let step = Self::execute_instruction(
+                instr,
+                caller_base_height,
+                caller_base_height + locals_len as u32,
+                module,
+                instance,
+                br_table_targets,
+                module.imported_func_count,
+            )
+            .unwrap();
+
+            match step {
+                Step::Next => {
+                    pc += 1;
+                }
+                Step::JumpTo(target_index) => {
+                    pc = target_index as usize;
+                }
+                Step::Call {
+                    func_index: callee_func_index,
+                    params_count: _,
+                    is_indirect: _,
+                } => {
+                    // Checked *before* recursing: the callee increments the counter
+                    // on entry, so testing after would admit one frame past the
+                    // limit. Every wasm frame costs a native one here, so the
+                    // ceiling is what keeps a deep guest from overflowing the host
+                    // stack, which aborts rather than unwinding.
+                    let max_depth = instance.config().get_max_call_stack_depth();
+
+                    if *call_stack_depth >= max_depth {
+                        return Err(func_call_err(
+                            func_index,
+                            vec![],
+                            InstructionExecutionError::CallStackExhausted(max_depth),
+                            pc,
+                            instruction_offsets[pc],
+                            module,
+                        ));
+                    }
+
+                    TraceVM::execute_recursive(
+                        callee_func_index,
+                        instance,
+                        module,
+                        call_stack_depth,
+                    )?;
+
+                    // The callee left its results in the caller's argument slots,
+                    // so there is nothing to do but resume past the call.
+                    pc += 1;
+                }
+            }
 
             // Advancing past the last instruction means we just executed the
             // function's terminating `End`: the frame is complete. (`return` and
@@ -308,57 +349,7 @@ impl TraceVM {
         Ok(())
     }
 
-    #[inline(never)]
-    fn func_call_err(
-        func_index: FuncIndex,
-        frames: Vec<Frame>,
-        err: InstructionExecutionError,
-        instr_index: usize,
-        instr_offset: u32,
-        module: &Arc<Module>,
-    ) -> FuncCallError {
-        let func_name = module
-            .exported_func_name(func_index)
-            .map(String::as_str)
-            .unwrap_or("<unknown>");
-
-        let mut trace: Vec<TraceRecord> = vec![];
-
-        trace.push(TraceRecord {
-            func_index: if frames.is_empty() {
-                func_index
-            } else {
-                frames.last().unwrap().callee_func_index
-            },
-            instr_index,
-            kind: TraceRecordKind::NonCall(err),
-            instr_offset,
-        });
-
-        let frames_len = frames.len();
-
-        for i in 0..frames_len {
-            let frame = &frames[frames_len - 1 - i];
-
-            trace.push(TraceRecord {
-                func_index: frame.func_index,
-                instr_index: frame.pc as usize,
-                kind: TraceRecordKind::Call {
-                    callee_index: frame.callee_func_index,
-                    is_indirect: frame.callee_is_indirect,
-                },
-                instr_offset: frame.instruction_offsets[frame.pc as usize],
-            });
-        }
-
-        FuncCallError::new(
-            func_name.to_string(),
-            trace.into_boxed_slice(),
-            module.clone(),
-        )
-    }
-
-    fn execute_non_recursive<M: Memory, I: ImportRegistry>(
+    fn execute<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I>,
         module: &Arc<Module>,
@@ -406,7 +397,7 @@ impl TraceVM {
             let step = match step {
                 Ok(step) => step,
                 Err(err) => {
-                    return Err(Self::func_call_err(
+                    return Err(func_call_err(
                         top_enclosing_func_index,
                         frames,
                         err,
@@ -422,13 +413,26 @@ impl TraceVM {
                     pc = pc + 1;
                 }
                 Step::JumpTo(target_index) => {
-                    pc = target_index;
+                    pc = target_index as usize;
                 }
                 Step::Call {
                     func_index: callee_func_index,
                     params_count: callee_params_count,
                     is_indirect,
                 } => {
+                    let max_depth = instance.config().get_max_call_stack_depth();
+
+                    if frames.len() as u32 >= max_depth {
+                        return Err(func_call_err(
+                            top_enclosing_func_index,
+                            frames,
+                            InstructionExecutionError::CallStackExhausted(max_depth),
+                            pc,
+                            instruction_offsets[pc] as u32,
+                            module,
+                        ));
+                    }
+
                     // only local function calls come here
                     debug_assert!(callee_func_index.0 >= imported_func_count);
 
@@ -508,6 +512,158 @@ impl TraceVM {
             .truncate_by_preserving_arity(caller_base_height, results_len as u32);
 
         Ok(())
+    }
+
+    fn call_func<M: Memory, I: ImportRegistry>(
+        callee_func_index: FuncIndex,
+        callee_params_count: u32,
+        imported_func_count: u32,
+        module: &Module,
+        instance: &mut Instance<M, I>,
+        is_indirect: Option<TableIndex>,
+    ) -> Result<Step, InstructionExecutionError> {
+        // local function
+        if callee_func_index.0 >= imported_func_count {
+            return Ok(Step::Call {
+                func_index: callee_func_index,
+                params_count: callee_params_count,
+                is_indirect,
+            });
+        }
+
+        // execute imported function!
+        let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
+        let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
+
+        debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
+
+        let FuncKind::Imported {
+            module_name,
+            imported_func_name,
+        } = &callee_func_decl.kind
+        else {
+            unreachable!()
+        };
+
+        // The stack holds untagged `Value`s, so the host boundary re-tags them
+        // from the callee's declared parameter types. Collected into a
+        // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
+        // import of five or fewer parameters costs no allocation.
+        let callee_params = ParamVals::new(
+            instance
+                .stack
+                .pop_params(callee_params_count)
+                .iter()
+                .zip(callee_params_ty)
+                .map(|(param, ty)| param.into_val(ty))
+                .collect(),
+        );
+
+        // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
+        let results = instance
+            .import_registry
+            .execute(
+                module_name,
+                imported_func_name,
+                callee_params.as_ref(),
+                &mut instance.memory,
+            )
+            .map_err(|err| match is_indirect {
+                Some(table_index) => InstructionExecutionError::CallIndirect(
+                    table_index,
+                    FunctionCall(callee_func_index, Box::new(err)),
+                ),
+                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
+            })?;
+
+        // push results to the stack
+        for res in results {
+            instance.stack.push(res.into());
+        }
+
+        Ok(Step::Next)
+    }
+
+    #[inline(always)]
+    fn get_local<M: Memory, I: ImportRegistry>(
+        index: LocalIndex,
+        caller_base_height: u32,
+        instance: &Instance<M, I>,
+    ) -> Value {
+        let slot = (index.0 + caller_base_height) as usize;
+
+        // Mirrors the SAFETY argument below, so a broken link shows up as a failed
+        // test rather than as a silent out-of-bounds read. Compiled out in release.
+        debug_assert!(
+            slot < instance.stack.inner.len(),
+            "local slot {slot} is outside the operand stack's backing storage \
+             (len {}) — one of the invariants in the SAFETY comment no longer holds",
+            instance.stack.inner.len()
+        );
+
+        // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
+        // first belongs to `wasmparser`; the other three are this crate's own and
+        // are the ones that can rot:
+        //
+        // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
+        //    whole module in `Module::compile` before any lowering.
+        // 2. `stack_pointer == caller_base_height + locals_len` once the frame is
+        //    set up: `execute` derives `caller_base_height` by subtracting the
+        //    arguments already on the stack, then pushes the remaining declared
+        //    locals. Changing that setup invalidates this.
+        // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
+        //    in `vm::stack`.
+        // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
+        //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
+        //    any such call would break this.
+        //
+        // Together: `caller_base_height + index.0 < stack_pointer <= inner.len()`.
+        //
+        // Constant expressions cannot reach here at all — they run on the much
+        // smaller `Stack::for_const_expr_evaluation`, and
+        // `emit_instruction_for_const_expr` accepts a closed whitelist of operators
+        // that excludes `local.get`/`local.set`/`local.tee`.
+        unsafe { *instance.stack.inner.get_unchecked(slot) }
+    }
+
+    #[inline(always)]
+    fn set_local<M: Memory, I: ImportRegistry>(
+        index: LocalIndex,
+        val: Value,
+        caller_base_height: u32,
+        instance: &mut Instance<M, I>,
+    ) {
+        let slot = (index.0 + caller_base_height) as usize;
+
+        debug_assert!(
+            slot < instance.stack.inner.len(),
+            "local slot {slot} is outside the operand stack's backing storage \
+             (len {}) — one of the invariants in `get_local`'s SAFETY comment no \
+             longer holds",
+            instance.stack.inner.len()
+        );
+
+        // SAFETY: identical to [`Self::get_local`] — see the four invariants
+        // enumerated there. Writing rather than reading needs nothing extra: the
+        // slot is inside this frame's locals region, which the operand discipline
+        // never touches for the life of the frame.
+        unsafe {
+            *instance.stack.inner.get_unchecked_mut(slot) = val;
+        }
+    }
+
+    #[inline(always)]
+    fn pop_effective_address<M: Memory, I: ImportRegistry>(
+        memarg_offset: u32,
+        instance: &mut Instance<M, I>,
+    ) -> Result<usize, MemoryError> {
+        let addr = instance.stack.pop().as_i32() as u32;
+
+        let effective_offset = addr
+            .checked_add(memarg_offset)
+            .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
+
+        Ok(effective_offset as usize)
     }
 
     fn execute_instruction<M: Memory, I: ImportRegistry>(
@@ -591,99 +747,1684 @@ impl TraceVM {
                     Some(*table_index),
                 );
             }
-            Instruction::I32Store {
-                offset: memarg_offset,
-                align: _,
-            } => {
-                let val = instance.stack.pop().as_i32();
-                let addr = instance.stack.pop().as_i32() as u32;
+            Instruction::Unreachable => {
+                return Err(InstructionExecutionError::Unreachable);
+            }
+            Instruction::Nop => Step::Next,
+            Instruction::I32Const { value } => {
+                instance.stack.push(Value::from_i32(*value));
 
-                // Effective address = popped address + static offset, computed with
-                // a checked add: a u32 overflow is past the 32-bit memory space, so
-                // it traps rather than wrapping to a wrong (in-bounds) address.
-                let effective_offset = addr
-                    .checked_add(*memarg_offset)
-                    .ok_or(MemoryError::EffectiveAddressOverflow(addr, *memarg_offset))?
-                    as usize;
+                Step::Next
+            }
+            Instruction::I64Const { value } => {
+                instance.stack.push(Value::from_i64(*value));
+
+                Step::Next
+            }
+            Instruction::F32Const { value } => {
+                instance.stack.push(Value::from_f32(*value));
+
+                Step::Next
+            }
+            Instruction::F64Const { value } => {
+                instance.stack.push(Value::from_f64(*value));
+
+                Step::Next
+            }
+            Instruction::RefNull => {
+                instance.stack.push(Value::from_ref(None));
+
+                Step::Next
+            }
+            Instruction::RefFunc { function_index } => {
+                instance.stack.push(Value::from_ref(Some(*function_index)));
+
+                Step::Next
+            }
+            Instruction::RefIsNull => {
+                let func_ref = instance.stack.pop().as_ref();
+
+                if func_ref.is_none() {
+                    instance.stack.push(Value::from_i32(1));
+                } else {
+                    instance.stack.push(Value::from_i32(0));
+                }
+
+                Step::Next
+            }
+            Instruction::MemorySize => {
+                instance
+                    .stack
+                    .push(Value::from_i32(instance.memory.size_in_pages() as i32));
+
+                Step::Next
+            }
+            Instruction::MemoryGrow => {
+                // The delta is an unsigned i32; going through `u32` keeps a
+                // high-bit-set value from sign-extending into a different number.
+                let delta_in_pages = instance.stack.pop().as_i32() as u32 as u64;
+                let max_pages = instance.config.get_max_memory_size_in_pages();
+
+                // `instantiate` already narrowed this to the module's declared
+                // maximum, so the configured cap is the effective ceiling here.
+                match instance.memory.grow(delta_in_pages, max_pages) {
+                    Ok(old_page) => instance.stack.push(Value::from_i32(old_page as i32)),
+                    // Per the spec `memory.grow` does not trap: a request it cannot
+                    // satisfy reports `-1` and execution continues.
+                    Err(_) => instance.stack.push(Value::from_i32(-1)),
+                }
+
+                Step::Next
+            }
+            Instruction::MemoryCopy => {
+                let len = instance.stack.pop().as_i32() as usize;
+                let src = instance.stack.pop().as_i32() as usize;
+                let dest = instance.stack.pop().as_i32() as usize;
+
+                instance.memory.copy_within(dest, src, len)?;
+
+                Step::Next
+            }
+            Instruction::MemoryFill => {
+                let len = instance.stack.pop().as_i32() as usize;
+                let val = instance.stack.pop().as_i32() as u32;
+                let dest = instance.stack.pop().as_i32() as usize;
+
+                instance.memory.fill(dest, val, len)?;
+
+                Step::Next
+            }
+            Instruction::MemoryInit { data_index } => {
+                let len = instance.stack.pop().as_i32() as usize;
+                let src = instance.stack.pop().as_i32() as usize;
+                let dest = instance.stack.pop().as_i32() as usize;
+
+                // A dropped segment reads as *empty*, not as an outright trap: the
+                // spec replaces its bytes with the empty sequence, so a
+                // zero-length `memory.init` after `data.drop` still succeeds while
+                // any non-empty read fails the bounds check below.
+                let segment: &[u8] = match &instance.data_vals[*data_index as usize] {
+                    DataVal::Dropped => &[],
+                    DataVal::Passive(segment) => segment,
+                };
+
+                // The source range is validated against the segment before
+                // anything is written, and `checked_add` stops a huge `len` from
+                // wrapping past the comparison.
+                let end = src
+                    .checked_add(len)
+                    .filter(|end| *end <= segment.len())
+                    .ok_or(MemoryError::OutOfBoundsAccess(
+                        MemoryAccessKind::Read,
+                        src,
+                        segment.len(),
+                    ))?;
+
+                // `write` bounds-checks the destination, so a trap on either side
+                // leaves memory untouched.
+                instance.memory.write(dest, &segment[src..end])?;
+
+                Step::Next
+            }
+            Instruction::DataDrop { data_index } => {
+                instance.data_vals[*data_index as usize] = DataVal::Dropped;
+
+                Step::Next
+            }
+            Instruction::I32Load { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i32(effective_offset)?;
+
+                instance.stack.push(Value::from_i32(val));
+
+                Step::Next
+            }
+            Instruction::I32Load8U { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_u8(effective_offset)? as i32;
+
+                instance.stack.push(Value::from_i32(val));
+
+                Step::Next
+            }
+            Instruction::I32Load8S { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i8(effective_offset)? as i32;
+
+                instance.stack.push(Value::from_i32(val));
+
+                Step::Next
+            }
+            Instruction::I32Load16U { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_u16(effective_offset)? as i32;
+
+                instance.stack.push(Value::from_i32(val));
+
+                Step::Next
+            }
+            Instruction::I32Load16S { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i16(effective_offset)? as i32;
+
+                instance.stack.push(Value::from_i32(val));
+
+                Step::Next
+            }
+            Instruction::I64Load { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i64(effective_offset)?;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load8U { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_u8(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load8S { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i8(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load16U { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_u16(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load16S { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i16(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load32U { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_u32(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::I64Load32S { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_i32(effective_offset)? as i64;
+
+                instance.stack.push(Value::from_i64(val));
+
+                Step::Next
+            }
+            Instruction::F32Load { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_f32(effective_offset)?;
+
+                instance.stack.push(Value::from_f32(val));
+
+                Step::Next
+            }
+            Instruction::F64Load { offset, align: _ } => {
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+                let val = instance.memory.read_f64(effective_offset)?;
+
+                instance.stack.push(Value::from_f64(val));
+
+                Step::Next
+            }
+            Instruction::I32Store { offset, align: _ } => {
+                let val = instance.stack.pop().as_i32();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u32(effective_offset, val as u32)?;
 
                 Step::Next
             }
-            _ => todo!(),
+            Instruction::I32Store8 { offset, align: _ } => {
+                let val = instance.stack.pop().as_i32();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u8(effective_offset, val as u8)?;
+
+                Step::Next
+            }
+            Instruction::I32Store16 { offset, align: _ } => {
+                let val = instance.stack.pop().as_i32();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u16(effective_offset, val as u16)?;
+
+                Step::Next
+            }
+            Instruction::I64Store { offset, align: _ } => {
+                let val = instance.stack.pop().as_i64();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u64(effective_offset, val as u64)?;
+
+                Step::Next
+            }
+            Instruction::I64Store8 { offset, align: _ } => {
+                let val = instance.stack.pop().as_i64();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u8(effective_offset, val as u8)?;
+
+                Step::Next
+            }
+            Instruction::I64Store16 { offset, align: _ } => {
+                let val = instance.stack.pop().as_i64();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u16(effective_offset, val as u16)?;
+
+                Step::Next
+            }
+            Instruction::I64Store32 { offset, align: _ } => {
+                let val = instance.stack.pop().as_i64();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_u32(effective_offset, val as u32)?;
+
+                Step::Next
+            }
+            Instruction::F32Store { offset, align: _ } => {
+                let val = instance.stack.pop().as_f32();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_f32(effective_offset, val)?;
+
+                Step::Next
+            }
+            Instruction::F64Store { offset, align: _ } => {
+                let val = instance.stack.pop().as_f64();
+                let effective_offset = Self::pop_effective_address(*offset, instance)?;
+
+                instance.memory.write_f64(effective_offset, val)?;
+
+                Step::Next
+            }
+            Instruction::I32Clz => {
+                let a = instance.stack.pop().as_i32();
+
+                instance
+                    .stack
+                    .push(Value::from_i32(a.leading_zeros() as i32));
+
+                Step::Next
+            }
+            Instruction::I32Ctz => {
+                let a = instance.stack.pop().as_i32();
+
+                instance
+                    .stack
+                    .push(Value::from_i32(a.trailing_zeros() as i32));
+
+                Step::Next
+            }
+            Instruction::I32Popcnt => {
+                let a = instance.stack.pop().as_i32();
+
+                // Counts set bits in the two's-complement representation, so a
+                // negative operand counts its sign bits too — which is what the
+                // spec's bit-level definition asks for.
+                instance.stack.push(Value::from_i32(a.count_ones() as i32));
+
+                Step::Next
+            }
+            Instruction::I32Eqz => {
+                let a = instance.stack.pop().as_i32();
+
+                instance
+                    .stack
+                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
+
+                Step::Next
+            }
+            Instruction::I32Extend8S => {
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a as i8 as i32));
+
+                Step::Next
+            }
+            Instruction::I32Extend16S => {
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a as i16 as i32));
+
+                Step::Next
+            }
+            Instruction::I32WrapI64 => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32(a as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncF32U => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = instance.stack.pop().as_f32() as f64;
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                // The result is the `u32` bit pattern held in an `i32`, so values
+                // above `i32::MAX` come back out negative.
+                instance
+                    .stack
+                    .push(Value::from_i32(truncated as u32 as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncF32S => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = instance.stack.pop().as_f32() as f64;
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                instance.stack.push(Value::from_i32(truncated as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncF64U => {
+                let a = instance.stack.pop().as_f64();
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                instance
+                    .stack
+                    .push(Value::from_i32(truncated as u32 as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncF64S => {
+                let a = instance.stack.pop().as_f64();
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                instance.stack.push(Value::from_i32(truncated as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncSatF32U => {
+                let a = instance.stack.pop().as_f32() as u32;
+
+                instance.stack.push(Value::from_i32(a as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncSatF32S => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32(a as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncSatF64U => {
+                // Saturate to `u32`, the *target* width — going through `u64` here
+                // would clamp at the wrong bound and then wrap on the way down.
+                let a = instance.stack.pop().as_f64() as u32;
+
+                instance.stack.push(Value::from_i32(a as i32));
+
+                Step::Next
+            }
+            Instruction::I32TruncSatF64S => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32(a as i32));
+
+                Step::Next
+            }
+            Instruction::I32ReinterpretF32 => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32(a.to_bits() as i32));
+
+                Step::Next
+            }
+            Instruction::I32Add => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.wrapping_add(b)));
+
+                Step::Next
+            }
+            Instruction::I32Sub => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.wrapping_sub(b)));
+
+                Step::Next
+            }
+            Instruction::I32Mul => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.wrapping_mul(b)));
+
+                Step::Next
+            }
+            Instruction::I32DivU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )? as i32));
+
+                Step::Next
+            }
+            Instruction::I32DivS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )?));
+
+                Step::Next
+            }
+            Instruction::I32RemU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32(a.checked_rem(b).ok_or(
+                    InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    },
+                )? as i32));
+
+                Step::Next
+            }
+            Instruction::I32RemS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                // A zero divisor is the *only* trap here. Unlike `i32.div_s`,
+                // `rem_s` does not trap on overflow: the spec defines
+                // `i32::MIN % -1` as `0`, which is what `wrapping_rem` returns.
+                // `checked_rem` would wrongly report that case as a failure.
+                if b == 0 {
+                    return Err(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    });
+                }
+
+                instance.stack.push(Value::from_i32(a.wrapping_rem(b)));
+
+                Step::Next
+            }
+            Instruction::I32And => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.bitand(b)));
+
+                Step::Next
+            }
+            Instruction::I32Or => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.bitor(b)));
+
+                Step::Next
+            }
+            Instruction::I32Xor => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32(a.bitxor(b)));
+
+                Step::Next
+            }
+            // Shift and rotate counts are taken modulo the operand width, so a
+            // count of 32 or more is well defined rather than a trap or UB. The
+            // `wrapping_*`/`rotate_*` methods apply exactly that masking; the plain
+            // `<<`/`>>` operators would instead panic in debug builds.
+            Instruction::I32Shl => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shl(b as u32)));
+
+                Step::Next
+            }
+            Instruction::I32ShrU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                // Logical shift: done on `u32` so the vacated high bits are zeros.
+                instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shr(b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32ShrS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                // Arithmetic shift: on `i32` the sign bit is replicated.
+                instance
+                    .stack
+                    .push(Value::from_i32(a.wrapping_shr(b as u32)));
+
+                Step::Next
+            }
+            Instruction::I32Rotl => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance
+                    .stack
+                    .push(Value::from_i32(a.rotate_left(b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32Rotr => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance
+                    .stack
+                    .push(Value::from_i32(a.rotate_right(b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32Eq => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a == b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32Ne => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a != b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32LtU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32LtS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32GtU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32GtS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32LeU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32LeS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32GeU => {
+                let b = instance.stack.pop().as_i32() as u32;
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I32GeS => {
+                let b = instance.stack.pop().as_i32();
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64Clz => {
+                let a = instance.stack.pop().as_i64();
+
+                instance
+                    .stack
+                    .push(Value::from_i64(a.leading_zeros() as i64));
+
+                Step::Next
+            }
+            Instruction::I64Ctz => {
+                let a = instance.stack.pop().as_i64();
+
+                instance
+                    .stack
+                    .push(Value::from_i64(a.trailing_zeros() as i64));
+
+                Step::Next
+            }
+            Instruction::I64Popcnt => {
+                let a = instance.stack.pop().as_i64();
+
+                // See `I32Popcnt`. The count is at most 64, but the result type is
+                // `i64` — unary integer ops keep their operand's width, unlike the
+                // comparisons.
+                instance.stack.push(Value::from_i64(a.count_ones() as i64));
+
+                Step::Next
+            }
+            Instruction::I64Eqz => {
+                let a = instance.stack.pop().as_i64();
+
+                instance
+                    .stack
+                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
+
+                Step::Next
+            }
+            Instruction::I64Extend8S => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a as i8 as i64));
+
+                Step::Next
+            }
+            Instruction::I64Extend16S => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a as i16 as i64));
+
+                Step::Next
+            }
+            Instruction::I64Extend32S => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a as i32 as i64));
+
+                Step::Next
+            }
+            Instruction::I64ExtendI32U => {
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64ExtendI32S => {
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncF32U => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = instance.stack.pop().as_f32() as f64;
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                // As with the `i32` forms, the result is the unsigned bit pattern
+                // held in a signed value.
+                instance
+                    .stack
+                    .push(Value::from_i64(truncated as u64 as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncF32S => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = instance.stack.pop().as_f32() as f64;
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                instance.stack.push(Value::from_i64(truncated as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncF64U => {
+                let a = instance.stack.pop().as_f64();
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                instance
+                    .stack
+                    .push(Value::from_i64(truncated as u64 as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncF64S => {
+                let a = instance.stack.pop().as_f64();
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                instance.stack.push(Value::from_i64(truncated as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncSatF32U => {
+                // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
+                // first would lose every value an `i64` can still represent.
+                let a = instance.stack.pop().as_f32() as u64;
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncSatF32S => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncSatF64U => {
+                let a = instance.stack.pop().as_f64() as u64;
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64TruncSatF64S => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i64(a as i64));
+
+                Step::Next
+            }
+            Instruction::I64ReinterpretF64 => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i64(a.to_bits() as i64));
+
+                Step::Next
+            }
+            Instruction::I64Add => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.wrapping_add(b)));
+
+                Step::Next
+            }
+            Instruction::I64Sub => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.wrapping_sub(b)));
+
+                Step::Next
+            }
+            Instruction::I64Mul => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.wrapping_mul(b)));
+
+                Step::Next
+            }
+            Instruction::I64DivU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i64(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )? as i64));
+
+                Step::Next
+            }
+            Instruction::I64DivS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.checked_div(b).ok_or(
+                    InstructionExecutionError::Division {
+                        num: a.to_string(),
+                        deno: b.to_string(),
+                    },
+                )?));
+
+                Step::Next
+            }
+            Instruction::I64RemU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i64(a.checked_rem(b).ok_or(
+                    InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    },
+                )? as i64));
+
+                Step::Next
+            }
+            Instruction::I64RemS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
+                if b == 0 {
+                    return Err(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    });
+                }
+
+                instance.stack.push(Value::from_i64(a.wrapping_rem(b)));
+
+                Step::Next
+            }
+            Instruction::I64And => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.bitand(b)));
+
+                Step::Next
+            }
+            Instruction::I64Or => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.bitor(b)));
+
+                Step::Next
+            }
+            Instruction::I64Xor => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i64(a.bitxor(b)));
+
+                Step::Next
+            }
+            // As for `i32`, but masked modulo 64. The count arrives as an `i64` and
+            // the shift methods take `u32`, so it is narrowed first — harmless,
+            // since only the low 6 bits survive the masking anyway.
+            Instruction::I64Shl => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance
+                    .stack
+                    .push(Value::from_i64(a.wrapping_shl(b as u32)));
+
+                Step::Next
+            }
+            Instruction::I64ShrU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                // Logical shift: done on `u64` so the vacated high bits are zeros.
+                instance
+                    .stack
+                    .push(Value::from_i64(a.wrapping_shr(b as u32) as i64));
+
+                Step::Next
+            }
+            Instruction::I64ShrS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                // Arithmetic shift: on `i64` the sign bit is replicated.
+                instance
+                    .stack
+                    .push(Value::from_i64(a.wrapping_shr(b as u32)));
+
+                Step::Next
+            }
+            Instruction::I64Rotl => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance
+                    .stack
+                    .push(Value::from_i64(a.rotate_left(b as u32) as i64));
+
+                Step::Next
+            }
+            Instruction::I64Rotr => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance
+                    .stack
+                    .push(Value::from_i64(a.rotate_right(b as u32) as i64));
+
+                Step::Next
+            }
+            Instruction::I64Eq => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a == b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64Ne => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a != b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64LtU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64LtS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64GtU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64GtS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64LeU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64LeS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64GeU => {
+                let b = instance.stack.pop().as_i64() as u64;
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::I64GeS => {
+                let b = instance.stack.pop().as_i64();
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Abs => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.abs()));
+
+                Step::Next
+            }
+            Instruction::F32Neg => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.neg()));
+
+                Step::Next
+            }
+            Instruction::F32Ceil => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.ceil()));
+
+                Step::Next
+            }
+            Instruction::F32Floor => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.floor()));
+
+                Step::Next
+            }
+            Instruction::F32Trunc => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.trunc()));
+
+                Step::Next
+            }
+            Instruction::F32Sqrt => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.sqrt()));
+
+                Step::Next
+            }
+            Instruction::F32Nearest => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a.round_ties_even()));
+
+                Step::Next
+            }
+            Instruction::F32ConvertI32U => {
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_f32(a as f32));
+
+                Step::Next
+            }
+            Instruction::F32ConvertI32S => {
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_f32(a as f32));
+
+                Step::Next
+            }
+            Instruction::F32ConvertI64U => {
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_f32(a as f32));
+
+                Step::Next
+            }
+            Instruction::F32ConvertI64S => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_f32(a as f32));
+
+                Step::Next
+            }
+            Instruction::F32DemoteF64 => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f32(a as f32));
+
+                Step::Next
+            }
+            Instruction::F32ReinterpretI32 => {
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_f32(f32::from_bits(a)));
+
+                Step::Next
+            }
+            Instruction::F32Add => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a + b));
+
+                Step::Next
+            }
+            Instruction::F32Sub => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a - b));
+
+                Step::Next
+            }
+            Instruction::F32Mul => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f32(a * b));
+
+                Step::Next
+            }
+            Instruction::F32Div => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                // Unlike the integer divides this never traps: IEEE 754 gives
+                // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
+                instance.stack.push(Value::from_f32(a / b));
+
+                Step::Next
+            }
+            Instruction::F32Eq => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a == b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Ne => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a != b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Lt => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Gt => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Le => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Ge => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::F32Min => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                instance.stack.push(Value::from_f32(r));
+
+                Step::Next
+            }
+            Instruction::F32Max => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                instance.stack.push(Value::from_f32(r));
+
+                Step::Next
+            }
+            Instruction::F32Copysign => {
+                let b = instance.stack.pop().as_f32();
+                let a = instance.stack.pop().as_f32();
+
+                // Purely a sign-bit transplant: the magnitude of `a` with the sign
+                // of `b`. Defined even when either operand is NaN — the sign is
+                // copied without inspecting the payload — so unlike `min`/`max`
+                // this needs no NaN special case, and Rust's method matches.
+                instance.stack.push(Value::from_f32(a.copysign(b)));
+
+                Step::Next
+            }
+            Instruction::F64Abs => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.abs()));
+
+                Step::Next
+            }
+            Instruction::F64Neg => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.neg()));
+
+                Step::Next
+            }
+            Instruction::F64Ceil => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.ceil()));
+
+                Step::Next
+            }
+            Instruction::F64Floor => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.floor()));
+
+                Step::Next
+            }
+            Instruction::F64Trunc => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.trunc()));
+
+                Step::Next
+            }
+            Instruction::F64Sqrt => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.sqrt()));
+
+                Step::Next
+            }
+            Instruction::F64Nearest => {
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a.round_ties_even()));
+
+                Step::Next
+            }
+            Instruction::F64ConvertI32U => {
+                let a = instance.stack.pop().as_i32() as u32;
+
+                instance.stack.push(Value::from_f64(a as f64));
+
+                Step::Next
+            }
+            Instruction::F64ConvertI32S => {
+                let a = instance.stack.pop().as_i32();
+
+                instance.stack.push(Value::from_f64(a as f64));
+
+                Step::Next
+            }
+            Instruction::F64ConvertI64U => {
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_f64(a as f64));
+
+                Step::Next
+            }
+            Instruction::F64ConvertI64S => {
+                let a = instance.stack.pop().as_i64();
+
+                instance.stack.push(Value::from_f64(a as f64));
+
+                Step::Next
+            }
+            Instruction::F64PromoteF32 => {
+                let a = instance.stack.pop().as_f32();
+
+                instance.stack.push(Value::from_f64(a as f64));
+
+                Step::Next
+            }
+            Instruction::F64ReinterpretI64 => {
+                let a = instance.stack.pop().as_i64() as u64;
+
+                instance.stack.push(Value::from_f64(f64::from_bits(a)));
+
+                Step::Next
+            }
+            Instruction::F64Add => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a + b));
+
+                Step::Next
+            }
+            Instruction::F64Sub => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a - b));
+
+                Step::Next
+            }
+            Instruction::F64Mul => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_f64(a * b));
+
+                Step::Next
+            }
+            Instruction::F64Div => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                // See `F32Div`: division by zero yields an infinity or NaN, never
+                // a trap.
+                instance.stack.push(Value::from_f64(a / b));
+
+                Step::Next
+            }
+            Instruction::F64Eq => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a == b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Ne => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a != b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Lt => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a < b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Gt => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a > b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Le => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a <= b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Ge => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                instance.stack.push(Value::from_i32((a >= b) as i32));
+
+                Step::Next
+            }
+            Instruction::F64Min => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                instance.stack.push(Value::from_f64(r));
+
+                Step::Next
+            }
+            Instruction::F64Max => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                instance.stack.push(Value::from_f64(r));
+
+                Step::Next
+            }
+            Instruction::F64Copysign => {
+                let b = instance.stack.pop().as_f64();
+                let a = instance.stack.pop().as_f64();
+
+                // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
+                instance.stack.push(Value::from_f64(a.copysign(b)));
+
+                Step::Next
+            }
+            Instruction::LocalGet { index } => {
+                instance
+                    .stack
+                    .push(Self::get_local(*index, caller_base_height, instance));
+
+                Step::Next
+            }
+            Instruction::LocalSet { index } => {
+                let val = instance.stack.pop();
+
+                Self::set_local(*index, val, caller_base_height, instance);
+
+                Step::Next
+            }
+            Instruction::LocalTee { index } => {
+                let val = instance.stack.tee();
+
+                Self::set_local(*index, val, caller_base_height, instance);
+
+                Step::Next
+            }
+            Instruction::GlobalGet { index } => {
+                instance
+                    .stack
+                    .push(instance.global_vals[index.0 as usize].into());
+
+                Step::Next
+            }
+            Instruction::GlobalSet { index } => {
+                let val = instance.stack.pop();
+                let ty = module.globals[index.0 as usize].ty.content_type();
+
+                instance.global_vals[index.0 as usize] = val.into_val(&ty);
+
+                Step::Next
+            }
+            Instruction::Drop => {
+                let _ = instance.stack.pop();
+
+                Step::Next
+            }
+            Instruction::Select => {
+                let cond = instance.stack.pop().as_i32();
+                let b = instance.stack.pop();
+                let a = instance.stack.pop();
+
+                // true condition
+                if cond != 0 {
+                    instance.stack.push(a);
+                } else {
+                    instance.stack.push(b);
+                }
+
+                Step::Next
+            }
+            Instruction::Block {
+                end_index: _end_index,
+            } => Step::Next,
+            Instruction::Loop => Step::Next,
+            Instruction::If {
+                else_index,
+                end_index,
+            } => {
+                let cond = instance.stack.pop().as_i32();
+
+                if cond != 0 {
+                    Step::Next
+                } else {
+                    if let Some(else_index) = else_index {
+                        Step::JumpTo(*else_index + 1) // first instruction of the else branch
+                    } else {
+                        Step::JumpTo(*end_index)
+                    }
+                }
+            }
+            // this instruction would be encountered only when control flow is coming after completing `if` branch
+            // because if the condition was `false` and the control went to `else` branch, it jumps to the first
+            // instruction of `else` branch and not the `else` instruction.
+            Instruction::Else { if_end_index } => Step::JumpTo(*if_end_index),
+            Instruction::Br {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                // Unwind to the target label's absolute height (frame base + its
+                // recorded height) while keeping the top `arity` values, then jump.
+                instance
+                    .stack
+                    .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
+
+                Step::JumpTo(*target_index)
+            }
+            Instruction::BrIf {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                let cond = instance.stack.pop().as_i32();
+
+                if cond != 0 {
+                    instance
+                        .stack
+                        .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
+
+                    Step::JumpTo(*target_index)
+                } else {
+                    Step::Next
+                }
+            }
+            Instruction::BrTable { start_index, len } => {
+                // Widen before adding: the sum is bounded by the function's target
+                // count, but doing it in `u32` would make an overflow a debug panic
+                // rather than a wider add.
+                let start = *start_index as usize;
+                let targets = &br_table_targets[start..start + *len as usize];
+
+                // the branch index is an unsigned i32; go through u32 so a
+                // high-bit-set value maps to a large index (→ default), not a
+                // sign-extended one.
+                let index = instance.stack.pop().as_i32() as u32 as usize;
+                let target_count = targets.len() - 1;
+
+                let branch = if target_count <= index {
+                    &targets[target_count] // always the last element of targets
+                } else {
+                    &targets[index]
+                };
+
+                instance.stack.truncate_by_preserving_arity(
+                    branch.recorded_height + frame_base_height,
+                    branch.arity,
+                );
+
+                Step::JumpTo(branch.target_index)
+            }
+            Instruction::Return {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                instance
+                    .stack
+                    .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
+
+                Step::JumpTo(*target_index)
+            }
+            Instruction::End {
+                arity,
+                recorded_height,
+            } => {
+                // Sanity check the height model: when a block closes, the stack must
+                // hold exactly its `arity` results above the label's recorded height.
+                // Both are frame-relative, so shift by this frame's base to compare
+                // against the shared stack's absolute height.
+                debug_assert!(
+                    instance.stack.height() == *recorded_height + *arity + frame_base_height
+                );
+
+                Step::Next
+            }
         };
 
         Ok(res)
-    }
-
-    fn call_func<M: Memory, I: ImportRegistry>(
-        callee_func_index: FuncIndex,
-        callee_params_count: u32,
-        imported_func_count: u32,
-        module: &Module,
-        instance: &mut Instance<M, I>,
-        is_indirect: Option<TableIndex>,
-    ) -> Result<Step, InstructionExecutionError> {
-        // local function
-        if callee_func_index.0 >= imported_func_count {
-            return Ok(Step::Call {
-                func_index: callee_func_index,
-                params_count: callee_params_count,
-                is_indirect,
-            });
-        }
-
-        // execute imported function!
-        let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
-        let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
-
-        debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
-
-        let FuncKind::Imported {
-            module_name,
-            imported_func_name,
-        } = &callee_func_decl.kind
-        else {
-            unreachable!()
-        };
-
-        // The stack holds untagged `Value`s, so the host boundary re-tags them
-        // from the callee's declared parameter types. Collected into a
-        // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
-        // import of five or fewer parameters costs no allocation.
-        let callee_params = ParamVals::new(
-            instance
-                .stack
-                .pop_params(callee_params_count)
-                .iter()
-                .zip(callee_params_ty)
-                .map(|(param, ty)| param.into_val(ty))
-                .collect(),
-        );
-
-        // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-        let results = instance
-            .import_registry
-            .execute(
-                module_name,
-                imported_func_name,
-                callee_params.as_ref(),
-                &mut instance.memory,
-            )
-            .map_err(|err| match is_indirect {
-                Some(table_index) => InstructionExecutionError::CallIndirect(
-                    table_index,
-                    FunctionCall(callee_func_index, Box::new(err)),
-                ),
-                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
-            })?;
-
-        // push results to the stack
-        for res in results {
-            instance.stack.push(res.into());
-        }
-
-        Ok(Step::Next)
     }
 
     /// Evaluates a constant-expression instruction sequence to its single
@@ -771,2065 +2512,6 @@ impl TraceVM {
     }
 }
 
-/// What the driver loop should do after executing one instruction.
-enum ExecutionResult {
-    /// Set `pc` to this absolute (per-function) instruction index.
-    JumpTo(u32),
-    /// Advance to the next instruction (`pc + 1`); falling off the end of the
-    /// function's instruction list ends the frame.
-    Next,
-}
-
-/// The mutable state of a single in-flight function activation.
-///
-/// Nothing here is owned per activation: the instance is borrowed, and the stack
-/// holding this frame's locals *and* operands lives on it, shared across the whole
-/// call tree. The two height fields are all that distinguishes one activation from
-/// another — see the module docs for the frame layout they describe.
-struct TraceVMState<'a, M, I> {
-    /// Bottom of this frame's **locals** region: the height the stack had on
-    /// entry, minus the arguments (which are reused in place as the leading
-    /// local slots). Also the truncation target on frame exit.
-    caller_base_height: u32,
-    /// Bottom of this frame's **operand** region:
-    /// `caller_base_height + locals_len`. Every `recorded_height` is relative to
-    /// this, *not* to `caller_base_height`.
-    frame_base_height: u32,
-    /// The instance being run: linear memory, imports, globals, tables, and
-    /// [`Instance::stack`], on which this frame's locals and operands sit.
-    instance: &'a mut Instance<M, I>,
-}
-
-impl<'a, M: Memory, I: ImportRegistry> TraceVMState<'a, M, I> {
-    /// Reads local slot `index` from this frame's locals region.
-    ///
-    /// Indexes the backing storage directly rather than going through the
-    /// stack's push/pop API: locals sit *below* the stack pointer for the whole
-    /// life of the frame, so they are always live storage that the operand
-    /// discipline never touches. Validation guarantees `index < locals_len`.
-    fn get_local(&self, index: LocalIndex) -> Value {
-        let slot = (index.0 + self.caller_base_height) as usize;
-
-        // Mirrors the SAFETY argument below, so a broken link shows up as a failed
-        // test rather than as a silent out-of-bounds read. Compiled out in release.
-        debug_assert!(
-            slot < self.instance.stack.inner.len(),
-            "local slot {slot} is outside the operand stack's backing storage \
-             (len {}) — one of the invariants in the SAFETY comment no longer holds",
-            self.instance.stack.inner.len()
-        );
-
-        // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
-        // first belongs to `wasmparser`; the other three are this crate's own and
-        // are the ones that can rot:
-        //
-        // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
-        //    whole module in `Module::compile` before any lowering.
-        // 2. `stack_pointer == caller_base_height + locals_len` once the frame is
-        //    set up: `execute` derives `caller_base_height` by subtracting the
-        //    arguments already on the stack, then pushes the remaining declared
-        //    locals. Changing that setup invalidates this.
-        // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
-        //    in `vm::stack`.
-        // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
-        //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
-        //    any such call would break this.
-        //
-        // Together: `caller_base_height + index.0 < stack_pointer <= inner.len()`.
-        //
-        // Constant expressions cannot reach here at all — they run on the much
-        // smaller `Stack::for_const_expr_evaluation`, and
-        // `emit_instruction_for_const_expr` accepts a closed whitelist of operators
-        // that excludes `local.get`/`local.set`/`local.tee`.
-        unsafe { *self.instance.stack.inner.get_unchecked(slot) }
-    }
-
-    /// Writes local slot `index` in this frame's locals region. See
-    /// [`Self::get_local`] for why this indexes the backing storage directly.
-    fn set_local(&mut self, index: LocalIndex, val: Value) {
-        let slot = (index.0 + self.caller_base_height) as usize;
-
-        debug_assert!(
-            slot < self.instance.stack.inner.len(),
-            "local slot {slot} is outside the operand stack's backing storage \
-             (len {}) — one of the invariants in `get_local`'s SAFETY comment no \
-             longer holds",
-            self.instance.stack.inner.len()
-        );
-
-        // SAFETY: identical to [`Self::get_local`] — see the four invariants
-        // enumerated there. Writing rather than reading needs nothing extra: the
-        // slot is inside this frame's locals region, which the operand discipline
-        // never touches for the life of the frame.
-        unsafe {
-            *self.instance.stack.inner.get_unchecked_mut(slot) = val;
-        }
-    }
-
-    /// Pops the address operand of a memory access and resolves it to an
-    /// effective address by adding the instruction's static `memarg` offset.
-    ///
-    /// Shared by every load/store arm, so they all trap identically on an
-    /// effective address that leaves the 32-bit space.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::EffectiveAddressOverflow`] if the sum leaves the
-    /// 32-bit address space. The access itself is bounds-checked by [`Memory`].
-    ///
-    /// The static offset needs no range check of its own: `wasmparser` rejects a
-    /// `memarg` offset above `u32::MAX` on an `i32`-indexed memory, and 64-bit
-    /// memories are refused at compile time (see `Module::compile`), so the only
-    /// memories that reach here are 32-bit.
-    fn pop_effective_address(&mut self, memarg_offset: u32) -> Result<usize, MemoryError> {
-        let addr = self.instance.stack.pop().as_i32() as u32;
-
-        // Effective address = popped address + static offset, computed with
-        // a checked add: a u32 overflow is past the 32-bit memory space, so
-        // it traps rather than wrapping to a wrong (in-bounds) address.
-        let effective_offset = addr
-            .checked_add(memarg_offset)
-            .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
-
-        Ok(effective_offset as usize)
-    }
-
-    /// Invokes `func_index`, routing an imported callee to the [`ImportRegistry`]
-    /// and a locally-defined one back into [`TraceVM::execute`].
-    ///
-    /// Backs `call` and `call_indirect`. The callee's arguments must already be the
-    /// topmost `params_count` values on the stack; its results are left there.
-    ///
-    /// `call_stack_depth` is incremented for the local branch only, and checked
-    /// against [`Config::max_call_stack_depth`] before recursing — an imported
-    /// callee runs on the host's stack, not this one.
-    ///
-    /// # Errors
-    ///
-    /// [`TraceWasmError::CallStackExhausted`] when the depth limit is reached, plus
-    /// anything the callee itself raises: a trap from a local callee, or whatever
-    /// an imported one returns.
-    fn call_func(
-        &mut self,
-        func_index: FuncIndex,
-        params_count: u32,
-        module: &Module,
-        call_stack_depth: &mut u32,
-    ) -> Result<(), TraceWasmError> {
-        // The arguments are the topmost values on the shared stack. How they are
-        // handed over depends on the callee, so neither branch below pops them
-        // up front:
-        //
-        // - a local callee adopts them in place as its leading local slots, so
-        //   they are never copied;
-        // - an imported callee needs them as a `&[Val]` for the host boundary, so
-        //   that branch pops them into a `ParamVals`.
-        let imported_func_count = module.imported_func_count;
-
-        // Route on the *callee*: an imported callee is dispatched to the
-        // registry; a local one is interpreted recursively.
-        if func_index.0 < imported_func_count {
-            let func_decl = &module.func_decls[func_index.0 as usize];
-            let params_ty = &module.types[func_decl.ty.0 as usize].params;
-
-            debug_assert!(matches!(func_decl.kind, FuncKind::Imported { .. }));
-
-            let FuncKind::Imported {
-                module_name,
-                imported_func_name,
-            } = &func_decl.kind
-            else {
-                unreachable!()
-            };
-
-            // The stack holds untagged `Value`s, so the host boundary re-tags them
-            // from the callee's declared parameter types. Collected into a
-            // `ParamVals` rather than a boxed slice: it is a `SmallVec`, so an
-            // import of five or fewer parameters costs no allocation.
-            let params = ParamVals::new(
-                self.instance
-                    .stack
-                    .pop_params(params_count)
-                    .iter()
-                    .zip(params_ty)
-                    .map(|(param, ty)| param.into_val(ty))
-                    .collect(),
-            );
-
-            // `execute` returns a stack-allocated `ResultVals` (no heap for <=3 results).
-            let results = self.instance.import_registry.execute(
-                module_name,
-                imported_func_name,
-                params.as_ref(),
-                &mut self.instance.memory,
-            )?;
-
-            // push results to the stack
-            for res in results {
-                self.instance.stack.push(res.into());
-            }
-        } else {
-            // Only a local callee creates a new interpreter frame — and therefore a
-            // new native frame — so the depth limit is checked here rather than
-            // around the whole of `call_func`. An imported callee runs on the host's
-            // own stack and consumes no interpreter depth.
-            //
-            // `call_stack_depth` is this (the caller's) depth, so the callee would
-            // be at `+ 1`; `>=` is the test for "the callee would exceed".
-            let max_depth = self.instance.config().get_max_call_stack_depth();
-
-            if *call_stack_depth >= max_depth {
-                return Err(TraceWasmError::CallStackExhausted(max_depth));
-            }
-
-            // local function execution
-            TraceVM::execute(func_index, self.instance, module, call_stack_depth)?;
-        }
-
-        Ok(())
-    }
-
-    /// Executes a single instruction against this activation's state and returns
-    /// the control-flow decision for the driver loop.
-    ///
-    /// Heights are resolved against `frame_base_height` (see the module docs).
-    /// `module` is needed to resolve callees on `Call`. `br_table_targets` is the
-    /// enclosing function's flat target array, which [`Instruction::BrTable`]'s
-    /// `(start_index, len)` range indexes into.
-    ///
-    /// ## Why this signature, precisely
-    ///
-    /// Crossed once per wasm instruction, so the signature is shaped around the
-    /// aarch64/SysV rule that a return value over 16 bytes comes back through an
-    /// `sret` pointer — memory — instead of registers.
-    ///
-    /// `pc` is taken by value and the next one returned. The ordinary shape,
-    /// `&mut usize`, forces the caller's `pc` to have an address, so it cannot stay
-    /// in a register across this (non-inlined) call and is spilled and reloaded
-    /// every iteration.
-    ///
-    /// The [`ExecutionResult`] match stays inside this function so that enum never
-    /// crosses the boundary either; LLVM folds each arm's constant straight into
-    /// the returned `pc`.
-    /// Inlined into [`TraceVM::execute`]'s driver loop, which is worth ~40% of
-    /// interpreter throughput. Left as a real call, this boundary is crossed once
-    /// per wasm instruction, and `pc` together with the stack's base and length
-    /// cannot stay in registers across it — they are reloaded every iteration.
-    ///
-    /// The cost is paid in stack: fusing ~200 opcode arms into one function puts
-    /// all their spill slots in a single frame, roughly 5 KB, and since the
-    /// recursive call path runs through that frame it is charged per nested wasm
-    /// call. [`Config::max_call_stack_depth`](crate::instance::config::Config)'s
-    /// default is sized against it — read the note there before changing either.
-    #[inline(always)]
-    fn execute_instruction(
-        &mut self,
-        instruction: &Instruction,
-        module: &Module,
-        pc: usize,
-        call_stack_depth: &mut u32,
-        br_table_targets: &[TargetBranch],
-    ) -> Result<usize, InstructionExecutionError> {
-        let res = match instruction {
-            Instruction::Call {
-                func_index: callee_func_index,
-                params_count,
-            } => {
-                self.call_func(*callee_func_index, *params_count, module, call_stack_depth)
-                    .map_err(|err| {
-                        InstructionExecutionError::Call(*callee_func_index, Box::new(err))
-                    })?;
-
-                ExecutionResult::Next
-            }
-            Instruction::CallIndirect {
-                ty_index,
-                table_index,
-            } => {
-                let table = &self.instance.table_vals[table_index.0 as usize];
-                // The index operand is an unsigned i32; a negative value becomes a
-                // large `usize` and fails the bounds check below.
-                let slot = self.instance.stack.pop().as_i32() as u32 as usize;
-
-                // Trap if the index is past the table's end (wasm: "undefined element").
-                let Some(func_ref) = table.table.get(slot).copied() else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::TableSlotOutOfBounds,
-                    ));
-                };
-
-                // Trap on a null element (wasm: "uninitialized element").
-                let Some(callee_func_index) = func_ref else {
-                    return Err(InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        CallIndirectError::NullElementInTable,
-                    ));
-                };
-
-                let func_ty = &module.types[ty_index.0 as usize];
-                let params = &func_ty.params;
-                let results = &func_ty.results;
-
-                let func = &module.func_decls[callee_func_index.0 as usize];
-                let ty = &module.types[func.ty.0 as usize];
-
-                let declared_params = &ty.params;
-                let declared_results = &ty.results;
-
-                // Trap if the callee's signature differs from the type the
-                // instruction expects (wasm: "indirect call type mismatch").
-                if params.as_ref() != declared_params.as_ref()
-                    || results.as_ref() != declared_results.as_ref()
-                {
-                    return Err(signature_mismatch(
-                        *table_index,
-                        declared_params,
-                        declared_results,
-                        params,
-                        results,
-                    ));
-                }
-
-                self.call_func(
-                    callee_func_index,
-                    declared_params.len() as u32,
-                    module,
-                    call_stack_depth,
-                )
-                .map_err(|err| {
-                    InstructionExecutionError::CallIndirect(
-                        *table_index,
-                        FunctionCall(callee_func_index, Box::new(err)),
-                    )
-                })?;
-
-                ExecutionResult::Next
-            }
-            Instruction::Unreachable => {
-                return Err(InstructionExecutionError::Unreachable);
-            }
-            Instruction::Nop => ExecutionResult::Next,
-            Instruction::I32Const { value } => {
-                self.instance.stack.push(Value::from_i32(*value));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Const { value } => {
-                self.instance.stack.push(Value::from_i64(*value));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Const { value } => {
-                self.instance.stack.push(Value::from_f32(*value));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Const { value } => {
-                self.instance.stack.push(Value::from_f64(*value));
-
-                ExecutionResult::Next
-            }
-            Instruction::RefNull => {
-                self.instance.stack.push(Value::from_ref(None));
-
-                ExecutionResult::Next
-            }
-            Instruction::RefFunc { function_index } => {
-                self.instance
-                    .stack
-                    .push(Value::from_ref(Some(*function_index)));
-
-                ExecutionResult::Next
-            }
-            Instruction::RefIsNull => {
-                let func_ref = self.instance.stack.pop().as_ref();
-
-                if func_ref.is_none() {
-                    self.instance.stack.push(Value::from_i32(1));
-                } else {
-                    self.instance.stack.push(Value::from_i32(0));
-                }
-
-                ExecutionResult::Next
-            }
-            Instruction::MemorySize => {
-                self.instance
-                    .stack
-                    .push(Value::from_i32(self.instance.memory.size_in_pages() as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::MemoryGrow => {
-                // The delta is an unsigned i32; going through `u32` keeps a
-                // high-bit-set value from sign-extending into a different number.
-                let delta_in_pages = self.instance.stack.pop().as_i32() as u32 as u64;
-                let max_pages = self.instance.config.get_max_memory_size_in_pages();
-
-                // `instantiate` already narrowed this to the module's declared
-                // maximum, so the configured cap is the effective ceiling here.
-                match self.instance.memory.grow(delta_in_pages, max_pages) {
-                    Ok(old_page) => self.instance.stack.push(Value::from_i32(old_page as i32)),
-                    // Per the spec `memory.grow` does not trap: a request it cannot
-                    // satisfy reports `-1` and execution continues.
-                    Err(_) => self.instance.stack.push(Value::from_i32(-1)),
-                }
-
-                ExecutionResult::Next
-            }
-            Instruction::MemoryCopy => {
-                let len = self.instance.stack.pop().as_i32() as usize;
-                let src = self.instance.stack.pop().as_i32() as usize;
-                let dest = self.instance.stack.pop().as_i32() as usize;
-
-                self.instance.memory.copy_within(dest, src, len)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::MemoryFill => {
-                let len = self.instance.stack.pop().as_i32() as usize;
-                let val = self.instance.stack.pop().as_i32() as u32;
-                let dest = self.instance.stack.pop().as_i32() as usize;
-
-                self.instance.memory.fill(dest, val, len)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::MemoryInit { data_index } => {
-                let len = self.instance.stack.pop().as_i32() as usize;
-                let src = self.instance.stack.pop().as_i32() as usize;
-                let dest = self.instance.stack.pop().as_i32() as usize;
-
-                // A dropped segment reads as *empty*, not as an outright trap: the
-                // spec replaces its bytes with the empty sequence, so a
-                // zero-length `memory.init` after `data.drop` still succeeds while
-                // any non-empty read fails the bounds check below.
-                let segment: &[u8] = match &self.instance.data_vals[*data_index as usize] {
-                    DataVal::Dropped => &[],
-                    DataVal::Passive(segment) => segment,
-                };
-
-                // The source range is validated against the segment before
-                // anything is written, and `checked_add` stops a huge `len` from
-                // wrapping past the comparison.
-                let end = src
-                    .checked_add(len)
-                    .filter(|end| *end <= segment.len())
-                    .ok_or(MemoryError::OutOfBoundsAccess(
-                        MemoryAccessKind::Read,
-                        src,
-                        segment.len(),
-                    ))?;
-
-                // `write` bounds-checks the destination, so a trap on either side
-                // leaves memory untouched.
-                self.instance.memory.write(dest, &segment[src..end])?;
-
-                ExecutionResult::Next
-            }
-            Instruction::DataDrop { data_index } => {
-                self.instance.data_vals[*data_index as usize] = DataVal::Dropped;
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Load { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i32(effective_offset)?;
-
-                self.instance.stack.push(Value::from_i32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Load8U { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_u8(effective_offset)? as i32;
-
-                self.instance.stack.push(Value::from_i32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Load8S { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i8(effective_offset)? as i32;
-
-                self.instance.stack.push(Value::from_i32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Load16U { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_u16(effective_offset)? as i32;
-
-                self.instance.stack.push(Value::from_i32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Load16S { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i16(effective_offset)? as i32;
-
-                self.instance.stack.push(Value::from_i32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i64(effective_offset)?;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load8U { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_u8(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load8S { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i8(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load16U { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_u16(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load16S { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i16(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load32U { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_u32(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Load32S { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_i32(effective_offset)? as i64;
-
-                self.instance.stack.push(Value::from_i64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Load { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_f32(effective_offset)?;
-
-                self.instance.stack.push(Value::from_f32(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Load { offset, align: _ } => {
-                let effective_offset = self.pop_effective_address(*offset)?;
-                let val = self.instance.memory.read_f64(effective_offset)?;
-
-                self.instance.stack.push(Value::from_f64(val));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Store { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i32();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance
-                    .memory
-                    .write_u32(effective_offset, val as u32)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Store8 { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i32();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance.memory.write_u8(effective_offset, val as u8)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Store16 { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i32();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance
-                    .memory
-                    .write_u16(effective_offset, val as u16)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Store { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i64();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance
-                    .memory
-                    .write_u64(effective_offset, val as u64)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Store8 { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i64();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance.memory.write_u8(effective_offset, val as u8)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Store16 { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i64();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance
-                    .memory
-                    .write_u16(effective_offset, val as u16)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Store32 { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_i64();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance
-                    .memory
-                    .write_u32(effective_offset, val as u32)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Store { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_f32();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance.memory.write_f32(effective_offset, val)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Store { offset, align: _ } => {
-                let val = self.instance.stack.pop().as_f64();
-                let effective_offset = self.pop_effective_address(*offset)?;
-
-                self.instance.memory.write_f64(effective_offset, val)?;
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Clz => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.leading_zeros() as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Ctz => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.trailing_zeros() as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Popcnt => {
-                let a = self.instance.stack.pop().as_i32();
-
-                // Counts set bits in the two's-complement representation, so a
-                // negative operand counts its sign bits too — which is what the
-                // spec's bit-level definition asks for.
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.count_ones() as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Eqz => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Extend8S => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a as i8 as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Extend16S => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a as i16 as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32WrapI64 => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32(a as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncF32U => {
-                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
-
-                // The result is the `u32` bit pattern held in an `i32`, so values
-                // above `i32::MAX` come back out negative.
-                self.instance
-                    .stack
-                    .push(Value::from_i32(truncated as u32 as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncF32S => {
-                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
-
-                self.instance.stack.push(Value::from_i32(truncated as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncF64U => {
-                let a = self.instance.stack.pop().as_f64();
-                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(truncated as u32 as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncF64S => {
-                let a = self.instance.stack.pop().as_f64();
-                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
-
-                self.instance.stack.push(Value::from_i32(truncated as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncSatF32U => {
-                let a = self.instance.stack.pop().as_f32() as u32;
-
-                self.instance.stack.push(Value::from_i32(a as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncSatF32S => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32(a as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncSatF64U => {
-                // Saturate to `u32`, the *target* width — going through `u64` here
-                // would clamp at the wrong bound and then wrap on the way down.
-                let a = self.instance.stack.pop().as_f64() as u32;
-
-                self.instance.stack.push(Value::from_i32(a as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32TruncSatF64S => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32(a as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32ReinterpretF32 => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.to_bits() as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Add => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.wrapping_add(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Sub => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.wrapping_sub(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Mul => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.wrapping_mul(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32DivU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.checked_div(b).ok_or(
-                        InstructionExecutionError::Division {
-                            num: a.to_string(),
-                            deno: b.to_string(),
-                        },
-                    )? as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32DivS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.checked_div(b).ok_or(
-                        InstructionExecutionError::Division {
-                            num: a.to_string(),
-                            deno: b.to_string(),
-                        },
-                    )?));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32RemU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.checked_rem(b).ok_or(
-                        InstructionExecutionError::Remainder {
-                            left: a.to_string(),
-                            right: b.to_string(),
-                        },
-                    )? as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32RemS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                // A zero divisor is the *only* trap here. Unlike `i32.div_s`,
-                // `rem_s` does not trap on overflow: the spec defines
-                // `i32::MIN % -1` as `0`, which is what `wrapping_rem` returns.
-                // `checked_rem` would wrongly report that case as a failure.
-                if b == 0 {
-                    return Err(InstructionExecutionError::Remainder {
-                        left: a.to_string(),
-                        right: b.to_string(),
-                    });
-                }
-
-                self.instance.stack.push(Value::from_i32(a.wrapping_rem(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32And => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.bitand(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Or => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.bitor(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Xor => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32(a.bitxor(b)));
-
-                ExecutionResult::Next
-            }
-            // Shift and rotate counts are taken modulo the operand width, so a
-            // count of 32 or more is well defined rather than a trap or UB. The
-            // `wrapping_*`/`rotate_*` methods apply exactly that masking; the plain
-            // `<<`/`>>` operators would instead panic in debug builds.
-            Instruction::I32Shl => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.wrapping_shl(b as u32)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32ShrU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                // Logical shift: done on `u32` so the vacated high bits are zeros.
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.wrapping_shr(b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32ShrS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                // Arithmetic shift: on `i32` the sign bit is replicated.
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.wrapping_shr(b as u32)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Rotl => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.rotate_left(b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Rotr => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(a.rotate_right(b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Eq => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a == b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32Ne => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a != b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32LtU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32LtS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32GtU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32GtS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32LeU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32LeS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32GeU => {
-                let b = self.instance.stack.pop().as_i32() as u32;
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I32GeS => {
-                let b = self.instance.stack.pop().as_i32();
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Clz => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.leading_zeros() as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Ctz => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.trailing_zeros() as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Popcnt => {
-                let a = self.instance.stack.pop().as_i64();
-
-                // See `I32Popcnt`. The count is at most 64, but the result type is
-                // `i64` — unary integer ops keep their operand's width, unlike the
-                // comparisons.
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.count_ones() as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Eqz => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Extend8S => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a as i8 as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Extend16S => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a as i16 as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Extend32S => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a as i32 as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64ExtendI32U => {
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64ExtendI32S => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncF32U => {
-                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
-
-                // As with the `i32` forms, the result is the unsigned bit pattern
-                // held in a signed value.
-                self.instance
-                    .stack
-                    .push(Value::from_i64(truncated as u64 as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncF32S => {
-                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = self.instance.stack.pop().as_f32() as f64;
-                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
-
-                self.instance.stack.push(Value::from_i64(truncated as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncF64U => {
-                let a = self.instance.stack.pop().as_f64();
-                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(truncated as u64 as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncF64S => {
-                let a = self.instance.stack.pop().as_f64();
-                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
-
-                self.instance.stack.push(Value::from_i64(truncated as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncSatF32U => {
-                // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
-                // first would lose every value an `i64` can still represent.
-                let a = self.instance.stack.pop().as_f32() as u64;
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncSatF32S => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncSatF64U => {
-                let a = self.instance.stack.pop().as_f64() as u64;
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64TruncSatF64S => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i64(a as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64ReinterpretF64 => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.to_bits() as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Add => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.wrapping_add(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Sub => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.wrapping_sub(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Mul => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.wrapping_mul(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64DivU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.checked_div(b).ok_or(
-                        InstructionExecutionError::Division {
-                            num: a.to_string(),
-                            deno: b.to_string(),
-                        },
-                    )? as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64DivS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.checked_div(b).ok_or(
-                        InstructionExecutionError::Division {
-                            num: a.to_string(),
-                            deno: b.to_string(),
-                        },
-                    )?));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64RemU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.checked_rem(b).ok_or(
-                        InstructionExecutionError::Remainder {
-                            left: a.to_string(),
-                            right: b.to_string(),
-                        },
-                    )? as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64RemS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
-                if b == 0 {
-                    return Err(InstructionExecutionError::Remainder {
-                        left: a.to_string(),
-                        right: b.to_string(),
-                    });
-                }
-
-                self.instance.stack.push(Value::from_i64(a.wrapping_rem(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64And => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.bitand(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Or => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.bitor(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Xor => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i64(a.bitxor(b)));
-
-                ExecutionResult::Next
-            }
-            // As for `i32`, but masked modulo 64. The count arrives as an `i64` and
-            // the shift methods take `u32`, so it is narrowed first — harmless,
-            // since only the low 6 bits survive the masking anyway.
-            Instruction::I64Shl => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.wrapping_shl(b as u32)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64ShrU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                // Logical shift: done on `u64` so the vacated high bits are zeros.
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.wrapping_shr(b as u32) as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64ShrS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                // Arithmetic shift: on `i64` the sign bit is replicated.
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.wrapping_shr(b as u32)));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Rotl => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.rotate_left(b as u32) as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Rotr => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance
-                    .stack
-                    .push(Value::from_i64(a.rotate_right(b as u32) as i64));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Eq => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a == b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64Ne => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a != b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64LtU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64LtS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64GtU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64GtS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64LeU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64LeS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64GeU => {
-                let b = self.instance.stack.pop().as_i64() as u64;
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::I64GeS => {
-                let b = self.instance.stack.pop().as_i64();
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Abs => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.abs()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Neg => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.neg()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Ceil => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.ceil()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Floor => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.floor()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Trunc => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.trunc()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Sqrt => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a.sqrt()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Nearest => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance
-                    .stack
-                    .push(Value::from_f32(a.round_ties_even()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32ConvertI32U => {
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_f32(a as f32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32ConvertI32S => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_f32(a as f32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32ConvertI64U => {
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_f32(a as f32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32ConvertI64S => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_f32(a as f32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32DemoteF64 => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f32(a as f32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32ReinterpretI32 => {
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_f32(f32::from_bits(a)));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Add => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a + b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Sub => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a - b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Mul => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f32(a * b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Div => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                // Unlike the integer divides this never traps: IEEE 754 gives
-                // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
-                self.instance.stack.push(Value::from_f32(a / b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Eq => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a == b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Ne => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a != b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Lt => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Gt => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Le => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Ge => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Min => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                let r = if a.is_nan() || b.is_nan() {
-                    f32::NAN
-                } else if a == b {
-                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
-                    if a.is_sign_negative() { a } else { b }
-                } else if a < b {
-                    a
-                } else {
-                    b
-                };
-
-                self.instance.stack.push(Value::from_f32(r));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Max => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                let r = if a.is_nan() || b.is_nan() {
-                    f32::NAN
-                } else if a == b {
-                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
-                    if a.is_sign_positive() { a } else { b }
-                } else if a > b {
-                    a
-                } else {
-                    b
-                };
-
-                self.instance.stack.push(Value::from_f32(r));
-
-                ExecutionResult::Next
-            }
-            Instruction::F32Copysign => {
-                let b = self.instance.stack.pop().as_f32();
-                let a = self.instance.stack.pop().as_f32();
-
-                // Purely a sign-bit transplant: the magnitude of `a` with the sign
-                // of `b`. Defined even when either operand is NaN — the sign is
-                // copied without inspecting the payload — so unlike `min`/`max`
-                // this needs no NaN special case, and Rust's method matches.
-                self.instance.stack.push(Value::from_f32(a.copysign(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Abs => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.abs()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Neg => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.neg()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Ceil => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.ceil()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Floor => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.floor()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Trunc => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.trunc()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Sqrt => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a.sqrt()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Nearest => {
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance
-                    .stack
-                    .push(Value::from_f64(a.round_ties_even()));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64ConvertI32U => {
-                let a = self.instance.stack.pop().as_i32() as u32;
-
-                self.instance.stack.push(Value::from_f64(a as f64));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64ConvertI32S => {
-                let a = self.instance.stack.pop().as_i32();
-
-                self.instance.stack.push(Value::from_f64(a as f64));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64ConvertI64U => {
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_f64(a as f64));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64ConvertI64S => {
-                let a = self.instance.stack.pop().as_i64();
-
-                self.instance.stack.push(Value::from_f64(a as f64));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64PromoteF32 => {
-                let a = self.instance.stack.pop().as_f32();
-
-                self.instance.stack.push(Value::from_f64(a as f64));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64ReinterpretI64 => {
-                let a = self.instance.stack.pop().as_i64() as u64;
-
-                self.instance.stack.push(Value::from_f64(f64::from_bits(a)));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Add => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a + b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Sub => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a - b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Mul => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_f64(a * b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Div => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                // See `F32Div`: division by zero yields an infinity or NaN, never
-                // a trap.
-                self.instance.stack.push(Value::from_f64(a / b));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Eq => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a == b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Ne => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a != b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Lt => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a < b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Gt => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a > b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Le => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a <= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Ge => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                self.instance.stack.push(Value::from_i32((a >= b) as i32));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Min => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                let r = if a.is_nan() || b.is_nan() {
-                    f64::NAN
-                } else if a == b {
-                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
-                    if a.is_sign_negative() { a } else { b }
-                } else if a < b {
-                    a
-                } else {
-                    b
-                };
-
-                self.instance.stack.push(Value::from_f64(r));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Max => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                let r = if a.is_nan() || b.is_nan() {
-                    f64::NAN
-                } else if a == b {
-                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
-                    if a.is_sign_positive() { a } else { b }
-                } else if a > b {
-                    a
-                } else {
-                    b
-                };
-
-                self.instance.stack.push(Value::from_f64(r));
-
-                ExecutionResult::Next
-            }
-            Instruction::F64Copysign => {
-                let b = self.instance.stack.pop().as_f64();
-                let a = self.instance.stack.pop().as_f64();
-
-                // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
-                self.instance.stack.push(Value::from_f64(a.copysign(b)));
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalGet { index } => {
-                self.instance.stack.push(self.get_local(*index));
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalSet { index } => {
-                let val = self.instance.stack.pop();
-
-                self.set_local(*index, val);
-
-                ExecutionResult::Next
-            }
-            Instruction::LocalTee { index } => {
-                let val = self.instance.stack.tee();
-
-                self.set_local(*index, val);
-
-                ExecutionResult::Next
-            }
-            Instruction::GlobalGet { index } => {
-                self.instance
-                    .stack
-                    .push(self.instance.global_vals[index.0 as usize].into());
-
-                ExecutionResult::Next
-            }
-            Instruction::GlobalSet { index } => {
-                let val = self.instance.stack.pop();
-                let ty = module.globals[index.0 as usize].ty.content_type();
-
-                self.instance.global_vals[index.0 as usize] = val.into_val(&ty);
-
-                ExecutionResult::Next
-            }
-            Instruction::Drop => {
-                let _ = self.instance.stack.pop();
-
-                ExecutionResult::Next
-            }
-            Instruction::Select => {
-                let cond = self.instance.stack.pop().as_i32();
-                let b = self.instance.stack.pop();
-                let a = self.instance.stack.pop();
-
-                // true condition
-                if cond != 0 {
-                    self.instance.stack.push(a);
-                } else {
-                    self.instance.stack.push(b);
-                }
-
-                ExecutionResult::Next
-            }
-            Instruction::Block {
-                end_index: _end_index,
-            } => ExecutionResult::Next,
-            Instruction::Loop => ExecutionResult::Next,
-            Instruction::If {
-                else_index,
-                end_index,
-            } => {
-                let cond = self.instance.stack.pop().as_i32();
-
-                if cond != 0 {
-                    ExecutionResult::Next
-                } else {
-                    if let Some(else_index) = else_index {
-                        ExecutionResult::JumpTo(*else_index + 1) // first instruction of the else branch
-                    } else {
-                        ExecutionResult::JumpTo(*end_index)
-                    }
-                }
-            }
-            // this instruction would be encountered only when control flow is coming after completing `if` branch
-            // because if the condition was `false` and the control went to `else` branch, it jumps to the first
-            // instruction of `else` branch and not the `else` instruction.
-            Instruction::Else { if_end_index } => ExecutionResult::JumpTo(*if_end_index),
-            Instruction::Br {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                // Unwind to the target label's absolute height (frame base + its
-                // recorded height) while keeping the top `arity` values, then jump.
-                self.instance.stack.truncate_by_preserving_arity(
-                    *recorded_height + self.frame_base_height,
-                    *arity,
-                );
-
-                ExecutionResult::JumpTo(*target_index)
-            }
-            Instruction::BrIf {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                let cond = self.instance.stack.pop().as_i32();
-
-                if cond != 0 {
-                    self.instance.stack.truncate_by_preserving_arity(
-                        *recorded_height + self.frame_base_height,
-                        *arity,
-                    );
-
-                    ExecutionResult::JumpTo(*target_index)
-                } else {
-                    ExecutionResult::Next
-                }
-            }
-            Instruction::BrTable { start_index, len } => {
-                // Widen before adding: the sum is bounded by the function's target
-                // count, but doing it in `u32` would make an overflow a debug panic
-                // rather than a wider add.
-                let start = *start_index as usize;
-                let targets = &br_table_targets[start..start + *len as usize];
-
-                // the branch index is an unsigned i32; go through u32 so a
-                // high-bit-set value maps to a large index (→ default), not a
-                // sign-extended one.
-                let index = self.instance.stack.pop().as_i32() as u32 as usize;
-                let target_count = targets.len() - 1;
-
-                let branch = if target_count <= index {
-                    &targets[target_count] // always the last element of targets
-                } else {
-                    &targets[index]
-                };
-
-                self.instance.stack.truncate_by_preserving_arity(
-                    branch.recorded_height + self.frame_base_height,
-                    branch.arity,
-                );
-
-                ExecutionResult::JumpTo(branch.target_index)
-            }
-            Instruction::Return {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                self.instance.stack.truncate_by_preserving_arity(
-                    *recorded_height + self.frame_base_height,
-                    *arity,
-                );
-
-                ExecutionResult::JumpTo(*target_index)
-            }
-            Instruction::End {
-                arity,
-                recorded_height,
-            } => {
-                // Sanity check the height model: when a block closes, the stack must
-                // hold exactly its `arity` results above the label's recorded height.
-                // Both are frame-relative, so shift by this frame's base to compare
-                // against the shared stack's absolute height.
-                debug_assert!(
-                    self.instance.stack.height()
-                        == *recorded_height + *arity + self.frame_base_height
-                );
-
-                ExecutionResult::Next
-            }
-        };
-
-        // Resolve the control-flow decision into the next `pc` here, in the same
-        // function that produced it — see the note on this fn for why.
-        Ok(match res {
-            ExecutionResult::Next => pc + 1,
-            ExecutionResult::JumpTo(target) => target as usize,
-        })
-    }
-}
-
 /// Truncates `operand` toward zero, checking the result is representable in an
 /// integer type spanning the half-open range `[low, high)`.
 ///
@@ -2908,5 +2590,55 @@ fn signature_mismatch(
                 formatted_val_types(results)
             ),
         ),
+    )
+}
+
+#[inline(never)]
+fn func_call_err(
+    func_index: FuncIndex,
+    frames: Vec<Frame>,
+    err: InstructionExecutionError,
+    instr_index: usize,
+    instr_offset: u32,
+    module: &Arc<Module>,
+) -> FuncCallError {
+    let func_name = module
+        .exported_func_name(func_index)
+        .map(String::as_str)
+        .unwrap_or("<unknown>");
+
+    let mut trace: Vec<TraceRecord> = vec![];
+
+    trace.push(TraceRecord {
+        func_index: if frames.is_empty() {
+            func_index
+        } else {
+            frames.last().unwrap().callee_func_index
+        },
+        instr_index,
+        kind: TraceRecordKind::NonCall(err),
+        instr_offset,
+    });
+
+    let frames_len = frames.len();
+
+    for i in 0..frames_len {
+        let frame = &frames[frames_len - 1 - i];
+
+        trace.push(TraceRecord {
+            func_index: frame.func_index,
+            instr_index: frame.pc as usize,
+            kind: TraceRecordKind::Call {
+                callee_index: frame.callee_func_index,
+                is_indirect: frame.callee_is_indirect,
+            },
+            instr_offset: frame.instruction_offsets[frame.pc as usize],
+        });
+    }
+
+    FuncCallError::new(
+        func_name.to_string(),
+        trace.into_boxed_slice(),
+        module.clone(),
     )
 }

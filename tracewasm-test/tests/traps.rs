@@ -75,11 +75,15 @@ fn a_trap_reports_the_wasm_call_chain() {
         .try_i32_i64("mem_trap_oob_read", 0)
         .expect_err("indexing past the end of a Vec should trap");
 
-    let rendered = err.to_string();
+    // `Display` is deliberately a one-liner — the frames are opt-in through
+    // `stack_trace()`, so the chain has to be read from there rather than the
+    // message.
+    let trace = err.stack_trace();
+    let rendered = trace.render();
 
     // the panic happens several frames below the export, inside the slice
     // bounds-check machinery, so the chain should have real depth
-    let frames = rendered.matches("in func(").count();
+    let frames = trace.records().len();
 
     assert!(
         frames >= 2,

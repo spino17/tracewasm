@@ -34,23 +34,6 @@ pub enum TraceWasmError {
     /// [`MemoryError`].
     #[error("{0:?}")]
     MemoryError(MemoryError),
-    /// A call would have nested deeper than
-    /// [`Config::max_call_stack_depth`](crate::instance::config::Config::get_max_call_stack_depth).
-    /// Field: the limit that was reached.
-    ///
-    /// Each active wasm frame costs a native Rust frame, so an unbounded guest
-    /// recursion would overflow the *host* stack — which aborts the process
-    /// instead of unwinding, leaving the embedder no way to recover. Trapping
-    /// first keeps the failure an ordinary error.
-    ///
-    /// Raised at the call site, so it reaches the caller wrapped in an
-    /// [`InstructionExecutionError::Call`] / [`CallIndirectError::FunctionCall`]
-    /// and carries the usual backtrace.
-    ///
-    /// The message deliberately contains "call stack exhausted", the string the
-    /// WebAssembly spec testsuite's `assert_exhaustion` directive matches on.
-    #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
-    CallStackExhausted(u32),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, imports other than functions and
     /// globals, or 64-bit memory). The string describes the specific unsupported
@@ -223,6 +206,8 @@ pub enum InstructionExecutionError {
     /// error for an imported callee). Field: the callee's function index.
     #[error("call to func({0:?}): {1}")]
     Call(FuncIndex, Box<TraceWasmError>),
+    #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
+    CallStackExhausted(u32),
     /// A `call_indirect` failed — an out-of-bounds index, a null element, a
     /// signature mismatch, or an error inside the callee. Fields: the table index
     /// and the specific [`CallIndirectError`].
@@ -248,19 +233,6 @@ pub enum InstructionExecutionError {
     /// produces this.
     #[error("float truncation of `{0}` to {1} failed")]
     FloatToIntTruncation(String, String),
-}
-
-impl InstructionExecutionError {
-    /// Tags this cause with where it happened, producing the crate-wide error.
-    /// CLEANUP!
-    pub fn into_tracewasm_err(
-        self,
-        instr_index: usize,
-        enclosing_func_index: FuncIndex,
-        offset: u32,
-    ) -> TraceWasmError {
-        todo!()
-    }
 }
 
 /// Why a `call_indirect` failed: a table-access trap, a signature mismatch, or an
@@ -468,6 +440,14 @@ impl<'a> StackTrace<'a> {
     /// The header names the entry function the trace was captured for. Function
     /// and table names come from the module's `name` section, falling back to
     /// `func #N` / `table #N` when a name is absent.
+    /// The frames of this trace, innermost first.
+    ///
+    /// Element 0 is always the trapping instruction; the rest are its callers,
+    /// outward. Mirrors [`SourceStackTrace::records`].
+    pub fn records(&self) -> &[TraceRecord] {
+        &self.0
+    }
+
     pub fn render(&self) -> String {
         let custom_section = &self.2.custom_section;
 
