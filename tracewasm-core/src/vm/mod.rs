@@ -62,8 +62,6 @@
 //! Instruction indices, by contrast, are per-function: each `TraceVM::execute`
 //! invocation has its own `instructions` slice and `pc`.
 
-use smallvec::{SmallVec, smallvec};
-
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
@@ -77,9 +75,9 @@ use crate::{
     instruction::{Instruction, TargetBranch},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
-    tracewasm_unreachable::unreachable,
     vm::stack::{DataVal, Stack, Val, Value},
 };
+use smallvec::{SmallVec, smallvec};
 use std::{
     ops::{BitAnd, BitOr, BitXor, Neg},
     sync::Arc,
@@ -156,7 +154,7 @@ impl TraceVM {
         params: &[Val],
         instance: &mut Instance<M, I>,
         module: &Arc<Module>,
-    ) -> Result<ResultVals, TraceWasmError> {
+    ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
         instance.stack.reset();
 
@@ -165,7 +163,8 @@ impl TraceVM {
         }
 
         // The reset above put the stack at height 0, so this frame's base is 0.
-        Self::execute_recursive(func_index, instance, module, &mut call_stack_depth)?;
+        Self::execute_on_native_stack(func_index, instance, module, &mut call_stack_depth)
+            .map_err(|trace| func_call_err_from_unwind(func_index, trace, module))?;
 
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
@@ -198,19 +197,23 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Always a [`TraceWasmError::InstructionExecution`]: every failure — a trap,
-    /// an error from a nested call, or one from an imported function — is tagged
-    /// here with the instruction that raised it. Frame setup cannot fail, since
-    /// `Module::compile` already rejected the local types the VM does not model.
+    /// An [`Unwind`]: the trace of the failure so far, innermost frame first.
+    /// The trapping instruction records itself, and each frame the error passes
+    /// through on its way out appends its own `call`. Frame setup cannot fail,
+    /// since `Module::compile` already rejected the local types the VM does not
+    /// model.
     ///
-    /// [`FuncCallError`](crate::error::FuncCallError) depends on this being the
-    /// only error shape that escapes the interpreter.
-    fn execute_recursive<M: Memory, I: ImportRegistry>(
+    /// Returning the trace rather than taking a buffer to fill keeps it off the
+    /// dispatch loop entirely: the loop has no accumulator to keep live, and the
+    /// native unwind visits exactly the frames the trace needs, in the order it
+    /// needs them. [`Self::run`] turns it into a [`FuncCallError`] once, where the
+    /// entry function's name and the module are in reach.
+    fn execute_on_native_stack<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         instance: &mut Instance<M, I>,
         module: &Arc<Module>,
         call_stack_depth: &mut u32,
-    ) -> Result<(), FuncCallError> {
+    ) -> Result<(), Unwind> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
@@ -284,8 +287,12 @@ impl TraceVM {
                 instance,
                 br_table_targets,
                 imported_func_count,
-            )
-            .unwrap();
+            );
+
+            let step = match step {
+                Ok(step) => step,
+                Err(err) => return Err(trap_here(func_index, pc, instruction_offsets, err)),
+            };
 
             match step {
                 Step::Next => {
@@ -297,7 +304,7 @@ impl TraceVM {
                 Step::Call {
                     func_index: callee_func_index,
                     params_count: _,
-                    is_indirect: _,
+                    is_indirect,
                 } => {
                     // Checked *before* recursing: the callee increments the counter
                     // on entry, so testing after would admit one frame past the
@@ -307,22 +314,34 @@ impl TraceVM {
                     let max_depth = instance.config().get_max_call_stack_depth();
 
                     if *call_stack_depth >= max_depth {
-                        return Err(func_call_err(
+                        return Err(trap_here(
                             func_index,
-                            vec![],
-                            InstructionExecutionError::CallStackExhausted(max_depth),
                             pc,
-                            instruction_offsets[pc],
-                            module,
+                            instruction_offsets,
+                            InstructionExecutionError::CallStackExhausted(max_depth),
                         ));
                     }
 
-                    TraceVM::execute_recursive(
+                    if let Err(mut trace) = TraceVM::execute_on_native_stack(
                         callee_func_index,
                         instance,
                         module,
                         call_stack_depth,
-                    )?;
+                    ) {
+                        // This frame is one link in the chain that led to the
+                        // trap, so it appends itself as the error passes through.
+                        trace.push(TraceRecord {
+                            func_index,
+                            instr_index: pc,
+                            kind: TraceRecordKind::Call {
+                                callee_index: callee_func_index,
+                                is_indirect,
+                            },
+                            instr_offset: instruction_offsets[pc],
+                        });
+
+                        return Err(trace);
+                    }
 
                     // The callee left its results in the caller's argument slots,
                     // so there is nothing to do but resume past the call.
@@ -354,7 +373,7 @@ impl TraceVM {
         Ok(())
     }
 
-    fn execute<M: Memory, I: ImportRegistry>(
+    fn _execute_on_frame_stack<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I>,
         module: &Arc<Module>,
@@ -2596,6 +2615,59 @@ fn signature_mismatch(
                 formatted_val_types(results)
             ),
         ),
+    )
+}
+
+/// A trap on its way back up the native call stack, carrying the trace built so
+/// far, innermost frame first.
+///
+/// This is the error type of [`TraceVM::execute_on_native_stack`], which assembles
+/// it during the unwind rather than reconstructing it afterwards: the trapping
+/// instruction seeds it, and each enclosing frame appends its `call` as the error
+/// passes through. [`TraceVM::run`] closes it into a [`FuncCallError`].
+type Unwind = Vec<TraceRecord>;
+
+/// Seeds an [`Unwind`] at the instruction that trapped.
+///
+/// Outlined so the allocation and the record's construction stay out of the
+/// dispatch loop, which would otherwise carry their working values across every
+/// instruction it executes.
+#[inline(never)]
+#[cold]
+fn trap_here(
+    func_index: FuncIndex,
+    pc: usize,
+    instruction_offsets: &[u32],
+    err: InstructionExecutionError,
+) -> Unwind {
+    vec![TraceRecord {
+        func_index,
+        instr_index: pc,
+        kind: TraceRecordKind::NonCall(err),
+        instr_offset: instruction_offsets[pc],
+    }]
+}
+
+/// Closes a completed [`Unwind`] into the error the caller sees, naming the entry
+/// function the call was made through.
+#[inline(never)]
+fn func_call_err_from_unwind(
+    func_index: FuncIndex,
+    trace: Unwind,
+    module: &Arc<Module>,
+) -> FuncCallError {
+    // A `TypedFunc` is only handed out for an export, so the lookup resolves;
+    // falling back rather than unwrapping keeps a failure while *reporting* a
+    // trap from replacing it with a panic.
+    let func_name = module
+        .exported_func_name(func_index)
+        .map(String::as_str)
+        .unwrap_or("<unknown>");
+
+    FuncCallError::new(
+        func_name.to_string(),
+        trace.into_boxed_slice(),
+        module.clone(),
     )
 }
 

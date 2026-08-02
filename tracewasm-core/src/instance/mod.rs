@@ -128,13 +128,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         let params = params.to_vals();
         let module = instance.module.clone();
 
-        let results = match TraceVM::run(self.func_index, params.as_ref(), instance, &module) {
-            Ok(res) => res,
-            // The interpreter builds the `FuncCallError` itself, so it already
-            // carries the entry-function name and the full frame trace.
-            Err(TraceWasmError::FuncCall(err)) => return Err(err),
-            Err(_) => todo!("non-`FuncCall` error out of `run`"),
-        };
+        let results = TraceVM::run(self.func_index, params.as_ref(), instance, &module)?;
 
         // `get_typed_func` already matched `R` against the module's declared
         // results, so this holds. It cannot be reported as a `FuncCallError`
