@@ -2,8 +2,8 @@
 //!
 //! `Instruction::emit_instruction_for_func` (function bodies) and
 //! `Instruction::emit_instruction_for_const_expr` (constant expressions) each
-//! consume a [`wasmparser::OperatorsReader`] and produce a `Vec<Instruction>` in
-//! which **structured control
+//! consume a [`wasmparser::OperatorsReader`] and produce a flat instruction list
+//! in which **structured control
 //! flow has been resolved into absolute indices** and **operand-stack heights
 //! have been precomputed**. The goal is that a downstream interpreter never has
 //! to re-scan for matching `end`s or rebuild block types at runtime: every
@@ -41,8 +41,8 @@
 //!
 //! ## Keeping [`Instruction`] small (load-bearing)
 //!
-//! One `Instruction` is **16 bytes** — asserted just below the enum, so a
-//! regression is a compile error rather than a silent cost. A function body holds
+//! One `Instruction` is **at most 16 bytes** — asserted just below the enum, so
+//! a regression is a compile error rather than a silent cost. A function body holds
 //! one per operator, so the widest variant sets the memory cost of every compiled
 //! module, and at 16 bytes four of them share a cache line.
 //!
@@ -1298,12 +1298,13 @@ impl Instruction {
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
-    /// `is_func` is `Some((params, results))` for a function body, in which case
-    /// an implicit [`BlockKind::Func`] frame is pushed to catch top-level
-    /// branches and the trailing `end`. It is `None` for constant expressions
-    /// (global/table/element/data init), which carry no root frame; their
-    /// terminating `end` has nothing to pop and simply ends the pass (see the
-    /// `Operator::End` arm).
+    /// `params` and `results` are the body's own arity. They seed an implicit
+    /// [`BlockKind::Func`] frame at the root of the control stack, which is what
+    /// catches top-level branches and the trailing `end`.
+    ///
+    /// Constant expressions have no such frame and go through
+    /// [`Self::emit_instruction_for_const_expr`] instead: their terminating `end`
+    /// has nothing to pop and simply ends the pass.
     ///
     /// `types` is the module's type section, used to resolve `BlockType::FuncType`
     /// arities. `func_decls` is the module's function declarations, used by

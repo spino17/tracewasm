@@ -22,6 +22,10 @@
 //! without releasing the storage. Locals live below the operand region — see the
 //! frame layout in [`crate::vm`].
 //!
+//! Constant expressions are the exception: they run on their own short-lived
+//! stack from [`Stack::for_const_expr_evaluation`], because they are evaluated
+//! during instantiation, before the instance whose stack they would share exists.
+//!
 //! ## Ordering conventions
 //!
 //! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
@@ -54,13 +58,26 @@ use smallvec::{SmallVec, smallvec};
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.
-pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
+///
+/// A count of slots, not of bytes: at 8 bytes per [`Value`] this reserves 4 MiB.
+/// The pages are faulted lazily, so an instance that never runs deep pays only
+/// for what it touches.
+pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024;
 
 /// A concrete runtime value on the operand stack or in a local slot.
 ///
-/// One variant per supported WebAssembly value type. `V128` (SIMD) is
-/// intentionally absent and rejected at the `Val` constructors below. `Ref`
-/// holds an optional function index — `None` is a null reference.
+/// One variant per supported WebAssembly value type. `Ref` holds an optional
+/// function index — `None` is a null reference.
+///
+/// `V128` (SIMD) is intentionally absent, so there is no `Val` that can carry
+/// one. Where a [`ValType`] has to be turned into a value the type is rejected
+/// instead: [`Val::has_ty`] reports it as unsupported, and the interpreter's own
+/// frame setup treats it as unreachable, which is sound because
+/// `Module::compile` refuses such a module up front.
+///
+/// This is the tagged form, used at the API boundary and for globals. The
+/// interpreter's operand stack holds an untagged eight-byte slot instead, since
+/// there the type of every slot is already fixed by the instruction reading it.
 #[derive(Debug, Copy, Clone)]
 pub enum Val {
     /// A 32-bit integer value.
@@ -216,6 +233,10 @@ impl Val {
     }
 }
 
+/// Drops the tag, keeping the bits: the inverse of [`Value::into_val`].
+///
+/// Used where a tagged value crosses into the interpreter — call arguments, host
+/// results, global reads.
 impl From<&Val> for Value {
     #[inline(always)]
     fn from(value: &Val) -> Self {
@@ -229,6 +250,8 @@ impl From<&Val> for Value {
     }
 }
 
+/// By-value form of [`From<&Val>`](Value); [`Val`] is `Copy`, so the two differ
+/// only in what the caller happens to hold.
 impl From<Val> for Value {
     #[inline(always)]
     fn from(value: Val) -> Self {
@@ -242,33 +265,68 @@ impl From<Val> for Value {
     }
 }
 
+/// Where [`Value`] keeps the "this reference is non-null" bit.
+///
+/// A `funcref` payload is a [`FuncIndex`], which is a `u32`, so the whole upper
+/// half of the word is free; 56 is simply a bit in that half.
 const TAG_SHIFT: u32 = 56;
+/// The bit pattern [`Value::from_ref`] sets for a non-null reference. A null one
+/// is all zeroes, which is what makes the tag necessary: without it a null
+/// reference and `Some(FuncIndex(0))` would be the same word.
 const TAG_SOME: u64 = 1 << TAG_SHIFT;
 
+/// One operand-stack slot: eight bytes, no type tag.
+///
+/// Every wasm value the interpreter holds fits in a `u64`, and the *type* of a
+/// given slot is already fixed by the validated instruction stream — an
+/// `i64.add` can only ever find two `i64`s beneath it. Carrying a discriminant
+/// alongside the bits would therefore pay, on every push and pop, for
+/// information the opcode already has. The tagged [`Val`] is used at the API
+/// boundary instead, where the type genuinely is dynamic.
+///
+/// # Invariant
+///
+/// **A slot must be read back with the same type it was written as.** The
+/// accessors reinterpret bits and cannot detect a mismatch: `from_i32(-1)`
+/// stores `0x0000_0000_FFFF_FFFF`, so reading it with [`Self::as_i64`] yields
+/// `4294967295` rather than `-1`. Validation is what upholds this, so a bug in
+/// lowering surfaces as a wrong answer rather than a panic.
+///
+/// Floats are stored as raw bits rather than converted, so NaN payloads and
+/// signed zeroes survive a round trip unchanged, as wasm requires.
 #[derive(Clone, Copy)]
 pub(crate) struct Value(u64);
 
 impl Value {
+    /// Stores an `i32` in the low half, zero-extended.
+    ///
+    /// Zero- rather than sign-extending keeps the upper half at zero, so the
+    /// 32-bit operations that read the slot back never have to mask.
     #[inline(always)]
     pub fn from_i32(val: i32) -> Self {
         Value(val as u32 as u64)
     }
 
+    /// Stores an `i64`, which occupies the whole slot.
     #[inline(always)]
     pub fn from_i64(val: i64) -> Self {
         Value(val as u64)
     }
 
+    /// Stores an `f32` as its raw bits in the low half, preserving NaN payloads.
     #[inline(always)]
     pub fn from_f32(val: f32) -> Self {
         Value(val.to_bits() as u64)
     }
 
+    /// Stores an `f64` as its raw bits, preserving NaN payloads.
     #[inline(always)]
     pub fn from_f64(val: f64) -> Self {
         Value(val.to_bits())
     }
 
+    /// Stores a `funcref`: the index in the low 32 bits, [`TAG_SOME`] set when
+    /// the reference is non-null. A null reference is the all-zero word.
     #[inline(always)]
     pub fn from_ref(func_ref: Option<FuncIndex>) -> Self {
         let x = match func_ref {
@@ -281,26 +339,38 @@ impl Value {
         Value(tag | x)
     }
 
+    /// Reads the low half as an `i32`, discarding the upper half.
+    ///
+    /// Correct only for a slot written by [`Self::from_i32`]; see the type's
+    /// invariant.
     #[inline(always)]
     pub fn as_i32(&self) -> i32 {
         self.0 as u32 as i32
     }
 
+    /// Reads the whole slot as an `i64`. See the type's invariant.
     #[inline(always)]
     pub fn as_i64(&self) -> i64 {
         self.0 as i64
     }
 
+    /// Reinterprets the low half as an `f32`. See the type's invariant.
     #[inline(always)]
     pub fn as_f32(&self) -> f32 {
         f32::from_bits(self.0 as u32)
     }
 
+    /// Reinterprets the whole slot as an `f64`. See the type's invariant.
     #[inline(always)]
     pub fn as_f64(&self) -> f64 {
         f64::from_bits(self.0)
     }
 
+    /// Reads a `funcref`, `None` for a null one.
+    ///
+    /// Any bit set at or above [`TAG_SHIFT`] counts as non-null, not just the one
+    /// [`Self::from_ref`] writes, so this stays correct if the upper half is ever
+    /// used for more than the one flag.
     #[inline(always)]
     pub fn as_ref(&self) -> Option<FuncIndex> {
         let is_some = (self.0 >> TAG_SHIFT) != 0;
@@ -308,6 +378,17 @@ impl Value {
         if is_some { Some(FuncIndex(val)) } else { None }
     }
 
+    /// The initial value wasm gives a declared local of type `ty` — zero for the
+    /// numeric types, a null reference for `funcref`.
+    ///
+    /// Every arm produces the all-zero word, so this compiles away to a store of
+    /// zero; it is written out per type to stay correct if a future
+    /// representation stops sharing that encoding.
+    ///
+    /// # Panics
+    ///
+    /// On [`ValType::V128`], which `Module::compile` rejects, so a frame setup
+    /// can never reach it.
     #[inline(always)]
     pub fn zero_of_ty(ty: ValType) -> Self {
         match ty {
@@ -320,6 +401,15 @@ impl Value {
         }
     }
 
+    /// Re-attaches the type that the slot lost, producing the tagged [`Val`] the
+    /// public API and the host boundary deal in.
+    ///
+    /// `ty` must be the type the slot was written as — it is taken from the
+    /// function's declared signature, which is what makes that so.
+    ///
+    /// # Panics
+    ///
+    /// On [`ValType::V128`], as for [`Self::zero_of_ty`].
     #[inline(always)]
     pub fn into_val(self, ty: &ValType) -> Val {
         match ty {

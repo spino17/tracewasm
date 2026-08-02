@@ -5,18 +5,25 @@
 //!
 //! Each function body is a `Vec<Instruction>` with control flow already
 //! resolved to absolute instruction indices and operand-stack heights
-//! precomputed. Execution is a simple `pc` loop: `TraceVMState::execute` runs
-//! one instruction and reports what the loop should do next via
-//! `ExecutionResult` — advance (`Next`), jump (`JumpTo`), or (implicitly, by
-//! advancing past the final `End`) return from the function.
+//! precomputed. Execution is a simple `pc` loop: [`TraceVM::execute_instruction`]
+//! runs one instruction and reports what the driver should do next via [`Step`]
+//! — advance (`Next`), jump (`JumpTo`), enter a callee (`Call`), or (implicitly,
+//! by advancing past the final `End`) return from the function.
+//!
+//! [`TraceVM::execute_on_native_stack`] is that driver. A `Call` makes it recurse
+//! into itself, so one native frame is live per active wasm frame; the depth is
+//! bounded by [`Config::max_call_stack_depth`](crate::instance::config::Config)
+//! rather than by the host stack, since overflowing the latter aborts the process
+//! instead of unwinding.
 //!
 //! ## One shared stack across all frames — locals included
 //!
 //! Rather than giving every call its own operand stack, the whole call tree
 //! shares a single `Stack`. A call does not allocate a new stack; the callee
 //! simply builds its operands on top of the caller's. Recursion still uses the
-//! native Rust call stack (one `TraceVM::execute` frame per active wasm call),
-//! but the potentially-large value stack is allocated exactly once.
+//! native Rust call stack (one [`TraceVM::execute_on_native_stack`] frame per
+//! active wasm call), but the potentially-large value stack is allocated exactly
+//! once.
 //!
 //! A frame's **locals live on that same shared stack**, not in a per-activation
 //! vector. The layout of one frame, from its base upwards, is:
@@ -59,8 +66,9 @@
 //! On frame exit the stack is truncated to `caller_base_height` preserving the
 //! result arity, which drops the locals and leaves the results exactly where the
 //! caller's arguments were — so the caller does nothing after the call returns.
-//! Instruction indices, by contrast, are per-function: each `TraceVM::execute`
-//! invocation has its own `instructions` slice and `pc`.
+//! Instruction indices, by contrast, are per-function: each
+//! [`TraceVM::execute_on_native_stack`] invocation has its own `instructions`
+//! slice and `pc`.
 
 use crate::{
     error::{
@@ -105,32 +113,57 @@ const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
 const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
+/// What [`TraceVM::execute_instruction`] tells its driver to do next.
+///
+/// Everything an instruction can do to the operand stack, memory, globals and
+/// tables it does itself, against the [`Instance`]. Only the things the *driver*
+/// owns — the program counter and the call stack — come back through here.
 enum Step {
+    /// Continue at the following instruction.
     Next,
+    /// Enter a locally-defined callee. An imported callee never produces this:
+    /// it runs to completion inside the dispatch and yields [`Self::Next`].
     Call {
         func_index: FuncIndex,
+        /// How many operands the callee takes; they are already on the stack and
+        /// become its leading local slots.
         params_count: u32,
+        /// `Some(table)` when the call came from `call_indirect`, recorded so a
+        /// trap can say which table it went through.
         is_indirect: Option<TableIndex>,
     },
+    /// Continue at this index into the current function's instruction list.
     JumpTo(u32),
 }
 
+/// A caller suspended at a `call`, saved by the driver that keeps its call stack
+/// in a `Vec` rather than on the native stack.
+///
+/// Holds everything needed to resume the caller, plus what the trace needs to
+/// describe the call if the callee traps. The slice references borrow from the
+/// [`Module`], so saving a frame copies pointers rather than instructions.
 struct Frame<'a> {
     func_index: FuncIndex,
     instructions: &'a Box<[Instruction]>,
+    /// Index of the `call` itself, not the instruction after it; resuming adds
+    /// one, and a trace records the call site.
     pc: u32,
     caller_base_height: u32,
     frame_base_height: u32,
     br_table_targets: &'a Box<[TargetBranch]>,
     instruction_offsets: &'a Box<[u32]>,
+    /// Result count of the callee, needed on return to know how much of its
+    /// region to keep when truncating back to `caller_base_height`.
     callee_results_len: u32,
+    /// Who this frame called, and through which table if indirect. Only the trace
+    /// reads these.
     callee_func_index: FuncIndex,
     callee_is_indirect: Option<TableIndex>,
 }
 
 /// Namespace for the interpreter's entry points. Carries no state of its own:
-/// everything mutable lives on the [`Instance`], and per-frame data on
-/// [`TraceVMState`].
+/// everything mutable lives on the [`Instance`], and a frame's own data lives in
+/// the locals of the driver running it.
 pub(crate) struct TraceVM;
 
 impl TraceVM {
@@ -138,8 +171,8 @@ impl TraceVM {
     /// result values (in declaration order).
     ///
     /// Resets [`Instance::stack`] to empty, pushes `params`, and delegates to
-    /// [`Self::execute`], which leaves the results on that stack for this function
-    /// to pop.
+    /// [`Self::execute_on_native_stack`], which leaves the results on that stack
+    /// for this function to pop.
     ///
     /// Resetting on entry rather than on exit is what makes an instance reusable
     /// after a trap: a failing call returns early with values still on the stack,
@@ -147,8 +180,11 @@ impl TraceVM {
     ///
     /// # Errors
     ///
-    /// Propagates any [`TraceWasmError`] from execution (traps, argument/result
-    /// mismatches, errors returned by imported functions, …).
+    /// A [`FuncCallError`] for any trap or host-function failure, carrying the
+    /// backtrace assembled during the unwind. This is the only place the
+    /// interpreter's [`Unwind`] is turned into an error the caller sees, because
+    /// it is the only frame that knows the entry function the call was made
+    /// through.
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
@@ -186,7 +222,9 @@ impl TraceVM {
     /// Runs one (locally-defined) function to completion on the shared stack.
     ///
     /// Called both as the top-level entry (with an empty stack, so this frame's
-    /// base is 0) and recursively from the `Call`/`CallIndirect` instructions.
+    /// base is 0) and recursively from its own driver loop, which is where a
+    /// [`Step::Call`] is acted on — the instruction arms themselves only report
+    /// the call, they do not perform it.
     ///
     /// **Arguments are passed on the stack, not as a slice.** The caller leaves
     /// them as the topmost values and this function adopts them in place as the
@@ -373,6 +411,30 @@ impl TraceVM {
         Ok(())
     }
 
+    /// The same interpreter, driving its call stack from a `Vec<Frame>` instead
+    /// of recursing.
+    ///
+    /// **Not wired up** — [`Self::run`] uses [`Self::execute_on_native_stack`].
+    /// It is kept because it is the only shape that decouples guest call depth
+    /// from the host stack: nothing here grows the native frame per wasm call, so
+    /// depth would be bounded by memory rather than by
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config).
+    ///
+    /// It is measurably slower, and for a reason that is structural rather than
+    /// incidental. The frame state it must carry across the dispatch loop —
+    /// instruction slice, offsets, branch targets, both base heights — occupies
+    /// registers that the recursive driver leaves free, because there they are
+    /// fixed for the life of the call and here they change on every call and
+    /// return. The opcode arms lose that contention: the operand-stack pointer
+    /// stops living in a register, so a push no longer folds into the pop before
+    /// it, and the arms' shared tail becomes a general push instead.
+    ///
+    /// Restructuring around an inner per-frame loop, and outlining the
+    /// call/return transitions, were both tried and moved it very little; the
+    /// contention is not in how those are written.
+    ///
+    /// Its depth check tests `frames.len()` rather than a separate counter, since
+    /// the `Vec` length *is* the depth.
     fn _execute_on_frame_stack<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I>,
@@ -538,6 +600,21 @@ impl TraceVM {
         Ok(())
     }
 
+    /// Resolves a `call`/`call_indirect` to the [`Step`] its driver should act on.
+    ///
+    /// The two callee kinds part company here, which is why both instructions
+    /// route through one function. A **local** callee is reported as
+    /// [`Step::Call`] and entered by the driver. An **imported** one is invoked
+    /// right here — its parameters are popped and re-tagged from the callee's
+    /// declared types, its results pushed — and reported as [`Step::Next`],
+    /// because it has already run and there is no frame to enter.
+    ///
+    /// `is_indirect` only labels the failure: it selects which error variant
+    /// wraps a host error, and rides along in [`Step::Call`] for the trace.
+    ///
+    /// # Errors
+    ///
+    /// Whatever an imported callee returned, wrapped to name the callee.
     fn call_func<M: Memory, I: ImportRegistry>(
         callee_func_index: FuncIndex,
         callee_params_count: u32,
@@ -632,9 +709,10 @@ impl TraceVM {
         // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
         //    whole module in `Module::compile` before any lowering.
         // 2. `stack_pointer == caller_base_height + locals_len` once the frame is
-        //    set up: `execute` derives `caller_base_height` by subtracting the
-        //    arguments already on the stack, then pushes the remaining declared
-        //    locals. Changing that setup invalidates this.
+        //    set up: whichever driver entered the frame derives
+        //    `caller_base_height` by subtracting the arguments already on the
+        //    stack, then pushes the remaining declared locals. Changing that setup
+        //    invalidates this.
         // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
         //    in `vm::stack`.
         // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
@@ -650,6 +728,10 @@ impl TraceVM {
         unsafe { *instance.stack.inner.get_unchecked(slot) }
     }
 
+    /// Writes local slot `index` of the frame based at `caller_base_height`.
+    ///
+    /// The mirror of [`Self::get_local`], and it rests on the same four
+    /// invariants; see the SAFETY comment there.
     #[inline(always)]
     fn set_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
@@ -676,6 +758,19 @@ impl TraceVM {
         }
     }
 
+    /// Pops a load/store's dynamic address and adds the instruction's static
+    /// `memarg` offset, giving the byte offset to access.
+    ///
+    /// Shared by every memory instruction, which differ only in width.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::EffectiveAddressOverflow`] if the sum leaves the 32-bit
+    /// address space. Checked rather than wrapped: wrapping would fold a
+    /// far-out-of-bounds address back to a valid one, turning a trap into a
+    /// silently wrong access. Being out of range is not itself the trap here —
+    /// the access that follows is bounds-checked anyway — but the addition must
+    /// not lose that fact.
     #[inline(always)]
     fn pop_effective_address<M: Memory, I: ImportRegistry>(
         memarg_offset: u32,
@@ -690,6 +785,30 @@ impl TraceVM {
         Ok(effective_offset as usize)
     }
 
+    /// Executes one instruction against `instance` and reports what the driver
+    /// should do next.
+    ///
+    /// The core dispatch: one arm per [`Instruction`] variant. Effects on the
+    /// operand stack, memory, globals and tables happen here; only the program
+    /// counter and the call stack are handed back, as a [`Step`].
+    ///
+    /// Takes its frame's context as loose arguments rather than a `&self` or a
+    /// state struct so that the driver can hold them in registers across the loop.
+    /// Every argument is constant for the life of a frame, so the driver computes
+    /// them once on entry — an expression evaluated in the argument list would be
+    /// evaluated once per instruction executed instead.
+    ///
+    /// `#[inline(always)]` because the call boundary is not worth its price here:
+    /// inlined, the arms share the driver's registers and the whole dispatch
+    /// becomes a jump table inside one function. The cost is frame size — every
+    /// arm's spill slots land in the driver's frame, which is why
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config) is tied
+    /// to the size of that frame.
+    ///
+    /// # Errors
+    ///
+    /// The trap the instruction raised, untagged: it says what went wrong, and
+    /// the driver adds where.
     #[inline(always)]
     fn execute_instruction<M: Memory, I: ImportRegistry>(
         instr: &Instruction,
@@ -2671,6 +2790,16 @@ fn func_call_err_from_unwind(
     )
 }
 
+/// Builds the caller-visible error for [`TraceVM::_execute_on_frame_stack`],
+/// reconstructing the trace from its saved frames.
+///
+/// The counterpart to [`func_call_err_from_unwind`]. That driver keeps its call
+/// stack in a `Vec` and unwinds in one step, so it has no per-frame moment at
+/// which to append a record; the whole trace is walked out here instead —
+/// `err` at `instr_index` as the innermost record, then `frames` in reverse, so
+/// the result is innermost-first either way.
+///
+/// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
 fn func_call_err(
     func_index: FuncIndex,

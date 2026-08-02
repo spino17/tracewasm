@@ -2,7 +2,7 @@
 //! type-safe [`TypedFunc`] handle for calling its functions.
 
 use crate::{
-    error::{FuncCallError, TraceWasmError},
+    error::FuncCallError,
     instance::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
@@ -16,24 +16,47 @@ use crate::{
 };
 use std::{marker::PhantomData, sync::Arc};
 
+/// Per-instance resource limits.
 pub mod config;
 pub mod traits;
 
-/// A compiled module paired with the mutable state needed to run it: its linear
-/// [`Memory`] and the [`ImportRegistry`] resolving its imported functions.
+/// A compiled module paired with everything mutable that running it touches: the
+/// operand stack, linear memory, globals, tables, and the [`ImportRegistry`]
+/// resolving its imported functions.
+///
+/// All interpreter state lives here rather than in the driver, so a frame is
+/// described by a few indices into this rather than by owned buffers, and a
+/// nested call costs no allocation.
 ///
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
-/// import implementation. The module is shared via `Arc`, so one compiled
-/// module can back several instances.
+/// import implementation. The module is shared via `Arc`, so one compiled module
+/// can back several instances.
 pub struct Instance<M, I> {
+    /// The guest's linear memory.
     pub(crate) memory: M,
+    /// The operand stack, shared by every frame: locals and operands of a call
+    /// chain sit contiguously, and each frame addresses its own region by base
+    /// offset. Reset at the start of each [`TypedFunc::call`], which is what
+    /// leaves an instance usable after a trap.
     pub(crate) stack: Stack<Value>,
+    /// Host functions backing the module's declared imports.
     pub(crate) import_registry: I,
+    /// The compiled module this instance was created from.
     pub(crate) module: Arc<Module>,
+    /// The limits this instance was created under, already narrowed against what
+    /// the module declares.
     pub(crate) config: Config,
+    /// Global values, imported ones first, indexed by the module's global index
+    /// space. Tagged [`Val`] rather than untagged [`Value`] because a global's
+    /// type is read at runtime when the host asks for it.
     pub(crate) global_vals: Box<[Val]>,
+    /// Materialized tables, indexed by table index.
     pub(crate) table_vals: Box<[TableVal]>,
+    /// Element segments, retained so a passive segment can still be applied by a
+    /// later `table.init`, and dropped by `elem.drop`.
     pub(crate) element_vals: Box<[ElementVal]>,
+    /// Data segments, retained for `memory.init` and dropped by `data.drop`, for
+    /// the same reason as [`Self::element_vals`].
     pub(crate) data_vals: Box<[DataVal]>,
 }
 
@@ -100,6 +123,12 @@ pub struct TypedFunc<P, R> {
 }
 
 impl<P: Params, R: Results> TypedFunc<P, R> {
+    /// Wraps a function index in the `P`/`R` types the caller will use it with.
+    ///
+    /// Crate-private because it asserts the pairing rather than checking it; the
+    /// public path is
+    /// [`Module::get_typed_func`](crate::module::Module::get_typed_func), which
+    /// matches `P` and `R` against the module's declared signature first.
     pub(crate) fn new(func_index: FuncIndex) -> Self {
         TypedFunc {
             func_index,
@@ -131,8 +160,10 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         let results = TraceVM::run(self.func_index, params.as_ref(), instance, &module)?;
 
         // `get_typed_func` already matched `R` against the module's declared
-        // results, so this holds. It cannot be reported as a `FuncCallError`
-        // either, since that type's invariant is an `InstructionExecution` cause.
+        // results, so this holds. It could not be reported as a `FuncCallError`
+        // anyway: that type describes a trap inside the guest and its trace must
+        // start at the instruction that raised one, which a signature mismatch
+        // here is not.
         let res = R::from_vals(results.as_ref())
             .expect("panicking this means the logic of function signature validation in `get_typed_func` in module/mod.rs is incorrect");
 

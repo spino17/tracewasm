@@ -1,4 +1,12 @@
-/// Per-instance resource limits, enforced at instantiation and during execution.
+//! Per-instance resource limits.
+
+/// Ceilings an [`Instance`](crate::instance::Instance) is created under, checked
+/// at instantiation and during execution.
+///
+/// The fields are private so that a limit can only be set through its setter;
+/// [`Module::instantiate`](crate::module::Module::instantiate) may narrow some of
+/// them against what the module itself declares, so the value read back is the
+/// effective one rather than the one supplied.
 pub struct Config {
     /// Max memory size in pages: the ceiling for both the initial allocation and
     /// any later `memory.grow`.
@@ -8,12 +16,17 @@ pub struct Config {
     /// [`Instance`](crate::instance::Instance) it is the *effective* limit and may
     /// read lower than the value supplied.
     max_memory_size_in_pages: u64,
-    /// Max number of elements in a table.
+    /// Max number of elements in a table, checked when a table is materialized at
+    /// instantiation.
     max_table_elements: u64,
     /// Max number of locals per function (including params).
+    ///
+    /// **Not currently enforced.** The setter and getter exist so that callers can
+    /// carry the intent, but no code consults it; a module with more locals than
+    /// this is accepted.
     max_locals_per_func: u64,
     /// Max depth of nested wasm calls before
-    /// [`TraceWasmError::CallStackExhausted`](crate::error::TraceWasmError::CallStackExhausted).
+    /// [`InstructionExecutionError::CallStackExhausted`](crate::error::InstructionExecutionError::CallStackExhausted).
     ///
     /// Each wasm frame costs a native frame, so this bounds guest recursion below
     /// the host stack's own limit, where an overflow would abort the process
@@ -22,7 +35,7 @@ pub struct Config {
     /// **The default is tied to the interpreter's native frame size.** Dispatch is
     /// inlined into the driver, so one frame holds the spill slots of every opcode
     /// arm: 688 bytes per nested call on aarch64 release. The default of 2000
-    /// keeps a full chain near 1.35 MiB, which fits the 2 MiB stack Rust gives a
+    /// keeps a full chain near 1.3 MiB, which fits the 2 MiB stack Rust gives a
     /// spawned thread — the smallest stack a host is likely to run on without
     /// having chosen one — with about a third to spare.
     ///

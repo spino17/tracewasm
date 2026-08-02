@@ -18,15 +18,9 @@ use thiserror::Error;
 /// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
-    /// A trap or error raised while executing a single instruction, tagged with
-    /// where it happened. The interpreter's driver loop attaches these coordinates
-    /// to the [`InstructionExecutionError`] the instruction produced.
-    ///
-    /// Fields: the enclosing function index, the instruction's index in that
-    /// function's lowered instruction list, the instruction itself, the underlying
-    /// cause, and the instruction's byte offset in the module binary. The offset
-    /// is carried for DWARF lookup rather than display, so it is deliberately
-    /// absent from the message.
+    /// A call into the guest failed. The [`FuncCallError`] carries the trapping
+    /// [`InstructionExecutionError`] together with the frames that led to it, so
+    /// it can render a backtrace without the caller supplying context.
     #[error("{0:?}")]
     FuncCall(FuncCallError),
     /// A linear-memory failure raised outside instruction execution — for example
@@ -117,10 +111,14 @@ impl From<wasmparser::Error> for TraceWasmError {
 /// A failed [`TypedFunc::call`](crate::instance::TypedFunc::call), carrying the
 /// context needed to explain it.
 ///
-/// The underlying [`TraceWasmError`] is raised deep inside the interpreter, where
-/// the entry function and the [`Module`] are not in reach. This pairs the cause
-/// with both, so a caller can go straight from the error to a rendered backtrace
-/// via [`Self::stack_trace`] without threading that context in themselves.
+/// A trap is raised deep inside the interpreter, where the entry function and the
+/// [`Module`] are not in reach. This pairs the trace with both, so a caller can go
+/// straight from the error to a rendered backtrace via [`Self::stack_trace`]
+/// without threading that context in themselves.
+///
+/// The `Module` is held by `Arc` rather than borrowed so the error outlives the
+/// call it came from — a backtrace can be rendered long afterwards, and needs the
+/// name and DWARF sections to do it.
 pub struct FuncCallError {
     func_name: String,
     trace: Box<[TraceRecord]>,
@@ -128,13 +126,18 @@ pub struct FuncCallError {
 }
 
 impl FuncCallError {
-    /// Pairs a failure with the entry function and module it happened in.
+    /// Pairs a completed trace with the entry function and module it happened in.
     ///
-    /// `err` must be a [`TraceWasmError::InstructionExecution`]: every error path
-    /// out of the interpreter is tagged with the instruction that raised it, which
-    /// is what lets [`Self::stack_trace`] always produce at least one frame. The
-    /// `debug_assert` below pins that invariant at construction, so a violation
-    /// surfaces where the error is built rather than where it is read.
+    /// # Invariants
+    ///
+    /// `trace` must be non-empty and innermost-first, and `trace[0]` must be a
+    /// [`TraceRecordKind::NonCall`] — the instruction that actually trapped. Both
+    /// [`Self::cause`] and [`Self::stack_trace`] rely on it, and `cause` treats a
+    /// violation as unreachable rather than returning an `Option`.
+    ///
+    /// The interpreter satisfies this by construction: a trap seeds the trace
+    /// with its own `NonCall` record before any caller appends a
+    /// [`TraceRecordKind::Call`] on top.
     pub(crate) fn new(func_name: String, trace: Box<[TraceRecord]>, module: Arc<Module>) -> Self {
         FuncCallError {
             func_name,
@@ -144,6 +147,14 @@ impl FuncCallError {
     }
 
     /// The underlying cause, without the call context.
+    ///
+    /// # Panics
+    ///
+    /// If the trace's innermost record is not a [`TraceRecordKind::NonCall`].
+    /// The interpreter cannot produce such a trace: a trap seeds it with its own
+    /// `NonCall` record before any caller appends a [`TraceRecordKind::Call`].
+    /// Diverging rather than returning an `Option` keeps the impossible case out
+    /// of every caller's signature.
     pub fn cause(&self) -> &InstructionExecutionError {
         let TraceRecordKind::NonCall(err) = &self.trace[0].kind else {
             tracewasm_unreachable::unreachable()
@@ -154,8 +165,8 @@ impl FuncCallError {
 
     /// The interpreter backtrace for this failure, innermost frame first.
     ///
-    /// Always has at least one frame: this type is only constructed from a
-    /// [`TraceWasmError::InstructionExecution`] cause.
+    /// Always has at least one frame: frame `0` is the instruction that trapped,
+    /// which is what seeds the trace in the first place.
     pub fn stack_trace(&self) -> StackTrace<'_> {
         StackTrace(&self.trace, &self.func_name, &self.module)
     }
@@ -193,19 +204,31 @@ impl From<FuncCallError> for TraceWasmError {
 }
 
 /// The cause of a failure while executing one instruction, one variant per
-/// instruction kind that can fail. The interpreter's driver loop tags this with
-/// the enclosing function and instruction index via
-/// [`Self::into_tracewasm_err`], producing a [`TraceWasmError::InstructionExecution`].
+/// instruction kind that can fail.
+///
+/// This says only *what* went wrong. Where it happened is added by the driver,
+/// which records it as the [`TraceRecordKind::NonCall`] at the head of a
+/// [`FuncCallError`]'s trace.
 #[derive(Error, Debug)]
 pub enum InstructionExecutionError {
     /// Reached an `unreachable` instruction (a wasm trap).
     #[error("reached an `unreachable` instruction")]
     Unreachable,
-    /// A `call` failed; the boxed error carries the underlying cause (typically a
-    /// nested [`TraceWasmError::InstructionExecution`] from the callee, or a host
-    /// error for an imported callee). Field: the callee's function index.
+    /// A `call` failed; the boxed error carries the underlying cause, which for
+    /// an imported callee is whatever the host returned. Field: the callee's
+    /// function index.
+    ///
+    /// A locally-defined callee does not produce this: its trap propagates as the
+    /// callee's own record in the trace instead.
     #[error("call to func({0:?}): {1}")]
     Call(FuncIndex, Box<TraceWasmError>),
+    /// Guest recursion hit
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config). Field:
+    /// that limit.
+    ///
+    /// Raised at the `call` that would have exceeded it, before the callee is
+    /// entered, so the guard trips while there is still native stack left to
+    /// unwind on.
     #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
     CallStackExhausted(u32),
     /// A `call_indirect` failed — an out-of-bounds index, a null element, a
@@ -332,7 +355,10 @@ pub enum TraceRecordKind {
     /// function called; `is_indirect` is `Some(table)` for a `call_indirect` and
     /// `None` for a direct `call`.
     Call {
+        /// The function this frame called.
         callee_index: FuncIndex,
+        /// `Some(table)` if the call went through that table via
+        /// `call_indirect`, `None` for a direct `call`.
         is_indirect: Option<TableIndex>,
     },
     /// The innermost frame: the instruction that trapped, carrying its message.
@@ -433,13 +459,6 @@ impl<'a> StackTrace<'a> {
         Ok(SourceStackTrace(source_trace, self.1))
     }
 
-    /// Renders the trace as a human-readable, innermost-first backtrace: frame
-    /// `#0` is where execution trapped, and each subsequent frame is the caller
-    /// that led to it.
-    ///
-    /// The header names the entry function the trace was captured for. Function
-    /// and table names come from the module's `name` section, falling back to
-    /// `func #N` / `table #N` when a name is absent.
     /// The frames of this trace, innermost first.
     ///
     /// Element 0 is always the trapping instruction; the rest are its callers,
@@ -447,6 +466,14 @@ impl<'a> StackTrace<'a> {
     pub fn records(&self) -> &[TraceRecord] {
         &self.0
     }
+
+    /// Renders the trace as a human-readable, innermost-first backtrace: frame
+    /// `#0` is where execution trapped, and each subsequent frame is the caller
+    /// that led to it.
+    ///
+    /// The header names the entry function the trace was captured for. Function
+    /// and table names come from the module's `name` section, falling back to
+    /// `func #N` / `table #N` when a name is absent.
 
     pub fn render(&self) -> String {
         let custom_section = &self.2.custom_section;

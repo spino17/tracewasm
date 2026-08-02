@@ -61,6 +61,8 @@ pub type ModuleDwarf = Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>;
 pub struct GlobalType(wasmparser::GlobalType);
 
 impl GlobalType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::GlobalType) -> Self {
         GlobalType(value)
     }
@@ -89,6 +91,8 @@ impl GlobalType {
 pub struct MemoryType(wasmparser::MemoryType);
 
 impl MemoryType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::MemoryType) -> Self {
         MemoryType(value)
     }
@@ -129,6 +133,8 @@ impl MemoryType {
 pub struct TagType(wasmparser::TagType);
 
 impl TagType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::TagType) -> Self {
         TagType(value)
     }
@@ -172,6 +178,11 @@ impl ValType {
     /// Alias for the wasm `contref` type.
     pub const CONTREF: ValType = ValType::Ref(RefType(wasmparser::RefType::CONTREF));
 
+    /// Maps the parser's value type onto this crate's.
+    ///
+    /// Total, including `V128`: rejecting SIMD is left to the callers that would
+    /// have to represent a value of it, so the type itself can still be named in
+    /// a signature this crate merely reads past.
     pub(crate) fn from_wasmparser(value: wasmparser::ValType) -> Self {
         match value {
             wasmparser::ValType::I32 => ValType::I32,
@@ -205,6 +216,8 @@ pub(crate) fn formatted_val_types(types: &[ValType]) -> String {
 pub struct RefType(wasmparser::RefType);
 
 impl RefType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::RefType) -> Self {
         RefType(value)
     }
@@ -412,8 +425,10 @@ impl EntityIndex for FieldIndex {}
 /// A fully parsed module: every section decoded into owned data.
 ///
 /// Field order roughly follows the binary section order. Index spaces that can
-/// be imported (functions here) fold imports and definitions into a single
-/// list; see the per-field docs.
+/// be imported — functions and globals — fold imports and definitions into a
+/// single list, imports first, matching how wasm numbers them; the
+/// `imported_*_count` fields record where the boundary falls. See the per-field
+/// docs.
 pub struct Module {
     /// The type section. Only function types are kept — GC composite types
     /// (struct/array) are rejected during parsing.
@@ -789,7 +804,12 @@ impl Export {
 /// Whether a global is imported or locally defined.
 pub enum GlobalKind {
     /// Imported from `module`::`name`; its value is supplied at instantiation.
-    Imported { module: String, name: String },
+    Imported {
+        /// The import's module name.
+        module: String,
+        /// The import's field name within that module.
+        name: String,
+    },
     /// Locally defined; the constant expression computes its initial value.
     Local(Box<[Instruction]>),
 }
@@ -945,9 +965,12 @@ impl Module {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails, and
-    /// [`TraceWasmError::Unsupported`] for valid modules using features TraceWasm
-    /// does not model: components, GC types, imports other than functions and
+    /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails. GC
+    /// types arrive this way too: `wasmparser` refuses them while reading the
+    /// type section, before this pass sees them.
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] for valid modules using features
+    /// TraceWasm does not model: components, imports other than functions and
     /// globals, 64-bit memory, more than one memory, tables of anything but
     /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
     pub fn compile(buf: &[u8]) -> Result<Arc<Module>, TraceWasmError> {
@@ -1310,9 +1333,8 @@ impl Module {
 
                         // Rejected here rather than when the frame is built: the
                         // local's type is static, so failing at compile time gives
-                        // a clearer error and keeps every runtime error out of
-                        // `TraceVM::execute` an `InstructionExecution` (the
-                        // invariant `FuncCallError` relies on).
+                        // a clearer error, and it lets frame setup treat `v128` as
+                        // unreachable instead of having to produce a trap for it.
                         if ty == ValType::V128 {
                             return Err(TraceWasmError::Unsupported("v128 local".to_string()));
                         }
@@ -1545,9 +1567,14 @@ impl Module {
     /// Instantiates the module against an import registry, producing a runnable
     /// [`Instance`].
     ///
-    /// Allocates the instance's linear memory and validates the registry against
-    /// the module's declared imports: the function counts must agree, and every
-    /// imported function must exist in the registry with a matching signature.
+    /// In order: validates the registry against the module's declared function
+    /// imports (counts must agree, and each must exist with a matching
+    /// signature), allocates linear memory, resolves and type-checks imported
+    /// globals, builds tables, applies active element and data segments, and
+    /// finally runs the `start` function if the module has one.
+    ///
+    /// Imports are checked before anything is allocated, so a mismatched registry
+    /// costs nothing.
     ///
     /// # Errors
     ///
@@ -1561,6 +1588,9 @@ impl Module {
     ///   a table's or memory's initial size exceeds the configured cap, and
     ///   [`TraceWasmError::ElementSegmentOutOfBounds`] if an active element segment
     ///   does not fit its target table.
+    /// - [`TraceWasmError::Unsupported`] for constructs only reachable at
+    ///   instantiation: a non-`funcref` element expression, a data segment
+    ///   targeting a memory other than index 0, or a `v128` imported global.
     /// - Anything the module's `start` function raises, since it runs before this
     ///   returns.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
