@@ -666,6 +666,7 @@ impl TraceVM {
         Ok(effective_offset as usize)
     }
 
+    #[inline(always)]
     fn execute_instruction<M: Memory, I: ImportRegistry>(
         instr: &Instruction,
         caller_base_height: u32,
