@@ -20,9 +20,11 @@ pub struct Config {
     /// instead of unwinding.
     ///
     /// **The default is tied to the interpreter's native frame size.** Dispatch is
-    /// inlined into the driver loop, which puts every opcode arm's spill slots in
-    /// one frame — about 5 KB per nested call. The default of 1200 keeps a full
-    /// chain near 6 MB, inside a typical 8 MiB main thread with room to spare.
+    /// inlined into the driver, so one frame holds the spill slots of every opcode
+    /// arm: 688 bytes per nested call on aarch64 release. The default of 2000
+    /// keeps a full chain near 1.35 MiB, which fits the 2 MiB stack Rust gives a
+    /// spawned thread — the smallest stack a host is likely to run on without
+    /// having chosen one — with about a third to spare.
     ///
     /// Raising it is only safe if the host stack is larger to match: run the
     /// interpreter on a thread with an explicit `stack_size`, and size the limit
@@ -37,7 +39,7 @@ impl Default for Config {
             max_memory_size_in_pages: 1000,
             max_table_elements: 10000,
             max_locals_per_func: 50000,
-            max_call_stack_depth: 1200,
+            max_call_stack_depth: 2000,
         }
     }
 }
