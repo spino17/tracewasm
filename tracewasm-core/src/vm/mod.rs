@@ -268,17 +268,22 @@ impl TraceVM {
         let mut pc = 0;
         let instr_count = instructions.len();
 
+        // Both are fixed for the whole frame, so they are computed here rather
+        // than in the call below: an expression in the argument list is an add and
+        // a load per instruction executed, not per frame.
+        let frame_base_height = caller_base_height + locals_len as u32;
+
         loop {
             let instr = &instructions[pc];
 
             let step = Self::execute_instruction(
                 instr,
                 caller_base_height,
-                caller_base_height + locals_len as u32,
+                frame_base_height,
                 module,
                 instance,
                 br_table_targets,
-                module.imported_func_count,
+                imported_func_count,
             )
             .unwrap();
 
