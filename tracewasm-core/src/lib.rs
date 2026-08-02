@@ -38,3 +38,10 @@ pub mod instruction;
 pub mod memory;
 pub mod module;
 pub(crate) mod vm;
+
+pub mod tracewasm_unreachable {
+    #[inline(never)]
+    pub fn unreachable() -> ! {
+        unreachable!()
+    }
+}

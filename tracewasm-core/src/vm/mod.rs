@@ -67,7 +67,8 @@ use smallvec::{SmallVec, smallvec};
 use crate::{
     error::{
         CallIndirectError::{self, FunctionCall},
-        InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
+        FuncCallError, InstructionExecutionError, MemoryAccessKind, MemoryError, TraceRecord,
+        TraceRecordKind, TraceWasmError,
     },
     instance::{
         Instance,
@@ -78,7 +79,10 @@ use crate::{
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
     vm::stack::{DataVal, Stack, Val, Value},
 };
-use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use std::{
+    ops::{BitAnd, BitOr, BitXor, Neg},
+    sync::Arc,
+};
 
 pub(crate) mod stack;
 
@@ -110,6 +114,19 @@ enum Step {
         is_indirect: Option<TableIndex>,
     },
     JumpTo(usize),
+}
+
+struct Frame<'a> {
+    func_index: FuncIndex,
+    instructions: &'a Box<[Instruction]>,
+    pc: u32,
+    caller_base_height: u32,
+    frame_base_height: u32,
+    br_table_targets: &'a Box<[TargetBranch]>,
+    instruction_offsets: &'a Box<[u32]>,
+    callee_results_len: u32,
+    callee_func_index: FuncIndex,
+    callee_is_indirect: Option<TableIndex>,
 }
 
 /// Namespace for the interpreter's entry points. Carries no state of its own:
@@ -264,7 +281,7 @@ impl TraceVM {
                 .map_err(|err| {
                     // `pc` is unchanged on the error path (the failing arm returns
                     // before the update), so it still names the faulting instruction.
-                    err.into_tracewasm_err(pc, func_index, instr, instruction_offsets[pc])
+                    err.into_tracewasm_err(pc, func_index, instruction_offsets[pc])
                 })?;
 
             // Advancing past the last instruction means we just executed the
@@ -291,29 +308,67 @@ impl TraceVM {
         Ok(())
     }
 
+    #[inline(never)]
+    fn func_call_err(
+        func_index: FuncIndex,
+        frames: Vec<Frame>,
+        err: InstructionExecutionError,
+        instr_index: usize,
+        instr_offset: u32,
+        module: &Arc<Module>,
+    ) -> FuncCallError {
+        let func_name = module
+            .exported_func_name(func_index)
+            .map(String::as_str)
+            .unwrap_or("<unknown>");
+
+        let mut trace: Vec<TraceRecord> = vec![];
+
+        trace.push(TraceRecord {
+            func_index: if frames.is_empty() {
+                func_index
+            } else {
+                frames.last().unwrap().callee_func_index
+            },
+            instr_index,
+            kind: TraceRecordKind::NonCall(err),
+            instr_offset,
+        });
+
+        let frames_len = frames.len();
+
+        for i in 0..frames_len {
+            let frame = &frames[frames_len - 1 - i];
+
+            trace.push(TraceRecord {
+                func_index: frame.func_index,
+                instr_index: frame.pc as usize,
+                kind: TraceRecordKind::Call {
+                    callee_index: frame.callee_func_index,
+                    is_indirect: frame.callee_is_indirect,
+                },
+                instr_offset: frame.instruction_offsets[frame.pc as usize],
+            });
+        }
+
+        FuncCallError::new(
+            func_name.to_string(),
+            trace.into_boxed_slice(),
+            module.clone(),
+        )
+    }
+
     fn execute_non_recursive<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I>,
-        module: &Module,
-    ) -> Result<(), String> {
-        struct Frame<'a> {
-            func_index: FuncIndex,
-            instructions: &'a Box<[Instruction]>,
-            pc: u32,
-            caller_base_height: u32,
-            frame_base_height: u32,
-            br_table_targets: &'a Box<[TargetBranch]>,
-            instruction_offsets: &'a Box<[u32]>,
-            callee_results_len: u32,
-            callee_func_index: FuncIndex,
-            callee_is_indirect: Option<TableIndex>,
-        }
-
+        module: &Arc<Module>,
+    ) -> Result<(), FuncCallError> {
         let mut frames: Vec<Frame> = Vec::with_capacity(10);
         let imported_func_count = module.imported_func_count;
 
         debug_assert!(func_index.0 >= imported_func_count);
 
+        let top_enclosing_func_index = func_index;
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty.0 as usize];
         let params_len = ty.params.len();
@@ -348,7 +403,19 @@ impl TraceVM {
                 imported_func_count,
             );
 
-            let Ok(step) = step else { todo!() }; // wire up getting the stack trace
+            let step = match step {
+                Ok(step) => step,
+                Err(err) => {
+                    return Err(Self::func_call_err(
+                        top_enclosing_func_index,
+                        frames,
+                        err,
+                        pc,
+                        instruction_offsets[pc] as u32,
+                        module,
+                    ));
+                }
+            };
 
             match step {
                 Step::Next => {
@@ -374,7 +441,7 @@ impl TraceVM {
                     let callee_br_table_targets = &callee_func_body.br_table_targets;
                     let callee_instruction_offsets = &callee_func_body.instruction_offsets;
 
-                    // save current frame's data
+                    // save current frame's state
                     frames.push(Frame {
                         func_index,
                         instructions: instructions,
@@ -417,16 +484,18 @@ impl TraceVM {
                 }
 
                 // pop the frame!
-                // reset the values and continue
-                let frame = frames.pop().unwrap(); // checked above!
+                let frame = frames.pop().unwrap(); // safe to unwrap as checked above!
 
+                // tear down the locals and operands of the frame to just retain the results on top of the
+                // old frame's height
                 instance
                     .stack
                     .truncate_by_preserving_arity(caller_base_height, frame.callee_results_len);
 
+                // reset the state of the frame which executed call instruction
                 func_index = frame.func_index;
                 instructions = frame.instructions;
-                pc = frame.pc as usize + 1;
+                pc = frame.pc as usize + 1; // next instruction past the call
                 caller_base_height = frame.caller_base_height;
                 frame_base_height = frame.frame_base_height;
                 br_table_targets = frame.br_table_targets;

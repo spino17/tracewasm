@@ -2,7 +2,7 @@
 //! type-safe [`TypedFunc`] handle for calling its functions.
 
 use crate::{
-    error::FuncCallError,
+    error::{FuncCallError, TraceWasmError},
     instance::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
@@ -130,23 +130,10 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
 
         let results = match TraceVM::run(self.func_index, params.as_ref(), instance, &module) {
             Ok(res) => res,
-            Err(err) => {
-                // A `TypedFunc` is only handed out for an export, so the lookup
-                // resolves; fall back rather than unwrapping, since panicking
-                // while building an error would replace a diagnosable failure
-                // with a crash.
-                let func_name = instance
-                    .module
-                    .exported_func_name(self.func_index)
-                    .map(String::as_str)
-                    .unwrap_or("<unknown>");
-
-                return Err(FuncCallError::new(
-                    func_name.to_string(),
-                    err,
-                    instance.module.clone(),
-                ));
-            }
+            // The interpreter builds the `FuncCallError` itself, so it already
+            // carries the entry-function name and the full frame trace.
+            Err(TraceWasmError::FuncCall(err)) => return Err(err),
+            Err(_) => todo!("non-`FuncCall` error out of `run`"),
         };
 
         // `get_typed_func` already matched `R` against the module's declared

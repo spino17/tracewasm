@@ -48,6 +48,7 @@
 use crate::{
     error::TraceWasmError,
     module::{FuncIndex, ValType},
+    tracewasm_unreachable,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -105,13 +106,6 @@ mod wrong_ty {
     #[inline(never)]
     pub fn reference() -> ! {
         panic!("value is not ref")
-    }
-}
-
-mod tracewasm_unreachable {
-    #[inline(never)]
-    pub fn unreachable() -> ! {
-        unreachable!()
     }
 }
 
