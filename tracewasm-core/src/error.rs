@@ -326,6 +326,15 @@ impl From<MemoryError> for InstructionExecutionError {
     }
 }
 
+/// Lets `?` on a memory operation propagate straight out of the dispatch, which
+/// boxes its error so its `Result` fits in registers. Without this the memory
+/// arms would each need an explicit `map_err`, the conversion being two steps.
+impl From<MemoryError> for Box<InstructionExecutionError> {
+    fn from(value: MemoryError) -> Self {
+        Box::new(InstructionExecutionError::Memory(value))
+    }
+}
+
 impl From<MemoryError> for TraceWasmError {
     fn from(value: MemoryError) -> Self {
         TraceWasmError::MemoryError(value)

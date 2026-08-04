@@ -265,7 +265,11 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let instruction_offsets = &func_body.instruction_offsets;
-        let br_table_targets = &func_body.br_table_targets;
+        // Annotated as a slice so the `Box` is dereferenced here rather than at the
+        // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
+        // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
+        // loads for a pair that is fixed for the whole frame.
+        let br_table_targets: &[TargetBranch] = &func_body.br_table_targets;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -329,7 +333,7 @@ impl TraceVM {
 
             let step = match step {
                 Ok(step) => step,
-                Err(err) => return Err(trap_here(func_index, pc, instruction_offsets, err)),
+                Err(err) => return Err(trap_here(func_index, pc, instruction_offsets, *err)),
             };
 
             match step {
@@ -486,7 +490,7 @@ impl TraceVM {
                     return Err(func_call_err(
                         top_enclosing_func_index,
                         frames,
-                        err,
+                        *err,
                         pc,
                         instruction_offsets[pc] as u32,
                         module,
@@ -600,39 +604,34 @@ impl TraceVM {
         Ok(())
     }
 
-    /// Resolves a `call`/`call_indirect` to the [`Step`] its driver should act on.
+    /// Runs an imported callee to completion: pops its parameters, re-tags them
+    /// from its declared types, invokes the host function, pushes its results.
     ///
-    /// The two callee kinds part company here, which is why both instructions
-    /// route through one function. A **local** callee is reported as
-    /// [`Step::Call`] and entered by the driver. An **imported** one is invoked
-    /// right here — its parameters are popped and re-tagged from the callee's
-    /// declared types, its results pushed — and reported as [`Step::Next`],
-    /// because it has already run and there is no frame to enter.
+    /// The caller decides which callees come here; a locally-defined one is
+    /// reported to the driver as [`Step::Call`] at the instruction arm instead.
     ///
-    /// `is_indirect` only labels the failure: it selects which error variant
-    /// wraps a host error, and rides along in [`Step::Call`] for the trace.
+    /// **Returns `Result<(), _>` rather than a [`Step`], deliberately.** With the
+    /// error boxed that is eight bytes — a null-niche pointer — so it comes back
+    /// in a register. Returning a `Result<Step, _>` makes it sixteen, which this
+    /// ABI hands back through a caller-provided pointer, and the pointer it would
+    /// be given is the dispatch's own result slot. That slot's address escaping to
+    /// a real call is enough to stop the compiler keeping it in registers, and
+    /// then *every* instruction pays a store and a reload for it — not just the
+    /// two arms that can reach here.
+    ///
+    /// `is_indirect` only labels the failure: it selects which error variant wraps
+    /// a host error.
     ///
     /// # Errors
     ///
-    /// Whatever an imported callee returned, wrapped to name the callee.
-    fn call_func<M: Memory, I: ImportRegistry>(
+    /// Whatever the imported callee returned, wrapped to name the callee.
+    fn call_imported<M: Memory, I: ImportRegistry>(
         callee_func_index: FuncIndex,
         callee_params_count: u32,
-        imported_func_count: u32,
         module: &Module,
         instance: &mut Instance<M, I>,
         is_indirect: Option<TableIndex>,
-    ) -> Result<Step, InstructionExecutionError> {
-        // local function
-        if callee_func_index.0 >= imported_func_count {
-            return Ok(Step::Call {
-                func_index: callee_func_index,
-                params_count: callee_params_count,
-                is_indirect,
-            });
-        }
-
-        // execute imported function!
+    ) -> Result<(), Box<InstructionExecutionError>> {
         let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
         let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
 
@@ -669,12 +668,14 @@ impl TraceVM {
                 callee_params.as_ref(),
                 &mut instance.memory,
             )
-            .map_err(|err| match is_indirect {
-                Some(table_index) => InstructionExecutionError::CallIndirect(
-                    table_index,
-                    FunctionCall(callee_func_index, Box::new(err)),
-                ),
-                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
+            .map_err(|err| {
+                Box::new(match is_indirect {
+                    Some(table_index) => InstructionExecutionError::CallIndirect(
+                        table_index,
+                        FunctionCall(callee_func_index, Box::new(err)),
+                    ),
+                    None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
+                })
             })?;
 
         // push results to the stack
@@ -682,7 +683,7 @@ impl TraceVM {
             instance.stack.push(res.into());
         }
 
-        Ok(Step::Next)
+        Ok(())
     }
 
     #[inline(always)]
@@ -818,20 +819,32 @@ impl TraceVM {
         instance: &mut Instance<M, I>,
         br_table_targets: &[TargetBranch],
         imported_func_count: u32,
-    ) -> Result<Step, InstructionExecutionError> {
+    ) -> Result<Step, Box<InstructionExecutionError>> {
         let res = match instr {
             Instruction::Call {
                 func_index: callee_func_index,
                 params_count: callee_params_count,
             } => {
-                return Self::call_func(
-                    *callee_func_index,
-                    *callee_params_count,
-                    imported_func_count,
-                    module,
-                    instance,
-                    None,
-                );
+                // Which callee kind this is decides who runs it: a local one is
+                // handed to the driver to enter, an imported one runs to
+                // completion here and control simply falls through.
+                if callee_func_index.0 >= imported_func_count {
+                    Step::Call {
+                        func_index: *callee_func_index,
+                        params_count: *callee_params_count,
+                        is_indirect: None,
+                    }
+                } else {
+                    Self::call_imported(
+                        *callee_func_index,
+                        *callee_params_count,
+                        module,
+                        instance,
+                        None,
+                    )?;
+
+                    Step::Next
+                }
             }
             Instruction::CallIndirect {
                 ty_index,
@@ -844,18 +857,18 @@ impl TraceVM {
 
                 // Trap if the index is past the table's end (wasm: "undefined element").
                 let Some(func_ref) = table.table.get(slot).copied() else {
-                    return Err(InstructionExecutionError::CallIndirect(
+                    return Err(Box::new(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::TableSlotOutOfBounds,
-                    ));
+                    )));
                 };
 
                 // Trap on a null element (wasm: "uninitialized element").
                 let Some(callee_func_index) = func_ref else {
-                    return Err(InstructionExecutionError::CallIndirect(
+                    return Err(Box::new(InstructionExecutionError::CallIndirect(
                         *table_index,
                         CallIndirectError::NullElementInTable,
-                    ));
+                    )));
                 };
 
                 let func_ty = &module.types[ty_index.0 as usize];
@@ -873,26 +886,37 @@ impl TraceVM {
                 if params.as_ref() != declared_params.as_ref()
                     || results.as_ref() != declared_results.as_ref()
                 {
-                    return Err(signature_mismatch(
+                    return Err(Box::new(signature_mismatch(
                         *table_index,
                         declared_params,
                         declared_results,
                         params,
                         results,
-                    ));
+                    )));
                 }
 
-                return Self::call_func(
-                    callee_func_index,
-                    declared_params.len() as u32,
-                    imported_func_count,
-                    module,
-                    instance,
-                    Some(*table_index),
-                );
+                // As for `Call` above; the table index rides along so a failure can
+                // say which table the call went through.
+                if callee_func_index.0 >= imported_func_count {
+                    Step::Call {
+                        func_index: callee_func_index,
+                        params_count: declared_params.len() as u32,
+                        is_indirect: Some(*table_index),
+                    }
+                } else {
+                    Self::call_imported(
+                        callee_func_index,
+                        declared_params.len() as u32,
+                        module,
+                        instance,
+                        Some(*table_index),
+                    )?;
+
+                    Step::Next
+                }
             }
             Instruction::Unreachable => {
-                return Err(InstructionExecutionError::Unreachable);
+                return Err(Box::new(InstructionExecutionError::Unreachable));
             }
             Instruction::Nop => Step::Next,
             Instruction::I32Const { value } => {
@@ -1406,10 +1430,10 @@ impl TraceVM {
                 // `i32::MIN % -1` as `0`, which is what `wrapping_rem` returns.
                 // `checked_rem` would wrongly report that case as a failure.
                 if b == 0 {
-                    return Err(InstructionExecutionError::Remainder {
+                    return Err(Box::new(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    });
+                    }));
                 }
 
                 instance.stack.push(Value::from_i32(a.wrapping_rem(b)));
@@ -1794,10 +1818,10 @@ impl TraceVM {
 
                 // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
                 if b == 0 {
-                    return Err(InstructionExecutionError::Remainder {
+                    return Err(Box::new(InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
-                    });
+                    }));
                 }
 
                 instance.stack.push(Value::from_i64(a.wrapping_rem(b)));
