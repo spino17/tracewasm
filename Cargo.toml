@@ -1,5 +1,5 @@
 [workspace]
-members = ["bin/playground", "trace-rs","tracewasm-core", "tracewasm-macros", "tracewasm-scratch", "tracewasm-test"]
+members = ["bin/playground", "trace-rs","tracewasm-core", "tracewasm-macros", "tracewasm-test"]
 
 resolver = "3"
 

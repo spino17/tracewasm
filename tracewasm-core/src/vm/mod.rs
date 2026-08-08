@@ -144,14 +144,14 @@ enum Step {
 /// [`Module`], so saving a frame copies pointers rather than instructions.
 struct Frame<'a> {
     func_index: FuncIndex,
-    instructions: &'a Box<[Instruction]>,
+    instructions: &'a [Instruction],
     /// Index of the `call` itself, not the instruction after it; resuming adds
     /// one, and a trace records the call site.
     pc: u32,
     caller_base_height: u32,
     frame_base_height: u32,
-    br_table_targets: &'a Box<[TargetBranch]>,
-    instruction_offsets: &'a Box<[u32]>,
+    br_table_targets: &'a [TargetBranch],
+    instruction_offsets: &'a [u32],
     /// Result count of the callee, needed on return to know how much of its
     /// region to keep when truncating back to `caller_base_height`.
     callee_results_len: u32,
@@ -455,9 +455,9 @@ impl TraceVM {
         let params_len = ty.params.len();
         let results_len = ty.results.len();
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
-        let mut instructions = &func_body.instructions;
-        let mut instruction_offsets = &func_body.instruction_offsets;
-        let mut br_table_targets = &func_body.br_table_targets;
+        let mut instructions = func_body.instructions.as_ref();
+        let mut instruction_offsets = func_body.instruction_offsets.as_ref();
+        let mut br_table_targets = func_body.br_table_targets.as_ref();
 
         let locals_ty = &func_body.locals;
         let locals_len = locals_ty.len();
@@ -492,7 +492,7 @@ impl TraceVM {
                         frames,
                         *err,
                         pc,
-                        instruction_offsets[pc] as u32,
+                        instruction_offsets[pc],
                         module,
                     ));
                 }
@@ -500,7 +500,7 @@ impl TraceVM {
 
             match step {
                 Step::Next => {
-                    pc = pc + 1;
+                    pc += 1;
                 }
                 Step::JumpTo(target_index) => {
                     pc = target_index as usize;
@@ -518,7 +518,7 @@ impl TraceVM {
                             frames,
                             InstructionExecutionError::CallStackExhausted(max_depth),
                             pc,
-                            instruction_offsets[pc] as u32,
+                            instruction_offsets[pc],
                             module,
                         ));
                     }
@@ -538,7 +538,7 @@ impl TraceVM {
                     // save current frame's state
                     frames.push(Frame {
                         func_index,
-                        instructions: instructions,
+                        instructions,
                         pc: pc as u32,
                         caller_base_height,
                         frame_base_height,

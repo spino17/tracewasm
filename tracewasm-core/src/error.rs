@@ -376,7 +376,7 @@ pub enum TraceRecordKind {
 
 /// A captured interpreter backtrace, innermost-first: frame `0` is where
 /// execution trapped and each later frame is the caller that led to it.
-pub struct StackTrace<'a>(&'a Box<[TraceRecord]>, &'a str, &'a Arc<Module>);
+pub struct StackTrace<'a>(&'a [TraceRecord], &'a str, &'a Arc<Module>);
 
 impl<'a> StackTrace<'a> {
     /// Resolves each frame of this trace against the module's `dwarf`, expanding
@@ -473,7 +473,7 @@ impl<'a> StackTrace<'a> {
     /// Element 0 is always the trapping instruction; the rest are its callers,
     /// outward. Mirrors [`SourceStackTrace::records`].
     pub fn records(&self) -> &[TraceRecord] {
-        &self.0
+        self.0
     }
 
     /// Renders the trace as a human-readable, innermost-first backtrace: frame
@@ -483,7 +483,6 @@ impl<'a> StackTrace<'a> {
     /// The header names the entry function the trace was captured for. Function
     /// and table names come from the module's `name` section, falling back to
     /// `func #N` / `table #N` when a name is absent.
-
     pub fn render(&self) -> String {
         let custom_section = &self.2.custom_section;
 
