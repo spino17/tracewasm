@@ -7,6 +7,8 @@ use crate::{
 };
 use wasmparser::{Operator, OperatorsReader};
 
+pub mod lazy;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Const {
     I32(i32),
