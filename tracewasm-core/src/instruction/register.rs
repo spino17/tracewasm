@@ -2,7 +2,6 @@
 
 use crate::{
     error::TraceWasmError,
-    instruction::register,
     module::{FuncDecl, FuncType},
     vm::stack::Stack,
 };
