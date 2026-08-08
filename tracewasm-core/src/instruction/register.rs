@@ -2,12 +2,11 @@
 
 use crate::{
     error::TraceWasmError,
+    instruction::register,
     module::{FuncDecl, FuncType},
     vm::stack::Stack,
 };
 use wasmparser::{Operator, OperatorsReader};
-
-pub enum RegInstruction {} // register instructions
 
 #[derive(Debug, Clone, Copy)]
 pub enum Const {
@@ -123,6 +122,15 @@ impl SimulatedStack {
     }
 }
 
+pub enum RegInstruction {
+    I32Load(Box<(u32, Registers<1, 1>)>), // (memarg, registers)
+    GlobalSet(Box<(u32, Registers<1, 0>)>),
+    LocalSet(Box<(u32, Registers<1, 0>)>),
+    I32Store(Box<(u32, Registers<2, 0>)>),
+    I32Add(Box<Registers<2, 1>>),
+    I32Eqz(Box<Registers<1, 1>>),
+}
+
 impl RegInstruction {
     pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
@@ -138,33 +146,55 @@ impl RegInstruction {
             let (operator, offset) = operator_reader.read_with_offset()?;
 
             match operator {
-                Operator::I32Const { value } => {
-                    simulated_stack.push_const(Const::I32(value));
-                }
                 Operator::GlobalGet { global_index } => {
                     simulated_stack.push_global(global_index);
+                }
+                Operator::GlobalSet { global_index } => {
+                    let registers = simulated_stack.registers_for::<1, 0>();
+
+                    instructions.push(RegInstruction::GlobalSet(Box::new((
+                        global_index,
+                        registers,
+                    ))));
                 }
                 Operator::LocalGet { local_index } => {
                     simulated_stack.push_local(local_index);
                 }
-                Operator::I32Load { memarg } => {
-                    let registers = simulated_stack.registers_for::<1, 1>();
-                }
-                Operator::GlobalSet { global_index } => {
-                    let registers = simulated_stack.registers_for::<1, 0>();
-                }
                 Operator::LocalSet { local_index } => {
                     let registers = simulated_stack.registers_for::<1, 0>();
+
+                    instructions.push(RegInstruction::LocalSet(Box::new((local_index, registers))));
+                }
+                Operator::I32Const { value } => {
+                    simulated_stack.push_const(Const::I32(value));
+                }
+                Operator::I32Load { memarg } => {
+                    let registers = simulated_stack.registers_for::<1, 1>();
+
+                    instructions.push(RegInstruction::I32Load(Box::new((
+                        memarg.offset as u32,
+                        registers,
+                    ))));
                 }
                 Operator::I32Store { memarg } => {
                     let registers = simulated_stack.registers_for::<2, 0>();
+
+                    instructions.push(RegInstruction::I32Store(Box::new((
+                        memarg.offset as u32,
+                        registers,
+                    ))));
                 }
                 Operator::I32Add => {
                     let registers = simulated_stack.registers_for::<2, 1>();
+
+                    instructions.push(RegInstruction::I32Add(Box::new(registers)));
                 }
                 Operator::I32Eqz => {
                     let registers = simulated_stack.registers_for::<1, 1>();
+
+                    instructions.push(RegInstruction::I32Eqz(Box::new(registers)));
                 }
+                // TODO - add blocks and branch instructions!
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}`",
