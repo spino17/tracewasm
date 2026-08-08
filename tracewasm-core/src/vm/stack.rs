@@ -486,6 +486,13 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    pub fn new_with_capacity(cap: u32) -> Self {
+        Stack {
+            inner: Vec::with_capacity(cap as usize),
+            stack_pointer: 0,
+        }
+    }
+
     /// Creates an empty stack sized for constant-expression evaluation, which
     /// needs only a handful of slots, avoiding the large `Default` reservation.
     pub(crate) fn for_const_expr_evaluation() -> Self {

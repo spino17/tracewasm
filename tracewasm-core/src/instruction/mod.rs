@@ -79,6 +79,8 @@ use crate::{
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
+pub mod register;
+
 /// A lowered TraceWasm instruction.
 ///
 /// `wasmparser` operators are translated into this owned form by the crate's
@@ -1854,7 +1856,7 @@ impl Instruction {
                     Instruction::LocalTee {
                         index: LocalIndex(local_index),
                     },
-                    StackEffectResult::NoEffect,
+                    StackEffectResult::PopPush { pops: 1, pushes: 1 },
                 ),
                 // globals
                 Operator::GlobalGet { global_index } => (
