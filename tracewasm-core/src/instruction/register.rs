@@ -9,7 +9,7 @@ use wasmparser::{Operator, OperatorsReader};
 
 pub enum RegInstruction {} // register instructions
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum Const {
     I32(i32),
     I64(i64),
@@ -17,12 +17,18 @@ pub enum Const {
     F64(f64),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Slot {
     Const(Const),
     Local(u32),
     Global(u32),
     Register(u32), // index into stack
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Slot::Const(Const::I32(0))
+    }
 }
 
 impl Slot {
@@ -31,35 +37,9 @@ impl Slot {
     }
 }
 
-struct Registers11 {
-    input: Slot,
-    output: Slot,
-}
-
-struct Registers01 {
-    output: Slot,
-}
-
-struct Registers10 {
-    input: Slot,
-}
-
-struct Registers20 {
-    input: (Slot, Slot),
-}
-
-struct Registers21 {
-    input: (Slot, Slot),
-    output: Slot,
-}
-
-struct Registers30 {
-    input: (Slot, Slot, Slot),
-}
-
-struct Registers31 {
-    input: (Slot, Slot, Slot),
-    output: Slot,
+struct Registers<const I: usize, const O: usize> {
+    input: [Slot; I],
+    output: [Slot; O],
 }
 
 struct SimulatedStack {
@@ -124,79 +104,22 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
-    fn registers_for_11(&mut self) -> Registers11 {
-        let val = self.pop();
+    fn registers_for<const I: usize, const O: usize>(&mut self) -> Registers<I, O> {
+        let mut input = [Slot::default(); I];
+        let mut output = [Slot::default(); O];
 
-        let out = Slot::Register(self.curr_register_index);
-
-        self.push(out);
-
-        Registers11 {
-            input: val,
-            output: out,
+        for i in 0..I {
+            input[I - 1 - i] = self.pop();
         }
-    }
 
-    fn registers_for_01(&mut self) -> Registers01 {
-        let out = Slot::Register(self.curr_register_index);
+        for i in 0..O {
+            let out = Slot::Register(self.curr_register_index);
+            output[i] = out;
 
-        self.push(out);
-
-        Registers01 { output: out }
-    }
-
-    fn registers_for_10(&mut self) -> Registers10 {
-        let val = self.pop();
-
-        Registers10 { input: val }
-    }
-
-    fn registers_for_21(&mut self) -> Registers21 {
-        let val2 = self.pop();
-        let val1 = self.pop();
-
-        let out = Slot::Register(self.curr_register_index);
-
-        self.push(out);
-
-        Registers21 {
-            input: (val1, val2),
-            output: out,
+            self.push(out);
         }
-    }
 
-    fn registers_for_20(&mut self) -> Registers20 {
-        let val2 = self.pop();
-        let val1 = self.pop();
-
-        Registers20 {
-            input: (val1, val2),
-        }
-    }
-
-    fn registers_for_30(&mut self) -> Registers30 {
-        let val3 = self.pop();
-        let val2 = self.pop();
-        let val1 = self.pop();
-
-        Registers30 {
-            input: (val1, val2, val3),
-        }
-    }
-
-    fn registers_for_31(&mut self) -> Registers31 {
-        let val3 = self.pop();
-        let val2 = self.pop();
-        let val1 = self.pop();
-
-        let out = Slot::Register(self.curr_register_index);
-
-        self.push(out);
-
-        Registers31 {
-            input: (val1, val2, val3),
-            output: out,
-        }
+        Registers { input, output }
     }
 }
 
@@ -225,22 +148,22 @@ impl RegInstruction {
                     simulated_stack.push_local(local_index);
                 }
                 Operator::I32Load { memarg } => {
-                    let registers = simulated_stack.registers_for_11();
+                    let registers = simulated_stack.registers_for::<1, 1>();
                 }
                 Operator::GlobalSet { global_index } => {
-                    let registers = simulated_stack.registers_for_10();
+                    let registers = simulated_stack.registers_for::<1, 0>();
                 }
                 Operator::LocalSet { local_index } => {
-                    let registers = simulated_stack.registers_for_10();
+                    let registers = simulated_stack.registers_for::<1, 0>();
                 }
                 Operator::I32Store { memarg } => {
-                    let registers = simulated_stack.registers_for_20();
+                    let registers = simulated_stack.registers_for::<2, 0>();
                 }
                 Operator::I32Add => {
-                    let registers = simulated_stack.registers_for_21();
+                    let registers = simulated_stack.registers_for::<2, 1>();
                 }
                 Operator::I32Eqz => {
-                    let registers = simulated_stack.registers_for_11();
+                    let registers = simulated_stack.registers_for::<1, 1>();
                 }
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
