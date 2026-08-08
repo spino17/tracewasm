@@ -43,7 +43,7 @@
 use std::time::Instant;
 
 use tracewasm_core::{
-    instance::config::Config, instruction::Instruction, memory::linear::LinearMemory,
+    instance::config::Config, instruction::stack::Instruction, memory::linear::LinearMemory,
     module::Module,
 };
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, NoImports, guests, with_large_stack};

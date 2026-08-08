@@ -80,7 +80,7 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
-    instruction::{Instruction, TargetBranch},
+    instruction::stack::{Instruction, TargetBranch},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
     vm::stack::{DataVal, Stack, Val, Value},

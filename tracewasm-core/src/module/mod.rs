@@ -24,7 +24,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{Instruction, TargetBranch},
+    instruction::stack::{Instruction, TargetBranch},
     memory::Memory,
     vm::{
         TraceVM,
