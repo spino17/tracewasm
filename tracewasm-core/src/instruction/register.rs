@@ -38,7 +38,7 @@ impl Slot {
 
 struct Registers<const I: usize, const O: usize> {
     input: [Slot; I],
-    output: [Slot; O],
+    output: [usize; O],
 }
 
 struct SimulatedStack {
@@ -46,8 +46,8 @@ struct SimulatedStack {
 
     // below values are for real stack (registers) and not
     // simulated stack
-    curr_register_index: u32,
-    max_registers: u32,
+    curr_register_index: usize,
+    max_registers: usize,
 }
 
 impl Default for SimulatedStack {
@@ -105,15 +105,15 @@ impl SimulatedStack {
 
     fn registers_for<const I: usize, const O: usize>(&mut self) -> Registers<I, O> {
         let mut input = [Slot::default(); I];
-        let mut output = [Slot::default(); O];
+        let mut output = [0; O];
 
         for i in 0..I {
             input[I - 1 - i] = self.pop();
         }
 
         for i in 0..O {
-            let out = Slot::Register(self.curr_register_index);
-            output[i] = out;
+            output[i] = self.curr_register_index;
+            let out = Slot::Register(self.curr_register_index as u32);
 
             self.push(out);
         }
