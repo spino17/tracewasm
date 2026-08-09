@@ -7,6 +7,11 @@ pub(crate) enum LazyLocation {
     Spilled(u32),
 }
 
+pub(crate) enum LazyEntryDropResult {
+    Dropped,
+    StillAlive,
+}
+
 pub(crate) struct LazyEntry<T> {
     location: LazyLocation,
     ref_count: u32,
@@ -17,19 +22,17 @@ pub(crate) struct LazyArena<T> {
     arena: Arena<LazyEntry<T>>,
 }
 
-pub(crate) type LazySlot<T> = Id<LazyEntry<T>>;
-
 impl<T> LazyArena<T> {
     pub fn allocate(&mut self, location: u32) -> LazySlot<T> {
-        self.arena.alloc(LazyEntry {
+        LazySlot(self.arena.alloc(LazyEntry {
             location: LazyLocation::Original(location),
             ref_count: 1,
             phantom: PhantomData,
-        })
+        }))
     }
 
     pub fn get_entry(&self, id: LazySlot<T>) -> &LazyEntry<T> {
-        let Some(entry_ref) = self.arena.get(id) else {
+        let Some(entry_ref) = self.arena.get(id.0) else {
             unreachable!("hitting this means the `LazyEntry` allocation logic is incorrect")
         };
 
@@ -37,21 +40,33 @@ impl<T> LazyArena<T> {
     }
 
     pub fn get_mut_entry(&mut self, id: LazySlot<T>) -> &mut LazyEntry<T> {
-        let Some(entry_ref) = self.arena.get_mut(id) else {
+        let Some(entry_ref) = self.arena.get_mut(id.0) else {
             unreachable!("hitting this means the `LazyEntry` allocation logic is incorrect")
         };
 
         entry_ref
     }
+}
 
-    pub fn advanced_ref_count(&mut self, id: LazySlot<T>) {
-        let entry = self.get_mut_entry(id);
+pub(crate) struct LazySlot<T>(Id<LazyEntry<T>>);
+
+impl<T> Clone for LazySlot<T> {
+    fn clone(&self) -> Self {
+        LazySlot(self.0)
+    }
+}
+
+impl<T> Copy for LazySlot<T> {}
+
+impl<T> LazySlot<T> {
+    pub fn advanced_ref_count(&self, arena: &mut LazyArena<T>) {
+        let entry = arena.get_mut_entry(*self);
 
         entry.ref_count += 1;
     }
 
-    pub fn decrease_ref_count(&mut self, id: LazySlot<T>) -> LazyEntryDropResult {
-        let entry = self.get_mut_entry(id);
+    pub fn decrease_ref_count(&mut self, arena: &mut LazyArena<T>) -> LazyEntryDropResult {
+        let entry = arena.get_mut_entry(*self);
 
         entry.ref_count -= 1;
 
@@ -62,8 +77,8 @@ impl<T> LazyArena<T> {
         }
     }
 
-    pub fn spill(&mut self, id: LazySlot<T>, spill_index: u32) {
-        let entry = self.get_mut_entry(id);
+    pub fn spill(&mut self, spill_index: u32, arena: &mut LazyArena<T>) {
+        let entry = arena.get_mut_entry(*self);
 
         debug_assert!(matches!(entry.location, LazyLocation::Original(_)));
 
@@ -71,11 +86,6 @@ impl<T> LazyArena<T> {
             entry.location = LazyLocation::Spilled(spill_index);
         }
     }
-}
-
-pub(crate) enum LazyEntryDropResult {
-    Dropped,
-    StillAlive,
 }
 
 pub(crate) struct Global;
