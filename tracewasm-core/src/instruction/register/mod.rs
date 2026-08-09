@@ -220,8 +220,7 @@ impl SimulatedStack {
     }
 
     fn tee(&self) -> Slot {
-        let height = self.stack.height() as usize;
-        let top_slot = &self.stack.inner[height - 1];
+        let top_slot = &self.stack.top();
 
         match top_slot {
             StackSlot::Const(val) => Slot::Const(*val),

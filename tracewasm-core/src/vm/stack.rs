@@ -459,6 +459,17 @@ fn pop_underflow() -> ! {
     panic!("pop from an empty operand stack")
 }
 
+/// Reports a read of the top of an empty stack.
+///
+/// A sibling of [`pop_underflow`] rather than a shared helper, for the same
+/// reason [`wrong_ty`] has one function per type: each carries an accurate
+/// message while still taking no arguments, so neither costs the caller
+/// anything to keep live.
+#[inline(never)]
+fn top_underflow() -> ! {
+    panic!("top of an empty operand stack")
+}
+
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
 /// independently of the backing vector's length. See the module docs for the
 /// invariants and rationale.
@@ -500,6 +511,26 @@ impl<T: Clone> Stack<T> {
             inner: Vec::with_capacity(2), // needs very small stack
             stack_pointer: 0,
         }
+    }
+
+    /// Borrows the top value without removing it.
+    ///
+    /// Precondition: the stack is non-empty, as for [`Self::pop`].
+    ///
+    /// Bounded by `stack_pointer`, not by `inner.len()` — the backing vector
+    /// extends past the live region (see the module docs), so slots at or above
+    /// the height hold stale values from earlier pops rather than being absent.
+    /// Deriving the index from `stack_pointer` is what keeps this a read of the
+    /// live top.
+    pub fn top(&self) -> &T {
+        // Indexing directly would reach `panic_bounds_check`, which takes the index
+        // and the length as arguments; `top_underflow` takes nothing. See the note
+        // in [`Self::pop`], whose shape this follows.
+        let Some(val) = self.inner.get(self.stack_pointer.wrapping_sub(1)) else {
+            top_underflow()
+        };
+
+        val
     }
 
     /// Empties the stack in O(1) by moving the pointer back to 0.
@@ -803,6 +834,54 @@ mod tests {
     fn tee_on_empty_panics() {
         let s = stack::<i32>();
         s.tee();
+    }
+
+    // ------------------------------------------------------------------
+    // top — borrows the live top without removing it
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn top_borrows_without_popping() {
+        let mut s = stack();
+        s.push(10);
+        s.push(20);
+
+        assert_eq!(*s.top(), 20);
+        // a borrow, not a pop: height and contents are untouched
+        assert_eq!(s.stack_pointer, 2);
+        assert_eq!(live(&s), vec![10, 20]);
+    }
+
+    #[test]
+    fn top_follows_the_pointer_past_stale_slots() {
+        let mut s = stack();
+        s.push(10);
+        s.push(20);
+        s.push(30);
+        s.pop();
+
+        // 30 is still sitting in `inner`, above the live region
+        assert!(s.inner.len() > s.stack_pointer);
+        assert_eq!(*s.top(), 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "top of an empty operand stack")]
+    fn top_of_empty_stack_panics() {
+        let s: Stack<i32> = stack();
+
+        let _ = s.top();
+    }
+
+    #[test]
+    #[should_panic(expected = "top of an empty operand stack")]
+    fn top_of_drained_stack_panics_rather_than_reading_a_stale_slot() {
+        let mut s = stack();
+        s.push(1);
+        s.pop();
+
+        // `stack_pointer` is 0 but `inner` still holds the 1
+        let _ = s.top();
     }
 
     // ------------------------------------------------------------------
