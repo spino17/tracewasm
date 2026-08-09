@@ -218,6 +218,24 @@ impl SimulatedStack {
 
         Some(spill_index)
     }
+
+    fn tee(&self) -> Slot {
+        let height = self.stack.height() as usize;
+        let top_slot = &self.stack.inner[height - 1];
+
+        match top_slot {
+            StackSlot::Const(val) => Slot::Const(*val),
+            StackSlot::Register(val) => Slot::Register(*val),
+            StackSlot::Local(slot) => match slot.location(&self.lazy_locals) {
+                LazyLocation::Original(local_index) => Slot::Local(local_index),
+                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+            },
+            StackSlot::Global(slot) => match slot.location(&self.lazy_globals) {
+                LazyLocation::Original(global_index) => Slot::Global(global_index),
+                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+            },
+        }
+    }
 }
 
 /// The storage one lowered body needs, in slot counts.
@@ -249,9 +267,11 @@ pub enum RegInstruction {
     I32Load(Box<(u32, Registers<1, 1>)>), // (memarg, registers)
     GlobalSet(Box<(u32, Registers<1, 0>)>),
     LocalSet(Box<(u32, Registers<1, 0>)>),
+    LocalTee(Box<(u32, Registers<1, 0>)>),
     I32Store(Box<(u32, Registers<2, 0>)>),
     I32Add(Box<Registers<2, 1>>),
     I32Eqz(Box<Registers<1, 1>>),
+    Select(Box<Registers<3, 1>>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
 }
@@ -308,6 +328,22 @@ impl RegInstruction {
 
                     instructions.push(RegInstruction::LocalSet(Box::new((local_index, registers))));
                 }
+                Operator::LocalTee { local_index } => {
+                    if let Some(spill_index) = SimulatedStack::set_lazy(
+                        local_index,
+                        &mut simulated_stack.lazy_locals,
+                        &mut simulated_stack.spills,
+                    ) {
+                        instructions.push(RegInstruction::LocalSpill(local_index, spill_index));
+                    }
+
+                    let registers = Registers {
+                        input: [simulated_stack.tee()],
+                        output: [],
+                    };
+
+                    instructions.push(RegInstruction::LocalTee(Box::new((local_index, registers))));
+                }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
                 }
@@ -336,6 +372,19 @@ impl RegInstruction {
                     let registers = simulated_stack.registers_for::<1, 1>();
 
                     instructions.push(RegInstruction::I32Eqz(Box::new(registers)));
+                }
+                Operator::Nop => {
+                    continue;
+                }
+                Operator::Select => {
+                    let registers = simulated_stack.registers_for::<3, 1>();
+
+                    instructions.push(RegInstruction::Select(Box::new(registers)));
+                }
+                Operator::Drop => {
+                    simulated_stack.pop();
+
+                    continue;
                 }
                 // TODO - add blocks and branch instructions!
                 _ => {
