@@ -58,18 +58,18 @@ impl<const L: usize, T> Registers<L, T> {
     }
 }
 
-pub struct InstructionSignature<const I: usize, const O: usize> {
+pub struct Signature<const I: usize, const O: usize> {
     input: Registers<I, Slot>,
     output: Registers<O, u32>,
 }
 
-pub struct DynInstructionSignature {
+pub struct DynSignature {
     input: u32,
     output: u32,
     len: u32,
 }
 
-impl DynInstructionSignature {
+impl DynSignature {
     pub fn intput_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
         let start = self.input as usize;
 
@@ -222,7 +222,7 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
-    fn registers_for<const I: usize, const O: usize>(&mut self) -> InstructionSignature<I, O> {
+    fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
         let input_start = self.input_registers.len();
 
         self.input_registers
@@ -243,7 +243,7 @@ impl SimulatedStack {
             self.push(out);
         }
 
-        InstructionSignature {
+        Signature {
             input: Registers {
                 start: input_start as u32,
                 phantom: PhantomData,
@@ -317,17 +317,17 @@ pub(crate) struct FrameLayout {
 pub(crate) type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 
 pub enum RegInstruction {
-    I32Load(u32, InstructionSignature<1, 1>), // (memarg, registers)
-    GlobalSet(u32, InstructionSignature<1, 0>),
-    LocalSet(u32, InstructionSignature<1, 0>),
-    LocalTee(u32, InstructionSignature<1, 0>),
-    I32Store(u32, InstructionSignature<2, 0>),
-    I32Add(InstructionSignature<2, 1>),
-    I32Eqz(InstructionSignature<1, 1>),
-    Select(InstructionSignature<3, 1>),
+    I32Load(u32, Signature<1, 1>), // (memarg, registers)
+    GlobalSet(u32, Signature<1, 0>),
+    LocalSet(u32, Signature<1, 0>),
+    LocalTee(u32, Signature<1, 0>),
+    I32Store(u32, Signature<2, 0>),
+    I32Add(Signature<2, 1>),
+    I32Eqz(Signature<1, 1>),
+    Select(Signature<3, 1>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
-    Move(DynInstructionSignature),
+    Move(DynSignature),
 }
 
 // One `RegInstruction` per lowered operator, so this size is multiplied across every
@@ -411,7 +411,7 @@ impl RegInstruction {
 
                     simulated_stack.input_registers.push(simulated_stack.tee());
 
-                    let registers = InstructionSignature {
+                    let registers = Signature {
                         input: Registers {
                             start: input_start as u32,
                             phantom: PhantomData,
