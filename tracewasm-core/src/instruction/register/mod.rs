@@ -309,6 +309,25 @@ pub enum RegInstruction {
     GlobalSpill(u32, u32), // (global_index, spill_index)
 }
 
+// One `RegInstruction` per lowered operator, so this size is multiplied across every
+// compiled module — the same budget, and the same reasoning, as `Instruction` in the
+// stack pass.
+//
+// What holds it here is that operands live in the flat side tables rather than in the
+// variant: a `Registers<I, O>` is a pair of `u32` starts (8 bytes) whatever `I` and
+// `O` are, so the widest variant is `I32Load(u32, Registers<1, 1>)` at 12 bytes plus
+// tag. Inlining the operands instead would put `Select(Registers<3, 1>)` alone at 56.
+//
+// The constraint this places on what comes next: an instruction whose arity is not a
+// compile-time constant — `call`, `call_indirect`, the block param/result moves — must
+// stay within the same 8-byte shape. Either derive both arities at execution from an
+// index the variant already carries (as `CallIndirect` does with its `ty_index` in the
+// stack pass), or store an explicit `len` and drop something else to pay for it.
+const _: () = assert!(
+    size_of::<RegInstruction>() <= 16,
+    "RegInstruction grew past 16 bytes. Need to keep it compact."
+);
+
 impl RegInstruction {
     pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
