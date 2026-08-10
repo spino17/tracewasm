@@ -51,16 +51,36 @@ pub struct Registers<const L: usize, T> {
 }
 
 impl<const L: usize, T> Registers<L, T> {
-    pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T] {
+    pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T; L] {
         let start = self.start as usize;
 
-        &arena[start..(start + L)]
+        arena[start..(start + L)].try_into().unwrap()
     }
 }
 
 pub struct InstructionSignature<const I: usize, const O: usize> {
     input: Registers<I, Slot>,
     output: Registers<O, u32>,
+}
+
+pub struct DynInstructionSignature {
+    input: u32,
+    output: u32,
+    len: u32,
+}
+
+impl DynInstructionSignature {
+    pub fn intput_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
+        let start = self.input as usize;
+
+        &arena[start..(start + self.len as usize)]
+    }
+
+    pub fn output_registers<'a>(&self, arena: &'a [u32]) -> &'a [u32] {
+        let start = self.output as usize;
+
+        &arena[start..(start + self.len as usize)]
+    }
 }
 
 struct SimulatedStack {
@@ -307,6 +327,7 @@ pub enum RegInstruction {
     Select(InstructionSignature<3, 1>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
+    Move(DynInstructionSignature),
 }
 
 // One `RegInstruction` per lowered operator, so this size is multiplied across every
