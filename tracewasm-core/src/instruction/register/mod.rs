@@ -45,12 +45,12 @@ enum StackSlot {
     Global(GlobalSlot),
 }
 
-pub struct Register<const L: usize, T> {
+pub struct Registers<const L: usize, T> {
     start: u32,
     phantom: PhantomData<T>,
 }
 
-impl<const L: usize, T> Register<L, T> {
+impl<const L: usize, T> Registers<L, T> {
     pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T] {
         let start = self.start as usize;
 
@@ -58,9 +58,9 @@ impl<const L: usize, T> Register<L, T> {
     }
 }
 
-pub struct Registers<const I: usize, const O: usize> {
-    input: Register<I, Slot>,
-    output: Register<O, u32>,
+pub struct InstructionSignature<const I: usize, const O: usize> {
+    input: Registers<I, Slot>,
+    output: Registers<O, u32>,
 }
 
 struct SimulatedStack {
@@ -202,7 +202,7 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
-    fn registers_for<const I: usize, const O: usize>(&mut self) -> Registers<I, O> {
+    fn registers_for<const I: usize, const O: usize>(&mut self) -> InstructionSignature<I, O> {
         let input_start = self.input_registers.len();
 
         self.input_registers
@@ -223,12 +223,12 @@ impl SimulatedStack {
             self.push(out);
         }
 
-        Registers {
-            input: Register {
+        InstructionSignature {
+            input: Registers {
                 start: input_start as u32,
                 phantom: PhantomData,
             },
-            output: Register {
+            output: Registers {
                 start: output_start as u32,
                 phantom: PhantomData,
             },
@@ -297,14 +297,14 @@ pub(crate) struct FrameLayout {
 pub(crate) type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 
 pub enum RegInstruction {
-    I32Load(u32, Registers<1, 1>), // (memarg, registers)
-    GlobalSet(u32, Registers<1, 0>),
-    LocalSet(u32, Registers<1, 0>),
-    LocalTee(u32, Registers<1, 0>),
-    I32Store(u32, Registers<2, 0>),
-    I32Add(Registers<2, 1>),
-    I32Eqz(Registers<1, 1>),
-    Select(Registers<3, 1>),
+    I32Load(u32, InstructionSignature<1, 1>), // (memarg, registers)
+    GlobalSet(u32, InstructionSignature<1, 0>),
+    LocalSet(u32, InstructionSignature<1, 0>),
+    LocalTee(u32, InstructionSignature<1, 0>),
+    I32Store(u32, InstructionSignature<2, 0>),
+    I32Add(InstructionSignature<2, 1>),
+    I32Eqz(InstructionSignature<1, 1>),
+    Select(InstructionSignature<3, 1>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
 }
@@ -390,12 +390,12 @@ impl RegInstruction {
 
                     simulated_stack.input_registers.push(simulated_stack.tee());
 
-                    let registers = Registers {
-                        input: Register {
+                    let registers = InstructionSignature {
+                        input: Registers {
                             start: input_start as u32,
                             phantom: PhantomData,
                         },
-                        output: Register {
+                        output: Registers {
                             start: simulated_stack.output_registers.len() as u32,
                             phantom: PhantomData,
                         },
