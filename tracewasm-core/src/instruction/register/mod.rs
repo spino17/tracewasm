@@ -9,6 +9,7 @@ use crate::{
     module::{FuncDecl, FuncType},
     vm::stack::Stack,
 };
+use std::marker::PhantomData;
 use wasmparser::{Operator, OperatorsReader};
 
 pub mod lazy;
@@ -22,7 +23,7 @@ pub enum Const {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Slot {
+pub enum Slot {
     Const(Const),
     Local(u32),
     Global(u32),
@@ -44,9 +45,22 @@ enum StackSlot {
     Global(GlobalSlot),
 }
 
-struct Registers<const I: usize, const O: usize> {
-    input: [Slot; I],
-    output: [usize; O],
+pub struct Register<const L: usize, T> {
+    start: u32,
+    phantom: PhantomData<T>,
+}
+
+impl<const L: usize, T> Register<L, T> {
+    pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T] {
+        let start = self.start as usize;
+
+        &arena[start..(start + L)]
+    }
+}
+
+pub struct Registers<const I: usize, const O: usize> {
+    input: Register<I, Slot>,
+    output: Register<O, u32>,
 }
 
 struct SimulatedStack {
@@ -56,6 +70,8 @@ struct SimulatedStack {
     lazy_locals: LazyArena<Local>,
     lazy_globals: LazyArena<Global>,
     spills: SpillArena,
+    input_registers: Vec<Slot>,
+    output_registers: Vec<u32>,
 }
 
 impl SimulatedStack {
@@ -67,6 +83,8 @@ impl SimulatedStack {
             lazy_locals: LazyArena::new(locals_count),
             lazy_globals: LazyArena::new(globals_count),
             spills: SpillArena::default(),
+            input_registers: vec![],
+            output_registers: vec![],
         }
     }
 
@@ -185,21 +203,36 @@ impl SimulatedStack {
     }
 
     fn registers_for<const I: usize, const O: usize>(&mut self) -> Registers<I, O> {
-        let mut input = [Slot::default(); I];
-        let mut output = [0; O];
+        let input_start = self.input_registers.len();
+
+        self.input_registers
+            .resize(input_start + I, Slot::default());
 
         for i in 0..I {
-            input[I - 1 - i] = self.pop();
+            self.input_registers[input_start + I - 1 - i] = self.pop();
         }
 
+        let output_start = self.output_registers.len();
+
+        self.output_registers.resize(output_start + O, 0);
+
         for i in 0..O {
-            output[i] = self.curr_register_index;
+            self.output_registers[output_start + i] = self.curr_register_index as u32;
             let out = Slot::Register(self.curr_register_index as u32);
 
             self.push(out);
         }
 
-        Registers { input, output }
+        Registers {
+            input: Register {
+                start: input_start as u32,
+                phantom: PhantomData,
+            },
+            output: Register {
+                start: output_start as u32,
+                phantom: PhantomData,
+            },
+        }
     }
 
     fn set_lazy<T>(
@@ -246,8 +279,7 @@ impl SimulatedStack {
 /// [`max_height`](crate::instruction::stack), these are measured from the frame's
 /// operand base, so a consumer laying out storage needs
 /// `locals_len + registers + spills`.
-#[derive(Debug, Clone, Copy)]
-pub struct FrameLayout {
+pub(crate) struct FrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
@@ -256,21 +288,23 @@ pub struct FrameLayout {
     /// Zero for a body that never overwrites a lazily-forwarded local or global,
     /// which is the common case.
     pub spills: u32,
+    pub input_registers_arena: Box<[Slot]>,
+    pub output_registers_arena: Box<[u32]>,
 }
 
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
-type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
+pub(crate) type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 
 pub enum RegInstruction {
-    I32Load(Box<(u32, Registers<1, 1>)>), // (memarg, registers)
-    GlobalSet(Box<(u32, Registers<1, 0>)>),
-    LocalSet(Box<(u32, Registers<1, 0>)>),
-    LocalTee(Box<(u32, Registers<1, 0>)>),
-    I32Store(Box<(u32, Registers<2, 0>)>),
-    I32Add(Box<Registers<2, 1>>),
-    I32Eqz(Box<Registers<1, 1>>),
-    Select(Box<Registers<3, 1>>),
+    I32Load(u32, Registers<1, 1>), // (memarg, registers)
+    GlobalSet(u32, Registers<1, 0>),
+    LocalSet(u32, Registers<1, 0>),
+    LocalTee(u32, Registers<1, 0>),
+    I32Store(u32, Registers<2, 0>),
+    I32Add(Registers<2, 1>),
+    I32Eqz(Registers<1, 1>),
+    Select(Registers<3, 1>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
 }
@@ -306,10 +340,7 @@ impl RegInstruction {
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::GlobalSet(Box::new((
-                        global_index,
-                        registers,
-                    ))));
+                    instructions.push(RegInstruction::GlobalSet(global_index, registers));
                 }
                 Operator::LocalGet { local_index } => {
                     simulated_stack.push_local(local_index);
@@ -325,7 +356,7 @@ impl RegInstruction {
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::LocalSet(Box::new((local_index, registers))));
+                    instructions.push(RegInstruction::LocalSet(local_index, registers));
                 }
                 Operator::LocalTee { local_index } => {
                     if let Some(spill_index) = SimulatedStack::set_lazy(
@@ -336,12 +367,22 @@ impl RegInstruction {
                         instructions.push(RegInstruction::LocalSpill(local_index, spill_index));
                     }
 
+                    let input_start = simulated_stack.input_registers.len();
+
+                    simulated_stack.input_registers.push(simulated_stack.tee());
+
                     let registers = Registers {
-                        input: [simulated_stack.tee()],
-                        output: [],
+                        input: Register {
+                            start: input_start as u32,
+                            phantom: PhantomData,
+                        },
+                        output: Register {
+                            start: simulated_stack.output_registers.len() as u32,
+                            phantom: PhantomData,
+                        },
                     };
 
-                    instructions.push(RegInstruction::LocalTee(Box::new((local_index, registers))));
+                    instructions.push(RegInstruction::LocalTee(local_index, registers));
                 }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
@@ -349,28 +390,22 @@ impl RegInstruction {
                 Operator::I32Load { memarg } => {
                     let registers = simulated_stack.registers_for::<1, 1>();
 
-                    instructions.push(RegInstruction::I32Load(Box::new((
-                        memarg.offset as u32,
-                        registers,
-                    ))));
+                    instructions.push(RegInstruction::I32Load(memarg.offset as u32, registers));
                 }
                 Operator::I32Store { memarg } => {
                     let registers = simulated_stack.registers_for::<2, 0>();
 
-                    instructions.push(RegInstruction::I32Store(Box::new((
-                        memarg.offset as u32,
-                        registers,
-                    ))));
+                    instructions.push(RegInstruction::I32Store(memarg.offset as u32, registers));
                 }
                 Operator::I32Add => {
                     let registers = simulated_stack.registers_for::<2, 1>();
 
-                    instructions.push(RegInstruction::I32Add(Box::new(registers)));
+                    instructions.push(RegInstruction::I32Add(registers));
                 }
                 Operator::I32Eqz => {
                     let registers = simulated_stack.registers_for::<1, 1>();
 
-                    instructions.push(RegInstruction::I32Eqz(Box::new(registers)));
+                    instructions.push(RegInstruction::I32Eqz(registers));
                 }
                 Operator::Nop => {
                     continue;
@@ -378,7 +413,7 @@ impl RegInstruction {
                 Operator::Select => {
                     let registers = simulated_stack.registers_for::<3, 1>();
 
-                    instructions.push(RegInstruction::Select(Box::new(registers)));
+                    instructions.push(RegInstruction::Select(registers));
                 }
                 Operator::Drop => {
                     simulated_stack.pop();
@@ -405,6 +440,8 @@ impl RegInstruction {
             // truncate for any module that could be loaded at all.
             registers: simulated_stack.max_registers as u32,
             spills: simulated_stack.spills.allocation_len(),
+            input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
+            output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),
         };
 
         Ok((instructions, frame))
