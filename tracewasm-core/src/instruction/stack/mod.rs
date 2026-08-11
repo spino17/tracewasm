@@ -822,11 +822,7 @@ pub enum Instruction {
     Select,
     /// Opens a block. Purely a label: entering one does nothing at runtime, but a
     /// branch targeting it jumps forward to its `End`.
-    Block {
-        /// Absolute index of this block's matching `End`. Backpatched; a branch
-        /// that targets this block jumps here.
-        end_index: u32,
-    },
+    Block,
     /// Opens a loop. Branches targeting a loop jump back to this instruction
     /// (the loop start), so no `end` index is needed.
     Loop,
@@ -1818,20 +1814,9 @@ impl Instruction {
                 ),
                 // blocks
                 Operator::Block { blockty } => {
-                    control_stack.add_block(
-                        BlockKind::Block {
-                            index: instructions.len() as u32,
-                        },
-                        &blockty,
-                        types,
-                    );
+                    control_stack.add_block(BlockKind::Block, &blockty, types);
 
-                    (
-                        Instruction::Block {
-                            end_index: u32::MAX, // dummy value! will backpath when we see END for this block
-                        },
-                        StackEffectResult::NoEffect,
-                    )
+                    (Instruction::Block, StackEffectResult::NoEffect)
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
@@ -2105,18 +2090,8 @@ impl Instruction {
                     // Backpatch this block's own structural indices. `func`/`loop` need none: a function's
                     // `end` is not referenced by index, and a loop's branch target is its start, not its end.
                     match block.kind {
-                        BlockKind::Func | BlockKind::Loop { .. } => {} // no backpatching required
-                        BlockKind::Block { index: block_index } => {
-                            let Instruction::Block { end_index } =
-                                &mut instructions[block_index as usize]
-                            else {
-                                unreachable!(
-                                    "hitting this means TraceWasm has a bug recording the instructions"
-                                )
-                            };
-
-                            *end_index = index;
-                        }
+                        BlockKind::Func | BlockKind::Loop { .. } => {}
+                        BlockKind::Block => {} // no backpatching require
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,

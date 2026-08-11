@@ -585,6 +585,39 @@ impl RegInstruction {
 
                     continue;
                 }
+                Operator::Block { blockty } => {
+                    let (block_params, _) =
+                        simulated_stack.add_block(BlockKind::Block, &blockty, types);
+
+                    if block_params != 0 {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(block_params);
+
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+                }
+                Operator::Loop { blockty } => {
+                    let has_params = params_and_results_from_blockty(&blockty, types).0 != 0;
+
+                    let (block_params, _) = simulated_stack.add_block(
+                        BlockKind::Loop {
+                            index: if has_params {
+                                instructions.len() as u32 + 1
+                            } else {
+                                instructions.len() as u32
+                            },
+                        },
+                        &blockty,
+                        types,
+                    );
+
+                    if has_params {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(block_params);
+
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+                }
                 Operator::If { blockty } => {
                     // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
                     // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
@@ -652,12 +685,19 @@ impl RegInstruction {
 
                     instructions.push(RegInstruction::Else {
                         end_index: u32::MAX,
-                    }); // TODO: backpatched when end is visited
+                    });
                 }
-                Operator::End => {
+                Operator::Br { relative_depth } => {
                     todo!()
                 }
-                // TODO - add blocks and branch instructions!
+                Operator::End => {
+                    // emit mov instruction for setting the layout correctly for the branch coming from
+                    // just before this end.
+                    //
+                    // pop the control block, backpatch all the entries just like stack/mod.rs
+                    //
+                    todo!()
+                }
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}`",

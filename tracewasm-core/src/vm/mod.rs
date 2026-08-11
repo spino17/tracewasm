@@ -2485,9 +2485,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::Block {
-                end_index: _end_index,
-            } => Step::Next,
+            Instruction::Block => Step::Next,
             Instruction::Loop => Step::Next,
             Instruction::If {
                 else_index,

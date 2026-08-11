@@ -13,7 +13,7 @@ pub(crate) enum BlockKind {
     Func,
     /// A `block`. `index` is the position of its `Instruction::Block`, so the
     /// `end_index` field can be filled in later.
-    Block { index: u32 },
+    Block,
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
     Loop { index: u32 },
