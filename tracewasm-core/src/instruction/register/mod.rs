@@ -17,6 +17,13 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
 
+enum BlockVariant {
+    If,
+    Loop,
+    Block,
+    Func,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Const {
     I32(i32),
@@ -147,11 +154,32 @@ impl SimulatedStack {
 
     fn add_block(
         &mut self,
-        kind: BlockKind,
+        kind: BlockVariant,
         blockty: &BlockType,
         types: &[FuncType],
+        instr_len: usize,
     ) -> (u32, u32) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
+
+        let kind = match kind {
+            BlockVariant::Func => BlockKind::Func,
+            BlockVariant::Block => BlockKind::Block,
+            BlockVariant::If => BlockKind::If {
+                index: if params != 0 {
+                    instr_len + 1 // move instruction is emitted if params != 0 so the actuall instruction lands at `len + 1`
+                } else {
+                    instr_len
+                } as u32,
+                else_index: None,
+            },
+            BlockVariant::Loop => BlockKind::Loop {
+                index: if params != 0 {
+                    instr_len + 1 // see above.
+                } else {
+                    instr_len
+                } as u32,
+            },
+        };
 
         let is_unreachable_traversing = self
             .control_stack
@@ -215,6 +243,21 @@ impl SimulatedStack {
 
     fn get_block_mut(&mut self, index: usize) -> &mut Block {
         &mut self.control_stack.stack[index]
+    }
+
+    fn set_unreachable_traversing(&mut self) {
+        let curr_block = self.get_curr_block_mut();
+        curr_block.is_unreachable_traversing = true;
+    }
+
+    fn end_unreachable_traversing(&mut self) {
+        let curr_block = self.get_curr_block_mut();
+
+        if curr_block.has_inherited {
+            return;
+        }
+
+        curr_block.is_unreachable_traversing = false;
     }
 
     fn pop_lazy<T>(
@@ -663,8 +706,12 @@ impl RegInstruction {
                     continue;
                 }
                 Operator::Block { blockty } => {
-                    let (block_params, _) =
-                        simulated_stack.add_block(BlockKind::Block, &blockty, types);
+                    let (block_params, _) = simulated_stack.add_block(
+                        BlockVariant::Block,
+                        &blockty,
+                        types,
+                        instructions.len(),
+                    );
 
                     if block_params != 0 {
                         let move_registers =
@@ -674,21 +721,14 @@ impl RegInstruction {
                     }
                 }
                 Operator::Loop { blockty } => {
-                    let has_params = params_and_results_from_blockty(&blockty, types).0 != 0;
-
                     let (block_params, _) = simulated_stack.add_block(
-                        BlockKind::Loop {
-                            index: if has_params {
-                                instructions.len() as u32 + 1
-                            } else {
-                                instructions.len() as u32
-                            },
-                        },
+                        BlockVariant::Loop,
                         &blockty,
                         types,
+                        instructions.len(),
                     );
 
-                    if has_params {
+                    if block_params != 0 {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_params);
 
@@ -704,23 +744,21 @@ impl RegInstruction {
                     // the layout of frame in the start of the instruction and at the end of the instruction is same.
 
                     let (block_params, _) = simulated_stack.add_block(
-                        BlockKind::If {
-                            index: instructions.len() as u32 + 1, // at instruction.len, mov instruction be placed and then if instruction.
-                            else_index: None,
-                        },
+                        BlockVariant::If,
                         &blockty,
                         types,
+                        instructions.len(),
                     );
 
-                    let move_registers =
-                        simulated_stack.materialize_stack_slots_in_registers(block_params + 1);
+                    if block_params != 0 {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(block_params + 1);
 
-                    instructions.push(RegInstruction::Move(move_registers));
-
-                    let registers = simulated_stack.registers_for::<1, 0>(); // condition
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
 
                     instructions.push(RegInstruction::If {
-                        cond: registers,
+                        cond: simulated_stack.registers_for::<1, 0>(),
                         else_index: None,
                         end_index: u32::MAX,
                     });
@@ -747,6 +785,10 @@ impl RegInstruction {
                         instructions.len() as u32 + 1 // mov instruction also emitted!
                     });
 
+                    // materialize the results produced by the if arm.
+                    // The else instruction is only reached by the if arm, if the condition is false
+                    // then the pc is jumped directly to the first instruction of the else arm skipping
+                    // the else instruction itself.
                     if block_results != 0 {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_results);
@@ -827,6 +869,14 @@ impl RegInstruction {
                     //
                     // pop the control block, backpatch all the entries just like stack/mod.rs
                     //
+                    // there are 3 ways to reach end.
+                    // - from a br instruction -> no need for materializing the result registers, br already does that
+                    // - from an instruction previous to it, for that it requires emitting mov before end so that it first
+                    // executes mov instruction and then end
+                    // - from a br resolved to a different block and instructions following it became unreachable! in this case
+                    // too the registers are materialized by the reset function.
+                    // Any branch which is not coming from just above always land directly to end instruction, they materialize
+                    // the results.
                     todo!()
                 }
                 _ => {
