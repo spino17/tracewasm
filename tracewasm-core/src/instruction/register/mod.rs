@@ -2,15 +2,18 @@
 
 use crate::{
     error::TraceWasmError,
-    instruction::register::lazy::{
-        Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
-        LocalSlot, SpillArena,
+    instruction::{
+        Block, BlockKind, params_and_results_from_blockty,
+        register::lazy::{
+            Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
+            LocalSlot, SpillArena,
+        },
     },
     module::{FuncDecl, FuncType},
     vm::stack::Stack,
 };
 use std::marker::PhantomData;
-use wasmparser::{Operator, OperatorsReader};
+use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
 
@@ -70,7 +73,7 @@ pub struct DynSignature {
 }
 
 impl DynSignature {
-    pub fn intput_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
+    pub fn input_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
         let start = self.input as usize;
 
         &arena[start..(start + self.len as usize)]
@@ -81,6 +84,20 @@ impl DynSignature {
 
         &arena[start..(start + self.len as usize)]
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+struct PopsPushesResult {
+    input_start: u32,
+    output_start: u32,
+}
+
+#[derive(Default)]
+struct ControlStack {
+    stack: Vec<Block>,
 }
 
 struct SimulatedStack {
@@ -92,6 +109,7 @@ struct SimulatedStack {
     spills: SpillArena,
     input_registers: Vec<Slot>,
     output_registers: Vec<u32>,
+    control_stack: ControlStack,
 }
 
 impl SimulatedStack {
@@ -105,6 +123,7 @@ impl SimulatedStack {
             spills: SpillArena::default(),
             input_registers: vec![],
             output_registers: vec![],
+            control_stack: ControlStack::default(),
         }
     }
 
@@ -118,6 +137,74 @@ impl SimulatedStack {
 
     fn recede_register_index(&mut self) {
         self.curr_register_index -= 1;
+    }
+
+    fn add_block(
+        &mut self,
+        kind: BlockKind,
+        blockty: &BlockType,
+        types: &[FuncType],
+    ) -> (u32, u32) {
+        let (params, results) = params_and_results_from_blockty(blockty, types);
+
+        let is_unreachable_traversing = self
+            .control_stack
+            .stack
+            .last()
+            .is_some_and(|b| b.is_unreachable_traversing);
+
+        if is_unreachable_traversing {
+            self.control_stack.stack.push(Block {
+                kind,
+                recorded_height: 0, // this won't be used at runtime because of unreachablity
+                params,
+                results,
+                is_unreachable_traversing,
+                has_inherited: true,
+                attached_breaks: vec![],
+            });
+
+            return (params, results);
+        }
+
+        let recorded_height = match kind {
+            BlockKind::Func => 0,
+            BlockKind::Block { .. } => self.stack.height() - params,
+            BlockKind::Loop { .. } => self.stack.height() - params,
+            BlockKind::If { .. } => {
+                // top is the `if` condition and then params
+                self.stack.height() - params - 1
+            }
+        };
+
+        self.control_stack.stack.push(Block {
+            kind,
+            recorded_height,
+            params,
+            results,
+            is_unreachable_traversing: false,
+            has_inherited: false,
+            attached_breaks: vec![],
+        });
+
+        (params, results)
+    }
+
+    fn get_curr_block(&self) -> &Block {
+        debug_assert!(!self.control_stack.stack.is_empty());
+
+        &self.control_stack.stack[self.control_stack.stack.len() - 1]
+    }
+
+    fn get_curr_block_mut(&mut self) -> &mut Block {
+        debug_assert!(!self.control_stack.stack.is_empty());
+        let len = self.control_stack.stack.len();
+
+        &mut self.control_stack.stack[len - 1]
+    }
+
+    fn get_block_mut(&mut self, index: usize) -> &mut Block {
+        &mut self.control_stack.stack[index]
     }
 
     fn pop_lazy<T>(
@@ -222,36 +309,56 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
-    fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
+    fn pops_and_pushes(&mut self, pops: u32, pushes: u32) -> PopsPushesResult {
+        let pops = pops as usize;
+        let pushes = pushes as usize;
         let input_start = self.input_registers.len();
-
-        self.input_registers
-            .resize(input_start + I, Slot::default());
-
-        for i in 0..I {
-            self.input_registers[input_start + I - 1 - i] = self.pop();
-        }
-
         let output_start = self.output_registers.len();
 
-        self.output_registers.resize(output_start + O, 0);
+        self.input_registers
+            .resize(input_start + pops, Slot::default());
 
-        for i in 0..O {
+        for i in 0..pops {
+            self.input_registers[input_start + pops - 1 - i] = self.pop();
+        }
+
+        self.output_registers.resize(output_start + pushes, 0);
+
+        for i in 0..pushes {
             self.output_registers[output_start + i] = self.curr_register_index as u32;
             let out = Slot::Register(self.curr_register_index as u32);
 
             self.push(out);
         }
 
+        PopsPushesResult {
+            input_start: input_start as u32,
+            output_start: output_start as u32,
+        }
+    }
+
+    fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
+        let result = self.pops_and_pushes(I as u32, O as u32);
+
         Signature {
             input: Registers {
-                start: input_start as u32,
+                start: result.input_start as u32,
                 phantom: PhantomData,
             },
             output: Registers {
-                start: output_start as u32,
+                start: result.output_start as u32,
                 phantom: PhantomData,
             },
+        }
+    }
+
+    fn materialize_stack_slots_in_registers(&mut self, depth: u32) -> DynSignature {
+        let result = self.pops_and_pushes(depth, depth);
+
+        DynSignature {
+            input: result.input_start,
+            output: result.output_start,
+            len: depth,
         }
     }
 
@@ -328,6 +435,14 @@ pub enum RegInstruction {
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
     Move(DynSignature),
+    If {
+        cond: Signature<1, 0>,
+        else_index: Option<u32>,
+        end_index: u32,
+    },
+    Else {
+        end_index: u32,
+    },
 }
 
 // One `RegInstruction` per lowered operator, so this size is multiplied across every
@@ -345,8 +460,8 @@ pub enum RegInstruction {
 // index the variant already carries (as `CallIndirect` does with its `ty_index` in the
 // stack pass), or store an explicit `len` and drop something else to pay for it.
 const _: () = assert!(
-    size_of::<RegInstruction>() <= 16,
-    "RegInstruction grew past 16 bytes. Need to keep it compact."
+    size_of::<RegInstruction>() <= 20,
+    "RegInstruction grew past 20 bytes. Need to keep it compact."
 );
 
 impl RegInstruction {
@@ -361,6 +476,16 @@ impl RegInstruction {
     ) -> Result<LoweredRegFuncBody, TraceWasmError> {
         let mut instructions: Vec<RegInstruction> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
+
+        simulated_stack.control_stack.stack.push(Block {
+            kind: BlockKind::Func,
+            recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
+            params,
+            results,
+            is_unreachable_traversing: false,
+            has_inherited: false,
+            attached_breaks: vec![],
+        });
 
         while !operator_reader.eof() {
             let (operator, offset) = operator_reader.read_with_offset()?;
@@ -459,6 +584,78 @@ impl RegInstruction {
                     simulated_stack.pop();
 
                     continue;
+                }
+                Operator::If { blockty } => {
+                    // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
+                    // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
+                    // which will be the recorded_height. So after the `end` of this `if` we should leave the stack
+                    // at: recorded_height + results. We should materalize all the popped values by pushing it back on the stack
+                    // making them materialized in registers. Same would be for results. So no matter what branch control flow takes
+                    // the layout of frame in the start of the instruction and at the end of the instruction is same.
+
+                    let (block_params, _) = simulated_stack.add_block(
+                        BlockKind::If {
+                            index: instructions.len() as u32 + 1, // at instruction.len, mov instruction be placed and then if instruction.
+                            else_index: None,
+                        },
+                        &blockty,
+                        types,
+                    );
+
+                    let move_registers =
+                        simulated_stack.materialize_stack_slots_in_registers(block_params + 1);
+
+                    instructions.push(RegInstruction::Move(move_registers));
+
+                    let registers = simulated_stack.registers_for::<1, 0>(); // condition
+
+                    instructions.push(RegInstruction::If {
+                        cond: registers,
+                        else_index: None,
+                        end_index: u32::MAX,
+                    });
+                }
+                Operator::Else => {
+                    let if_block = simulated_stack.get_curr_block_mut();
+                    let recorded_height = if_block.recorded_height;
+                    let block_params = if_block.params;
+                    let block_results = if_block.results;
+
+                    let BlockKind::If {
+                        index: _,
+                        else_index,
+                    } = &mut if_block.kind
+                    else {
+                        unreachable!(
+                            "hitting this means TraceWasm has a bug recording the instructions"
+                        )
+                    };
+
+                    *else_index = Some(if block_results == 0 {
+                        instructions.len() as u32
+                    } else {
+                        instructions.len() as u32 + 1 // mov instruction also emitted!
+                    });
+
+                    if block_results != 0 {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(block_results);
+
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+
+                    // reset the frame layout with params on top for else instructions.
+                    let result = simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - recorded_height,
+                        block_params,
+                    );
+
+                    instructions.push(RegInstruction::Else {
+                        end_index: u32::MAX,
+                    }); // TODO: backpatched when end is visited
+                }
+                Operator::End => {
+                    todo!()
                 }
                 // TODO - add blocks and branch instructions!
                 _ => {
