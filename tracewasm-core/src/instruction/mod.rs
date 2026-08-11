@@ -6,6 +6,7 @@ pub mod stack;
 
 /// What kind of label a control-stack entry represents, plus the data needed to
 /// backpatch its originating instruction once its `end` is seen.
+#[derive(Clone, Copy)]
 pub(crate) enum BlockKind {
     /// The implicit outermost frame for a function body. Not backpatched (its
     /// `end` is the final instruction and no branch instruction stores its

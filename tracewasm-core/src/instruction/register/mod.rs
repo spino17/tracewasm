@@ -100,10 +100,16 @@ struct ControlStack {
     stack: Vec<Block>,
 }
 
+impl ControlStack {
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+}
+
 struct SimulatedStack {
     stack: Stack<StackSlot>,
     curr_register_index: usize,
-    max_registers: usize,
+    max_registers: u32,
     lazy_locals: LazyArena<Local>,
     lazy_globals: LazyArena<Global>,
     spills: SpillArena,
@@ -130,7 +136,7 @@ impl SimulatedStack {
     fn advanced_register_index(&mut self) {
         self.curr_register_index += 1;
 
-        if self.curr_register_index > self.max_registers {
+        if self.curr_register_index as u32 > self.max_registers {
             self.max_registers += 1;
         }
     }
@@ -201,6 +207,10 @@ impl SimulatedStack {
         let len = self.control_stack.stack.len();
 
         &mut self.control_stack.stack[len - 1]
+    }
+
+    fn get_block(&self, index: usize) -> &Block {
+        &self.control_stack.stack[index]
     }
 
     fn get_block_mut(&mut self, index: usize) -> &mut Block {
@@ -297,6 +307,23 @@ impl SimulatedStack {
         self.stack.push(slot);
     }
 
+    fn tee(&self) -> Slot {
+        let top_slot = &self.stack.top();
+
+        match top_slot {
+            StackSlot::Const(val) => Slot::Const(*val),
+            StackSlot::Register(val) => Slot::Register(*val),
+            StackSlot::Local(slot) => match slot.location(&self.lazy_locals) {
+                LazyLocation::Original(local_index) => Slot::Local(local_index),
+                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+            },
+            StackSlot::Global(slot) => match slot.location(&self.lazy_globals) {
+                LazyLocation::Original(global_index) => Slot::Global(global_index),
+                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+            },
+        }
+    }
+
     fn push_const(&mut self, val: Const) {
         self.push(Slot::Const(val));
     }
@@ -362,6 +389,70 @@ impl SimulatedStack {
         }
     }
 
+    fn br_truncation_registers<F: Fn(&mut SimulatedStack, Vec<Slot>)>(
+        &mut self,
+        base_height: u32,
+        arity_to_preserve: u32,
+        reset_func: F,
+    ) -> DynSignature {
+        let input_start = self.input_registers.len();
+        let output_start = self.output_registers.len();
+        let arity_to_preserve = arity_to_preserve as usize;
+        let curr_stack_height = self.stack.height();
+        let popped_count = (curr_stack_height - base_height) as usize;
+        let mut popped_slots = vec![Slot::default(); popped_count];
+
+        self.input_registers
+            .resize(input_start + arity_to_preserve, Slot::default());
+
+        self.output_registers
+            .resize(output_start + arity_to_preserve, 0);
+
+        // One pass down to `base_height`. Every slot goes into `popped_slots` so the
+        // reset can put back the ones that belong to the enclosing block, and the
+        // first `arity_to_preserve` of them — the branch's operands — additionally
+        // become the move's inputs.
+        //
+        // Both writes are indexed off `i` rather than a running counter: the counter
+        // has to step past its own last element, which underflows a `usize` on the
+        // final iteration and on an empty `popped_slots`.
+        for i in 0..popped_count {
+            let slot = self.pop();
+
+            if i < arity_to_preserve {
+                self.input_registers[input_start + arity_to_preserve - 1 - i] = slot;
+            }
+
+            // pops arrive top-first; `popped_slots[0]` is the deepest slot, which is
+            // the order the reset pushes them back in.
+            popped_slots[popped_count - 1 - i] = slot;
+        }
+
+        debug_assert!(self.stack.height() == base_height);
+
+        let mut register_index = self.curr_register_index as u32;
+
+        // output registers for the branch results
+        for i in 0..arity_to_preserve {
+            self.output_registers[output_start + i] = register_index;
+            register_index += 1;
+        }
+
+        if register_index > self.max_registers {
+            self.max_registers = register_index;
+        }
+
+        // stack is still at base_height
+        // reset the stack using reset function
+        reset_func(self, popped_slots);
+
+        DynSignature {
+            input: input_start as u32,
+            output: output_start as u32,
+            len: arity_to_preserve as u32,
+        }
+    }
+
     fn set_lazy<T>(
         location: u32,
         arena: &mut LazyArena<T>,
@@ -377,23 +468,6 @@ impl SimulatedStack {
         arena.origin[location as usize] = None;
 
         Some(spill_index)
-    }
-
-    fn tee(&self) -> Slot {
-        let top_slot = &self.stack.top();
-
-        match top_slot {
-            StackSlot::Const(val) => Slot::Const(*val),
-            StackSlot::Register(val) => Slot::Register(*val),
-            StackSlot::Local(slot) => match slot.location(&self.lazy_locals) {
-                LazyLocation::Original(local_index) => Slot::Local(local_index),
-                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
-            },
-            StackSlot::Global(slot) => match slot.location(&self.lazy_globals) {
-                LazyLocation::Original(global_index) => Slot::Global(global_index),
-                LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
-            },
-        }
     }
 }
 
@@ -442,6 +516,9 @@ pub enum RegInstruction {
     },
     Else {
         end_index: u32,
+    },
+    Br {
+        target_index: u32,
     },
 }
 
@@ -688,7 +765,61 @@ impl RegInstruction {
                     });
                 }
                 Operator::Br { relative_depth } => {
-                    todo!()
+                    let enclosing_block = simulated_stack.get_curr_block();
+                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
+                    let enclosing_block_results = enclosing_block.results;
+
+                    let block_index =
+                        simulated_stack.control_stack.len() - 1 - relative_depth as usize;
+                    let block = simulated_stack.get_block(block_index);
+                    let params = block.params;
+                    let results = block.results;
+                    let recorded_height = block.recorded_height;
+
+                    let (move_registers, target_index) = if let Some(loop_index) =
+                        block.kind.is_loop()
+                    {
+                        (
+                            simulated_stack.br_truncation_registers(
+                                recorded_height,
+                                params,
+                                br_reset_func(
+                                    enclosing_block_recorded_height,
+                                    enclosing_block_results,
+                                ),
+                            ),
+                            loop_index,
+                        )
+                    } else {
+                        let move_registers = simulated_stack.br_truncation_registers(
+                            recorded_height,
+                            results,
+                            br_reset_func(enclosing_block_recorded_height, enclosing_block_results),
+                        );
+
+                        simulated_stack
+                            .get_block_mut(block_index)
+                            .attached_breaks
+                            .push((
+                                if move_registers.is_empty() {
+                                    instructions.len() as u32
+                                } else {
+                                    instructions.len() as u32 + 1
+                                },
+                                u32::MAX,
+                            ));
+
+                        (move_registers, u32::MAX)
+                    };
+
+                    if !move_registers.is_empty() {
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+
+                    instructions.push(RegInstruction::Br { target_index });
+
+                    // TODO: instruction after this point are unreachable! so stack should not change at all.
+                    // it should be freezed
                 }
                 Operator::End => {
                     // emit mov instruction for setting the layout correctly for the branch coming from
@@ -723,4 +854,23 @@ impl RegInstruction {
 
         Ok((instructions, frame))
     }
+}
+
+fn br_reset_func(
+    enclosing_block_height: u32,
+    enclosing_block_results: u32,
+) -> impl Fn(&mut SimulatedStack, Vec<Slot>) {
+    let func = move |stack: &mut SimulatedStack, popped_slots: Vec<Slot>| {
+        let push_count = enclosing_block_height - stack.stack.height();
+
+        for i in 0..push_count as usize {
+            stack.push(popped_slots[i]);
+        }
+
+        for _ in 0..enclosing_block_results {
+            stack.push(Slot::Register(stack.curr_register_index as u32));
+        }
+    };
+
+    func
 }
