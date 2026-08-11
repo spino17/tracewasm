@@ -245,21 +245,6 @@ impl SimulatedStack {
         &mut self.control_stack.stack[index]
     }
 
-    fn set_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-        curr_block.is_unreachable_traversing = true;
-    }
-
-    fn end_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-
-        if curr_block.has_inherited {
-            return;
-        }
-
-        curr_block.is_unreachable_traversing = false;
-    }
-
     fn pop_lazy<T>(
         slot: LazySlot<T>,
         arena: &mut LazyArena<T>,
