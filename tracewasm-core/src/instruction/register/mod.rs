@@ -117,6 +117,96 @@ impl ControlStack {
     }
 }
 
+struct UnreachableTrackingControlStack {
+    blocks: Vec<BlockVariant>,
+    unreachable: bool,
+}
+
+enum UnreachableCheckResult {
+    Continue,
+    Reachable,
+}
+
+impl UnreachableTrackingControlStack {
+    fn new() -> Self {
+        UnreachableTrackingControlStack {
+            blocks: vec![],
+            unreachable: false,
+        }
+    }
+
+    fn set_unreachable(&mut self) {
+        self.unreachable = true;
+    }
+
+    fn unset_unreachable(&mut self) {
+        self.unreachable = false;
+    }
+
+    fn add_block(&mut self, block: BlockVariant) {
+        self.blocks.push(block);
+    }
+
+    fn pop_block(&mut self) -> BlockVariant {
+        self.blocks.pop().unwrap()
+    }
+
+    fn check_unreachablity(&mut self, operator: &Operator<'_>) -> UnreachableCheckResult {
+        if !self.unreachable {
+            return UnreachableCheckResult::Reachable;
+        }
+
+        if let Some(block) = Self::is_block(operator) {
+            self.add_block(block);
+
+            UnreachableCheckResult::Continue
+        } else if Self::is_else(operator) {
+            if self.is_empty() {
+                self.unset_unreachable();
+
+                UnreachableCheckResult::Reachable
+            } else {
+                debug_assert!(matches!(self.blocks.last().unwrap(), BlockVariant::If));
+
+                UnreachableCheckResult::Continue
+            }
+        } else if Self::is_end(operator) {
+            if self.is_empty() {
+                self.unset_unreachable();
+
+                UnreachableCheckResult::Reachable
+            } else {
+                self.pop_block();
+
+                UnreachableCheckResult::Continue
+            }
+        } else {
+            UnreachableCheckResult::Continue
+        }
+    }
+
+    fn is_block(operator: &Operator<'_>) -> Option<BlockVariant> {
+        match operator {
+            Operator::Block { .. } => Some(BlockVariant::Block),
+            Operator::If { .. } => Some(BlockVariant::If),
+            Operator::Loop { .. } => Some(BlockVariant::Loop),
+            _ => None,
+        }
+    }
+
+    fn is_else(operator: &Operator<'_>) -> bool {
+        matches!(operator, Operator::Else)
+    }
+
+    fn is_end(operator: &Operator<'_>) -> bool {
+        matches!(operator, Operator::End)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
 struct SimulatedStack {
     stack: Stack<StackSlot>,
     curr_register_index: usize,
@@ -185,26 +275,6 @@ impl SimulatedStack {
             },
         };
 
-        let is_unreachable_traversing = self
-            .control_stack
-            .stack
-            .last()
-            .is_some_and(|b| b.is_unreachable_traversing);
-
-        if is_unreachable_traversing {
-            self.control_stack.stack.push(Block {
-                kind,
-                recorded_height: 0, // this won't be used at runtime because of unreachablity
-                params,
-                results,
-                is_unreachable_traversing,
-                has_inherited: true,
-                attached_breaks: vec![],
-            });
-
-            return (params, results);
-        }
-
         let recorded_height = match kind {
             BlockKind::Func => 0,
             BlockKind::Block { .. } => self.stack.height() - params,
@@ -220,9 +290,12 @@ impl SimulatedStack {
             recorded_height,
             params,
             results,
+            attached_breaks: vec![],
+
+            // below two fields are not used in register lowering!
+            // they are just placeholders
             is_unreachable_traversing: false,
             has_inherited: false,
-            attached_breaks: vec![],
         });
 
         (params, results)
@@ -664,6 +737,7 @@ impl RegInstruction {
     ) -> Result<LoweredRegFuncBody, TraceWasmError> {
         let mut instructions: Vec<RegInstruction> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
+        let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
 
         simulated_stack.control_stack.stack.push(Block {
             kind: BlockKind::Func,
@@ -677,6 +751,13 @@ impl RegInstruction {
 
         while !operator_reader.eof() {
             let (operator, offset) = operator_reader.read_with_offset()?;
+
+            if !matches!(
+                unreachable_tracking_stack.check_unreachablity(&operator),
+                UnreachableCheckResult::Reachable
+            ) {
+                continue;
+            }
 
             match operator {
                 Operator::GlobalGet { global_index } => {
@@ -949,8 +1030,7 @@ impl RegInstruction {
                         enclosing_block_results,
                     );
 
-                    // TODO: instruction after this point are unreachable! so stack should not change at all.
-                    // it should be freezed
+                    unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::End => {
                     // emit mov instruction for setting the layout correctly for the branch coming from
