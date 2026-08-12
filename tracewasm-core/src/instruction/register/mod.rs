@@ -41,6 +41,12 @@ pub enum Slot {
     Register(u32), // index into stack
 }
 
+impl Slot {
+    fn is_register(&self) -> bool {
+        matches!(self, Slot::Register(_))
+    }
+}
+
 impl Default for Slot {
     fn default() -> Self {
         Slot::Const(Const::I32(0))
@@ -311,6 +317,33 @@ impl SimulatedStack {
         slot
     }
 
+    fn simulated_pop(&self, depth: u32) -> Slot {
+        let val = *self.stack.peek_from_top(depth);
+
+        let slot = match val {
+            StackSlot::Const(val) => Slot::Const(val),
+            StackSlot::Register(val) => Slot::Register(val),
+            StackSlot::Local(slot) => {
+                let location = slot.location(&self.lazy_locals);
+
+                match location {
+                    LazyLocation::Original(local_index) => Slot::Local(local_index),
+                    LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+                }
+            }
+            StackSlot::Global(slot) => {
+                let location = slot.location(&self.lazy_globals);
+
+                match location {
+                    LazyLocation::Original(global_index) => Slot::Global(global_index),
+                    LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
+                }
+            }
+        };
+
+        slot
+    }
+
     fn push(&mut self, val: Slot) {
         let slot = match val {
             Slot::Const(val) => StackSlot::Const(val),
@@ -417,18 +450,17 @@ impl SimulatedStack {
         }
     }
 
-    fn br_truncation_registers<F: Fn(&mut SimulatedStack, Vec<Slot>)>(
+    fn br_truncation_registers(
         &mut self,
         base_height: u32,
         arity_to_preserve: u32,
-        reset_func: F,
     ) -> DynSignature {
         let input_start = self.input_registers.len();
         let output_start = self.output_registers.len();
         let arity_to_preserve = arity_to_preserve as usize;
         let curr_stack_height = self.stack.height();
         let popped_count = (curr_stack_height - base_height) as usize;
-        let mut popped_slots = vec![Slot::default(); popped_count];
+        let mut register_index = self.curr_register_index as u32;
 
         self.input_registers
             .resize(input_start + arity_to_preserve, Slot::default());
@@ -436,29 +468,17 @@ impl SimulatedStack {
         self.output_registers
             .resize(output_start + arity_to_preserve, 0);
 
-        // One pass down to `base_height`. Every slot goes into `popped_slots` so the
-        // reset can put back the ones that belong to the enclosing block, and the
-        // first `arity_to_preserve` of them — the branch's operands — additionally
-        // become the move's inputs.
-        //
-        // Both writes are indexed off `i` rather than a running counter: the counter
-        // has to step past its own last element, which underflows a `usize` on the
-        // final iteration and on an empty `popped_slots`.
         for i in 0..popped_count {
-            let slot = self.pop();
+            let slot = self.simulated_pop(i as u32);
+
+            if slot.is_register() {
+                register_index -= 1;
+            }
 
             if i < arity_to_preserve {
                 self.input_registers[input_start + arity_to_preserve - 1 - i] = slot;
             }
-
-            // pops arrive top-first; `popped_slots[0]` is the deepest slot, which is
-            // the order the reset pushes them back in.
-            popped_slots[popped_count - 1 - i] = slot;
         }
-
-        debug_assert!(self.stack.height() == base_height);
-
-        let mut register_index = self.curr_register_index as u32;
 
         // output registers for the branch results
         for i in 0..arity_to_preserve {
@@ -469,10 +489,6 @@ impl SimulatedStack {
         if register_index > self.max_registers {
             self.max_registers = register_index;
         }
-
-        // stack is still at base_height
-        // reset the stack using reset function
-        reset_func(self, popped_slots);
 
         DynSignature {
             input: input_start as u32,
@@ -536,6 +552,54 @@ pub enum RegInstruction {
     Select(Signature<3, 1>),
     LocalSpill(u32, u32),  // (local_index, spill_index)
     GlobalSpill(u32, u32), // (global_index, spill_index)
+    /// Copies each input slot into the register named by the output at the same
+    /// position, materializing block params and results so every path into a label
+    /// leaves its values in the same registers.
+    ///
+    /// **Must be executed as a gather-then-scatter, not an in-place copy.**
+    ///
+    /// Two things rule out `copy_within` or any single-pass loop:
+    ///
+    /// * The inputs are not all registers. A [`Slot`] reads from a constant, the
+    ///   locals array, the globals table, the spill area, or the register file, so
+    ///   this gathers from five places into one contiguous destination range rather
+    ///   than moving a block within one slice.
+    ///
+    /// * The register-sourced inputs *overlap* the destinations, and the two callers
+    ///   need opposite copy directions — so there is no ordering that is correct for
+    ///   both.
+    ///
+    /// `materialize_stack_slots_in_registers` pops `depth` slots and pushes `depth`
+    /// registers from the same base, so a source's index never exceeds its own
+    /// destination. Slots `[Const(5), Register(b)]` into `[b, b + 1]`:
+    ///
+    /// ```text
+    /// ascending :  reg[b]   = 5           ;  reg[b+1] = reg[b]  -> reads 5   WRONG
+    /// descending:  reg[b+1] = reg[b]  ok  ;  reg[b]   = 5       ok
+    /// ```
+    ///
+    /// `br_truncation_registers` discards the slots between the target's base and the
+    /// branch operands, which shifts the operands *down*, so there a source index can
+    /// exceed its destination. Stack `[Register(b), Register(b + 1), Const]` above the
+    /// base with `arity == 2` gives inputs `[Register(b + 1), Const]` into `[b, b + 1]`:
+    ///
+    /// ```text
+    /// ascending :  reg[b]   = reg[b+1] ok ;  reg[b+1] = C       ok
+    /// descending:  reg[b+1] = C           ;  reg[b]   = reg[b+1] -> reads C  WRONG
+    /// ```
+    ///
+    /// Reading every input before writing any output is correct for both, and stays
+    /// correct if the allocation pattern changes — neither direction rule is visible
+    /// from the instruction itself, so relying on one is a trap for the next reader:
+    ///
+    /// ```text
+    /// let mut tmp: SmallVec<[Value; 4]> = SmallVec::new();
+    /// for slot in sig.input_registers(arena) { tmp.push(read(slot)); }
+    /// for (i, &dst) in sig.output_registers(arena).iter().enumerate() { regs[dst] = tmp[i]; }
+    /// ```
+    ///
+    /// The buffer costs nothing in practice: arities are the label's params or
+    /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
     If {
         cond: Signature<1, 0>,
@@ -803,47 +867,44 @@ impl RegInstruction {
                     let results = block.results;
                     let recorded_height = block.recorded_height;
 
-                    let (move_registers, target_index) = if let Some(loop_index) =
-                        block.kind.is_loop()
-                    {
-                        (
-                            simulated_stack.br_truncation_registers(
-                                recorded_height,
-                                params,
-                                br_reset_func(
-                                    enclosing_block_recorded_height,
-                                    enclosing_block_results,
-                                ),
-                            ),
-                            loop_index,
-                        )
-                    } else {
-                        let move_registers = simulated_stack.br_truncation_registers(
-                            recorded_height,
-                            results,
-                            br_reset_func(enclosing_block_recorded_height, enclosing_block_results),
-                        );
+                    let (move_registers, target_index) =
+                        if let Some(loop_index) = block.kind.is_loop() {
+                            (
+                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                loop_index,
+                            )
+                        } else {
+                            let move_registers =
+                                simulated_stack.br_truncation_registers(recorded_height, results);
 
-                        simulated_stack
-                            .get_block_mut(block_index)
-                            .attached_breaks
-                            .push((
-                                if move_registers.is_empty() {
-                                    instructions.len() as u32
-                                } else {
-                                    instructions.len() as u32 + 1
-                                },
-                                u32::MAX,
-                            ));
+                            simulated_stack
+                                .get_block_mut(block_index)
+                                .attached_breaks
+                                .push((
+                                    if move_registers.is_empty() {
+                                        instructions.len() as u32
+                                    } else {
+                                        instructions.len() as u32 + 1
+                                    },
+                                    u32::MAX,
+                                ));
 
-                        (move_registers, u32::MAX)
-                    };
+                            (move_registers, u32::MAX)
+                        };
 
                     if !move_registers.is_empty() {
                         instructions.push(RegInstruction::Move(move_registers));
                     }
 
                     instructions.push(RegInstruction::Br { target_index });
+
+                    // set the layout correctly to the current enclosing block so that instructions
+                    // after else or end would see correct layout as all the instructions between br and else/end
+                    // are unreachable and stack is freezed.
+                    simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - enclosing_block_recorded_height,
+                        enclosing_block_results,
+                    );
 
                     // TODO: instruction after this point are unreachable! so stack should not change at all.
                     // it should be freezed
@@ -889,23 +950,4 @@ impl RegInstruction {
 
         Ok((instructions, frame))
     }
-}
-
-fn br_reset_func(
-    enclosing_block_height: u32,
-    enclosing_block_results: u32,
-) -> impl Fn(&mut SimulatedStack, Vec<Slot>) {
-    let func = move |stack: &mut SimulatedStack, popped_slots: Vec<Slot>| {
-        let push_count = enclosing_block_height - stack.stack.height();
-
-        for i in 0..push_count as usize {
-            stack.push(popped_slots[i]);
-        }
-
-        for _ in 0..enclosing_block_results {
-            stack.push(Slot::Register(stack.curr_register_index as u32));
-        }
-    };
-
-    func
 }

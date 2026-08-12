@@ -689,6 +689,10 @@ impl<T: Clone> Stack<T> {
     pub fn tee(&self) -> T {
         self.inner[self.stack_pointer - 1].clone()
     }
+
+    pub fn peek_from_top(&self, depth: u32) -> &T {
+        &self.inner[(self.height() - 1 - depth) as usize]
+    }
 }
 
 impl Stack<Value> {
