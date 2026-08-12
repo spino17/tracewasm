@@ -2,23 +2,23 @@ use id_arena::{Arena, Id};
 use std::marker::PhantomData;
 
 #[derive(Clone, Copy)]
-pub(crate) enum LazyLocation {
+pub enum LazyLocation {
     Original(u32),
     Spilled(u32),
 }
 
-pub(crate) enum LazyEntryDropResult {
+pub enum LazyEntryDropResult {
     Dropped,
     StillAlive,
 }
 
-pub(crate) struct LazyEntry<T> {
+pub struct LazyEntry<T> {
     location: LazyLocation,
     ref_count: u32,
     phantom: PhantomData<T>,
 }
 
-pub(crate) struct LazyArena<T> {
+pub struct LazyArena<T> {
     arena: Arena<LazyEntry<T>>,
     pub origin: Vec<Option<LazySlot<T>>>,
 }
@@ -56,7 +56,7 @@ impl<T> LazyArena<T> {
     }
 }
 
-pub(crate) struct LazySlot<T>(Id<LazyEntry<T>>);
+pub struct LazySlot<T>(Id<LazyEntry<T>>);
 
 impl<T> Clone for LazySlot<T> {
     fn clone(&self) -> Self {
@@ -111,8 +111,8 @@ impl<T> LazySlot<T> {
     }
 }
 
-pub(crate) struct Global;
-pub(crate) struct Local;
+pub struct Global;
+pub struct Local;
 
 pub type LocalSlot = LazySlot<Local>;
 pub type GlobalSlot = LazySlot<Global>;

@@ -1,5 +1,3 @@
-#![allow(warnings)]
-
 use crate::{
     error::TraceWasmError,
     instruction::{
@@ -9,7 +7,7 @@ use crate::{
             LocalSlot, SpillArena,
         },
     },
-    module::{FuncDecl, FuncType},
+    module::{FuncDecl, FuncType, GlobalIndex, LocalIndex},
     vm::stack::Stack,
 };
 use std::marker::PhantomData;
@@ -75,8 +73,8 @@ impl<const L: usize, T> Registers<L, T> {
 }
 
 pub struct Signature<const I: usize, const O: usize> {
-    input: Registers<I, Slot>,
-    output: Registers<O, u32>,
+    pub input: Registers<I, Slot>,
+    pub output: Registers<O, u32>,
 }
 
 pub struct DynSignature {
@@ -362,7 +360,7 @@ impl SimulatedStack {
 
                 StackSlot::Global(slot)
             }
-            Slot::Spilled(val) => unreachable!("spilled slots are never produced for push!"),
+            Slot::Spilled(_) => unreachable!("spilled slots are never produced for push!"),
         };
 
         self.stack.push(slot);
@@ -524,7 +522,7 @@ impl SimulatedStack {
 /// [`max_height`](crate::instruction::stack), these are measured from the frame's
 /// operand base, so a consumer laying out storage needs
 /// `locals_len + registers + spills`.
-pub(crate) struct FrameLayout {
+pub struct FrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
@@ -539,19 +537,51 @@ pub(crate) struct FrameLayout {
 
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
-pub(crate) type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
+pub type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 
 pub enum RegInstruction {
-    I32Load(u32, Signature<1, 1>), // (memarg, registers)
-    GlobalSet(u32, Signature<1, 0>),
-    LocalSet(u32, Signature<1, 0>),
-    LocalTee(u32, Signature<1, 0>),
-    I32Store(u32, Signature<2, 0>),
+    I32Load {
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    GlobalSet {
+        index: GlobalIndex,
+        sig: Signature<1, 0>,
+    },
+    LocalSet {
+        index: LocalIndex,
+        sig: Signature<1, 0>,
+    },
+    LocalTee {
+        index: LocalIndex,
+        sig: Signature<1, 0>,
+    },
+    I32Store {
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    LocalSpill {
+        index: LocalIndex,
+        spill_index: u32,
+    },
+    GlobalSpill {
+        index: GlobalIndex,
+        spill_index: u32,
+    },
+    If {
+        cond: Signature<1, 0>,
+        else_index: Option<u32>,
+        end_index: u32,
+    },
+    Else {
+        end_index: u32,
+    },
+    Br {
+        target_index: u32,
+    },
     I32Add(Signature<2, 1>),
     I32Eqz(Signature<1, 1>),
     Select(Signature<3, 1>),
-    LocalSpill(u32, u32),  // (local_index, spill_index)
-    GlobalSpill(u32, u32), // (global_index, spill_index)
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
     /// leaves its values in the same registers.
@@ -601,17 +631,6 @@ pub enum RegInstruction {
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
-    If {
-        cond: Signature<1, 0>,
-        else_index: Option<u32>,
-        end_index: u32,
-    },
-    Else {
-        end_index: u32,
-    },
-    Br {
-        target_index: u32,
-    },
 }
 
 // One `RegInstruction` per lowered operator, so this size is multiplied across every
@@ -634,7 +653,7 @@ const _: () = assert!(
 );
 
 impl RegInstruction {
-    pub(crate) fn emit_instruction_for_func(
+    pub fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
@@ -669,12 +688,18 @@ impl RegInstruction {
                         &mut simulated_stack.lazy_globals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::GlobalSpill(global_index, spill_index));
+                        instructions.push(RegInstruction::GlobalSpill {
+                            index: GlobalIndex(global_index),
+                            spill_index,
+                        });
                     }
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::GlobalSet(global_index, registers));
+                    instructions.push(RegInstruction::GlobalSet {
+                        index: GlobalIndex(global_index),
+                        sig: registers,
+                    });
                 }
                 Operator::LocalGet { local_index } => {
                     simulated_stack.push_local(local_index);
@@ -685,12 +710,18 @@ impl RegInstruction {
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::LocalSpill(local_index, spill_index));
+                        instructions.push(RegInstruction::LocalSpill {
+                            index: LocalIndex(local_index),
+                            spill_index,
+                        });
                     }
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::LocalSet(local_index, registers));
+                    instructions.push(RegInstruction::LocalSet {
+                        index: LocalIndex(local_index),
+                        sig: registers,
+                    });
                 }
                 Operator::LocalTee { local_index } => {
                     if let Some(spill_index) = SimulatedStack::set_lazy(
@@ -698,7 +729,10 @@ impl RegInstruction {
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::LocalSpill(local_index, spill_index));
+                        instructions.push(RegInstruction::LocalSpill {
+                            index: LocalIndex(local_index),
+                            spill_index,
+                        });
                     }
 
                     let input_start = simulated_stack.input_registers.len();
@@ -716,7 +750,10 @@ impl RegInstruction {
                         },
                     };
 
-                    instructions.push(RegInstruction::LocalTee(local_index, registers));
+                    instructions.push(RegInstruction::LocalTee {
+                        index: LocalIndex(local_index),
+                        sig: registers,
+                    });
                 }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
@@ -724,12 +761,18 @@ impl RegInstruction {
                 Operator::I32Load { memarg } => {
                     let registers = simulated_stack.registers_for::<1, 1>();
 
-                    instructions.push(RegInstruction::I32Load(memarg.offset as u32, registers));
+                    instructions.push(RegInstruction::I32Load {
+                        offset: memarg.offset as u32,
+                        sig: registers,
+                    });
                 }
                 Operator::I32Store { memarg } => {
                     let registers = simulated_stack.registers_for::<2, 0>();
 
-                    instructions.push(RegInstruction::I32Store(memarg.offset as u32, registers));
+                    instructions.push(RegInstruction::I32Store {
+                        offset: memarg.offset as u32,
+                        sig: registers,
+                    });
                 }
                 Operator::I32Add => {
                     let registers = simulated_stack.registers_for::<2, 1>();
@@ -846,7 +889,7 @@ impl RegInstruction {
                     }
 
                     // reset the frame layout with params on top for else instructions.
-                    let result = simulated_stack.pops_and_pushes(
+                    simulated_stack.pops_and_pushes(
                         simulated_stack.stack.height() - recorded_height,
                         block_params,
                     );
