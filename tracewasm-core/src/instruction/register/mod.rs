@@ -120,6 +120,9 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
 
+#[cfg(test)]
+mod tests;
+
 /// Which kind of label a block opens, before its instruction index is known.
 ///
 /// [`SimulatedStack::add_block`] turns this into a [`BlockKind`], filling in the
