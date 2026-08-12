@@ -101,6 +101,15 @@ impl DynSignature {
     }
 }
 
+/// Where the operands recorded by [`SimulatedStack::pops_and_pushes_registers`]
+/// landed in the flat arenas.
+///
+/// `#[must_use]` because dropping it means the entries just written are
+/// unreferenced: the arenas ship inside [`FrameLayout`], so a discarded result is
+/// dead weight in every compiled function. A caller that only needs the stack and
+/// register bookkeeping wants [`SimulatedStack::pops_and_pushes`], which does the
+/// same thing without touching the arenas.
+#[must_use]
 struct PopsPushesResult {
     input_start: u32,
     output_start: u32,
@@ -468,7 +477,7 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
-    fn pops_and_pushes(&mut self, pops: u32, pushes: u32) -> PopsPushesResult {
+    fn pops_and_pushes_registers(&mut self, pops: u32, pushes: u32) -> PopsPushesResult {
         let pops = pops as usize;
         let pushes = pushes as usize;
         let input_start = self.input_registers.len();
@@ -496,8 +505,23 @@ impl SimulatedStack {
         }
     }
 
+    fn pops_and_pushes(&mut self, pops: u32, pushes: u32) {
+        let pops = pops as usize;
+        let pushes = pushes as usize;
+
+        for _ in 0..pops {
+            self.pop();
+        }
+
+        for _ in 0..pushes {
+            let out = Slot::Register(self.curr_register_index as u32);
+
+            self.push(out);
+        }
+    }
+
     fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
-        let result = self.pops_and_pushes(I as u32, O as u32);
+        let result = self.pops_and_pushes_registers(I as u32, O as u32);
 
         Signature {
             input: Registers {
@@ -512,7 +536,7 @@ impl SimulatedStack {
     }
 
     fn materialize_stack_slots_in_registers(&mut self, depth: u32) -> DynSignature {
-        let result = self.pops_and_pushes(depth, depth);
+        let result = self.pops_and_pushes_registers(depth, depth);
 
         DynSignature {
             input: result.input_start,
