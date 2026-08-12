@@ -1982,8 +1982,6 @@ impl Instruction {
                                 arity: params,
                                 recorded_height,
                             });
-
-                            br_targets_len += 1;
                         } else {
                             // record the absolute slot in the flat target array to backpatch
                             // at the target's `end`
@@ -1997,9 +1995,9 @@ impl Instruction {
                                 arity: results,
                                 recorded_height,
                             });
-
-                            br_targets_len += 1;
                         };
+
+                        br_targets_len += 1;
                     }
 
                     control_stack.set_unreachable_traversing();

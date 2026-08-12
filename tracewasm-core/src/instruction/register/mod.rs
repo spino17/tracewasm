@@ -216,6 +216,11 @@ impl UnreachableTrackingControlStack {
     }
 }
 
+struct BrTarget {
+    mov: DynSignature,
+    target_index: u32,
+}
+
 struct SimulatedStack {
     stack: Stack<StackSlot>,
     curr_register_index: usize,
@@ -226,6 +231,7 @@ struct SimulatedStack {
     input_registers: Vec<Slot>,
     output_registers: Vec<u32>,
     control_stack: ControlStack,
+    br_targets: Vec<BrTarget>,
 }
 
 impl SimulatedStack {
@@ -240,6 +246,7 @@ impl SimulatedStack {
             input_registers: vec![],
             output_registers: vec![],
             control_stack: ControlStack::default(),
+            br_targets: vec![],
         }
     }
 
@@ -681,6 +688,11 @@ pub enum RegInstruction {
         mov: DynSignature,
         target_index: u32,
     },
+    BrTable {
+        index: Registers<1, Slot>,
+        targets_start: u32,
+        targets_len: u32,
+    },
     I32Add(Signature<2, 1>),
     I32Eqz(Signature<1, 1>),
     Select(Signature<3, 1>),
@@ -1096,6 +1108,82 @@ impl RegInstruction {
                         target_index,
                     });
                 }
+                Operator::BrTable { targets: table } => {
+                    let enclosing_block = simulated_stack.get_curr_block();
+                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
+                    let enclosing_block_results = enclosing_block.results;
+                    let targets_start = simulated_stack.br_targets.len() as u32;
+                    let mut targets_len = 0;
+
+                    let targets = table.targets();
+                    let mut targets = targets.collect::<Result<Vec<_>, _>>()?;
+
+                    targets.push(table.default());
+
+                    let table_index = simulated_stack.registers_for::<1, 0>().input; // targets index
+
+                    for (i, &relative_depth) in targets.iter().enumerate() {
+                        let block_index =
+                            simulated_stack.control_stack.len() - 1 - relative_depth as usize;
+                        let block = simulated_stack.get_block_mut(block_index);
+                        let params = block.params;
+                        let results = block.results;
+                        let recorded_height = block.recorded_height;
+                        let block_kind = block.kind;
+
+                        let (move_registers, target_index) = if let Some(loop_index) =
+                            block_kind.is_loop()
+                        {
+                            (
+                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                loop_index,
+                            )
+                        } else {
+                            let move_registers =
+                                simulated_stack.br_truncation_registers(recorded_height, results);
+
+                            simulated_stack
+                                .get_block_mut(block_index)
+                                .attached_breaks
+                                .push((instructions.len() as u32, targets_start + i as u32));
+
+                            (move_registers, u32::MAX)
+                        };
+
+                        let br_target = BrTarget {
+                            mov: move_registers,
+                            target_index,
+                        };
+
+                        simulated_stack.br_targets.push(br_target);
+
+                        targets_len += 1;
+                    }
+
+                    instructions.push(RegInstruction::BrTable {
+                        index: table_index,
+                        targets_start,
+                        targets_len,
+                    });
+
+                    // set the layout correctly to the current enclosing block so that instructions
+                    // after else or end would see correct layout as all the instructions between br and else/end
+                    // are unreachable and stack is freezed.
+                    simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - enclosing_block_recorded_height,
+                        enclosing_block_results,
+                    );
+
+                    unreachable_tracking_stack.set_unreachable();
+                }
+                Operator::Return => {
+                    todo!()
+                }
+                Operator::Call { function_index } => todo!(),
+                Operator::CallIndirect {
+                    type_index,
+                    table_index,
+                } => todo!(),
                 Operator::End => {
                     // emit mov instruction for setting the layout correctly for the branch coming from
                     // just before this end.
