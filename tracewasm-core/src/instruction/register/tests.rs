@@ -734,3 +734,548 @@ fn a_block_with_no_params_emits_no_move() {
         ",
     );
 }
+
+// ---------------------------------------------------------------------------
+// globals
+//
+// Globals run through the same machinery as locals but a separate arena, so the
+// asymmetries are worth pinning rather than assuming.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn global_borrows_behave_like_local_ones() {
+    let mut s = sim(2, 2);
+
+    s.push_global(1);
+    s.push_global(1);
+    s.push_const(Const::I32(5));
+
+    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills);
+    let _set = s.registers_for::<1, 0>();
+    let add = s.registers_for::<2, 1>();
+
+    assert_eq!(spill, Some(0));
+    assert!(
+        matches!(
+            add.input.registers(&s.input_registers),
+            [Slot::Spilled(0), Slot::Spilled(0)]
+        ),
+        "{:?}",
+        add.input.registers(&s.input_registers)
+    );
+}
+
+#[test]
+fn a_local_and_a_global_of_the_same_index_are_independent() {
+    let mut s = sim(2, 2);
+
+    s.push_local(0);
+    s.push_global(0);
+    s.push_const(Const::I32(7));
+
+    // writing global 0 must not disturb the borrow of local 0
+    let global_spill = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
+    let _set = s.registers_for::<1, 0>();
+
+    assert_eq!(global_spill, Some(0));
+    assert!(
+        s.lazy_locals.origin[0].is_some(),
+        "local 0's borrow must survive a write to global 0"
+    );
+    assert!(matches!(s.pop(), Slot::Spilled(0)), "the global was rescued");
+    assert!(matches!(s.pop(), Slot::Local(0)), "the local still forwards");
+}
+
+#[test]
+fn locals_and_globals_draw_from_one_spill_pool() {
+    let mut s = sim(2, 2);
+
+    s.push_local(0);
+    s.push_global(0);
+
+    let l = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let g = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
+
+    assert_eq!((l, g), (Some(0), Some(1)), "distinct slots from the shared pool");
+    assert_eq!(s.spills.allocation_len(), 2);
+}
+
+#[test]
+fn writing_one_local_leaves_other_borrows_alone() {
+    let mut s = sim(4, 0);
+
+    s.push_local(0);
+    s.push_local(1);
+    s.push_local(2);
+
+    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
+
+    assert_eq!(spill, Some(0));
+    assert!(matches!(s.pop(), Slot::Local(2)), "untouched above");
+    assert!(matches!(s.pop(), Slot::Spilled(0)), "rescued");
+    assert!(matches!(s.pop(), Slot::Local(0)), "untouched below");
+}
+
+#[test]
+fn writing_an_unborrowed_local_emits_nothing() {
+    let mut s = sim(4, 0);
+
+    s.push_local(0);
+
+    assert_eq!(
+        SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills),
+        None
+    );
+    assert_eq!(s.spills.allocation_len(), 0);
+}
+
+#[test]
+fn three_borrows_share_one_entry() {
+    let mut s = sim(2, 0);
+
+    s.push_local(0);
+    s.push_local(0);
+    s.push_local(0);
+
+    assert_eq!(
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills),
+        Some(0)
+    );
+    for _ in 0..3 {
+        assert!(matches!(s.pop(), Slot::Spilled(0)), "all three redirect");
+    }
+    // the pool only reclaims once the last of them is gone
+    assert_eq!(s.spills.allocation_len(), 1);
+}
+
+#[test]
+fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
+    let mut s = sim(2, 0);
+
+    s.push_local(0);
+    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let operand = s.tee();
+
+    // `local.tee 0` on a value read from local 0: correct, if redundant
+    assert_eq!(spill, Some(0));
+    assert!(matches!(operand, Slot::Spilled(0)), "{operand:?}");
+}
+
+// ---------------------------------------------------------------------------
+// drop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn drop_releases_a_register() {
+    let mut s = sim(2, 0);
+
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+    assert_eq!(heights(&s), (1, 1));
+
+    s.pop();
+    assert_eq!(heights(&s), (0, 0), "the register comes back");
+    assert_eq!(s.max_registers, 1, "but the peak is remembered");
+}
+
+#[test]
+fn drop_releases_a_borrow_but_only_the_last_one() {
+    let mut s = sim(2, 0);
+
+    s.push_local(0);
+    s.push_local(0);
+    s.pop();
+    assert!(
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_some(),
+        "one borrow survives, so a write still has to rescue it"
+    );
+
+    let mut s = sim(2, 0);
+    s.push_local(0);
+    s.pop();
+    assert_eq!(
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills),
+        None,
+        "the sole borrow is gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// operand ordering and register reuse
+// ---------------------------------------------------------------------------
+
+#[test]
+fn operands_are_recorded_deepest_first() {
+    let mut s = sim(4, 0);
+
+    s.push_local(0); // a
+    s.push_local(1); // b
+    s.push_local(2); // condition, pushed last
+    let select = s.registers_for::<3, 1>();
+
+    assert!(
+        matches!(
+            select.input.registers(&s.input_registers),
+            [Slot::Local(0), Slot::Local(1), Slot::Local(2)]
+        ),
+        "select reads a, b, cond in that order: {:?}",
+        select.input.registers(&s.input_registers)
+    );
+}
+
+#[test]
+fn store_records_address_then_value() {
+    let mut s = sim(4, 0);
+
+    s.push_local(0); // address
+    s.push_const(Const::I32(9)); // value
+    let store = s.registers_for::<2, 0>();
+
+    assert!(matches!(
+        store.input.registers(&s.input_registers),
+        [Slot::Local(0), Slot::Const(Const::I32(9))]
+    ));
+}
+
+#[test]
+fn a_result_reuses_an_operands_register() {
+    let mut s = sim(4, 0);
+
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>(); // r0
+    s.push_local(1);
+    let _ = s.registers_for::<1, 1>(); // r1
+
+    let add = s.registers_for::<2, 1>();
+    let inputs = add.input.registers(&s.input_registers);
+    let output = add.output.registers(&s.output_registers)[0];
+
+    assert!(matches!(inputs, [Slot::Register(0), Slot::Register(1)]));
+    assert_eq!(
+        output, 0,
+        "the destination aliases an operand — an executor must read both first"
+    );
+}
+
+#[test]
+fn max_registers_tracks_the_peak_not_the_total() {
+    // two loads, each consumed before the next
+    let mut s = sim(4, 0);
+    for l in 0..2 {
+        s.push_local(l);
+        let _ = s.registers_for::<1, 1>();
+        let _ = s.registers_for::<1, 0>();
+    }
+    assert_eq!(s.max_registers, 1, "serial values reuse one register");
+
+    // two loads live at once
+    let mut s = sim(4, 0);
+    for l in 0..2 {
+        s.push_local(l);
+        let _ = s.registers_for::<1, 1>();
+    }
+    assert_eq!(s.max_registers, 2);
+}
+
+#[test]
+fn non_register_operands_occupy_stack_but_not_registers() {
+    let mut s = sim(4, 2);
+
+    s.push_const(Const::I32(1));
+    s.push_local(0);
+    s.push_global(0);
+
+    assert_eq!(
+        heights(&s),
+        (3, 0),
+        "three slots, zero registers — the two heights diverge"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// block indices
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_loop_back_edge_targets_the_first_body_instruction() {
+    let types = vec![func_ty(1, 1)];
+
+    // no params: no entry move, so the body starts where the loop was seen
+    let mut s = sim(4, 0);
+    s.add_block(BlockVariant::Loop, &BlockType::Empty, &types, 7);
+    assert!(matches!(s.get_curr_block().kind, BlockKind::Loop { index: 7 }));
+
+    // with params: an entry move occupies index 7, body starts at 8
+    let mut s = sim(4, 0);
+    s.push_const(Const::I32(1));
+    s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 7);
+    assert!(matches!(s.get_curr_block().kind, BlockKind::Loop { index: 8 }));
+}
+
+#[test]
+fn an_if_records_the_index_of_the_if_itself() {
+    let types = vec![func_ty(1, 1)];
+
+    let mut s = sim(4, 0);
+    s.push_const(Const::I32(1)); // condition
+    s.add_block(BlockVariant::If, &BlockType::Empty, &types, 7);
+    assert!(matches!(s.get_curr_block().kind, BlockKind::If { index: 7, .. }));
+
+    let mut s = sim(4, 0);
+    s.push_const(Const::I32(9)); // param
+    s.push_const(Const::I32(1)); // condition
+    s.add_block(BlockVariant::If, &BlockType::FuncType(0), &types, 7);
+    assert!(matches!(s.get_curr_block().kind, BlockKind::If { index: 8, .. }));
+}
+
+// ---------------------------------------------------------------------------
+// branches, harder shapes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_branch_to_the_function_frame_unwinds_to_zero() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+
+    let func_block = s.get_block(0);
+    assert_eq!(func_block.recorded_height, 0);
+
+    let mov = s.br_truncation_registers(0, 0);
+    assert!(mov.is_empty());
+    assert_eq!(heights(&s), (1, 1), "still a simulation");
+}
+
+#[test]
+fn a_branch_carrying_several_values_lands_them_contiguously() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let base = s.get_curr_block().recorded_height;
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+    s.push_const(Const::I32(2));
+    s.push_local(1);
+
+    let mov = s.br_truncation_registers(base, 3);
+
+    assert_eq!(mov.output_registers(&s.output_registers), &[0, 1, 2]);
+    assert_eq!(mov.input_registers(&s.input_registers).len(), 3);
+}
+
+#[test]
+fn a_br_table_may_mix_loop_and_block_targets() {
+    // loop's label type is its params; a block's is its results. Validation only
+    // requires the types to match, so the arities agree while the bases differ.
+    let types = vec![func_ty(1, 1)];
+    let mut s = sim(4, 0);
+
+    s.push_const(Const::I32(0)); // the loop's param
+    s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
+    let loop_block = *&s.get_curr_block().recorded_height;
+    let loop_params = s.get_curr_block().params;
+    let _ = s.materialize_stack_slots_in_registers(loop_params);
+
+    s.add_block(BlockVariant::Block, &BlockType::Type(wasmparser::ValType::I32), &types, 1);
+    let block_base = s.get_curr_block().recorded_height;
+    let block_results = s.get_curr_block().results;
+
+    s.push_local(0); // the value the branch carries
+
+    let to_loop = s.br_truncation_registers(loop_block, loop_params);
+    let to_block = s.br_truncation_registers(block_base, block_results);
+
+    assert_eq!(loop_params, block_results, "arities agree");
+    assert_ne!(
+        to_loop.output_registers(&s.output_registers),
+        to_block.output_registers(&s.output_registers),
+        "but the destinations differ, which is why each arm carries its own move"
+    );
+}
+
+#[test]
+fn every_br_table_arm_sees_the_same_stack() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let base = s.get_curr_block().recorded_height;
+    s.push_local(0);
+    let before = heights(&s);
+
+    let arms: Vec<_> = (0..4).map(|_| s.br_truncation_registers(base, 1)).collect();
+
+    assert_eq!(heights(&s), before, "four simulations, no mutation");
+    let first = arms[0].output_registers(&s.output_registers).to_vec();
+    for arm in &arms[1..] {
+        assert_eq!(
+            arm.output_registers(&s.output_registers),
+            first.as_slice(),
+            "identical targets must produce identical moves"
+        );
+    }
+}
+
+#[test]
+fn a_branch_carrying_nothing_emits_no_move() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let base = s.get_curr_block().recorded_height;
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+
+    assert!(
+        s.br_truncation_registers(base, 0).is_empty(),
+        "callers use this to skip emitting the move entirely"
+    );
+}
+
+#[test]
+fn br_if_consumes_only_its_condition() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let base = s.get_curr_block().recorded_height;
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+    s.push_local(1);
+    let live = (heights(&s), s.lazy_locals.origin[1].is_some());
+
+    s.push_const(Const::I32(1)); // condition
+    let _cond = s.registers_for::<1, 0>();
+    let _mov = s.br_truncation_registers(base, 0);
+
+    assert_eq!(
+        (heights(&s), s.lazy_locals.origin[1].is_some()),
+        live,
+        "the fall-through path must see exactly what it saw before"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// unreachable, harder shapes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_second_branch_in_dead_code_is_skipped() {
+    let seq = [blk(), br(0), br(0), cst(), Operator::End];
+    assert_eq!(reachability(&seq), [true, true, false, false, true]);
+}
+
+#[test]
+fn an_if_without_an_else_in_dead_code_closes_cleanly() {
+    let seq = [blk(), br(0), iff(), cst(), Operator::End, Operator::End];
+    assert_eq!(reachability(&seq), [true, true, false, false, false, true]);
+}
+
+#[test]
+fn dead_code_at_the_function_level_ends_at_the_final_end() {
+    let seq = [br(0), cst(), Operator::End];
+    assert_eq!(reachability(&seq), [true, false, true]);
+}
+
+#[test]
+fn liveness_resumes_independently_in_each_sibling_block() {
+    let seq = [
+        blk(), br(0), cst(), Operator::End, // first block goes dead, recovers at its end
+        cst(),                              // live again
+        blk(), br(0), cst(), Operator::End, // and the same again
+        cst(),
+    ];
+    assert_eq!(
+        reachability(&seq),
+        [true, true, false, true, true, true, true, false, true, true]
+    );
+}
+
+#[test]
+fn deeply_nested_dead_constructs_unwind_in_order() {
+    let seq = [
+        blk(),
+        br(0),
+        blk(),
+        lop(),
+        iff(),
+        Operator::Else,
+        Operator::End, // closes if
+        Operator::End, // closes loop
+        Operator::End, // closes block
+        cst(),
+        Operator::End, // closes the live block -> reachable again
+    ];
+    let live = reachability(&seq);
+
+    assert_eq!(live[live.len() - 1], true, "the live block's end must resume");
+    assert!(
+        live[2..live.len() - 1].iter().all(|r| !r),
+        "everything nested inside stays dead: {live:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// arenas travel with the body
+//
+// Every operand and every `br_table` arm is an index into a side table. If a table
+// is not moved onto `FrameLayout`, the indices in the instruction list name freed
+// storage and nothing can resolve them.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn br_table_arms_survive_lowering() {
+    let mut s = sim(4, 0);
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let outer = s.get_curr_block().recorded_height;
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
+    let inner = s.get_curr_block().recorded_height;
+    s.push_local(1);
+
+    // two arms plus a default, as the BrTable arm records them
+    for base in [inner, outer, inner] {
+        let mov = s.br_truncation_registers(base, 1);
+        s.br_targets.push(BrTarget {
+            mov,
+            target_index: u32::MAX,
+        });
+    }
+
+    let frame = FrameLayout {
+        registers: s.max_registers,
+        spills: s.spills.allocation_len(),
+        input_registers_arena: s.input_registers.into_boxed_slice(),
+        output_registers_arena: s.output_registers.into_boxed_slice(),
+        br_targets_arena: s.br_targets.into_boxed_slice(),
+    };
+
+    assert_eq!(frame.br_targets_arena.len(), 3, "arms must ship with the body");
+
+    // and each one still resolves against the arenas it was recorded in
+    let dests: Vec<&[u32]> = frame
+        .br_targets_arena
+        .iter()
+        .map(|t| t.mov.output_registers(&frame.output_registers_arena))
+        .collect();
+
+    assert_eq!(dests, vec![&[1u32][..], &[0u32][..], &[1u32][..]]);
+}
+
+#[test]
+fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
+    let mut s = sim(2, 0);
+    s.push_local(0);
+    let _ = s.registers_for::<1, 1>();
+
+    let frame = FrameLayout {
+        registers: s.max_registers,
+        spills: s.spills.allocation_len(),
+        input_registers_arena: s.input_registers.into_boxed_slice(),
+        output_registers_arena: s.output_registers.into_boxed_slice(),
+        br_targets_arena: s.br_targets.into_boxed_slice(),
+    };
+
+    assert!(frame.br_targets_arena.is_empty());
+}

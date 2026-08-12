@@ -434,13 +434,17 @@ impl UnreachableTrackingControlStack {
 
 /// One resolved arm of a [`RegInstruction::BrTable`].
 ///
-/// Each arm carries its own `Move` and jump target because a single `br_table` may
-/// mix loop and non-loop labels: validation only requires the label *types* to match,
-/// so the arities agree but the unwind heights, and therefore the destination
-/// registers, differ per arm.
-struct BrTarget {
-    mov: DynSignature,
-    target_index: u32,
+/// Each arm carries its own move and jump target because a single `br_table` may mix
+/// loop and non-loop labels: validation only requires the label *types* to match, so
+/// the arities agree but the unwind heights — and therefore the destination registers
+/// — differ per arm.
+pub struct BrTarget {
+    /// Values transferred to this arm's label, on the same terms as
+    /// [`RegInstruction::Move`]. Empty when the label carries nothing.
+    pub mov: DynSignature,
+    /// Absolute jump target: a loop's start for a back-edge, otherwise the label's
+    /// `end`, backpatched when that `end` is reached.
+    pub target_index: u32,
 }
 
 /// The whole lowering state for one function body.
@@ -1035,6 +1039,12 @@ pub struct FrameLayout {
     /// Every instruction's destination registers, on the same terms as
     /// [`Self::input_registers_arena`].
     pub output_registers_arena: Box<[u32]>,
+    /// Every `br_table`'s arms, concatenated in lowering order.
+    ///
+    /// A [`RegInstruction::BrTable`] owns the contiguous run named by its
+    /// `(targets_start, targets_len)`, with the default arm last. Empty, and
+    /// unallocated, for the common case of a body with no `br_table`.
+    pub br_targets_arena: Box<[BrTarget]>,
 }
 
 /// The two outputs of lowering one function body into register form: the
@@ -1686,6 +1696,7 @@ impl RegInstruction {
             spills: simulated_stack.spills.allocation_len(),
             input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
             output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),
+            br_targets_arena: simulated_stack.br_targets.into_boxed_slice(),
         };
 
         Ok((instructions, frame))
