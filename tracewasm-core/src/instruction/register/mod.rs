@@ -676,6 +676,11 @@ pub enum RegInstruction {
     Br {
         target_index: u32,
     },
+    BrIf {
+        cond: Registers<1, Slot>,
+        mov: DynSignature,
+        target_index: u32,
+    },
     I32Add(Signature<2, 1>),
     I32Eqz(Signature<1, 1>),
     Select(Signature<3, 1>),
@@ -745,8 +750,8 @@ pub enum RegInstruction {
 // index the variant already carries (as `CallIndirect` does with its `ty_index` in the
 // stack pass), or store an explicit `len` and drop something else to pay for it.
 const _: () = assert!(
-    size_of::<RegInstruction>() <= 20,
-    "RegInstruction grew past 20 bytes. Need to keep it compact."
+    size_of::<RegInstruction>() <= 24,
+    "RegInstruction grew past 24 bytes. Need to keep it compact."
 );
 
 impl RegInstruction {
@@ -1055,6 +1060,41 @@ impl RegInstruction {
                     );
 
                     unreachable_tracking_stack.set_unreachable();
+                }
+                Operator::BrIf { relative_depth } => {
+                    let block_index =
+                        simulated_stack.control_stack.len() - 1 - relative_depth as usize;
+                    let block = simulated_stack.get_block(block_index);
+                    let params = block.params;
+                    let results = block.results;
+                    let recorded_height = block.recorded_height;
+                    let block_kind = block.kind;
+
+                    let cond = simulated_stack.registers_for::<1, 0>().input;
+
+                    let (move_registers, target_index) =
+                        if let Some(loop_index) = block_kind.is_loop() {
+                            (
+                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                loop_index,
+                            )
+                        } else {
+                            let move_registers =
+                                simulated_stack.br_truncation_registers(recorded_height, results);
+
+                            simulated_stack
+                                .get_block_mut(block_index)
+                                .attached_breaks
+                                .push((instructions.len() as u32, u32::MAX));
+
+                            (move_registers, u32::MAX)
+                        };
+
+                    instructions.push(RegInstruction::BrIf {
+                        cond,
+                        mov: move_registers,
+                        target_index,
+                    });
                 }
                 Operator::End => {
                     // emit mov instruction for setting the layout correctly for the branch coming from
