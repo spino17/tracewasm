@@ -1,3 +1,108 @@
+//! Lowering of a WebAssembly operator stream into a register machine.
+//!
+//! WebAssembly is a stack machine, but the stack traffic it implies is mostly
+//! bookkeeping: `local.get; local.get; i32.add` describes two pushes and two pops
+//! that a register machine does not need. This pass consumes the same operator
+//! stream as [`crate::instruction::stack`] and produces
+//! [`RegInstruction`]s whose operands name where a value *is* — a constant, a local,
+//! a global, a spill slot, or a register — so nothing moves unless it has to.
+//!
+//! The stack pass remains the reference for tracing fidelity; this one is for
+//! running the same module quickly.
+//!
+//! ## The simulated stack
+//!
+//! Lowering walks the operators once, maintaining a `SimulatedStack`: a stack of
+//! `StackSlot`s standing for the operands wasm would have pushed. Nothing is
+//! emitted for `local.get` or `i32.const` — they push a slot describing where the
+//! value lives. An instruction that consumes operands pops the slots and records
+//! them as its inputs, so the consumer reads the original locations directly.
+//!
+//! **Two heights, and they are not the same number.** `stack.height()` counts
+//! simulated slots; `curr_register_index` counts only the slots that occupy a
+//! machine register. A `Const`, `Local`, `Global`, or `Spilled` slot occupies a
+//! stack position and no register. Anything restoring the stack to a label's entry
+//! state must use the slot height; anything naming a destination register must use
+//! the register index. Both are recorded per block — the slot height in
+//! `Block::recorded_height`, the register index derived by counting register slots
+//! back down to it.
+//!
+//! ## Lazily forwarded locals and globals
+//!
+//! A slot naming a local or global is only valid while that origin still holds the
+//! value; a later write has to materialize every operand still reading it. That is
+//! [`lazy`]'s job — see its module docs for how one shared entry per borrowed value
+//! makes multiple simultaneous borrows, and multiple live snapshots of the same
+//! local, fall out of the representation.
+//!
+//! ## Operands live in flat side tables
+//!
+//! A [`RegInstruction`] never stores its operands inline. Inputs go into
+//! [`FrameLayout::input_registers_arena`] and destination registers into
+//! [`FrameLayout::output_registers_arena`]; the variant holds only a start index and
+//! (for the variable-arity forms) a length. That is what keeps the enum at 24 bytes
+//! — inline operands would put `Select` alone at 56 — and it means resolving an
+//! operand at execution is a slice index rather than a pointer chase.
+//!
+//! The arenas ship inside [`FrameLayout`], because every index in the instruction
+//! list points into them.
+//!
+//! ## Labels and [`RegInstruction::Move`]
+//!
+//! A block's params and results have to live in the *same* registers no matter which
+//! path reaches the label, so control flow can merge without the consumer knowing
+//! which way it came. A [`RegInstruction::Move`] materializes them into a contiguous
+//! run based at the label's register height.
+//!
+//! One `Move` is emitted before every *exit* from a block, and there are three:
+//!
+//! * falling through into the block's `end`;
+//! * each `br`/`br_if`/`br_table` arm targeting the label;
+//! * falling out of an `if`'s then-branch into its `else`, which jumps to the `end`
+//!   and so bypasses the `end`'s own `Move`.
+//!
+//! Branch targets are the instruction *after* the fallthrough `Move`, so each path
+//! performs its own copy exactly once. `br_if` is the exception: its `Move` is a
+//! field of the instruction rather than a preceding one, because it must only run on
+//! the taken path.
+//!
+//! Entering a block with params materializes them the same way, so the body starts
+//! from a known layout regardless of what the operands were before.
+//!
+//! ## Branch lowering does not disturb the stack
+//!
+//! A branch has to know what the *target* label's layout is — how far to unwind and
+//! which registers the values land in — but the operators after it still belong to
+//! the enclosing block, which is not being left. So
+//! `br_truncation_registers` reads the stack through
+//! `simulated_pop`, which peeks by depth instead of popping. It
+//! computes the destination base by counting register slots down to the target's
+//! height rather than by unwinding to it.
+//!
+//! This matters most for `br_table`, where every arm is computed against the same
+//! unchanged stack, and for outward branches, whose target base lies *below* the
+//! enclosing block's — unwinding there would discard slots, lazy borrows, and spill
+//! slots that the enclosing block still owns.
+//!
+//! Real state changes still go through `pop`, because that is
+//! where lazy reference counts are released and spill slots freed. After an
+//! unconditional branch the enclosing block is reset with
+//! `pops_and_pushes` so its `end` sees the layout it expects.
+//!
+//! ## Unreachable operators
+//!
+//! Everything between an unconditional branch and the enclosing block's `else` or
+//! `end` is dead. Rather than lowering it against a fictional stack,
+//! `UnreachableTrackingControlStack` filters it out before the match: one check at
+//! the top of the loop, and every arm below can assume it is reachable.
+//!
+//! The tracker keeps its own small stack of blocks opened *while* dead. `else` and
+//! `end` clear the dead state only when that stack is empty — meaning the construct
+//! they close was opened while reachable. So an `if` opened inside dead code keeps
+//! both of its arms dead, and blocks opened in dead code never reach
+//! `add_block` at all, which is what keeps the real control stack
+//! balanced without a reconciliation step.
+
 use crate::{
     error::TraceWasmError,
     instruction::{
@@ -15,6 +120,14 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
 
+/// Which kind of label a block opens, before its instruction index is known.
+///
+/// [`SimulatedStack::add_block`] turns this into a [`BlockKind`], filling in the
+/// index itself so the caller cannot get it wrong: whether a params [`Move`] precedes
+/// the block's own instruction determines that index, and the params count is
+/// derived from the block type inside `add_block`.
+///
+/// [`Move`]: RegInstruction::Move
 enum BlockVariant {
     If,
     Loop,
@@ -22,24 +135,44 @@ enum BlockVariant {
     Func,
 }
 
+/// An immediate operand, carried inline because it has no home to be read from.
 #[derive(Debug, Clone, Copy)]
 pub enum Const {
+    /// A 32-bit integer immediate.
     I32(i32),
+    /// A 64-bit integer immediate.
     I64(i64),
+    /// A 32-bit float immediate; the bit pattern is preserved exactly.
     F32(f32),
+    /// A 64-bit float immediate; the bit pattern is preserved exactly.
     F64(f64),
 }
 
+/// Where an instruction reads one operand from.
+///
+/// This is the resolved, executable form: the lowering pass has already decided that
+/// this operand needs no copy and can be read in place. Only [`Self::Register`]
+/// values were produced by a preceding instruction; the rest are read straight out of
+/// the frame's constants, locals, globals, or spill area.
 #[derive(Debug, Clone, Copy)]
 pub enum Slot {
+    /// An immediate, needing no load at all.
     Const(Const),
+    /// Read local `n` in place. Valid because nothing writes that local between the
+    /// `local.get` and this instruction — a write would have spilled it first.
     Local(u32),
+    /// Read global `n` in place, on the same terms as [`Self::Local`].
     Global(u32),
+    /// Read the frame spill slot holding a local or global that was materialized
+    /// before a write to its origin. See [`lazy`].
     Spilled(u32),
-    Register(u32), // index into stack
+    /// Read an operand register, i.e. a value some earlier instruction produced.
+    Register(u32),
 }
 
 impl Slot {
+    /// Whether this operand occupies a machine register — the distinction between
+    /// the simulated stack's two heights. See the module docs.
     fn is_register(&self) -> bool {
         matches!(self, Slot::Register(_))
     }
@@ -51,6 +184,13 @@ impl Default for Slot {
     }
 }
 
+/// One entry on the simulated operand stack during lowering.
+///
+/// The internal counterpart of [`Slot`]. The difference is the lazy cases: where a
+/// `Slot` has already resolved a local to either `Local(n)` or `Spilled(s)`, a
+/// `StackSlot` holds the shared [`LocalSlot`] handle, so a spill that happens
+/// *after* this slot was pushed is still observed when it is finally read. Resolving
+/// to a `Slot` therefore happens at pop or peek time, never at push time.
 #[derive(Clone, Copy)]
 enum StackSlot {
     Const(Const),
@@ -59,12 +199,22 @@ enum StackSlot {
     Global(GlobalSlot),
 }
 
+/// A fixed-length run of `L` entries in one of the flat arenas, named by its start.
+///
+/// `T` is [`Slot`] for input runs and `u32` for output-register runs; the parameter
+/// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
+/// is, which is what lets instruction variants stay small.
 pub struct Registers<const L: usize, T> {
     start: u32,
     phantom: PhantomData<T>,
 }
 
 impl<const L: usize, T> Registers<L, T> {
+    /// Resolves this run against the arena it indexes.
+    ///
+    /// Returns a fixed-size array, so callers index it without bounds checks. Panics
+    /// if `arena` is not the arena this run was recorded in — for a lowered body,
+    /// the matching field of its [`FrameLayout`].
     pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T; L] {
         let start = self.start as usize;
 
@@ -72,11 +222,28 @@ impl<const L: usize, T> Registers<L, T> {
     }
 }
 
+/// The operands of an instruction whose arity is fixed by its opcode.
+///
+/// `I` inputs and `O` destination registers, each a run in the corresponding arena.
+///
+/// **Inputs may alias outputs.** Destination registers are allocated after the
+/// inputs are consumed, so an instruction's output frequently reuses the register one
+/// of its inputs occupied. An executor must read every operand before writing any
+/// destination.
 pub struct Signature<const I: usize, const O: usize> {
+    /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
     pub input: Registers<I, Slot>,
+    /// Destination registers, in the order results are pushed.
     pub output: Registers<O, u32>,
 }
 
+/// The operands of an instruction whose arity is only known at lowering time — a
+/// label's params or results.
+///
+/// One `len` covers both runs because every user is 1:1: a [`RegInstruction::Move`]
+/// writes exactly as many destinations as it reads sources. Storing two lengths would
+/// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
+/// its size budget.
 pub struct DynSignature {
     input: u32,
     output: u32,
@@ -84,18 +251,24 @@ pub struct DynSignature {
 }
 
 impl DynSignature {
+    /// The source operands, in push order.
     pub fn input_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
         let start = self.input as usize;
 
         &arena[start..(start + self.len as usize)]
     }
 
+    /// The destination registers, positionally matched to
+    /// [`Self::input_registers`].
     pub fn output_registers<'a>(&self, arena: &'a [u32]) -> &'a [u32] {
         let start = self.output as usize;
 
         &arena[start..(start + self.len as usize)]
     }
 
+    /// Whether this signature moves nothing — a label with no params or results,
+    /// which is the common case. Callers use it to skip emitting a `Move` entirely
+    /// rather than emitting an empty one.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -115,6 +288,9 @@ struct PopsPushesResult {
     output_start: u32,
 }
 
+/// The open labels, innermost last. Index 0 is the implicit function frame.
+///
+/// A `br relative_depth` resolves to `stack[len - 1 - relative_depth]`.
 #[derive(Default)]
 struct ControlStack {
     stack: Vec<Block>,
@@ -126,13 +302,41 @@ impl ControlStack {
     }
 }
 
+/// Filters out operators that cannot execute, so the lowering match never sees them.
+///
+/// After an unconditional branch, everything up to the enclosing block's `else` or
+/// `end` is dead. Dead code is stack-polymorphic — it may pop more than it pushed —
+/// so lowering it against the simulated stack is both meaningless and prone to
+/// underflow. Skipping it entirely means every arm of the match can assume its
+/// operands exist.
+///
+/// The only state needed is a flag plus a count of constructs opened *while* dead:
+///
+/// * `block`/`loop`/`if` while dead push onto [`Self::blocks`] and are skipped, so
+///   they never reach [`SimulatedStack::add_block`] and the real [`ControlStack`]
+///   never sees them.
+/// * `end` while dead pops one and stays dead, unless [`Self::blocks`] is empty — in
+///   which case it closes a construct that was opened while *reachable*, so it is the
+///   point where liveness resumes and the operator is processed normally.
+/// * `else` behaves the same way, which is what makes an `if` opened inside dead code
+///   keep both arms dead: its `else` finds a non-empty [`Self::blocks`] and does not
+///   resurrect anything.
+///
+/// Because dead constructs are only ever counted here, the real control stack stays
+/// balanced with no reconciliation: every block it holds was pushed while reachable
+/// and is popped by an `end` that is also processed.
 struct UnreachableTrackingControlStack {
+    /// Constructs opened while dead, innermost last. Only the kind is kept; nothing
+    /// about a dead block is needed beyond knowing when it closes.
     blocks: Vec<BlockVariant>,
     unreachable: bool,
 }
 
+/// What the lowering loop should do with an operator.
 enum UnreachableCheckResult {
+    /// Skip it — it cannot execute.
     Continue,
+    /// Lower it normally.
     Reachable,
 }
 
@@ -144,10 +348,15 @@ impl UnreachableTrackingControlStack {
         }
     }
 
+    /// Marks the rest of the enclosing block dead. Called after every unconditional
+    /// transfer — `br`, `br_table`, and (once implemented) `return` and
+    /// `unreachable`. Not after `br_if`, whose fall-through is reachable.
     fn set_unreachable(&mut self) {
         self.unreachable = true;
     }
 
+    /// Resumes lowering. Only correct when [`Self::blocks`] is empty, i.e. the
+    /// construct being closed was opened while reachable.
     fn unset_unreachable(&mut self) {
         self.unreachable = false;
     }
@@ -160,6 +369,10 @@ impl UnreachableTrackingControlStack {
         self.blocks.pop().unwrap()
     }
 
+    /// Classifies one operator, updating the dead-code state as a side effect.
+    ///
+    /// Called for every operator before the lowering match; returns
+    /// [`UnreachableCheckResult::Reachable`] immediately when nothing is dead.
     fn check_unreachablity(&mut self, operator: &Operator<'_>) -> UnreachableCheckResult {
         if !self.unreachable {
             return UnreachableCheckResult::Reachable;
@@ -216,21 +429,45 @@ impl UnreachableTrackingControlStack {
     }
 }
 
+/// One resolved arm of a [`RegInstruction::BrTable`].
+///
+/// Each arm carries its own `Move` and jump target because a single `br_table` may
+/// mix loop and non-loop labels: validation only requires the label *types* to match,
+/// so the arities agree but the unwind heights, and therefore the destination
+/// registers, differ per arm.
 struct BrTarget {
     mov: DynSignature,
     target_index: u32,
 }
 
+/// The whole lowering state for one function body.
+///
+/// "Simulated" because [`Self::stack`] holds descriptions of operands rather than
+/// values: the pass walks the operator stream maintaining the stack wasm *would*
+/// have, and reads off where each value lives instead of moving it.
 struct SimulatedStack {
+    /// The operand stack, one [`StackSlot`] per value wasm would have pushed.
     stack: Stack<StackSlot>,
+    /// How many machine registers are live. Distinct from `stack.height()`: only
+    /// [`StackSlot::Register`] entries consume one. See the module docs.
     curr_register_index: usize,
+    /// Peak [`Self::curr_register_index`], i.e. the register count the frame needs.
     max_registers: u32,
+    /// Lazy borrows of locals; see [`lazy`].
     lazy_locals: LazyArena<Local>,
+    /// Lazy borrows of globals; see [`lazy`].
     lazy_globals: LazyArena<Global>,
+    /// Frame slots holding locals and globals materialized ahead of a write.
     spills: SpillArena,
+    /// Flat arena of every instruction's input operands, indexed by
+    /// [`Registers`]/[`DynSignature`] and shipped in [`FrameLayout`].
     input_registers: Vec<Slot>,
+    /// Flat arena of every instruction's destination registers, on the same terms.
     output_registers: Vec<u32>,
+    /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
+    /// Flat arena of `br_table` arms, indexed by
+    /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
     br_targets: Vec<BrTarget>,
 }
 
@@ -250,6 +487,9 @@ impl SimulatedStack {
         }
     }
 
+    /// Allocates one register, keeping [`Self::max_registers`] a true high-water
+    /// mark. Every path that allocates a register must come through here, or the
+    /// frame will be sized smaller than the registers instructions actually write.
     fn advanced_register_index(&mut self) {
         self.curr_register_index += 1;
 
@@ -258,10 +498,30 @@ impl SimulatedStack {
         }
     }
 
+    /// Frees the top register, when a [`StackSlot::Register`] is popped.
     fn recede_register_index(&mut self) {
         self.curr_register_index -= 1;
     }
 
+    /// Opens a label, recording the layout its `else`/`end`/branches restore to.
+    ///
+    /// Returns the block's `(params, results)`, which the caller needs to decide
+    /// whether to emit a params [`Move`]. Taking a [`BlockVariant`] rather than a
+    /// [`BlockKind`] keeps that decision in one place: the params count is derived
+    /// from `blockty` here, and the same value picks both the `Move` and the
+    /// instruction index recorded in the `BlockKind` — `instr_len + 1` when a `Move`
+    /// precedes the block's own instruction, `instr_len` otherwise.
+    ///
+    /// `recorded_height` is a **slot** height, not a register index: it is what the
+    /// stack is popped back down to, and popping is what releases lazy borrows and
+    /// spill slots. The register base is recovered when needed by counting register
+    /// slots back down to it. An `if` subtracts one more than the others because its
+    /// condition sits above the params and is consumed by the `if` itself.
+    ///
+    /// Only ever called for reachable operators — dead blocks are counted by
+    /// [`UnreachableTrackingControlStack`] and never reach here.
+    ///
+    /// [`Move`]: RegInstruction::Move
     fn add_block(
         &mut self,
         kind: BlockVariant,
@@ -338,6 +598,17 @@ impl SimulatedStack {
         &mut self.control_stack.stack[index]
     }
 
+    /// Releases one borrow of a lazily forwarded local or global and reports where
+    /// its value was.
+    ///
+    /// The location is read *before* the reference count drops, because the answer
+    /// this returns is where the popped operand reads from, while the cleanup that
+    /// follows depends on that same location: the last borrow of an `Original` entry
+    /// clears its origin slot, the last borrow of a `Spilled` one returns its spill
+    /// slot to the pool.
+    ///
+    /// An associated function rather than a method so the caller can pass one arena
+    /// and the spill pool without borrowing all of `self`.
     fn pop_lazy<T>(
         slot: LazySlot<T>,
         arena: &mut LazyArena<T>,
@@ -355,6 +626,11 @@ impl SimulatedStack {
         location
     }
 
+    /// Starts or joins a lazy borrow of one local or global.
+    ///
+    /// If something already borrows this origin, the new stack slot shares that
+    /// entry, so a later spill redirects both at once. Otherwise a fresh entry is
+    /// allocated and recorded as the origin's live borrow.
     fn push_lazy<T>(location: u32, arena: &mut LazyArena<T>) -> LazySlot<T> {
         let slot = match arena.origin[location as usize] {
             Some(slot) => {
@@ -373,6 +649,15 @@ impl SimulatedStack {
         slot
     }
 
+    /// Consumes the top operand and resolves it to the [`Slot`] an instruction will
+    /// read.
+    ///
+    /// This is the only path that releases state, and everything that has to be
+    /// released rides on it: the register is freed, the lazy reference count drops,
+    /// and a dropped entry gives back its origin slot or its spill slot. Bulk
+    /// operations therefore unwind by repeated popping rather than by truncating —
+    /// truncation would skip all of it. [`Self::simulated_pop`] is the read-only
+    /// counterpart for cases that must not release anything.
     fn pop(&mut self) -> Slot {
         let val = self.stack.pop();
 
@@ -404,6 +689,26 @@ impl SimulatedStack {
         slot
     }
 
+    /// Resolves the operand `depth` entries below the top *without* consuming it.
+    ///
+    /// `depth == 0` is the top, so walking `0..n` visits slots in the order repeated
+    /// popping would, which is what lets a caller compute an instruction's operands
+    /// as if it had unwound the stack.
+    ///
+    /// This exists for branch lowering. A branch has to describe the *target* label's
+    /// layout — how far to unwind, and which registers the carried values land in —
+    /// but the operators after it still belong to the enclosing block, which is not
+    /// being left. Actually unwinding would release lazy borrows and spill slots the
+    /// enclosing block still owns, and for a branch to an *outer* label it would pop
+    /// below the enclosing block's own base entirely.
+    ///
+    /// Reading instead of popping also makes `br_table` work: every arm is computed
+    /// against the same unchanged stack, where the first arm would otherwise have
+    /// destroyed the state the rest need.
+    ///
+    /// The one thing a peek cannot do is maintain [`Self::curr_register_index`], so
+    /// [`Self::br_truncation_registers`] tracks the register base itself, decrementing
+    /// per register slot seen.
     fn simulated_pop(&self, depth: u32) -> Slot {
         let val = *self.stack.peek_from_top(depth);
 
@@ -431,6 +736,14 @@ impl SimulatedStack {
         slot
     }
 
+    /// Pushes one operand onto the simulated stack.
+    ///
+    /// A local or global becomes a shared lazy borrow rather than a resolved
+    /// location, so a spill occurring before it is read still reaches it. A register
+    /// allocates one.
+    ///
+    /// [`Slot::Spilled`] is rejected: a spill is a *transition* of an existing
+    /// borrow, applied through [`Self::set_lazy`], never a value pushed from nothing.
     fn push(&mut self, val: Slot) {
         let slot = match val {
             Slot::Const(val) => StackSlot::Const(val),
@@ -455,6 +768,14 @@ impl SimulatedStack {
         self.stack.push(slot);
     }
 
+    /// Resolves the top operand without consuming it, for `local.tee`.
+    ///
+    /// `local.tee n` writes the value *and* leaves it on the stack, so the operand
+    /// stays where it is. That is sound only because the caller spills first: any
+    /// borrow of local `n` still on the stack — including this one — is redirected to
+    /// a spill slot before the write, so the slot left behind no longer names the
+    /// local being overwritten. Reading the location here, after the spill, is what
+    /// picks up that redirection.
     fn tee(&self) -> Slot {
         let top_slot = &self.stack.top();
 
@@ -484,6 +805,16 @@ impl SimulatedStack {
         self.push(Slot::Global(index));
     }
 
+    /// Applies an instruction's stack effect and records its operands in the arenas.
+    ///
+    /// Pops `pops` operands into a fresh input run — deepest first, so `input[0]` is
+    /// the first value pushed — then allocates `pushes` destination registers and
+    /// pushes them back. Allocating the outputs *after* consuming the inputs is what
+    /// lets a result reuse an operand's register, and is why an executor must read
+    /// all operands before writing any destination.
+    ///
+    /// Use [`Self::pops_and_pushes`] when only the stack effect is wanted; this
+    /// variant grows the arenas that ship in [`FrameLayout`].
     fn pops_and_pushes_registers(&mut self, pops: u32, pushes: u32) -> PopsPushesResult {
         let pops = pops as usize;
         let pushes = pushes as usize;
@@ -512,6 +843,17 @@ impl SimulatedStack {
         }
     }
 
+    /// The same stack effect as [`Self::pops_and_pushes_registers`], recording
+    /// nothing.
+    ///
+    /// For resets that reshape the model without describing an instruction — the
+    /// layout an `else` hands to its arm, or the layout an unconditional branch
+    /// leaves the enclosing block in. Those emit no operands, so writing runs into
+    /// the arenas would leave entries nothing indexes, in tables that ship with every
+    /// compiled function.
+    ///
+    /// The pops still go through [`Self::pop`], so lazy borrows and spill slots are
+    /// released as they should be.
     fn pops_and_pushes(&mut self, pops: u32, pushes: u32) {
         let pops = pops as usize;
         let pushes = pushes as usize;
@@ -527,6 +869,8 @@ impl SimulatedStack {
         }
     }
 
+    /// [`Self::pops_and_pushes_registers`] for an instruction whose arity is fixed by
+    /// its opcode, returning the [`Signature`] to store in the variant.
     fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
         let result = self.pops_and_pushes_registers(I as u32, O as u32);
 
@@ -542,6 +886,17 @@ impl SimulatedStack {
         }
     }
 
+    /// Forces the top `depth` operands into a contiguous register run, returning the
+    /// [`RegInstruction::Move`] that performs it.
+    ///
+    /// Used wherever several control paths have to agree on where values live: a
+    /// block's params at entry, and its results at each exit. Whatever the operands
+    /// were — constants, lazy locals, registers — afterwards they are registers based
+    /// at the label's register height, so a merge does not have to know which path
+    /// arrived.
+    ///
+    /// Pops and re-pushes from the same base, so the destination range overlaps the
+    /// sources; see [`RegInstruction::Move`] for what that requires of an executor.
     fn materialize_stack_slots_in_registers(&mut self, depth: u32) -> DynSignature {
         let result = self.pops_and_pushes_registers(depth, depth);
 
@@ -552,6 +907,27 @@ impl SimulatedStack {
         }
     }
 
+    /// Builds the [`RegInstruction::Move`] a branch performs on its way to a label,
+    /// **without changing the simulated stack**.
+    ///
+    /// A taken branch unwinds to `base_height` while carrying the top
+    /// `arity_to_preserve` operands into the label's registers. This computes that:
+    /// the carried operands become the move's inputs, and its destinations are the
+    /// `arity_to_preserve` registers based at the target's register height.
+    ///
+    /// Everything is read through [`Self::simulated_pop`], so no state is released.
+    /// The stack must survive because the branch does not end the enclosing block —
+    /// the operators after it are still lowered against it, and for a branch to an
+    /// outer label `base_height` lies *below* the enclosing block's own base. It is
+    /// also what lets `br_table` compute every arm against the same stack.
+    ///
+    /// Because nothing pops, [`Self::curr_register_index`] cannot do the counting, so
+    /// `register_index` walks down one per register slot seen — arriving at exactly
+    /// the value popping to `base_height` would have produced. Destination registers
+    /// are then folded into [`Self::max_registers`] by hand, since they are allocated
+    /// without going through [`Self::advanced_register_index`]; the branch's operands
+    /// need not be registers already, so its destinations can sit above anything
+    /// allocated so far.
     fn br_truncation_registers(
         &mut self,
         base_height: u32,
@@ -599,6 +975,18 @@ impl SimulatedStack {
         }
     }
 
+    /// Rescues every operand still forwarding to `location`, ahead of a write to it.
+    ///
+    /// Returns the spill slot the caller must emit a
+    /// [`LocalSpill`](RegInstruction::LocalSpill) /
+    /// [`GlobalSpill`](RegInstruction::GlobalSpill) into — *before* the writing
+    /// instruction, so the copy captures the pre-write value — or `None` when nothing
+    /// borrows the origin and no rescue is needed.
+    ///
+    /// One redirect covers all of the borrows, however many there are, because they
+    /// share one entry. Clearing the origin afterwards is what lets a subsequent
+    /// `local.get` of the same index start a fresh borrow of the *new* value while
+    /// the older operands keep reading the spill slot.
     fn set_lazy<T>(
         location: u32,
         arena: &mut LazyArena<T>,
@@ -635,7 +1023,14 @@ pub struct FrameLayout {
     /// Zero for a body that never overwrites a lazily-forwarded local or global,
     /// which is the common case.
     pub spills: u32,
+    /// Every instruction's input operands, concatenated in lowering order.
+    ///
+    /// [`Signature::input`] and [`DynSignature::input_registers`] name runs here.
+    /// Shipped with the body because every one of those indices is meaningless
+    /// without it.
     pub input_registers_arena: Box<[Slot]>,
+    /// Every instruction's destination registers, on the same terms as
+    /// [`Self::input_registers_arena`].
     pub output_registers_arena: Box<[u32]>,
 }
 
@@ -643,58 +1038,112 @@ pub struct FrameLayout {
 /// instruction list, and the frame required to execute it.
 pub type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 
+/// One lowered instruction.
+///
+/// Operands are never inline: a variant carries indices into the arenas on
+/// [`FrameLayout`], resolved through [`Signature`] or [`DynSignature`]. Jump fields
+/// are absolute indices into the containing `Vec<RegInstruction>`, i.e. runtime
+/// program counters.
 pub enum RegInstruction {
+    /// `i32.load`: read four bytes at `address + offset`.
     I32Load {
+        /// Static byte offset added to the popped address.
         offset: u32,
         sig: Signature<1, 1>,
     },
+    /// `global.set`: write the operand into a global.
+    ///
+    /// Any operand still forwarding to this global was rescued by a preceding
+    /// [`Self::GlobalSpill`].
     GlobalSet {
         index: GlobalIndex,
         sig: Signature<1, 0>,
     },
+    /// `local.set`: write the operand into a local. See [`Self::GlobalSet`] on
+    /// rescues.
     LocalSet {
         index: LocalIndex,
         sig: Signature<1, 0>,
     },
+    /// `local.tee`: write the operand into a local, leaving it on the operand stack.
+    ///
+    /// Arity is `<1, 0>` rather than `<1, 1>` because the value stays where it
+    /// already is — no destination register is allocated.
     LocalTee {
         index: LocalIndex,
         sig: Signature<1, 0>,
     },
+    /// `i32.store`: write `sig.input[1]` to `sig.input[0] + offset`.
     I32Store {
+        /// Static byte offset added to the popped address.
         offset: u32,
         sig: Signature<2, 0>,
     },
-    LocalSpill {
-        index: LocalIndex,
-        spill_index: u32,
-    },
+    /// Copies a local into a spill slot, immediately before a write that would
+    /// otherwise invalidate operands still reading it. See [`lazy`].
+    LocalSpill { index: LocalIndex, spill_index: u32 },
+    /// [`Self::LocalSpill`] for a global.
     GlobalSpill {
         index: GlobalIndex,
         spill_index: u32,
     },
+    /// `if`: fall through when the condition is non-zero, otherwise jump past
+    /// `else_index` to the else-arm — or to `end_index` when there is none.
+    ///
+    /// Block params, if any, were materialized by a [`Self::Move`] emitted just
+    /// before this instruction.
     If {
         cond: Signature<1, 0>,
+        /// Index of the matching [`Self::Else`], backpatched at `end`.
         else_index: Option<u32>,
+        /// Index of the matching `end`, backpatched.
         end_index: u32,
     },
-    Else {
-        end_index: u32,
-    },
+    /// Reached only by falling out of a taken then-branch, which must skip the
+    /// else-arm: control jumps straight to `end_index`.
+    ///
+    /// A false condition never lands here — [`Self::If`] jumps past it.
+    Else { end_index: u32 },
+    /// `br`: jump to a label unconditionally.
+    ///
+    /// Carries no operands. Values transferred to the label were materialized by a
+    /// [`Self::Move`] emitted immediately before this instruction, so `target_index`
+    /// points past the label's own fallthrough `Move` and each path copies once.
     Br {
+        /// Absolute jump target: a loop's start for a back-edge, otherwise the
+        /// label's `end`, backpatched.
         target_index: u32,
     },
+    /// `br_if`: jump when the condition is non-zero, otherwise fall through.
+    ///
+    /// The move is a **field rather than a preceding instruction** because it must
+    /// only run on the taken path — an unconditional `Move` ahead of the branch would
+    /// overwrite registers the fall-through still needs. `mov` is empty when the
+    /// label carries no values.
+    ///
+    /// The condition is read before the move is performed, so a move whose
+    /// destinations include the condition's register is harmless.
     BrIf {
         cond: Registers<1, Slot>,
         mov: DynSignature,
         target_index: u32,
     },
+    /// `br_table`: jump to the arm selected by the operand, or to the default when it
+    /// is out of range.
+    ///
+    /// Arms are a contiguous run of `BrTarget` in the body's target arena; the
+    /// default is the last element. Each arm carries its own move and target, since
+    /// the labels may sit at different heights even though their arities agree.
     BrTable {
         index: Registers<1, Slot>,
         targets_start: u32,
         targets_len: u32,
     },
+    /// `i32.add`.
     I32Add(Signature<2, 1>),
+    /// `i32.eqz`: `1` if the operand is zero, else `0`.
     I32Eqz(Signature<1, 1>),
+    /// `select`: `input[2] != 0 ? input[0] : input[1]`.
     Select(Signature<3, 1>),
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
@@ -767,6 +1216,19 @@ const _: () = assert!(
 );
 
 impl RegInstruction {
+    /// Lowers one function body's operator stream into register form.
+    ///
+    /// `params`/`results` are the body's own arity, seeding the implicit function
+    /// frame at the root of the control stack. `locals_count` must cover params plus
+    /// declared locals, and `globals_count` the module's globals — both size the lazy
+    /// origin tables, which are indexed unchecked.
+    ///
+    /// Returns the instruction list alongside the [`FrameLayout`] needed to run it.
+    /// The two are inseparable: every operand in the list is an index into the
+    /// arenas the layout carries.
+    ///
+    /// Rejects any operator the pass does not model as
+    /// [`TraceWasmError::Unsupported`].
     pub fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
