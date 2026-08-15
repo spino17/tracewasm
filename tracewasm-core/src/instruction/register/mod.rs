@@ -1380,6 +1380,16 @@ pub enum RegInstruction {
         /// same terms as [`Self::Call`]'s.
         caller_base: u32,
     },
+    /// `ref.is_null`: `1` if the reference is null, else `0`.
+    ///
+    /// The result is an `i32`, not a reference — like [`Self::I32Eqz`] this is a
+    /// predicate and follows the comparison convention, so it can feed a `br_if`
+    /// directly. Consumes the reference; it does not peek.
+    ///
+    /// Its operand is frequently a [`Const::Ref`] rather than a register, since
+    /// `ref.null` and `ref.func` are immediates — the answer is known at lowering
+    /// time in that case, but folding it is left to whatever optimizes the stream.
+    RefIsNull(Signature<1, 1>),
     /// `unreachable`: trap.
     ///
     /// Lowered like the branches in everything but the branch: it ends the block's
@@ -1716,6 +1726,11 @@ impl RegInstruction {
                 }
                 Operator::RefFunc { function_index } => {
                     simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
+                }
+                Operator::RefIsNull => {
+                    let registers = simulated_stack.registers_for::<1, 1>();
+
+                    instructions.push(RegInstruction::RefIsNull(registers));
                 }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));

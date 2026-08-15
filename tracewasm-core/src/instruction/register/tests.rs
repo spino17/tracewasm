@@ -226,6 +226,11 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
+            RegInstruction::RefIsNull(sig) => format!(
+                "ref.is_null  {} -> {}",
+                list(sig.input.registers(ins)),
+                regs(sig.output.registers(outs))
+            ),
             RegInstruction::I32Eqz(sig) => format!(
                 "i32.eqz      {} -> {}",
                 list(sig.input.registers(ins)),
@@ -618,6 +623,78 @@ fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
 
     assert_eq!(funcref, externref);
     assert!(funcref.contains("(null)ref"), "{funcref}");
+}
+
+/// `ref.is_null` is the only consumer of a reference the pass has, and it reads
+/// its operand wherever it already lives — as an immediate when the reference came
+/// straight from `ref.func`/`ref.null`, out of a local otherwise.
+#[test]
+fn ref_is_null_reads_its_operand_in_place() {
+    assert_func_lowers_to(
+        &ref_module("(func (result i32) ref.func 0 ref.is_null)"),
+        1,
+        "
+          0  ref.is_null  (0)ref -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    assert_lowers_to(
+        "(module (func (param funcref) (result i32) local.get 0 ref.is_null))",
+        "
+          0  ref.is_null  local0 -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// The result is an `i32` predicate, not a reference, so it feeds a branch with
+/// nothing in between — the reason it follows the comparison convention.
+#[test]
+fn ref_is_null_feeds_a_branch_directly() {
+    assert_lowers_to(
+        r#"(module (func (param funcref) (result i32)
+             block (result i32)
+               i32.const 1
+               local.get 0
+               ref.is_null
+               br_if 0
+               drop
+               i32.const 2
+             end))"#,
+        "
+          0  ref.is_null  local0 -> r0
+          1  br_if        r0 -> 3  move 1 -> r0
+          2  move         2 -> r0
+          3  end
+          4  move         r0 -> r0
+          5  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// References take part in lazy forwarding like any other value: a `funcref`
+/// global borrowed across a call is rescued, and `ref.is_null` reads the spill.
+#[test]
+fn a_reference_borrowed_across_a_call_is_rescued() {
+    assert_func_lowers_to(
+        r#"(module (global (mut funcref) (ref.null func)) (func)
+             (func (result i32) global.get 0 call 0 ref.is_null))"#,
+        1,
+        "
+          0  global.spill global0 -> spill0
+          1  call         f0 caller_base=0
+          2  ref.is_null  spill0 -> r0
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 1 spills
+        ",
+    );
 }
 
 // ---------------------------------------------------------------------------
