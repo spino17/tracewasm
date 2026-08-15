@@ -1806,7 +1806,40 @@ impl RegInstruction {
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Return => {
-                    todo!()
+                    let enclosing_block = simulated_stack.get_curr_block();
+                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
+                    let enclosing_block_results = enclosing_block.results;
+
+                    let move_registers = simulated_stack.br_truncation_registers(0, results);
+
+                    simulated_stack.control_stack.stack[0]
+                        .attached_breaks
+                        .push((
+                            if move_registers.is_empty() {
+                                instructions.len() as u32
+                            } else {
+                                instructions.len() as u32 + 1
+                            },
+                            u32::MAX,
+                        ));
+
+                    if !move_registers.is_empty() {
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+
+                    instructions.push(RegInstruction::Return {
+                        target_index: u32::MAX,
+                    });
+
+                    // set the layout correctly to the current enclosing block so that instructions
+                    // after else or end would see correct layout as all the instructions between br and else/end
+                    // are unreachable and stack is freezed.
+                    simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - enclosing_block_recorded_height,
+                        enclosing_block_results,
+                    );
+
+                    unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Call { function_index } => todo!(),
                 Operator::CallIndirect {

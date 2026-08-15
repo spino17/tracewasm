@@ -2228,6 +2228,142 @@ fn the_br_table_arm_hoists_the_spill_above_the_branch() {
 }
 
 // ---------------------------------------------------------------------------
+// return
+//
+// `return` is a `br` to the function frame: it transfers the results and lands on
+// the body's final `End`, past that end's own fallthrough move.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_return_transfers_results_to_the_function_frame() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             return))"#,
+        "
+          0  move         local0 -> r0
+          1  return       -> 3
+          2  move         r0 -> r0
+          3  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn a_return_with_no_results_transfers_nothing() {
+    assert_lowers_to(
+        r#"(module (func (param i32)
+             return))"#,
+        "
+          0  return       -> 1
+          1  end
+             frame: 0 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn a_return_lands_on_the_final_end_from_any_depth() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32) (result i32)
+             block block local.get 0 return end end
+             i32.const 9))"#,
+    );
+
+    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+
+    let RegInstruction::Return { target_index } = &prog[at] else {
+        unreachable!()
+    };
+
+    assert_eq!(
+        *target_index as usize,
+        prog.len() - 1,
+        "a return from two blocks deep still reaches the body's last instruction"
+    );
+
+    assert!(matches!(prog[*target_index as usize], RegInstruction::End));
+}
+
+#[test]
+fn a_conditional_return_shares_the_functions_result_register() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             if (result i32) i32.const 1 return else i32.const 2 end))"#,
+    );
+
+    let dests: Vec<Vec<u32>> = prog
+        .iter()
+        .filter_map(|i| match i {
+            RegInstruction::Move(sig) => {
+                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        dests.windows(2).all(|w| w[0] == w[1]),
+        "returning and falling through must leave the result in one place: {dests:?}"
+    );
+}
+
+/// The returning path and the falling-through path read *different* values of the
+/// same local, which only works because the borrow was rescued above the branch.
+#[test]
+fn a_return_reads_the_snapshot_the_hoist_preserved() {
+    assert_lowers_to(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             block local.get 1 br_if 0 return end
+             i32.const 5
+             local.set 0
+             drop
+             local.get 0))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  br_if        spill1 -> 5
+          3  move         spill0 -> r0
+          4  return       -> 8
+          5  end
+          6  local.set    local0 <- 5
+          7  move         local0 -> r0
+          8  end
+             frame: 1 registers, 2 spills
+        ",
+    );
+}
+
+#[test]
+fn a_return_makes_the_rest_of_its_block_unreachable() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32) (result i32)
+             block (result i32)
+               local.get 0
+               return
+               i32.const 7
+               drop
+               local.get 0
+             end))"#,
+    );
+
+    // the operators after `return` are dropped, so nothing between the return and
+    // the block's end survives except that end's own materialisation
+    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+
+    let ends = prog
+        .iter()
+        .skip(at)
+        .filter(|i| matches!(i, RegInstruction::End))
+        .count();
+
+    assert_eq!(ends, 2, "only the block's end and the body's end follow");
+}
+
+// ---------------------------------------------------------------------------
 // frame layout
 // ---------------------------------------------------------------------------
 
