@@ -1598,6 +1598,16 @@ impl RegInstruction {
         );
     }
 
+    fn emit<const I: usize, const O: usize, F: Fn(Signature<I, O>) -> RegInstruction>(
+        simulated_stack: &mut SimulatedStack,
+        instructions: &mut Vec<RegInstruction>,
+        emitter: F,
+    ) {
+        let registers = simulated_stack.registers_for::<I, O>();
+
+        instructions.push(emitter(registers));
+    }
+
     /// Lowers one function body's operator stream into register form.
     ///
     /// `params`/`results` are the body's own arity, seeding the implicit function
@@ -1728,9 +1738,11 @@ impl RegInstruction {
                     simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
                 }
                 Operator::RefIsNull => {
-                    let registers = simulated_stack.registers_for::<1, 1>();
-
-                    instructions.push(RegInstruction::RefIsNull(registers));
+                    Self::emit(
+                        &mut simulated_stack,
+                        &mut instructions,
+                        RegInstruction::RefIsNull,
+                    );
                 }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
