@@ -116,6 +116,7 @@ fn lower(wat: &str) -> LoweredRegFuncBody {
 
     for local in body.get_locals_reader().expect("locals") {
         let (count, _ty) = local.expect("local");
+
         locals_count += count;
     }
 
@@ -250,11 +251,29 @@ fn render(body: &LoweredRegFuncBody) -> String {
                 index,
                 targets_start,
                 targets_len,
-            } => format!(
-                "br_table     {} arms={targets_start}..{}",
-                sig1(index),
-                targets_start + targets_len
-            ),
+            } => {
+                let arms = &frame.br_targets_arena
+                    [*targets_start as usize..(targets_start + targets_len) as usize];
+                let rendered: Vec<String> = arms
+                    .iter()
+                    .map(|a| {
+                        if a.mov.is_empty() {
+                            format!("->{}", a.target_index)
+                        } else {
+                            format!(
+                                "->{} [{} -> {}]",
+                                a.target_index,
+                                list(a.mov.input_registers(ins)),
+                                regs(a.mov.output_registers(outs))
+                            )
+                        }
+                    })
+                    .collect();
+
+                format!("br_table     {} {}", sig1(index), rendered.join(" "))
+            }
+            RegInstruction::Return { target_index } => format!("return       -> {target_index}"),
+            RegInstruction::End => "end".to_string(),
         };
 
         out.push_str(&format!("{pc:>3}  {line}\n"));
@@ -381,6 +400,7 @@ fn successive_writes_produce_independent_snapshots() {
     let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
 
     let _ = s.registers_for::<1, 0>();
+
     s.push_local(0);
     s.push_const(Const::I32(2));
 
@@ -1085,61 +1105,6 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 }
 
 // ---------------------------------------------------------------------------
-// end-to-end
-//
-// These go through `lower`, so they need `Operator::End`. Delete the `#[ignore]`s
-// once it lands; the expectations are written against the design as documented and
-// are the fastest way to find out whether it behaves as intended.
-// ---------------------------------------------------------------------------
-
-#[test]
-#[ignore = "blocked on Operator::End"]
-fn straight_line_body_forwards_operands_without_copying() {
-    assert_lowers_to(
-        r#"(module (func (param i32 i32) (result i32)
-             local.get 0
-             local.get 1
-             i32.add))"#,
-        "
-          0  i32.add      local0, local1 -> r0
-             frame: 1 registers, 0 spills
-        ",
-    );
-}
-
-#[test]
-#[ignore = "blocked on Operator::End"]
-fn overwriting_a_borrowed_local_spills_it_first() {
-    assert_lowers_to(
-        r#"(module (func (param i32) (result i32)
-             local.get 0
-             i32.const 5
-             local.set 0
-             local.get 0
-             i32.add))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.set    local0 <- 5
-          2  i32.add      spill0, local0 -> r0
-             frame: 1 registers, 1 spills
-        ",
-    );
-}
-
-#[test]
-#[ignore = "blocked on Operator::End"]
-fn a_block_with_no_params_emits_no_move() {
-    assert_lowers_to(
-        r#"(module (func (param i32) (result i32)
-             (block (nop))
-             local.get 0))"#,
-        "
-             frame: 0 registers, 0 spills
-        ",
-    );
-}
-
-// ---------------------------------------------------------------------------
 // globals
 //
 // Globals run through the same machinery as locals but a separate arena, so the
@@ -1777,34 +1742,405 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
     assert!(frame.br_targets_arena.is_empty());
 }
 
+// ===========================================================================
+// end-to-end
+//
+// Everything below goes through `lower`, so it exercises the real pass over real
+// wasm: operand forwarding, spills, label layout, backpatching and the frame, all
+// composed. Expectations are whole rendered programs wherever the output is small
+// enough to read, because a diff of the program is the most legible failure there
+// is.
+// ===========================================================================
+
 /// Position of the first instruction matching `pred`.
 fn index_of(prog: &[RegInstruction], pred: impl Fn(&RegInstruction) -> bool) -> Option<usize> {
     prog.iter().position(pred)
 }
 
 // ---------------------------------------------------------------------------
-// the hoist happens at the call sites
-//
-// The tests above replay each arm by calling the helper themselves, so they pin its
-// behaviour but would stay green if an arm stopped calling it. These go through
-// `lower`, so they fail if the call is missing from the arm — which is the half the
-// unit tests structurally cannot check.
+// operand forwarding
 // ---------------------------------------------------------------------------
 
-/// The borrow of local 0 rests on the operand stack across the `if` and is the
-/// function's result, so it must be rescued above the branch.
 #[test]
-#[ignore = "blocked on Operator::End"]
+fn a_straight_line_body_copies_nothing() {
+    assert_lowers_to(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             local.get 1
+             i32.add))"#,
+        "
+          0  i32.add      local0, local1 -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn constants_and_globals_are_read_in_place() {
+    assert_lowers_to(
+        r#"(module
+             (global i32 (i32.const 0))
+             (func (param i32) (result i32)
+               global.get 0
+               i32.const 7
+               i32.add))"#,
+        "
+          0  i32.add      global0, 7 -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn a_load_produces_the_only_register_a_body_needs() {
+    assert_lowers_to(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0
+             i32.load))"#,
+        "
+          0  i32.load     [local0]+0 -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// spilling a borrowed local
+// ---------------------------------------------------------------------------
+
+#[test]
+fn writing_a_borrowed_local_rescues_it_first() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             i32.const 5
+             local.set 0
+             local.get 0
+             i32.add))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.set    local0 <- 5
+          2  i32.add      spill0, local0 -> r0
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+#[test]
+fn an_unborrowed_write_rescues_nothing() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32)
+             i32.const 5
+             local.set 0))"#,
+    );
+
+    assert!(
+        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        "nothing borrows local 0"
+    );
+
+    assert_eq!(frame.spills, 0);
+}
+
+// ---------------------------------------------------------------------------
+// blocks and labels
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_block_emits_nothing_of_its_own() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             (block (nop))
+             local.get 0))"#,
+        "
+          0  end
+          1  move         local0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn an_if_else_wires_both_arms_to_one_end() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             if (result i32) i32.const 1 else i32.const 2 end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  if           spill0 else=3 end=5
+          2  move         1 -> r0
+          3  else         end=5
+          4  move         2 -> r0
+          5  end
+          6  move         r0 -> r0
+          7  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+#[test]
+fn an_if_without_an_else_jumps_straight_to_the_end() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32)
+             local.get 0
+             if i32.const 5 local.set 0 end))"#,
+    );
+
+    let at = index_of(&prog, |i| matches!(i, RegInstruction::If { .. })).unwrap();
+
+    let (else_index, end_index) = match &prog[at] {
+        RegInstruction::If {
+            else_index,
+            end_index,
+            ..
+        } => (*else_index, *end_index),
+        _ => unreachable!(),
+    };
+
+    assert!(else_index.is_none(), "there is no else to jump to");
+
+    assert!(
+        matches!(prog[end_index as usize], RegInstruction::End),
+        "end_index must name an End"
+    );
+}
+
+#[test]
+fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             if (result i32) i32.const 1 else i32.const 2 end))"#,
+    );
+
+    let dests: Vec<Vec<u32>> = prog
+        .iter()
+        .filter_map(|i| match i {
+            RegInstruction::Move(sig) => {
+                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        dests.windows(2).all(|w| w[0] == w[1]),
+        "every path must leave the result in the same register: {dests:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// branches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_branch_lands_past_the_fallthrough_move() {
+    // the block's own `end` materialises results for the path that falls into it;
+    // a branch carries its own, so it must jump past that move
+    assert_lowers_to(
+        r#"(module (func (result i32)
+             block (result i32) i32.const 7 br 0 end))"#,
+        "
+          0  move         7 -> r0
+          1  br           -> 3
+          2  move         r0 -> r0
+          3  end
+          4  move         r0 -> r0
+          5  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn an_outward_branch_targets_the_outer_label() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32) (result i32)
+             block (result i32)
+               block (result i32) local.get 0 br 1 end
+             end))"#,
+    );
+
+    let br = index_of(&prog, |i| matches!(i, RegInstruction::Br { .. })).unwrap();
+
+    let RegInstruction::Br { target_index } = &prog[br] else {
+        unreachable!()
+    };
+
+    let ends: Vec<usize> = prog
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, RegInstruction::End))
+        .map(|(n, _)| n)
+        .collect();
+
+    assert_eq!(
+        *target_index as usize, ends[1],
+        "br 1 must reach the *second* end (the outer block's), not the inner one"
+    );
+}
+
+#[test]
+fn a_loop_back_edge_skips_the_entry_spill() {
+    // the entry rescue must run once; the back-edge has to land after it
+    assert_lowers_to(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             loop
+               i32.const 5
+               local.set 0
+               local.get 1
+               br_if 0
+             end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.set    local0 <- 5
+          2  local.spill  local1 -> spill1
+          3  br_if        spill1 -> 1
+          4  end
+          5  move         spill0 -> r0
+          6  end
+             frame: 1 registers, 2 spills
+        ",
+    );
+}
+
+#[test]
+fn a_branch_to_a_loop_carries_the_loops_params() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32) (result i32)
+             i32.const 1
+             loop (param i32) (result i32)
+               drop i32.const 2 local.get 0 br_if 0
+             end))"#,
+    );
+
+    let br = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+
+    let RegInstruction::BrIf {
+        mov, target_index, ..
+    } = &prog[br]
+    else {
+        unreachable!()
+    };
+
+    assert_eq!(
+        mov.input_registers(&frame.input_registers_arena).len(),
+        1,
+        "a back-edge transfers the loop's params, not its results"
+    );
+
+    assert!(
+        (*target_index as usize) < br,
+        "a back-edge jumps backwards: {target_index} should precede {br}"
+    );
+}
+
+#[test]
+fn br_table_arms_resolve_to_their_own_labels() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32)
+             block block local.get 0 br_table 0 1 0 end end))"#,
+    );
+
+    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+
+    let RegInstruction::BrTable {
+        targets_start,
+        targets_len,
+        ..
+    } = &prog[table]
+    else {
+        unreachable!()
+    };
+
+    let arms =
+        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+    let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
+
+    assert_eq!(targets.len(), 3, "two arms plus the default");
+
+    assert_eq!(
+        targets[0], targets[2],
+        "arm 0 and the default both name depth 0"
+    );
+
+    assert_ne!(targets[0], targets[1], "depth 1 is a different label");
+
+    for t in &targets {
+        assert!(
+            matches!(prog[*t as usize], RegInstruction::End),
+            "every arm must land on an End"
+        );
+    }
+}
+
+#[test]
+fn each_br_table_arm_carries_its_own_move() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32) (result i32)
+             block (result i32) block (result i32)
+               i32.const 9 local.get 0 br_table 0 1 0
+             end end))"#,
+    );
+
+    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+
+    let RegInstruction::BrTable {
+        targets_start,
+        targets_len,
+        ..
+    } = &prog[table]
+    else {
+        unreachable!()
+    };
+
+    let arms =
+        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+
+    for arm in arms {
+        assert_eq!(
+            slots(arm.mov.input_registers(&frame.input_registers_arena)),
+            ["9"],
+            "every arm transfers the same value"
+        );
+
+        assert_eq!(
+            arm.mov
+                .output_registers(&frame.output_registers_arena)
+                .len(),
+            1
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the hoist happens at the call sites
+//
+// The unit tests above replay each arm by calling the helper directly, so they pin
+// its behaviour but stay green if an arm stops calling it. These fail in that case.
+// ---------------------------------------------------------------------------
+
+#[test]
 fn the_if_arm_hoists_the_spill_above_the_branch() {
     let body = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              local.get 1
-             if
-               i32.const 5
-               local.set 0
-             end))"#,
+             if i32.const 5 local.set 0 end))"#,
     );
+
     let prog = &body.0;
 
     let spill = index_of(prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
@@ -1819,7 +2155,6 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
 }
 
 #[test]
-#[ignore = "blocked on Operator::End"]
 fn the_br_if_arm_hoists_the_spill_above_the_branch() {
     let (prog, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
@@ -1839,11 +2174,8 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
     assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
 
-/// A spill left inside the body would re-run on the back-edge, so it has to sit
-/// above the header — before anything the loop can repeat.
 #[test]
-#[ignore = "blocked on Operator::End"]
-fn the_loop_arm_hoists_the_spill_above_the_header() {
+fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
     let (prog, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
@@ -1855,40 +2187,99 @@ fn the_loop_arm_hoists_the_spill_above_the_header() {
              end))"#,
     );
 
-    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let write = index_of(&prog, |i| matches!(i, RegInstruction::LocalSet { .. })).expect("the set");
+    let back_edge = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+
+    let RegInstruction::BrIf { target_index, .. } = &prog[back_edge] else {
+        unreachable!()
+    };
+
+    let rescue = prog
+        .iter()
+        .enumerate()
+        .find(|(_, i)| matches!(i, RegInstruction::LocalSpill { index, .. } if index.0 == 0))
+        .map(|(n, _)| n)
+        .expect("local 0 must be rescued");
 
     assert!(
-        spill < write,
-        "the spill must be hoisted out of the repeated region: spill {spill}, write {write}"
-    );
-    assert_eq!(
-        prog.iter()
-            .filter(|i| matches!(i, RegInstruction::LocalSpill { .. }))
-            .count(),
-        1,
-        "exactly one rescue, executed once on entry"
+        rescue < *target_index as usize,
+        "the rescue at {rescue} is inside the repeated region starting at {target_index}"
     );
 }
 
-/// Nothing rests on the operand stack across the branch, so the guard emits nothing.
 #[test]
-#[ignore = "blocked on Operator::End"]
-fn no_hoist_when_nothing_is_borrowed_across_the_branch() {
-    let (prog, frame) = lower(
+fn the_br_table_arm_hoists_the_spill_above_the_branch() {
+    let (prog, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
-             local.get 1
-             if
+             local.get 0
+             block
+               local.get 1
+               br_table 0 0
                i32.const 5
                local.set 0
-             end
-             local.get 0))"#,
+             end))"#,
     );
 
-    assert!(
-        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
-        "no borrow is live across the if, so nothing should be rescued"
+    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
+        .expect("the borrow must be rescued");
+    let branch =
+        index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).expect("the br_table");
+
+    assert!(spill < branch, "spill at {spill}, branch at {branch}");
+}
+
+// ---------------------------------------------------------------------------
+// frame layout
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_frame_reports_peak_register_use() {
+    let (_, frame) = lower(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.load
+             local.get 0 i32.load
+             i32.add))"#,
     );
-    assert_eq!(frame.spills, 0, "and no frame slots reserved");
+
+    assert_eq!(frame.registers, 2, "two loads are live at once");
+}
+
+#[test]
+fn the_frame_reports_peak_spill_use() {
+    let (_, frame) = lower(
+        r#"(module (func (param i32) (result i32)
+             local.get 0 i32.const 1 local.set 0
+             local.get 0 i32.const 2 local.set 0
+             i32.add))"#,
+    );
+
+    assert_eq!(
+        frame.spills, 2,
+        "two snapshots of local 0 are live at the same time"
+    );
+}
+
+#[test]
+fn the_arenas_ship_with_the_body() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32)
+             block block local.get 0 br_table 0 1 0 end end))"#,
+    );
+
+    assert!(!frame.input_registers_arena.is_empty(), "operands");
+    assert!(!frame.br_targets_arena.is_empty(), "br_table arms");
+
+    // and every index in the program resolves against them
+    for instruction in &prog {
+        if let RegInstruction::BrTable {
+            targets_start,
+            targets_len,
+            ..
+        } = instruction
+        {
+            assert!(
+                (targets_start + targets_len) as usize <= frame.br_targets_arena.len(),
+                "arm range runs past the arena"
+            );
+        }
+    }
 }

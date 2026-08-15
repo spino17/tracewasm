@@ -584,6 +584,13 @@ impl SimulatedStack {
         (params, results)
     }
 
+    fn pop_block(&mut self) -> Block {
+        self.control_stack
+            .stack
+            .pop()
+            .expect("hitting this means the control stack logic for pushing blocks is incorrect")
+    }
+
     fn get_curr_block(&self) -> &Block {
         debug_assert!(!self.control_stack.stack.is_empty());
 
@@ -1119,7 +1126,9 @@ pub enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else { end_index: u32 },
+    Else {
+        end_index: u32,
+    },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -1161,6 +1170,9 @@ pub enum RegInstruction {
     I32Eqz(Signature<1, 1>),
     /// `select`: `input[2] != 0 ? input[0] : input[1]`.
     Select(Signature<3, 1>),
+    Return {
+        target_index: u32,
+    },
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
     /// leaves its values in the same registers.
@@ -1210,6 +1222,7 @@ pub enum RegInstruction {
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
+    End,
 }
 
 // One `RegInstruction` per lowered operator, so this size is multiplied across every
@@ -1801,20 +1814,91 @@ impl RegInstruction {
                     table_index,
                 } => todo!(),
                 Operator::End => {
-                    // emit mov instruction for setting the layout correctly for the branch coming from
-                    // just before this end.
-                    //
-                    // pop the control block, backpatch all the entries just like stack/mod.rs
-                    //
-                    // there are 3 ways to reach end.
-                    // - from a br instruction -> no need for materializing the result registers, br already does that
-                    // - from an instruction previous to it, for that it requires emitting mov before end so that it first
-                    // executes mov instruction and then end
-                    // - from a br resolved to a different block and instructions following it became unreachable! in this case
-                    // too the registers are materialized by the reset function.
-                    // Any branch which is not coming from just above always land directly to end instruction, they materialize
-                    // the results.
-                    todo!()
+                    let block = simulated_stack.pop_block();
+                    let results = block.results;
+                    let attached_breaks = &block.attached_breaks;
+
+                    if results != 0 {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(results);
+
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+
+                    debug_assert!(
+                        simulated_stack.stack.height() == block.recorded_height + results
+                    );
+
+                    let index = instructions.len() as u32;
+
+                    for (br_index, br_targets_index) in attached_breaks {
+                        match &mut instructions[*br_index as usize] {
+                            RegInstruction::Br { target_index } => {
+                                *target_index = index;
+                            }
+                            RegInstruction::BrIf {
+                                cond: _,
+                                mov: _,
+                                target_index,
+                            } => {
+                                *target_index = index;
+                            }
+                            RegInstruction::BrTable { .. } => {
+                                // `br_targets_index` is already absolute, so the table's own
+                                // range is not needed here.
+                                simulated_stack.br_targets[*br_targets_index as usize]
+                                    .target_index = index;
+                            }
+                            RegInstruction::Return { target_index } => {
+                                *target_index = index;
+                            }
+                            _ => unreachable!(
+                                "hitting this means TraceWasm has a bug recording the instructions"
+                            ),
+                        }
+                    }
+
+                    // Backpatch this block's own structural indices. `func`/`loop` need none: a function's
+                    // `end` is not referenced by index, and a loop's branch target is its start, not its end.
+                    match block.kind {
+                        BlockKind::Func | BlockKind::Loop { .. } => {}
+                        BlockKind::Block => {} // no backpatching require
+                        BlockKind::If {
+                            index: if_index,
+                            else_index: ei,
+                        } => {
+                            // Fill the `if`'s `else_index` and `end_index` ...
+                            let RegInstruction::If {
+                                cond: _,
+                                else_index,
+                                end_index,
+                            } = &mut instructions[if_index as usize]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *else_index = ei;
+                            *end_index = index;
+
+                            // ... and point the `else` (if present) at this same `end`, so a then-branch
+                            // that falls through into `else` knows where the construct closes.
+                            if let Some(else_index) = ei {
+                                let RegInstruction::Else { end_index } =
+                                    &mut instructions[else_index as usize]
+                                else {
+                                    unreachable!(
+                                        "hitting this means TraceWasm has a bug recording the instructions"
+                                    )
+                                };
+
+                                *end_index = index;
+                            }
+                        }
+                    }
+
+                    instructions.push(RegInstruction::End);
                 }
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
