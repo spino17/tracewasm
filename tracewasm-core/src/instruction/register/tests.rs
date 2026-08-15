@@ -62,12 +62,21 @@ fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
 /// Panics on malformed input, which in a test is what you want: the `.wat` is part
 /// of the test, so a mistake in it is a test bug and should be loud.
 fn lower(wat: &str) -> LoweredRegFuncBody {
+    lower_func(wat, 0)
+}
+
+/// Lowers the `n`th *defined* function of a `.wat` module, for tests whose subject
+/// is a caller and so cannot be function 0.
+///
+/// Imported functions are not modelled: the index space here is the code section's,
+/// so `call n` inside the wat must name a defined function.
+fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
     let bytes = wat::parse_str(wat).expect("invalid wat");
 
     let mut types: Vec<FuncType> = vec![];
     let mut func_tys: Vec<TyIndex> = vec![];
     let mut globals_count: u32 = 0;
-    let mut body_bytes: Option<wasmparser::FunctionBody<'_>> = None;
+    let mut bodies: Vec<wasmparser::FunctionBody<'_>> = vec![];
 
     for payload in Parser::new(0).parse_all(&bytes) {
         match payload.expect("parse") {
@@ -98,16 +107,14 @@ fn lower(wat: &str) -> LoweredRegFuncBody {
                 globals_count += section.count();
             }
             wasmparser::Payload::CodeSectionEntry(body) => {
-                if body_bytes.is_none() {
-                    body_bytes = Some(body);
-                }
+                bodies.push(body);
             }
             _ => {}
         }
     }
 
-    let body = body_bytes.expect("module has no function body");
-    let ty = &types[func_tys[0].0 as usize];
+    let body = bodies.into_iter().nth(n).expect("no such function body");
+    let ty = &types[func_tys[n].0 as usize];
     let (params, results) = (ty.params.len() as u32, ty.results.len() as u32);
 
     // Locals are run-length encoded in the body header; the pass needs the flat
@@ -273,6 +280,10 @@ fn render(body: &LoweredRegFuncBody) -> String {
                 format!("br_table     {} {}", sig1(index), rendered.join(" "))
             }
             RegInstruction::Return { target_index } => format!("return       -> {target_index}"),
+            RegInstruction::Call {
+                func_index,
+                caller_base,
+            } => format!("call         f{} caller_base={caller_base}", func_index.0),
             RegInstruction::End => "end".to_string(),
         };
 
@@ -290,7 +301,12 @@ fn render(body: &LoweredRegFuncBody) -> String {
 /// Asserts a lowered body renders exactly as `expected`, ignoring leading
 /// indentation so the expectation can be written inline.
 fn assert_lowers_to(wat: &str, expected: &str) {
-    let got = render(&lower(wat));
+    assert_func_lowers_to(wat, 0, expected)
+}
+
+/// [`assert_lowers_to`] for a body that is not function 0 — a caller, typically.
+fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
+    let got = render(&lower_func(wat, n));
 
     let norm = |s: &str| {
         s.lines()
@@ -2361,6 +2377,250 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
         .count();
 
     assert_eq!(ends, 2, "only the block's end and the body's end follow");
+}
+
+// ---------------------------------------------------------------------------
+// calls
+//
+// `caller_base` is where the callee's frame is placed, expressed frame-relative
+// like every other register index. The arguments are staged at
+// `[caller_base, caller_base + params)` so they become the callee's locals in
+// place, and its results come back to the same base — so the field has to be the
+// *register* index below the arguments, not the simulated stack's slot height.
+// ---------------------------------------------------------------------------
+
+/// Two callers of the same function, differing only in what sits below the call.
+fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
+    let (prog, frame) = lower_func(wat, 1);
+    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+
+    let RegInstruction::Call { caller_base, .. } = &prog[at] else {
+        unreachable!()
+    };
+
+    // the instruction that consumes the call's result
+    let reader = prog[at + 1..]
+        .iter()
+        .find_map(|i| match i {
+            RegInstruction::I32Add(sig) => {
+                Some(slots(sig.input.registers(&frame.input_registers_arena)))
+            }
+            _ => None,
+        })
+        .expect("something must read the result");
+
+    (*caller_base, reader)
+}
+
+#[test]
+fn caller_base_is_a_register_index_not_a_slot_height() {
+    const CALLEE: &str = "(func (param i32 i32) (result i32) local.get 0)";
+
+    // a register below the call: the two heights agree, so this passes either way
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               local.get 0 i32.load
+               local.get 0 i32.const 7 call 0
+               i32.add))"#
+    ));
+
+    assert_eq!(base, 1);
+
+    assert!(
+        reader.contains(&"r1".to_string()),
+        "result read at r1: {reader:?}"
+    );
+
+    // a const below the call occupies a stack slot but no register, so the slot
+    // height would say 1 while the register base is 0
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module {CALLEE}
+             (func (param i32) (result i32)
+               i32.const 100
+               local.get 0 i32.const 7 call 0
+               i32.add))"#
+    ));
+
+    assert_eq!(base, 0, "a const below the call consumes no register");
+
+    assert!(
+        reader.contains(&"r0".to_string()),
+        "result read at r0: {reader:?}"
+    );
+
+    // two of them
+    let (base, _) = caller_base_of(&format!(
+        r#"(module {CALLEE}
+             (func (param i32) (result i32)
+               i32.const 100 i32.const 200
+               local.get 0 i32.const 7 call 0
+               i32.add i32.add))"#
+    ));
+
+    assert_eq!(base, 0);
+
+    // a mixture: only the register counts
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               i32.const 100
+               local.get 0 i32.load
+               local.get 0
+               local.get 0 i32.const 7 call 0
+               i32.add i32.add i32.add))"#
+    ));
+
+    assert_eq!(base, 1, "const and local below consume no registers");
+    assert!(reader.contains(&"r1".to_string()), "{reader:?}");
+}
+
+/// The arguments themselves may already be registers, and those must *not* count
+/// towards the base — the base is what sits below them.
+#[test]
+fn registers_passed_as_arguments_do_not_raise_the_base() {
+    const CALLEE: &str = "(func (param i32 i32) (result i32) local.get 0)";
+
+    // one argument is a register, nothing below the call
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               local.get 0 i32.load
+               i32.const 7
+               call 0
+               local.get 0
+               i32.add))"#
+    ));
+
+    assert_eq!(
+        base, 0,
+        "the register argument sits *at* the base, not below it"
+    );
+
+    assert!(reader.contains(&"r0".to_string()), "{reader:?}");
+
+    // a register below, and a register argument above it
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               local.get 0 i32.load
+               local.get 0 i32.load
+               i32.const 7
+               call 0
+               i32.add))"#
+    ));
+
+    assert_eq!(base, 1, "only the value below the arguments counts");
+    assert!(reader.contains(&"r1".to_string()), "{reader:?}");
+
+    // both arguments are registers
+    let (base, _) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               local.get 0 i32.load
+               local.get 0 i32.load
+               call 0
+               local.get 0
+               i32.add))"#
+    ));
+
+    assert_eq!(base, 0);
+}
+
+#[test]
+fn a_zero_param_call_still_reports_its_result_base() {
+    const CALLEE: &str = "(func (result i32) i32.const 1)";
+
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module {CALLEE}
+             (func (result i32) i32.const 100 call 0 i32.add))"#
+    ));
+
+    assert_eq!(
+        base, 0,
+        "nothing is popped, so the base is the current index"
+    );
+    assert!(reader.contains(&"r0".to_string()), "{reader:?}");
+
+    let (base, reader) = caller_base_of(&format!(
+        r#"(module (memory 1) {CALLEE}
+             (func (param i32) (result i32)
+               local.get 0 i32.load call 0 i32.add))"#
+    ));
+
+    assert_eq!(base, 1);
+    assert!(reader.contains(&"r1".to_string()), "{reader:?}");
+}
+
+#[test]
+fn arguments_are_staged_at_the_caller_base() {
+    let (prog, frame) = lower_func(
+        r#"(module
+             (func (param i32 i32) (result i32) local.get 0)
+             (func (param i32) (result i32)
+               local.get 0 i32.const 7 call 0))"#,
+        1,
+    );
+
+    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+
+    let RegInstruction::Call { caller_base, .. } = &prog[at] else {
+        unreachable!()
+    };
+
+    let RegInstruction::Move(sig) = &prog[at - 1] else {
+        panic!("the arguments must be staged immediately before the call")
+    };
+
+    assert_eq!(
+        sig.output_registers(&frame.output_registers_arena),
+        &[*caller_base, caller_base + 1],
+        "arguments land at [caller_base, caller_base + params)"
+    );
+}
+
+/// A callee may write any global, so a borrow that outlives the call has to be
+/// rescued first. Locals are safe — the callee has its own frame.
+#[test]
+fn a_global_read_across_a_call_is_rescued() {
+    assert_func_lowers_to(
+        r#"(module
+             (global (mut i32) (i32.const 0))
+             (func)
+             (func (result i32)
+               global.get 0
+               call 0
+               global.get 0
+               i32.add))"#,
+        1,
+        "
+          0  global.spill global0 -> spill0
+          1  call         f0 caller_base=0
+          2  i32.add      spill0, global0 -> r0
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+#[test]
+fn a_local_read_across_a_call_needs_no_rescue() {
+    let (prog, _) = lower_func(
+        r#"(module
+             (func)
+             (func (param i32) (result i32)
+               local.get 0
+               call 0
+               local.get 0
+               i32.add))"#,
+        1,
+    );
+
+    assert!(
+        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        "a callee cannot write the caller's locals"
+    );
 }
 
 // ---------------------------------------------------------------------------

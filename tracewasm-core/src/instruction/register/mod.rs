@@ -112,7 +112,7 @@ use crate::{
             LocalSlot, SpillArena, SpillIndex,
         },
     },
-    module::{FuncDecl, FuncType, GlobalIndex, LocalIndex},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex},
     vm::stack::Stack,
 };
 use std::marker::PhantomData;
@@ -1017,6 +1017,18 @@ impl SimulatedStack {
 
         Some(spill_index)
     }
+
+    fn register_index_at_depth(&self, depth: u32) -> usize {
+        let mut register_index = self.curr_register_index;
+
+        for i in 0..depth {
+            if matches!(self.stack.peek_from_top(i), StackSlot::Register(_)) {
+                register_index -= 1;
+            }
+        }
+
+        register_index
+    }
 }
 
 /// The storage one lowered body needs, in slot counts.
@@ -1172,6 +1184,10 @@ pub enum RegInstruction {
     Select(Signature<3, 1>),
     Return {
         target_index: u32,
+    },
+    Call {
+        func_index: FuncIndex,
+        caller_base: u32,
     },
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
@@ -1841,7 +1857,31 @@ impl RegInstruction {
 
                     unreachable_tracking_stack.set_unreachable();
                 }
-                Operator::Call { function_index } => todo!(),
+                Operator::Call { function_index } => {
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
+                    let func_decl = &func_decls[function_index as usize];
+                    let func_ty = &types[func_decl.ty.0 as usize];
+                    let params = func_ty.params.len() as u32;
+                    let results = func_ty.results.len() as u32;
+                    let recorded_height = simulated_stack.stack.height() - params;
+                    let caller_base = simulated_stack.register_index_at_depth(params) as u32;
+
+                    if params != 0 {
+                        let move_registers =
+                            simulated_stack.materialize_stack_slots_in_registers(params);
+
+                        instructions.push(RegInstruction::Move(move_registers));
+                    }
+
+                    instructions.push(RegInstruction::Call {
+                        func_index: FuncIndex(function_index),
+                        caller_base,
+                    });
+
+                    simulated_stack
+                        .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
+                }
                 Operator::CallIndirect {
                     type_index,
                     table_index,
