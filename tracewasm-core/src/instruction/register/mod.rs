@@ -132,9 +132,20 @@ mod tests;
 ///
 /// [`Move`]: RegInstruction::Move
 enum BlockVariant {
+    /// `if`: its condition sits above the params, so its entry height is one lower
+    /// than the others'.
     If,
+    /// `loop`: the only label whose branch target is its start rather than its
+    /// `end`.
     Loop,
+    /// `block`.
     Block,
+    /// The implicit label around the whole body, which `return` targets.
+    ///
+    /// Never constructed today: [`RegInstruction::emit_instruction_for_func`] pushes
+    /// that [`Block`] itself rather than going through [`SimulatedStack::add_block`],
+    /// since a function frame has no operator to open it and no block type to read.
+    /// The variant exists for the mapping in `add_block` to be total.
     Func,
 }
 
@@ -182,6 +193,12 @@ impl Slot {
 }
 
 impl Default for Slot {
+    /// Filler for arena entries that are about to be overwritten.
+    ///
+    /// `SimulatedStack::pops_and_pushes_registers` resizes the input arena before
+    /// popping, because it fills the run back-to-front. Every slot it reserves is
+    /// written before anything reads it, so the value only has to be cheap and
+    /// harmless — a constant reads nothing and names no location.
     fn default() -> Self {
         Slot::Const(Const::I32(0))
     }
@@ -196,9 +213,15 @@ impl Default for Slot {
 /// to a `Slot` therefore happens at pop or peek time, never at push time.
 #[derive(Clone, Copy)]
 enum StackSlot {
+    /// An immediate. Occupies a stack position and no register.
     Const(Const),
+    /// A value an earlier instruction produced, in the register named here. The
+    /// only variant [`SimulatedStack::curr_register_index`] counts.
     Register(u32),
+    /// A borrow of a local, resolving to the local itself or to the spill slot it
+    /// was rescued into, whichever holds the value when this is finally read.
     Local(LocalSlot),
+    /// [`Self::Local`] for a global.
     Global(GlobalSlot),
 }
 
@@ -208,6 +231,7 @@ enum StackSlot {
 /// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
 /// is, which is what lets instruction variants stay small.
 pub struct Registers<const L: usize, T> {
+    /// Index of the run's first entry in its arena; it covers `L` from there.
     start: u32,
     phantom: PhantomData<T>,
 }
@@ -248,8 +272,11 @@ pub struct Signature<const I: usize, const O: usize> {
 /// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
 /// its size budget.
 pub struct DynSignature {
+    /// Start of the source run in the input arena.
     input: u32,
+    /// Start of the destination run in the output arena.
     output: u32,
+    /// Length of both runs; see why there is only one on the type.
     len: u32,
 }
 
@@ -300,6 +327,8 @@ struct ControlStack {
 }
 
 impl ControlStack {
+    /// How many labels are open, the function frame included. A `br` resolves its
+    /// relative depth against this.
     fn len(&self) -> usize {
         self.stack.len()
     }
@@ -332,6 +361,8 @@ struct UnreachableTrackingControlStack {
     /// Constructs opened while dead, innermost last. Only the kind is kept; nothing
     /// about a dead block is needed beyond knowing when it closes.
     blocks: Vec<BlockVariant>,
+    /// Whether the operators being read cannot execute, i.e. an unconditional
+    /// transfer has been lowered and the enclosing block has not closed yet.
     unreachable: bool,
 }
 
@@ -344,6 +375,7 @@ enum UnreachableCheckResult {
 }
 
 impl UnreachableTrackingControlStack {
+    /// A tracker for a body that starts out reachable, as every body does.
     fn new() -> Self {
         UnreachableTrackingControlStack {
             blocks: vec![],
@@ -364,10 +396,17 @@ impl UnreachableTrackingControlStack {
         self.unreachable = false;
     }
 
+    /// Records a construct opened while dead, so its `else`/`end` is recognised as
+    /// closing it rather than as closing the construct that died.
     fn add_block(&mut self, block: BlockVariant) {
         self.blocks.push(block);
     }
 
+    /// Closes the innermost construct opened while dead.
+    ///
+    /// Panics if none is open, which would mean [`Self::check_unreachablity`] let an
+    /// `end` through the wrong arm — the real [`ControlStack`] would already be
+    /// unbalanced by then.
     fn pop_block(&mut self) -> BlockVariant {
         self.blocks.pop().unwrap()
     }
@@ -410,6 +449,10 @@ impl UnreachableTrackingControlStack {
         }
     }
 
+    /// The kind of label this operator opens, or `None` if it opens none.
+    ///
+    /// [`BlockVariant::Func`] is not among the answers: the function frame is opened
+    /// by the pass itself, never by an operator.
     fn is_block(operator: &Operator<'_>) -> Option<BlockVariant> {
         match operator {
             Operator::Block { .. } => Some(BlockVariant::Block),
@@ -419,14 +462,19 @@ impl UnreachableTrackingControlStack {
         }
     }
 
+    /// Whether this operator opens the second arm of an `if`.
     fn is_else(operator: &Operator<'_>) -> bool {
         matches!(operator, Operator::Else)
     }
 
+    /// Whether this operator closes a label.
     fn is_end(operator: &Operator<'_>) -> bool {
         matches!(operator, Operator::End)
     }
 
+    /// Whether every construct opened while dead has since closed — and so whether
+    /// the next `else`/`end` closes the construct that *died*, which is what makes
+    /// the code after it live again.
     fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
@@ -479,6 +527,13 @@ struct SimulatedStack {
 }
 
 impl SimulatedStack {
+    /// Empty lowering state for one body.
+    ///
+    /// The two counts size the lazy origin tables, which are indexed by local and
+    /// global index without bounds checks — so `locals_count` must include the
+    /// params, not just the declared locals. Everything else starts empty and grows
+    /// as the body is walked; the control stack in particular is empty here, and the
+    /// caller pushes the function frame onto it.
     fn new(locals_count: u32, globals_count: u32) -> Self {
         SimulatedStack {
             stack: Stack::new_with_capacity(0),
@@ -584,6 +639,11 @@ impl SimulatedStack {
         (params, results)
     }
 
+    /// Closes the innermost label and hands back its record, for the `end` that
+    /// backpatches every branch attached to it.
+    ///
+    /// Returns the [`Block`] by value because its `attached_breaks` are needed after
+    /// it has left the stack, and it is the last reader of them.
     fn pop_block(&mut self) -> Block {
         self.control_stack
             .stack
@@ -591,12 +651,15 @@ impl SimulatedStack {
             .expect("hitting this means the control stack logic for pushing blocks is incorrect")
     }
 
+    /// The innermost open label — the block the operators being lowered belong to.
     fn get_curr_block(&self) -> &Block {
         debug_assert!(!self.control_stack.stack.is_empty());
 
         &self.control_stack.stack[self.control_stack.stack.len() - 1]
     }
 
+    /// Mutable [`Self::get_curr_block`], for attaching a branch to the label it
+    /// targets.
     fn get_curr_block_mut(&mut self) -> &mut Block {
         debug_assert!(!self.control_stack.stack.is_empty());
         let len = self.control_stack.stack.len();
@@ -604,10 +667,15 @@ impl SimulatedStack {
         &mut self.control_stack.stack[len - 1]
     }
 
+    /// A label by absolute position, index 0 being the function frame.
+    ///
+    /// Branches index by *relative depth*, so a caller converts first:
+    /// `control_stack.len() - 1 - relative_depth`.
     fn get_block(&self, index: usize) -> &Block {
         &self.control_stack.stack[index]
     }
 
+    /// Mutable [`Self::get_block`], for attaching a branch to an outer label.
     fn get_block_mut(&mut self, index: usize) -> &mut Block {
         &mut self.control_stack.stack[index]
     }
@@ -807,14 +875,20 @@ impl SimulatedStack {
         }
     }
 
+    /// `i32.const` and friends: records the immediate, emitting nothing.
     fn push_const(&mut self, val: Const) {
         self.push(Slot::Const(val));
     }
 
+    /// `local.get`: starts or joins a lazy borrow of the local, emitting nothing.
+    /// The value is read in place by whatever consumes it, unless a write to the
+    /// local intervenes and spills it first.
     fn push_local(&mut self, index: u32) {
         self.push(Slot::Local(index));
     }
 
+    /// `global.get`: [`Self::push_local`] for a global. Also spilled by a call,
+    /// which may write any global.
     fn push_global(&mut self, index: u32) {
         self.push(Slot::Global(index));
     }
@@ -1018,6 +1092,19 @@ impl SimulatedStack {
         Some(spill_index)
     }
 
+    /// What [`Self::curr_register_index`] would be after popping `depth` operands,
+    /// without popping any of them.
+    ///
+    /// The two heights differ, so this cannot be subtraction: only
+    /// [`StackSlot::Register`] entries in the window give a register back, and a
+    /// `Const`, `Local`, or `Global` occupies a stack position and none. See the
+    /// module docs.
+    ///
+    /// Callers use it to name a register base *before* consuming the operands that
+    /// determine it — a call's `caller_base`, which has to be known when the
+    /// instruction is built. The window must span every operand the instruction
+    /// consumes: `call_indirect` counts one deeper than its signature's arity,
+    /// because the callee index is popped along with the arguments.
     fn register_index_at_depth(&self, depth: u32) -> usize {
         let mut register_index = self.curr_register_index;
 
@@ -1138,9 +1225,7 @@ pub enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else {
-        end_index: u32,
-    },
+    Else { end_index: u32 },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -1182,20 +1267,74 @@ pub enum RegInstruction {
     I32Eqz(Signature<1, 1>),
     /// `select`: `input[2] != 0 ? input[0] : input[1]`.
     Select(Signature<3, 1>),
+    /// `return`: leave the function, carrying its results.
+    ///
+    /// Lowered as a branch to the outermost label, so it behaves like any other
+    /// exit: the results, if there are any, are materialized by a [`Self::Move`]
+    /// emitted immediately before, and this is recorded in the function block's
+    /// `attached_breaks` for backpatching. Carries no operands of its own.
     Return {
+        /// Absolute index of the function's `end`, backpatched when that `end` is
+        /// reached. `u32::MAX` until then, which is what an unpatched target would
+        /// show up as.
         target_index: u32,
     },
+    /// `call`: invoke a function by index.
+    ///
+    /// The arguments were staged into `[caller_base, caller_base + params)` by a
+    /// [`Self::Move`] emitted immediately before — omitted for a callee that takes
+    /// none — so they become the callee's locals in place. Both arities come from
+    /// the callee's declared type rather than from this variant.
     Call {
+        /// The callee, in the module's function index space.
         func_index: FuncIndex,
+        /// Frame-relative register index the callee's frame is based at: where its
+        /// arguments were staged, and where its results come back to.
         caller_base: u32,
     },
+    /// `call_indirect`: resolve a callee through a table at execution and call it.
+    ///
+    /// The callee index is pushed *above* the arguments, so it is popped first and
+    /// the arguments are staged below it. That extra operand is the only structural
+    /// difference from [`Self::Call`] — and the reason both of this call's heights
+    /// count one deeper than the signature's arity.
+    ///
+    /// **Neither operand run is stored.** The arguments are the `params` operands
+    /// starting at `operands`, `params` coming from the signature [`Self::ty_index`]
+    /// names; their destinations are the same many registers based at `caller_base`,
+    /// contiguous because that is how they were allocated. Reconstructing both from
+    /// the signature is what keeps this variant inside the size budget — see the
+    /// note on [`RegInstruction`]'s size assertion.
+    ///
+    /// **The move is a field rather than a preceding [`Self::Move`]**, and unlike
+    /// [`Self::BrIf`] the reason is not a control path: the staged arguments land in
+    /// `[caller_base, caller_base + params)`, which may *include* the register
+    /// `slot` reads the callee index from. A `Move` ahead of the instruction would
+    /// destroy the index before it was used. An executor must therefore resolve
+    /// `slot` before performing the move — the same read-before-write contract
+    /// [`Self::BrIf`] has with its condition.
+    ///
+    /// [`Self::ty_index`]: RegInstruction::CallIndirect::ty_index
     CallIndirect {
+        /// Index into the module's type section of the signature this call site
+        /// expects.
+        ///
+        /// Two jobs: the callee's own type is checked structurally against it at
+        /// execution — a mismatch traps — and its param count is how many of the
+        /// operands at `operands` are arguments.
         ty_index: TyIndex,
+        /// The table the callee index is resolved through, and what a trap out of
+        /// this call reports.
         table_index: TableIndex,
+        /// Where the callee index is read from. Resolved *before* the move is
+        /// performed; see the note above.
         slot: Registers<1, Slot>,
-        // index into input_registers, take params length of registers and mov them to
-        // [caller_base][caller_base + 1]...[caller_base + params - 1]
+        /// Start of this call's arguments in the input arena. They run for the
+        /// `ty_index` signature's param count, in wasm push order, and are moved to
+        /// `caller_base`, `caller_base + 1`, ... one apiece.
         operands: u32,
+        /// Frame-relative register index the callee's frame is based at, on the
+        /// same terms as [`Self::Call`]'s.
         caller_base: u32,
     },
     /// Copies each input slot into the register named by the output at the same
@@ -1247,6 +1386,13 @@ pub enum RegInstruction {
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
+    /// Closes a label, one per `end` operator.
+    ///
+    /// This is where branches to a `block` or `if` label land — a `loop`'s
+    /// back-edge targets its start instead. The fallthrough [`Self::Move`] is
+    /// emitted *before* it, so a taken branch, which performed its own move on the
+    /// way, jumps here and skips the copy it would otherwise repeat. The outermost
+    /// one closes the function body.
     End,
 }
 

@@ -293,6 +293,12 @@ impl SpillArena {
     }
 }
 
+/// A slot in the frame's spill area, holding one materialized local or global.
+///
+/// The inner index is private and only `SpillArena::reserve_slot` can mint one,
+/// so an index that exists is one the arena handed out. There is no `PartialEq`
+/// either: two live borrows never share a slot, and comparing them would only be
+/// asking which of two distinct slots came first.
 #[derive(Debug, Clone, Copy)]
 pub struct SpillIndex(u32);
 
