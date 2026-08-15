@@ -112,7 +112,7 @@ use crate::{
             LocalSlot, SpillArena, SpillIndex,
         },
     },
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
     vm::stack::Stack,
 };
 use std::marker::PhantomData;
@@ -1189,6 +1189,15 @@ pub enum RegInstruction {
         func_index: FuncIndex,
         caller_base: u32,
     },
+    CallIndirect {
+        ty_index: TyIndex,
+        table_index: TableIndex,
+        slot: Registers<1, Slot>,
+        // index into input_registers, take params length of registers and mov them to
+        // [caller_base][caller_base + 1]...[caller_base + params - 1]
+        operands: u32,
+        caller_base: u32,
+    },
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
     /// leaves its values in the same registers.
@@ -1885,7 +1894,31 @@ impl RegInstruction {
                 Operator::CallIndirect {
                     type_index,
                     table_index,
-                } => todo!(),
+                } => {
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
+                    let ty = &types[type_index as usize];
+                    let params = ty.params.len() as u32;
+                    let results = ty.results.len() as u32;
+                    let recorded_height = simulated_stack.stack.height() - params - 1;
+                    let caller_base = simulated_stack.register_index_at_depth(params + 1) as u32;
+
+                    let slot = simulated_stack.registers_for::<1, 0>().input;
+
+                    let move_registers =
+                        simulated_stack.materialize_stack_slots_in_registers(params);
+
+                    instructions.push(RegInstruction::CallIndirect {
+                        ty_index: TyIndex(type_index),
+                        table_index: TableIndex(table_index),
+                        slot,
+                        operands: move_registers.input,
+                        caller_base,
+                    });
+
+                    simulated_stack
+                        .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
+                }
                 Operator::End => {
                     let block = simulated_stack.pop_block();
                     let results = block.results;

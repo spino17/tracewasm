@@ -71,6 +71,15 @@ fn lower(wat: &str) -> LoweredRegFuncBody {
 /// Imported functions are not modelled: the index space here is the code section's,
 /// so `call n` inside the wat must name a defined function.
 fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
+    lower_func_with_types(wat, n).0
+}
+
+/// [`lower_func`], also handing back the module's type section.
+///
+/// A `call_indirect` stores only a `ty_index`, so how many of the operands in its
+/// arena run are arguments is recoverable only through the types. Rendering one
+/// therefore needs exactly what executing one will need.
+fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncType>) {
     let bytes = wat::parse_str(wat).expect("invalid wat");
 
     let mut types: Vec<FuncType> = vec![];
@@ -135,7 +144,7 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
         })
         .collect();
 
-    RegInstruction::emit_instruction_for_func(
+    let body = RegInstruction::emit_instruction_for_func(
         body.get_operators_reader().expect("operators"),
         params,
         results,
@@ -144,7 +153,9 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
         locals_count,
         globals_count,
     )
-    .expect("lowering failed")
+    .expect("lowering failed");
+
+    (body, types)
 }
 
 /// Renders a lowered body as one line per instruction, operands resolved against
@@ -152,7 +163,7 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
 ///
 /// Assertions compare against this rather than against the enum, so a failure shows
 /// the whole program and a reader can see what changed.
-fn render(body: &LoweredRegFuncBody) -> String {
+fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
     let (instructions, frame) = body;
     let ins = &frame.input_registers_arena;
     let outs = &frame.output_registers_arena;
@@ -284,6 +295,34 @@ fn render(body: &LoweredRegFuncBody) -> String {
                 func_index,
                 caller_base,
             } => format!("call         f{} caller_base={caller_base}", func_index.0),
+            RegInstruction::CallIndirect {
+                ty_index,
+                table_index,
+                slot,
+                operands,
+                caller_base,
+            } => {
+                // Both runs are implicit: the arguments are the `params` operands
+                // starting at `operands`, and their destinations are the same many
+                // registers based at `caller_base`. Rendering them the way the
+                // executor has to reconstruct them is the point — a test that read
+                // them any other way would not notice the two disagreeing.
+                let params = types[ty_index.0 as usize].params.len();
+                let args = &ins[*operands as usize..*operands as usize + params];
+                let dsts: Vec<u32> = (0..params as u32).map(|i| caller_base + i).collect();
+
+                format!(
+                    "call_indirect [{}] ty{} table{} caller_base={caller_base}{}",
+                    sig1(slot),
+                    ty_index.0,
+                    table_index.0,
+                    if params == 0 {
+                        String::new()
+                    } else {
+                        format!("  move {} -> {}", list(args), regs(&dsts))
+                    }
+                )
+            }
             RegInstruction::End => "end".to_string(),
         };
 
@@ -306,7 +345,8 @@ fn assert_lowers_to(wat: &str, expected: &str) {
 
 /// [`assert_lowers_to`] for a body that is not function 0 — a caller, typically.
 fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
-    let got = render(&lower_func(wat, n));
+    let (body, types) = lower_func_with_types(wat, n);
+    let got = render(&body, &types);
 
     let norm = |s: &str| {
         s.lines()
@@ -2166,7 +2206,7 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
     assert!(
         spill < branch,
         "spill at {spill} must precede the branch at {branch}:\n{}",
-        render(&body)
+        render(&body, &[])
     );
 }
 
@@ -2620,6 +2660,242 @@ fn a_local_read_across_a_call_needs_no_rescue() {
     assert!(
         index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
         "a callee cannot write the caller's locals"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// call_indirect
+//
+// Everything `call` has to get right, plus one operand: the callee index sits
+// *above* the arguments and is popped with them. That extra pop is what both
+// heights have to account for — the slot height the call unwinds to, and the
+// register index the callee's frame is based at.
+//
+// The instruction stores neither run explicitly. The arguments are the `params`
+// operands starting at `operands`, `params` coming from the signature `ty_index`
+// names; their destinations are the same many registers based at `caller_base`.
+// The tests below read them back that way on purpose: reconstructing the two the
+// way an executor must is what would show them disagreeing.
+// ---------------------------------------------------------------------------
+
+/// A signature to call through, plus the table to resolve against. Type 0 is the
+/// call site's, so the tested function's own type lands at index 1.
+fn indirect_module(ty: &str, body: &str) -> String {
+    format!("(module (memory 1) (type (func {ty})) (table 4 funcref) {body})")
+}
+
+#[test]
+fn call_indirect_stages_its_arguments_at_the_caller_base() {
+    assert_lowers_to(
+        &indirect_module(
+            "(param i32 i32 i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 local.get 0 i32.load
+                 local.get 0
+                 i32.const 9
+                 local.get 0 i32.load
+                 call_indirect (type 0))"#,
+        ),
+        "
+          0  i32.load     [local0]+0 -> r0
+          1  i32.load     [local0]+0 -> r1
+          2  call_indirect [r1] ty0 table0 caller_base=0  move r0, local0, 9 -> r0, r1, r2
+          3  move         r0 -> r0
+          4  end
+             frame: 3 registers, 0 spills
+        ",
+    );
+}
+
+/// The index is the last thing pushed, so it is popped first and the arguments
+/// are staged below it — a call that forgot it would leave one argument on the
+/// simulated stack and shift every height after the call.
+#[test]
+fn the_callee_index_is_popped_with_the_arguments() {
+    assert_lowers_to(
+        &indirect_module(
+            "(param i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 local.get 0 i32.load
+                 local.get 0 i32.load
+                 i32.const 3
+                 call_indirect (type 0)
+                 i32.add)"#,
+        ),
+        "
+          0  i32.load     [local0]+0 -> r0
+          1  i32.load     [local0]+0 -> r1
+          2  call_indirect [3] ty0 table0 caller_base=1  move r1 -> r1
+          3  i32.add      r0, r1 -> r0
+          4  move         r0 -> r0
+          5  end
+             frame: 2 registers, 0 spills
+        ",
+    );
+}
+
+/// With no arguments the index is still popped, so the unwind is one slot deep
+/// and not zero — the arithmetic must not run through `params - 1` on the way.
+#[test]
+fn a_zero_argument_call_indirect_still_pops_its_index() {
+    assert_lowers_to(
+        &indirect_module(
+            "(result i32)",
+            r#"(func (result i32)
+                 i32.const 3
+                 call_indirect (type 0))"#,
+        ),
+        "
+          0  call_indirect [3] ty0 table0 caller_base=0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// `caller_base` is what sits below the *arguments*, so the window it counts over
+/// spans the index as well as them. Counting one short reads the deepest argument
+/// as if it were below the call, which shows up only when that argument holds a
+/// register — the case both of these pin.
+#[test]
+fn caller_base_counts_past_the_index_to_the_deepest_argument() {
+    let base_of = |wat: &str| {
+        let (prog, _) = lower_func(wat, 0);
+        let at = index_of(&prog, |i| matches!(i, RegInstruction::CallIndirect { .. })).unwrap();
+
+        let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
+            unreachable!()
+        };
+
+        *caller_base
+    };
+
+    // the only register is the argument itself: it sits *at* the base
+    assert_eq!(
+        base_of(&indirect_module(
+            "(param i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 local.get 0 i32.load
+                 i32.const 3
+                 call_indirect (type 0))"#,
+        )),
+        0,
+        "a register argument does not raise the base"
+    );
+
+    // one register below the call, one holding the argument
+    assert_eq!(
+        base_of(&indirect_module(
+            "(param i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 local.get 0 i32.load
+                 local.get 0 i32.load
+                 i32.const 3
+                 call_indirect (type 0)
+                 i32.add)"#,
+        )),
+        1,
+        "only the value below the arguments counts"
+    );
+}
+
+/// Why the argument move is a field of the instruction rather than a `Move` ahead
+/// of it: the staged arguments land at `[caller_base, caller_base + params)`, and
+/// the callee index may be read from a register inside that range. Here `7` is
+/// staged into `r0` while the index is read from `r0`.
+///
+/// An executor must therefore read the index *before* performing the move — the
+/// same contract [`RegInstruction::BrIf`] has with its condition.
+#[test]
+fn staging_the_arguments_may_clobber_the_callee_index_register() {
+    assert_lowers_to(
+        &indirect_module(
+            "(param i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 i32.const 7
+                 local.get 0 i32.load
+                 call_indirect (type 0))"#,
+        ),
+        "
+          0  i32.load     [local0]+0 -> r0
+          1  call_indirect [r0] ty0 table0 caller_base=0  move 7 -> r0
+          2  move         r0 -> r0
+          3  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// Results come back to the caller base, however many there are.
+#[test]
+fn results_come_back_at_the_caller_base() {
+    assert_lowers_to(
+        &indirect_module(
+            "(param i32) (result i32 i32)",
+            r#"(func (param i32) (result i32)
+                 local.get 0
+                 i32.const 3
+                 call_indirect (type 0)
+                 i32.add)"#,
+        ),
+        "
+          0  call_indirect [3] ty0 table0 caller_base=0  move local0 -> r0
+          1  i32.add      r0, r1 -> r0
+          2  move         r0 -> r0
+          3  end
+             frame: 2 registers, 0 spills
+        ",
+    );
+}
+
+/// The callee is not known until execution, so it may write any global: a borrow
+/// that outlives the call is rescued exactly as it is for a direct one.
+#[test]
+fn a_global_read_across_a_call_indirect_is_rescued() {
+    assert_lowers_to(
+        &format!(
+            "(module (global (mut i32) (i32.const 0)) (type (func (result i32))) (table 4 funcref)
+               {})",
+            r#"(func (result i32)
+                 global.get 0
+                 i32.const 3
+                 call_indirect (type 0)
+                 i32.add)"#
+        ),
+        "
+          0  global.spill global0 -> spill0
+          1  call_indirect [3] ty0 table0 caller_base=0
+          2  i32.add      spill0, r0 -> r0
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+/// A height that is off by one inside a block survives until the block's `end`
+/// asserts on it, so a balanced block is the cheap end-to-end check.
+#[test]
+fn a_call_indirect_leaves_its_block_balanced() {
+    assert_lowers_to(
+        &indirect_module(
+            "(param i32) (result i32)",
+            r#"(func (param i32) (result i32)
+                 block (result i32)
+                   local.get 0
+                   i32.const 3
+                   call_indirect (type 0)
+                 end)"#,
+        ),
+        "
+          0  call_indirect [3] ty0 table0 caller_base=0  move local0 -> r0
+          1  move         r0 -> r0
+          2  end
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
     );
 }
 
