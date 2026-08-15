@@ -29,13 +29,20 @@ use wasmparser::Parser;
 // values, which also keeps assertions reading like the emitted code.
 // ---------------------------------------------------------------------------
 
-/// Renders one operand: `5`, `local1`, `global0`, `spill0`, `r2`.
+/// Renders one operand: `5`, `local1`, `global0`, `spill0`, `r2`, `(0)ref`.
 fn slot_str(s: &Slot) -> String {
     match s {
         Slot::Const(Const::I32(v)) => format!("{v}"),
         Slot::Const(Const::I64(v)) => format!("{v}i64"),
         Slot::Const(Const::F32(v)) => format!("{v}f32"),
         Slot::Const(Const::F64(v)) => format!("{v}f64"),
+        Slot::Const(Const::Ref(v)) => {
+            if let Some(func_index) = v {
+                format!("({})ref", func_index.0)
+            } else {
+                "(null)ref".to_string()
+            }
+        }
         Slot::Local(n) => format!("local{n}"),
         Slot::Global(n) => format!("global{n}"),
         Slot::Spilled(i) => format!("spill{i}"),
@@ -524,6 +531,93 @@ fn tee_spills_before_reading_the_top() {
     );
 
     assert_eq!(s.stack.height(), 1, "tee peeks, it does not consume");
+}
+
+// ---------------------------------------------------------------------------
+// reference immediates
+//
+// `ref.null` and `ref.func` push a value that is fully described by the operator
+// itself, so they are [`Const`]s and behave like `i32.const`: nothing is emitted,
+// nothing is allocated, and the value is read in place by whatever consumes it.
+//
+// A reference is `Option<FuncIndex>`, matching the runtime's `Val::Ref`, so the
+// two agree on what a reference *is* without a conversion in between.
+// ---------------------------------------------------------------------------
+
+/// Two functions, so a `ref.func 0` has something to name. `elem declare` is what
+/// makes referencing it legal without putting it in a table.
+fn ref_module(body: &str) -> String {
+    format!("(module (func) (elem declare func 0) {body})")
+}
+
+#[test]
+fn a_reference_is_an_immediate_and_emits_nothing() {
+    // the push itself costs no instruction; the value appears at its consumer
+    assert_func_lowers_to(
+        &ref_module("(func (result funcref) ref.func 0)"),
+        1,
+        "
+          0  move         (0)ref -> r0
+          1  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    assert_lowers_to(
+        "(module (func (result funcref) ref.null func))",
+        "
+          0  move         (null)ref -> r0
+          1  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// Written straight into its destination, with no register in between — the whole
+/// point of carrying it as an operand rather than materializing it.
+#[test]
+fn a_reference_is_stored_in_place() {
+    assert_func_lowers_to(
+        &format!(
+            "(module (global (mut funcref) (ref.null func)) (func) (elem declare func 0) {})",
+            "(func ref.func 0 global.set 0)"
+        ),
+        1,
+        "
+          0  global.set   global0 <- (0)ref
+          1  end
+             frame: 0 registers, 0 spills
+        ",
+    );
+
+    assert_func_lowers_to(
+        &ref_module("(func (local funcref) ref.func 0 local.set 0)"),
+        1,
+        "
+          0  local.set    local0 <- (0)ref
+          1  end
+             frame: 0 registers, 0 spills
+        ",
+    );
+}
+
+/// The heap type is dropped, as it is in the stack pass: `Val::Ref(None)` is the
+/// only null there is at execution, and validation has already established that
+/// each null reached a slot willing to hold it. Nothing downstream can tell a null
+/// `funcref` from a null `externref`, so nothing needs to.
+#[test]
+fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
+    let funcref = render(
+        &lower("(module (func (result funcref) ref.null func))"),
+        &[],
+    );
+    let externref = render(
+        &lower("(module (func (result externref) ref.null extern))"),
+        &[],
+    );
+
+    assert_eq!(funcref, externref);
+    assert!(funcref.contains("(null)ref"), "{funcref}");
 }
 
 // ---------------------------------------------------------------------------

@@ -160,6 +160,7 @@ pub enum Const {
     F32(f32),
     /// A 64-bit float immediate; the bit pattern is preserved exactly.
     F64(f64),
+    Ref(Option<FuncIndex>),
 }
 
 /// Where an instruction reads one operand from.
@@ -1695,6 +1696,12 @@ impl RegInstruction {
                         index: LocalIndex(local_index),
                         sig: registers,
                     });
+                }
+                Operator::RefNull { hty: _ } => {
+                    simulated_stack.push_const(Const::Ref(None));
+                }
+                Operator::RefFunc { function_index } => {
+                    simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
                 }
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
