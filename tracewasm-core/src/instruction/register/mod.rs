@@ -1232,6 +1232,65 @@ const _: () = assert!(
 );
 
 impl RegInstruction {
+    /// Materializes every live lazy borrow in `arena`, emitting one spill
+    /// instruction per borrow.
+    ///
+    /// # Why a rescue cannot live at the write
+    ///
+    /// A borrow of a local or global reads its origin in place (see [`lazy`]), and
+    /// stays valid only until something writes that origin. The write emits a spill
+    /// that copies the old value aside, and the borrow is redirected to it — so from
+    /// then on the operand resolves to [`Slot::Spilled`] *for every path*, because
+    /// lowering resolves it once.
+    ///
+    /// That is only sound if the copy satisfies two properties. Emitting it at the
+    /// write satisfies neither in general:
+    ///
+    /// * **It must run on every path that reads it.** A write inside one arm of an
+    ///   `if`, or after a `br_if` that was taken, is skipped on the other path — and
+    ///   that path still reads the spill slot, which nothing wrote. The value it
+    ///   wanted is untouched in the local, but the operand is no longer looking
+    ///   there.
+    ///
+    /// * **It must not run again after the write.** A write inside a loop body puts
+    ///   the copy inside the repeated region, so the back-edge re-runs it and the
+    ///   second pass captures what the first pass wrote — destroying the snapshot it
+    ///   existed to preserve.
+    ///
+    /// # Where it lives instead
+    ///
+    /// The rescue is hoisted to the constructs that can break one of those:
+    /// `if`, `br_if` and `br_table`, where control diverges, and `loop`, where it
+    /// repeats. Called before the construct is emitted, the spill dominates every
+    /// reader and runs exactly once.
+    ///
+    /// A `block` needs nothing: entering one is unconditional and it never repeats,
+    /// so a spill inside it already has both properties.
+    ///
+    /// Once hoisted, the write inside the construct finds
+    /// [`LazyArena::origin`]`[n] == None` and adds nothing — the borrow is already
+    /// materialized, so there is no second copy and no second slot.
+    ///
+    /// # Cost
+    ///
+    /// Nothing is emitted unless a borrow is *live across* the construct, which
+    /// means a `local.get` result still resting on the operand stack when control
+    /// reaches it. Compiled Rust keeps such values in locals rather than on the
+    /// stack, so in practice this loop finds nothing and emits nothing.
+    ///
+    /// When it does fire it is deliberately conservative: it spills whether or not
+    /// any arm actually writes that origin, because a single forward pass cannot
+    /// know what a construct writes before lowering it. Narrowing that would take a
+    /// pre-pass collecting each construct's written origins, and the waste it would
+    /// recover is one copy — the operand itself is no slower, since a spill slot and
+    /// a local are both frame reads.
+    ///
+    /// # Ordering
+    ///
+    /// Call this *before* the arm reads `instructions.len()` — for the block index
+    /// recorded by [`SimulatedStack::add_block`], or for the `attached_breaks` entry
+    /// a branch registers. Spills emitted after that point shift the instruction the
+    /// index was meant to name.
     fn spill_lazy<T, F: Fn(SpillIndex, u32) -> RegInstruction>(
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
@@ -1247,6 +1306,11 @@ impl RegInstruction {
         }
     }
 
+    /// Rescues every live local borrow ahead of a diverging or repeating construct.
+    ///
+    /// See [`Self::spill_lazy`] for why the rescue cannot be left at the write, and
+    /// [`Self::spill_live_globals`] for the other half — a construct needs both, and
+    /// a call site that makes only one of them leaves the other origin space exposed.
     fn spill_live_locals(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Vec<RegInstruction>,
@@ -1265,6 +1329,8 @@ impl RegInstruction {
         );
     }
 
+    /// [`Self::spill_live_locals`] for globals, which use their own arena but share
+    /// the frame's spill pool.
     fn spill_live_globals(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Vec<RegInstruction>,
@@ -1464,6 +1530,9 @@ impl RegInstruction {
                     }
                 }
                 Operator::Loop { blockty } => {
+                    // A loop repeats: a rescue left inside the body would re-run on
+                    // the back-edge and capture what the previous iteration wrote.
+                    // Hoisting it above the header runs it exactly once, on entry.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions);
                     Self::spill_live_globals(&mut simulated_stack, &mut instructions);
 
@@ -1482,6 +1551,8 @@ impl RegInstruction {
                     }
                 }
                 Operator::If { blockty } => {
+                    // Control diverges here, and a write in either arm would leave
+                    // the other path reading a spill slot nothing wrote.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions);
                     Self::spill_live_globals(&mut simulated_stack, &mut instructions);
 
@@ -1609,6 +1680,8 @@ impl RegInstruction {
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::BrIf { relative_depth } => {
+                    // Taking the branch skips everything after it, including any
+                    // write that would have rescued a borrow still live here.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions);
                     Self::spill_live_globals(&mut simulated_stack, &mut instructions);
 
@@ -1647,6 +1720,8 @@ impl RegInstruction {
                     });
                 }
                 Operator::BrTable { targets: table } => {
+                    // As for `br_if`: every arm jumps away, so a later write cannot
+                    // be relied on to have rescued anything.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions);
                     Self::spill_live_globals(&mut simulated_stack, &mut instructions);
 
