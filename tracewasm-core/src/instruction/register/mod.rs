@@ -1598,7 +1598,7 @@ impl RegInstruction {
         );
     }
 
-    fn emit<const I: usize, const O: usize, F: Fn(Signature<I, O>) -> RegInstruction>(
+    fn emit<const I: usize, const O: usize, F: FnOnce(Signature<I, O>) -> RegInstruction>(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Vec<RegInstruction>,
         emitter: F,
@@ -1643,6 +1643,23 @@ impl RegInstruction {
             has_inherited: false,
             attached_breaks: vec![],
         });
+
+        /// [`Self::emit`] against this body's `simulated_stack` and `instructions`.
+        ///
+        /// Declared inside the function so it can name both by hand, which is what
+        /// keeps an arm to one line: the two are the same for every operator, and
+        /// spelling them out per arm is the only thing that made these five lines
+        /// long instead of one.
+        ///
+        /// The argument is normally the variant itself — a tuple-variant
+        /// constructor *is* a `Fn(Signature<I, O>) -> RegInstruction`, so the arity
+        /// comes from the variant's own declaration and no arm restates it. Pass a
+        /// closure where the variant carries an immediate beside its signature.
+        macro_rules! emit {
+            ($build:expr) => {
+                Self::emit(&mut simulated_stack, &mut instructions, $build)
+            };
+        }
 
         while !operator_reader.eof() {
             let (operator, _offset) = operator_reader.read_with_offset()?;
@@ -1737,50 +1754,24 @@ impl RegInstruction {
                 Operator::RefFunc { function_index } => {
                     simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
                 }
-                Operator::RefIsNull => {
-                    Self::emit(
-                        &mut simulated_stack,
-                        &mut instructions,
-                        RegInstruction::RefIsNull,
-                    );
-                }
+                Operator::RefIsNull => emit!(RegInstruction::RefIsNull),
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
                 }
-                Operator::I32Load { memarg } => {
-                    let registers = simulated_stack.registers_for::<1, 1>();
-
-                    instructions.push(RegInstruction::I32Load {
-                        offset: memarg.offset as u32,
-                        sig: registers,
-                    });
-                }
-                Operator::I32Store { memarg } => {
-                    let registers = simulated_stack.registers_for::<2, 0>();
-
-                    instructions.push(RegInstruction::I32Store {
-                        offset: memarg.offset as u32,
-                        sig: registers,
-                    });
-                }
-                Operator::I32Add => {
-                    let registers = simulated_stack.registers_for::<2, 1>();
-
-                    instructions.push(RegInstruction::I32Add(registers));
-                }
-                Operator::I32Eqz => {
-                    let registers = simulated_stack.registers_for::<1, 1>();
-
-                    instructions.push(RegInstruction::I32Eqz(registers));
-                }
+                Operator::I32Load { memarg } => emit!(|sig| RegInstruction::I32Load {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Store { memarg } => emit!(|sig| RegInstruction::I32Store {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Add => emit!(RegInstruction::I32Add),
+                Operator::I32Eqz => emit!(RegInstruction::I32Eqz),
                 Operator::Nop => {
                     continue;
                 }
-                Operator::Select => {
-                    let registers = simulated_stack.registers_for::<3, 1>();
-
-                    instructions.push(RegInstruction::Select(registers));
-                }
+                Operator::Select => emit!(RegInstruction::Select),
                 Operator::Drop => {
                     simulated_stack.pop();
 
