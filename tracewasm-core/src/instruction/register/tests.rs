@@ -323,6 +323,7 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                     }
                 )
             }
+            RegInstruction::Unreachable => "unreachable".to_string(),
             RegInstruction::End => "end".to_string(),
         };
 
@@ -2897,6 +2898,193 @@ fn a_call_indirect_leaves_its_block_balanced() {
              frame: 1 registers, 0 spills
         ",
     );
+}
+
+// ---------------------------------------------------------------------------
+// unreachable
+//
+// It transfers control without naming a label, so it is lowered like `br` in
+// every respect but the branch itself: no move, no attached break, no target —
+// just the trap, the enclosing block reset to the layout its `end` expects, and
+// everything up to that `end` marked dead.
+//
+// The reset is what these tests are about. The block's `end` still emits its own
+// materialisation and still asserts on the height it arrives at, so an operand
+// left behind here surfaces there rather than at the trap.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unreachable_leaves_its_block_in_the_layout_its_end_expects() {
+    assert_lowers_to(
+        r#"(module (func (result i32)
+             block (result i32)
+               unreachable
+             end))"#,
+        "
+          0  unreachable
+          1  move         r0 -> r0
+          2  end
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// Operands the trap never consumes are discarded by the reset, registers and
+/// stack-only slots alike — the block's `end` must see its own entry height plus
+/// its results, not whatever was stranded above it.
+#[test]
+fn operands_live_at_an_unreachable_are_discarded() {
+    // two constants, which occupy stack positions and no registers
+    assert_lowers_to(
+        r#"(module (func (result i32)
+             block (result i32)
+               i32.const 1
+               i32.const 2
+               unreachable
+             end))"#,
+        "
+          0  unreachable
+          1  move         r0 -> r0
+          2  end
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    // and a register, which the reset has to give back before pushing the result
+    assert_lowers_to(
+        r#"(module (memory 1) (func (result i32)
+             block (result i32)
+               i32.const 0 i32.load
+               unreachable
+             end))"#,
+        "
+          0  i32.load     [0]+0 -> r0
+          1  unreachable
+          2  move         r0 -> r0
+          3  end
+          4  move         r0 -> r0
+          5  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn code_after_an_unreachable_is_dropped() {
+    let body = lower(
+        r#"(module (func (result i32)
+             block (result i32)
+               unreachable
+               i32.const 7
+               i32.const 8
+               i32.add
+             end))"#,
+    );
+
+    assert!(
+        index_of(&body.0, |i| matches!(i, RegInstruction::I32Add(_))).is_none(),
+        "the operators after the trap cannot execute:\n{}",
+        render(&body, &[]),
+    );
+}
+
+/// Only the arm that traps is dead. `else` closes a construct opened while
+/// reachable, so lowering resumes there.
+#[test]
+fn an_unreachable_arm_does_not_kill_the_other_arm() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             if (result i32)
+               unreachable
+             else
+               i32.const 1
+             end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  if           spill0 else=4 end=6
+          2  unreachable
+          3  move         r0 -> r0
+          4  else         end=6
+          5  move         1 -> r0
+          6  end
+          7  move         r0 -> r0
+          8  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+/// The reset stops at the trapping block's own entry height: an operand the
+/// *enclosing* block owns is still there afterwards, and still in its register.
+#[test]
+fn an_unreachable_block_does_not_disturb_the_enclosing_block() {
+    assert_lowers_to(
+        r#"(module (memory 1) (func (result i32)
+             i32.const 0 i32.load
+             block
+               unreachable
+             end
+             drop
+             i32.const 1))"#,
+        "
+          0  i32.load     [0]+0 -> r0
+          1  unreachable
+          2  end
+          3  move         1 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// The reset pops through the same path everything else does, so a borrow it
+/// discards releases its spill slot — and one the enclosing block still holds
+/// keeps it.
+#[test]
+fn a_spill_live_across_an_unreachable_survives_it() {
+    assert_lowers_to(
+        r#"(module (global (mut i32) (i32.const 0)) (func (result i32)
+             global.get 0
+             i32.const 5
+             global.set 0
+             block
+               unreachable
+             end
+             i32.const 1
+             i32.add))"#,
+        "
+          0  global.spill global0 -> spill0
+          1  global.set   global0 <- 5
+          2  unreachable
+          3  end
+          4  i32.add      spill0, 1 -> r0
+          5  move         r0 -> r0
+          6  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+/// Results the trap can never produce are still allocated, because the `end`
+/// below is lowered as if the block could fall into it. The registers are never
+/// written at execution — the frame is one wider than it strictly needs, which is
+/// the cheap side of the trade.
+#[test]
+fn a_trapping_block_still_reserves_its_results() {
+    let (_, frame) = lower(
+        r#"(module (func (result i32)
+             block (result i32 i32)
+               unreachable
+             end
+             drop))"#,
+    );
+
+    assert_eq!(frame.registers, 2, "both results are given registers");
 }
 
 // ---------------------------------------------------------------------------

@@ -384,8 +384,9 @@ impl UnreachableTrackingControlStack {
     }
 
     /// Marks the rest of the enclosing block dead. Called after every unconditional
-    /// transfer — `br`, `br_table`, and (once implemented) `return` and
-    /// `unreachable`. Not after `br_if`, whose fall-through is reachable.
+    /// transfer — `br`, `br_table`, `return`, `unreachable` — each of which pairs it
+    /// with [`SimulatedStack::reset_enclosing_block_layout`]. Not after `br_if`,
+    /// whose fall-through is reachable.
     fn set_unreachable(&mut self) {
         self.unreachable = true;
     }
@@ -957,6 +958,33 @@ impl SimulatedStack {
         }
     }
 
+    /// Restores the enclosing block to the layout its `else`/`end` expects, after an
+    /// operator that leaves the rest of that block dead.
+    ///
+    /// Every unconditional transfer ends with this — `br`, `br_table`, `return`,
+    /// `unreachable`. The operators between here and the enclosing block's `else` or
+    /// `end` are filtered out by [`UnreachableTrackingControlStack`], so nothing is
+    /// lowered against the stack in between; but that `else`/`end` *is* lowered, and
+    /// it materializes the block's results and asserts on the height it arrives at.
+    /// This is what puts the model where that assertion expects it: the block's own
+    /// entry height, with its results in registers above it.
+    ///
+    /// The block being restored is the one the operators belong to, *not* the one a
+    /// branch targets — an outward branch leaves the enclosing block without closing
+    /// it, and its `end` still has to be lowered.
+    ///
+    /// Pops go through [`Self::pops_and_pushes`], so the operands abandoned here
+    /// release their lazy borrows and spill slots. Nothing downstream can read them:
+    /// the path that would have is the one just taken away.
+    fn reset_enclosing_block_layout(&mut self) {
+        let block = self.get_curr_block();
+        let recorded_height = block.recorded_height;
+        let results = block.results;
+        let unwind = self.stack.height() - recorded_height;
+
+        self.pops_and_pushes(unwind, results);
+    }
+
     /// [`Self::pops_and_pushes_registers`] for an instruction whose arity is fixed by
     /// its opcode, returning the [`Signature`] to store in the variant.
     fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
@@ -1337,6 +1365,18 @@ pub enum RegInstruction {
         /// same terms as [`Self::Call`]'s.
         caller_base: u32,
     },
+    /// `unreachable`: trap.
+    ///
+    /// Lowered like the branches in everything but the branch: it ends the block's
+    /// reachable code, so the operators after it are dropped and the enclosing block
+    /// is reset to the layout its `end` expects. It names no label, though, so there
+    /// is no move to perform, no break to attach, and no target to backpatch —
+    /// nothing survives the trap to be carried anywhere.
+    ///
+    /// A block whose only exit is a trap still reserves registers for its results,
+    /// because its `end` is lowered as if the block could fall into it. Those
+    /// registers are never written.
+    Unreachable,
     /// Copies each input slot into the register named by the output at the same
     /// position, materializing block params and results so every path into a label
     /// leaves its values in the same registers.
@@ -1811,10 +1851,6 @@ impl RegInstruction {
                     });
                 }
                 Operator::Br { relative_depth } => {
-                    let enclosing_block = simulated_stack.get_curr_block();
-                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
-                    let enclosing_block_results = enclosing_block.results;
-
                     let block_index =
                         simulated_stack.control_stack.len() - 1 - relative_depth as usize;
                     let block = simulated_stack.get_block(block_index);
@@ -1853,14 +1889,7 @@ impl RegInstruction {
 
                     instructions.push(RegInstruction::Br { target_index });
 
-                    // set the layout correctly to the current enclosing block so that instructions
-                    // after else or end would see correct layout as all the instructions between br and else/end
-                    // are unreachable and stack is freezed.
-                    simulated_stack.pops_and_pushes(
-                        simulated_stack.stack.height() - enclosing_block_recorded_height,
-                        enclosing_block_results,
-                    );
-
+                    simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::BrIf { relative_depth } => {
@@ -1909,9 +1938,6 @@ impl RegInstruction {
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions);
                     Self::spill_live_globals(&mut simulated_stack, &mut instructions);
 
-                    let enclosing_block = simulated_stack.get_curr_block();
-                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
-                    let enclosing_block_results = enclosing_block.results;
                     let targets_start = simulated_stack.br_targets.len() as u32;
                     let mut targets_len = 0;
 
@@ -1966,21 +1992,10 @@ impl RegInstruction {
                         targets_len,
                     });
 
-                    // set the layout correctly to the current enclosing block so that instructions
-                    // after else or end would see correct layout as all the instructions between br and else/end
-                    // are unreachable and stack is freezed.
-                    simulated_stack.pops_and_pushes(
-                        simulated_stack.stack.height() - enclosing_block_recorded_height,
-                        enclosing_block_results,
-                    );
-
+                    simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Return => {
-                    let enclosing_block = simulated_stack.get_curr_block();
-                    let enclosing_block_recorded_height = enclosing_block.recorded_height;
-                    let enclosing_block_results = enclosing_block.results;
-
                     let move_registers = simulated_stack.br_truncation_registers(0, results);
 
                     simulated_stack.control_stack.stack[0]
@@ -2002,14 +2017,7 @@ impl RegInstruction {
                         target_index: u32::MAX,
                     });
 
-                    // set the layout correctly to the current enclosing block so that instructions
-                    // after else or end would see correct layout as all the instructions between br and else/end
-                    // are unreachable and stack is freezed.
-                    simulated_stack.pops_and_pushes(
-                        simulated_stack.stack.height() - enclosing_block_recorded_height,
-                        enclosing_block_results,
-                    );
-
+                    simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Call { function_index } => {
@@ -2064,6 +2072,12 @@ impl RegInstruction {
 
                     simulated_stack
                         .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
+                }
+                Operator::Unreachable => {
+                    instructions.push(RegInstruction::Unreachable);
+
+                    simulated_stack.reset_enclosing_block_layout();
+                    unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::End => {
                     let block = simulated_stack.pop_block();
