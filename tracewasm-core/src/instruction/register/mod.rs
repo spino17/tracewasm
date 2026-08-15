@@ -1232,6 +1232,57 @@ const _: () = assert!(
 );
 
 impl RegInstruction {
+    fn spill_lazy<T, F: Fn(SpillIndex, u32) -> RegInstruction>(
+        arena: &mut LazyArena<T>,
+        spills: &mut SpillArena,
+        instructions: &mut Vec<RegInstruction>,
+        instruction_emitter: F,
+    ) {
+        let lazy_count = arena.origin.len() as u32;
+
+        for index in 0..lazy_count {
+            if let Some(spill_index) = SimulatedStack::set_lazy(index, arena, spills) {
+                instructions.push(instruction_emitter(spill_index, index));
+            }
+        }
+    }
+
+    fn spill_live_locals(
+        simulated_stack: &mut SimulatedStack,
+        instructions: &mut Vec<RegInstruction>,
+    ) {
+        let instruction_emitter =
+            |spill_index: SpillIndex, index: u32| RegInstruction::LocalSpill {
+                index: LocalIndex(index),
+                spill_index,
+            };
+
+        Self::spill_lazy(
+            &mut simulated_stack.lazy_locals,
+            &mut simulated_stack.spills,
+            instructions,
+            instruction_emitter,
+        );
+    }
+
+    fn spill_live_globals(
+        simulated_stack: &mut SimulatedStack,
+        instructions: &mut Vec<RegInstruction>,
+    ) {
+        let instruction_emitter =
+            |spill_index: SpillIndex, index: u32| RegInstruction::GlobalSpill {
+                index: GlobalIndex(index),
+                spill_index,
+            };
+
+        Self::spill_lazy(
+            &mut simulated_stack.lazy_globals,
+            &mut simulated_stack.spills,
+            instructions,
+            instruction_emitter,
+        );
+    }
+
     /// Lowers one function body's operator stream into register form.
     ///
     /// `params`/`results` are the body's own arity, seeding the implicit function
@@ -1413,6 +1464,9 @@ impl RegInstruction {
                     }
                 }
                 Operator::Loop { blockty } => {
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
                     let (block_params, _) = simulated_stack.add_block(
                         BlockVariant::Loop,
                         &blockty,
@@ -1428,6 +1482,9 @@ impl RegInstruction {
                     }
                 }
                 Operator::If { blockty } => {
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
                     // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
                     // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
                     // which will be the recorded_height. So after the `end` of this `if` we should leave the stack
@@ -1552,6 +1609,9 @@ impl RegInstruction {
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::BrIf { relative_depth } => {
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
                     let block_index =
                         simulated_stack.control_stack.len() - 1 - relative_depth as usize;
                     let block = simulated_stack.get_block(block_index);
@@ -1587,6 +1647,9 @@ impl RegInstruction {
                     });
                 }
                 Operator::BrTable { targets: table } => {
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+
                     let enclosing_block = simulated_stack.get_curr_block();
                     let enclosing_block_recorded_height = enclosing_block.recorded_height;
                     let enclosing_block_results = enclosing_block.results;

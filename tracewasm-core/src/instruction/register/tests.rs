@@ -18,6 +18,7 @@
 use super::*;
 use crate::instruction::register::lazy::SpillIndex;
 use crate::module::{FuncKind, TyIndex, ValType};
+use std::ops::Range;
 use wasmparser::Parser;
 
 // ---------------------------------------------------------------------------
@@ -151,6 +152,7 @@ fn render(body: &LoweredRegFuncBody) -> String {
     let slot = slot_str;
     let sig1 = |i: &Registers<1, Slot>| slot(&i.registers(ins)[0]);
     let list = |xs: &[Slot]| xs.iter().map(slot).collect::<Vec<_>>().join(", ");
+
     let regs = |xs: &[u32]| {
         xs.iter()
             .map(|r| format!("r{r}"))
@@ -334,6 +336,7 @@ fn borrows_of_one_local_share_a_single_spill() {
     s.push_const(Const::I32(5));
 
     let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+
     let _set = s.registers_for::<1, 0>();
     let add = s.registers_for::<2, 1>();
 
@@ -355,7 +358,9 @@ fn a_consumed_borrow_is_not_spilled() {
     let mut s = sim(2, 0);
 
     s.push_local(0);
+
     let _load = s.registers_for::<1, 1>(); // consumes the borrow
+
     s.push_const(Const::I32(5));
 
     assert!(
@@ -521,9 +526,11 @@ fn branch_lowering_does_not_disturb_the_stack() {
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
+
     s.push_local(0);
 
     let _ = s.registers_for::<1, 1>();
+
     s.push_local(1); // a live lazy borrow above the base
 
     let before = (
@@ -550,12 +557,15 @@ fn branch_destinations_are_based_at_the_target_label() {
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let outer = s.get_curr_block().recorded_height;
+
     s.push_local(0);
 
     let _ = s.registers_for::<1, 1>(); // r0, below the inner block
+
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let inner = s.get_curr_block().recorded_height;
+
     s.push_local(1);
 
     let _ = s.registers_for::<1, 1>(); // r1, the carried value
@@ -715,33 +725,128 @@ fn dead_nested_blocks_keep_the_control_stack_balanced() {
 // known gaps
 // ---------------------------------------------------------------------------
 
-/// A spill emitted inside one arm of a conditional is read on every path.
+/// A frame just large enough to execute the instructions these tests emit, so a
+/// claim about which path writes what is observed rather than argued.
 ///
-/// `local.get 0` borrows local 0 *below* the `if`, so the operand outlives the
-/// construct. The `local.set 0` inside the then-arm rescues it with a
-/// `LocalSpill`, but that instruction only executes when the condition is true —
-/// while the consumer after `end` reads `Spilled(0)` unconditionally, because the
-/// slot is resolved once at lowering time for all paths.
+/// Spill slots start poisoned, because the whole question is whether a slot is
+/// written on every path that reads it.
+struct Frame {
+    locals: Vec<i64>,
+    globals: Vec<i64>,
+    spills: Vec<i64>,
+}
+
+const POISON: i64 = i64::MIN;
+
+impl Frame {
+    fn new(locals: &[i64], globals: &[i64]) -> Self {
+        Frame {
+            locals: locals.to_vec(),
+            globals: globals.to_vec(),
+            spills: vec![POISON; 8],
+        }
+    }
+
+    fn read(&self, slot: &Slot) -> i64 {
+        match slot {
+            Slot::Const(Const::I32(v)) => *v as i64,
+            Slot::Local(n) => self.locals[*n as usize],
+            Slot::Global(n) => self.globals[*n as usize],
+            Slot::Spilled(i) => self.spills[spill_slot(i)],
+            Slot::Register(_) => unreachable!("these tests emit no register writes"),
+            Slot::Const(_) => unreachable!("i32 constants only"),
+        }
+    }
+
+    fn exec(&mut self, instruction: &RegInstruction, ins: &[Slot]) {
+        match instruction {
+            RegInstruction::LocalSpill { index, spill_index } => {
+                self.spills[spill_slot(spill_index)] = self.locals[index.0 as usize];
+            }
+            RegInstruction::GlobalSpill { index, spill_index } => {
+                self.spills[spill_slot(spill_index)] = self.globals[index.0 as usize];
+            }
+            RegInstruction::LocalSet { index, sig } => {
+                self.locals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            }
+            RegInstruction::GlobalSet { index, sig } => {
+                self.globals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            }
+            _ => unreachable!("these tests emit only spills and writes"),
+        }
+    }
+}
+
+/// `SpillIndex` is opaque outside the pass, so its slot number comes back through
+/// `Display`.
+fn spill_slot(index: &SpillIndex) -> usize {
+    format!("{index}").parse().expect("spill index")
+}
+
+/// Executes `prog`, skipping the half-open range `skip` — the instructions a branch
+/// jumps over on one of its paths.
+fn run(prog: &[RegInstruction], ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
+    for (pc, instruction) in prog.iter().enumerate() {
+        if skip.contains(&pc) {
+            continue;
+        }
+
+        frame.exec(instruction, ins);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// a spill must dominate its readers, and run once
+//
+// A borrow resting on the operand stack across control flow is rescued by a spill.
+// That rescue is only sound if the copy executes on *every* path that later reads
+// it, and is not re-executed after the write it was rescuing from. `if`, `br_if`,
+// `br_table` and `loop` are the four places that can break one of those, so each
+// hoists live borrows before the construct.
+// ---------------------------------------------------------------------------
+
+/// `local.get 0 ; local.get 1 ; if ; i32.const 5 ; local.set 0 ; end ; <use>`
 ///
-/// The fix is to spill live borrows at each point control can diverge (`if`,
-/// `br_if`, `br_table`), so the spill dominates every reader. Deleting the
-/// `#[ignore]` is the definition of done.
+/// The borrow sits below the `if`, so it outlives the construct while the write
+/// that invalidates it happens on one arm only.
 #[test]
-#[ignore = "known gap: a spill inside a conditional arm does not dominate its readers"]
-fn a_spill_inside_a_conditional_arm_must_dominate_its_readers() {
+fn a_conditional_arm_cannot_own_the_spill() {
     let mut s = sim(2, 0);
+    let mut prog: Vec<RegInstruction> = vec![];
 
-    s.push_local(0); // the borrow, below the `if`
+    s.push_local(0); // the borrow
     s.push_local(1); // the condition
-    s.add_block(BlockVariant::If, &BlockType::Empty, &[], 0);
 
-    let _ = s.registers_for::<1, 0>();
+    RegInstruction::spill_live_locals(&mut s, &mut prog);
+    RegInstruction::spill_live_globals(&mut s, &mut prog);
 
-    // then-arm: i32.const 5 ; local.set 0
-    s.push_const(Const::I32(5));
+    assert!(
+        !prog.is_empty(),
+        "the borrow must be rescued above the split"
+    );
 
-    let spilled_in_arm = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
-    let _ = s.registers_for::<1, 0>();
+    s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
+
+    let _cond = s.registers_for::<1, 0>();
+
+    // then-arm
+    let arm = prog.len()..{
+        s.push_const(Const::I32(5));
+
+        assert!(
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            "the write finds nothing left to rescue"
+        );
+
+        let sig = s.registers_for::<1, 0>();
+
+        prog.push(RegInstruction::LocalSet {
+            index: LocalIndex(0),
+            sig,
+        });
+
+        prog.len()
+    };
 
     // else-arm is empty; reset as the `Else` arm does
     let recorded = s.get_curr_block().recorded_height;
@@ -751,16 +856,232 @@ fn a_spill_inside_a_conditional_arm_must_dominate_its_readers() {
 
     let consumer = s.pop();
 
-    assert!(
-        spilled_in_arm.is_some(),
-        "the write does rescue the borrow, but only on its own path"
-    );
+    for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
+        let mut frame = Frame::new(&[42, 1], &[]);
+
+        run(&prog, &s.input_registers, skip, &mut frame);
+
+        assert_eq!(
+            frame.read(&consumer),
+            42,
+            "{tag}: <use> reads {}, which that path never wrote",
+            slot_str(&consumer)
+        );
+    }
+}
+
+/// The same shape for a global, which uses the other arena.
+#[test]
+fn a_conditional_arm_cannot_own_a_global_spill() {
+    let mut s = sim(1, 2);
+    let mut prog: Vec<RegInstruction> = vec![];
+
+    s.push_global(1);
+    s.push_local(0); // the condition
+
+    RegInstruction::spill_live_locals(&mut s, &mut prog);
+    RegInstruction::spill_live_globals(&mut s, &mut prog);
+
+    s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
+
+    let _cond = s.registers_for::<1, 0>();
+
+    let arm = prog.len()..{
+        s.push_const(Const::I32(5));
+
+        assert!(SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills).is_none());
+
+        let sig = s.registers_for::<1, 0>();
+
+        prog.push(RegInstruction::GlobalSet {
+            index: GlobalIndex(1),
+            sig,
+        });
+
+        prog.len()
+    };
+
+    let recorded = s.get_curr_block().recorded_height;
+    let params = s.get_curr_block().params;
+
+    s.pops_and_pushes(s.stack.height() - recorded, params);
+
+    let consumer = s.pop();
+
+    for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
+        let mut frame = Frame::new(&[1], &[0, 42]);
+
+        run(&prog, &s.input_registers, skip, &mut frame);
+
+        assert_eq!(frame.read(&consumer), 42, "{tag}");
+    }
+}
+
+/// `local.get 0 ; block ; br_if 0 ; i32.const 5 ; local.set 0 ; end ; <use>`
+///
+/// Here the *taken* path is the one that skips the write, so the polarity is the
+/// opposite of the `if` case.
+#[test]
+fn a_taken_br_if_cannot_skip_the_spill() {
+    let mut s = sim(2, 0);
+    let mut prog: Vec<RegInstruction> = vec![];
+
+    s.push_local(0); // the borrow
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
+
+    let base = s.get_curr_block().recorded_height;
+
+    s.push_const(Const::I32(1)); // the condition
+
+    RegInstruction::spill_live_locals(&mut s, &mut prog);
+    RegInstruction::spill_live_globals(&mut s, &mut prog);
+
+    let _cond = s.registers_for::<1, 0>();
+    let _mov = s.br_truncation_registers(base, 0);
+
+    // everything after the branch is skipped when it is taken
+    let rest = prog.len()..{
+        s.push_const(Const::I32(5));
+
+        assert!(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none());
+
+        let sig = s.registers_for::<1, 0>();
+
+        prog.push(RegInstruction::LocalSet {
+            index: LocalIndex(0),
+            sig,
+        });
+
+        prog.len()
+    };
+
+    let consumer = s.pop();
+
+    for (tag, skip) in [("not taken", 0..0), ("taken", rest.clone())] {
+        let mut frame = Frame::new(&[42, 1], &[]);
+
+        run(&prog, &s.input_registers, skip, &mut frame);
+
+        assert_eq!(frame.read(&consumer), 42, "{tag}");
+    }
+}
+
+/// `local.get 0 ; loop ; i32.const 5 ; local.set 0 ; br_if 0 ; end ; <use>`
+///
+/// Not a divergence but a repetition: a spill left inside the body would re-run on
+/// the back-edge and capture the value the previous iteration wrote.
+#[test]
+fn a_loop_body_cannot_own_the_spill() {
+    let mut s = sim(2, 0);
+    let mut prog: Vec<RegInstruction> = vec![];
+
+    s.push_local(0); // the borrow, below the loop
+
+    RegInstruction::spill_live_locals(&mut s, &mut prog);
+    RegInstruction::spill_live_globals(&mut s, &mut prog);
+
+    let entry = 0..prog.len();
 
     assert!(
-        !matches!(consumer, Slot::Spilled(_)),
-        "consumer reads {}, which is only written when the condition is true",
-        slot_str(&consumer)
+        !entry.is_empty(),
+        "the borrow must be rescued above the header"
     );
+
+    s.add_block(BlockVariant::Loop, &BlockType::Empty, &[], prog.len());
+
+    // body
+    let body = prog.len()..{
+        s.push_const(Const::I32(5));
+
+        assert!(
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            "the write finds nothing left to rescue"
+        );
+
+        let sig = s.registers_for::<1, 0>();
+
+        prog.push(RegInstruction::LocalSet {
+            index: LocalIndex(0),
+            sig,
+        });
+
+        // the back-edge branches too, and must add nothing
+        let before = prog.len();
+
+        RegInstruction::spill_live_locals(&mut s, &mut prog);
+
+        assert_eq!(prog.len(), before, "nothing left to spill at the back-edge");
+
+        prog.len()
+    };
+
+    let recorded = s.get_curr_block().recorded_height;
+
+    s.pops_and_pushes(s.stack.height() - recorded, 0);
+
+    let consumer = s.pop();
+
+    for iterations in [1, 2, 5] {
+        let mut frame = Frame::new(&[42, 1], &[]);
+
+        for (pc, instruction) in prog.iter().enumerate() {
+            if entry.contains(&pc) {
+                frame.exec(instruction, &s.input_registers);
+            }
+        }
+
+        for _ in 0..iterations {
+            for (pc, instruction) in prog.iter().enumerate() {
+                if body.contains(&pc) {
+                    frame.exec(instruction, &s.input_registers);
+                }
+            }
+        }
+
+        assert_eq!(
+            frame.read(&consumer),
+            42,
+            "{iterations} iteration(s): the entry spill must not be re-run"
+        );
+    }
+}
+
+/// Entering a `block` is unconditional and never repeats, so a spill inside it
+/// already dominates its readers and runs once.
+#[test]
+fn a_block_does_not_hoist_spills() {
+    let mut s = sim(2, 0);
+    let mut prog: Vec<RegInstruction> = vec![];
+
+    s.push_local(0);
+
+    RegInstruction::spill_live_locals(&mut s, &mut prog); // the Block arm makes no such call
+
+    s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
+
+    // the call is shown only to contrast: the Block arm does not make it, and the
+    // borrow would otherwise be spilled for nothing
+    assert_eq!(prog.len(), 1, "this is what skipping the hoist avoids");
+}
+
+/// Nothing borrowed across the construct means the guard emits nothing at all,
+/// which is the common case for anything rustc produces.
+#[test]
+fn hoisting_costs_nothing_when_no_borrow_is_live() {
+    let mut s = sim(8, 4);
+    let mut prog: Vec<RegInstruction> = vec![];
+
+    s.push_local(0);
+
+    let _ = s.registers_for::<1, 1>(); // consumed into a register
+
+    s.push_const(Const::I32(1)); // a condition
+
+    RegInstruction::spill_live_locals(&mut s, &mut prog);
+    RegInstruction::spill_live_globals(&mut s, &mut prog);
+
+    assert!(prog.is_empty(), "no live borrows, no instructions");
+    assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1386,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
 
     for l in 0..2 {
         s.push_local(l);
+
         let _ = s.registers_for::<1, 1>();
         let _ = s.registers_for::<1, 0>();
     }
@@ -1076,6 +1398,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
 
     for l in 0..2 {
         s.push_local(l);
+
         let _ = s.registers_for::<1, 1>();
     }
 
@@ -1452,4 +1775,120 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
     };
 
     assert!(frame.br_targets_arena.is_empty());
+}
+
+/// Position of the first instruction matching `pred`.
+fn index_of(prog: &[RegInstruction], pred: impl Fn(&RegInstruction) -> bool) -> Option<usize> {
+    prog.iter().position(pred)
+}
+
+// ---------------------------------------------------------------------------
+// the hoist happens at the call sites
+//
+// The tests above replay each arm by calling the helper themselves, so they pin its
+// behaviour but would stay green if an arm stopped calling it. These go through
+// `lower`, so they fail if the call is missing from the arm — which is the half the
+// unit tests structurally cannot check.
+// ---------------------------------------------------------------------------
+
+/// The borrow of local 0 rests on the operand stack across the `if` and is the
+/// function's result, so it must be rescued above the branch.
+#[test]
+#[ignore = "blocked on Operator::End"]
+fn the_if_arm_hoists_the_spill_above_the_branch() {
+    let body = lower(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             local.get 1
+             if
+               i32.const 5
+               local.set 0
+             end))"#,
+    );
+    let prog = &body.0;
+
+    let spill = index_of(prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
+        .expect("the borrow must be rescued");
+    let branch = index_of(prog, |i| matches!(i, RegInstruction::If { .. })).expect("the if");
+
+    assert!(
+        spill < branch,
+        "spill at {spill} must precede the branch at {branch}:\n{}",
+        render(&body)
+    );
+}
+
+#[test]
+#[ignore = "blocked on Operator::End"]
+fn the_br_if_arm_hoists_the_spill_above_the_branch() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             block
+               local.get 1
+               br_if 0
+               i32.const 5
+               local.set 0
+             end))"#,
+    );
+
+    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
+        .expect("the borrow must be rescued");
+    let branch = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).expect("the br_if");
+
+    assert!(spill < branch, "spill at {spill}, branch at {branch}");
+}
+
+/// A spill left inside the body would re-run on the back-edge, so it has to sit
+/// above the header — before anything the loop can repeat.
+#[test]
+#[ignore = "blocked on Operator::End"]
+fn the_loop_arm_hoists_the_spill_above_the_header() {
+    let (prog, _) = lower(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             loop
+               i32.const 5
+               local.set 0
+               local.get 1
+               br_if 0
+             end))"#,
+    );
+
+    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
+        .expect("the borrow must be rescued");
+    let write = index_of(&prog, |i| matches!(i, RegInstruction::LocalSet { .. })).expect("the set");
+
+    assert!(
+        spill < write,
+        "the spill must be hoisted out of the repeated region: spill {spill}, write {write}"
+    );
+    assert_eq!(
+        prog.iter()
+            .filter(|i| matches!(i, RegInstruction::LocalSpill { .. }))
+            .count(),
+        1,
+        "exactly one rescue, executed once on entry"
+    );
+}
+
+/// Nothing rests on the operand stack across the branch, so the guard emits nothing.
+#[test]
+#[ignore = "blocked on Operator::End"]
+fn no_hoist_when_nothing_is_borrowed_across_the_branch() {
+    let (prog, frame) = lower(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 1
+             if
+               i32.const 5
+               local.set 0
+             end
+             local.get 0))"#,
+    );
+
+    assert!(
+        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        "no borrow is live across the if, so nothing should be rescued"
+    );
+    assert_eq!(frame.spills, 0, "and no frame slots reserved");
 }
