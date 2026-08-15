@@ -89,6 +89,16 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
 fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncType>) {
     let bytes = wat::parse_str(wat).expect("invalid wat");
 
+    // `wat::parse_str` assembles without type-checking, so an ill-typed body
+    // reaches lowering intact — `i32.add` over an `f32` operand and all. The pass
+    // trusts validation to have happened (as it has for a real module, in
+    // `Module::compile`), so it would lower the nonsense without complaint and the
+    // test would assert against it. Validating here is what makes a `.wat` in a
+    // test self-checking, the same way `Module::compile` does for real input.
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .expect("wat does not validate");
+
     let mut types: Vec<FuncType> = vec![];
     let mut func_tys: Vec<TyIndex> = vec![];
     let mut globals_count: u32 = 0;
@@ -2538,27 +2548,29 @@ fn a_conditional_return_shares_the_functions_result_register() {
     );
 }
 
-/// The returning path and the falling-through path read *different* values of the
-/// same local, which only works because the borrow was rescued above the branch.
+/// The value a `return` carries is read *before* a write to the local it came
+/// from, so the rescue above the branch is what keeps it reachable: the return
+/// reads `spill0`, while `local0` itself now holds `5` on the taken path.
 #[test]
 fn a_return_reads_the_snapshot_the_hoist_preserved() {
     assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
-             block local.get 1 br_if 0 return end
-             i32.const 5
-             local.set 0
-             drop
-             local.get 0))"#,
+             local.get 1
+             if
+               i32.const 5
+               local.set 0
+             end
+             return))"#,
         "
           0  local.spill  local0 -> spill0
           1  local.spill  local1 -> spill1
-          2  br_if        spill1 -> 5
-          3  move         spill0 -> r0
-          4  return       -> 8
-          5  end
-          6  local.set    local0 <- 5
-          7  move         local0 -> r0
+          2  if           spill1 else=- end=4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  return       -> 8
+          7  move         r0 -> r0
           8  end
              frame: 1 registers, 2 spills
         ",
