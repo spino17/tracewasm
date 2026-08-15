@@ -1,97 +1,27 @@
-//! End-to-end checks for the numeric instructions, each aimed at the cases where
-//! a plausible-looking implementation diverges from the spec: signed vs unsigned
-//! ordering, comparisons always yielding an `i32` regardless of operand width,
-//! IEEE 754 corners (NaN, signed zero, ties-to-even), and the conversions —
-//! which is where the sign/zero-extension split and the trapping `trunc` bounds
-//! live.
+//! Numeric instruction coverage, ported from `tracewasm-core/tests/comparisons.rs`.
+//!
+//! Each case targets a place where a plausible-looking implementation diverges
+//! from the spec: signed vs unsigned ordering, comparisons always yielding an
+//! `i32` regardless of operand width, IEEE 754 corners (NaN, signed zero,
+//! ties-to-even), and the conversions — where the sign/zero-extension split and
+//! the trapping `trunc` bounds live.
+//!
+//! These run against small hand-built `.wasm` fixtures in `fixtures/`, which is
+//! complementary to `differential.rs`: a fixture can isolate one instruction with
+//! one operand pair, where a compiled Rust guest necessarily drags in a lot of
+//! surrounding code. Keep both.
 
-use tracewasm_core::{
-    error::FuncCallError,
-    instance::traits::{ImportRegistry, ResultVals, Results, Val},
-    memory::{MemoryView, linear::LinearMemory},
-    module::Module,
-};
-
-/// A module with no imports.
-struct NoImports;
-
-impl ImportRegistry for NoImports {
-    fn execute<V: MemoryView>(
-        &mut self,
-        _module_name: &str,
-        _func_name: &str,
-        _params: &[Val],
-        _memory_view: &mut V,
-    ) -> Result<ResultVals, tracewasm_core::error::TraceWasmError> {
-        unreachable!("the fixture declares no imports")
-    }
-
-    fn signature(
-        &self,
-        _module_name: &str,
-        _func_name: &str,
-    ) -> Option<tracewasm_core::instance::traits::ImportSignature> {
-        None
-    }
-
-    fn func_count(&self) -> u32 {
-        0
-    }
-
-    fn global_count(&self) -> u32 {
-        0
-    }
-
-    fn get_global(
-        &self,
-        _module_name: &str,
-        _global_name: &str,
-    ) -> Result<Val, tracewasm_core::error::TraceWasmError> {
-        unreachable!("the fixture declares no globals")
-    }
-}
+use tracewasm_core::instance::traits::Results;
+use tracewasm_test::{call_i32, call_typed, try_call};
 
 /// Calls a `() -> i32` export of the integer-comparison fixture.
 fn call(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/comparisons.wasm"), name)
+    call_i32(include_bytes!("../fixtures/comparisons.wasm"), name)
 }
 
 /// Calls a `() -> i32` export of the float-comparison fixture.
 fn call_f(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/float_comparisons.wasm"), name)
-}
-
-/// Compiles `wasm`, instantiates it, and calls its `() -> i32` export `name`.
-fn call_in(wasm: &[u8], name: &str) -> i32 {
-    let (v,) = call_typed::<(i32,)>(wasm, name);
-    v
-}
-
-/// Compiles `wasm`, instantiates it, and calls its `() -> R` export `name`.
-fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
-    match try_call_typed::<R>(wasm, name) {
-        Ok(v) => v,
-        Err(e) => panic!("calling `{name}` failed: {e}"),
-    }
-}
-
-/// As [`call_typed`], but surfaces the failure instead of panicking — needed for
-/// the trapping instructions, where the error *is* the thing under test.
-// Returns `TypedFunc::call`'s own error type unchanged; boxing it here would just
-// diverge from the signature under test.
-#[allow(clippy::result_large_err)]
-fn try_call_typed<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
-    let module = Module::compile(wasm).expect("fixture should compile");
-
-    let func = module
-        .get_typed_func::<(), R>(name)
-        .unwrap_or_else(|e| panic!("export `{name}`: {e}"));
-
-    let mut instance = module
-        .instantiate::<LinearMemory, _>(NoImports, None)
-        .expect("fixture should instantiate");
-
-    func.call((), &mut instance)
+    call_i32(include_bytes!("../fixtures/float_comparisons.wasm"), name)
 }
 
 // `-1` is `0xFFFF_FFFF` unsigned, so it is the *largest* u32 — the unsigned and
@@ -149,13 +79,13 @@ fn float_comparison_result_is_an_i32_usable_as_a_branch_condition() {
 
 /// `f32` result of the min/max/copysign fixture.
 fn min_max_f32(name: &str) -> f32 {
-    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/float_minmax.wasm"), name);
+    let (v,) = call_typed::<(f32,)>(include_bytes!("../fixtures/float_minmax.wasm"), name);
     v
 }
 
 /// `f64` result of the min/max/copysign fixture.
 fn min_max_f64(name: &str) -> f64 {
-    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/float_minmax.wasm"), name);
+    let (v,) = call_typed::<(f64,)>(include_bytes!("../fixtures/float_minmax.wasm"), name);
     v
 }
 
@@ -199,12 +129,12 @@ fn copysign_takes_magnitude_from_the_first_and_sign_from_the_second() {
 
 /// `i32` result of the bit-counting fixture.
 fn bits_i32(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/bit_counting.wasm"), name)
+    call_i32(include_bytes!("../fixtures/bit_counting.wasm"), name)
 }
 
 /// `i64` result of the bit-counting fixture.
 fn bits_i64(name: &str) -> i64 {
-    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/bit_counting.wasm"), name);
+    let (v,) = call_typed::<(i64,)>(include_bytes!("../fixtures/bit_counting.wasm"), name);
     v
 }
 
@@ -234,7 +164,7 @@ fn popcnt_counts_sign_bits_of_negative_operands() {
 
 /// `i32` result of the `eqz` fixture.
 fn eqz(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/eqz.wasm"), name)
+    call_i32(include_bytes!("../fixtures/eqz.wasm"), name)
 }
 
 #[test]
@@ -255,13 +185,13 @@ fn i64_eqz_result_is_an_i32_usable_as_a_branch_condition() {
 
 /// `f32` result of the float-unary fixture.
 fn unary_f32(name: &str) -> f32 {
-    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/float_unary.wasm"), name);
+    let (v,) = call_typed::<(f32,)>(include_bytes!("../fixtures/float_unary.wasm"), name);
     v
 }
 
 /// `f64` result of the float-unary fixture.
 fn unary_f64(name: &str) -> f64 {
-    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/float_unary.wasm"), name);
+    let (v,) = call_typed::<(f64,)>(include_bytes!("../fixtures/float_unary.wasm"), name);
     v
 }
 
@@ -305,12 +235,12 @@ fn sqrt_of_a_negative_operand_is_nan() {
 
 /// `i32` result of the sign-extension fixture.
 fn extend_i32(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/extend.wasm"), name)
+    call_i32(include_bytes!("../fixtures/extend.wasm"), name)
 }
 
 /// `i64` result of the sign-extension fixture.
 fn extend_i64(name: &str) -> i64 {
-    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/extend.wasm"), name);
+    let (v,) = call_typed::<(i64,)>(include_bytes!("../fixtures/extend.wasm"), name);
     v
 }
 
@@ -392,12 +322,12 @@ fn wrap_undoes_a_signed_widening() {
 
 /// `i32` result of the float-to-int truncation fixture.
 fn trunc_i32(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/trunc.wasm"), name)
+    call_i32(include_bytes!("../fixtures/trunc.wasm"), name)
 }
 
 /// `i64` result of the float-to-int truncation fixture.
 fn trunc_i64(name: &str) -> i64 {
-    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/trunc.wasm"), name);
+    let (v,) = call_typed::<(i64,)>(include_bytes!("../fixtures/trunc.wasm"), name);
     v
 }
 
@@ -407,7 +337,7 @@ fn trunc_i64(name: &str) -> i64 {
 /// `R` is the export's declared result type; the call never produces a value, but
 /// it still has to be named for `get_typed_func` to resolve the signature.
 fn assert_traps<R: Results>(name: &str, target: &str) {
-    let err = match try_call_typed::<R>(include_bytes!("fixtures/trunc.wasm"), name) {
+    let err = match try_call::<R>(include_bytes!("../fixtures/trunc.wasm"), name) {
         Err(e) => e,
         Ok(_) => panic!("`{name}` should have trapped, but returned a value"),
     };
@@ -501,12 +431,12 @@ fn truncation_traps_on_nan_and_infinity() {
 
 /// `i32` result of the saturating-truncation fixture.
 fn sat_i32(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/trunc_sat.wasm"), name)
+    call_i32(include_bytes!("../fixtures/trunc_sat.wasm"), name)
 }
 
 /// `i64` result of the saturating-truncation fixture.
 fn sat_i64(name: &str) -> i64 {
-    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/trunc_sat.wasm"), name);
+    let (v,) = call_typed::<(i64,)>(include_bytes!("../fixtures/trunc_sat.wasm"), name);
     v
 }
 
@@ -577,13 +507,13 @@ fn saturating_truncation_leaves_in_range_operands_alone() {
 
 /// `f32` result of the integer-to-float conversion fixture.
 fn conv_f32(name: &str) -> f32 {
-    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/convert.wasm"), name);
+    let (v,) = call_typed::<(f32,)>(include_bytes!("../fixtures/convert.wasm"), name);
     v
 }
 
 /// `f64` result of the integer-to-float conversion fixture.
 fn conv_f64(name: &str) -> f64 {
-    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/convert.wasm"), name);
+    let (v,) = call_typed::<(f64,)>(include_bytes!("../fixtures/convert.wasm"), name);
     v
 }
 
@@ -656,13 +586,13 @@ fn conversion_is_exact_for_small_operands() {
 
 /// `f32` result of the demote/promote fixture.
 fn dp_f32(name: &str) -> f32 {
-    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/demote_promote.wasm"), name);
+    let (v,) = call_typed::<(f32,)>(include_bytes!("../fixtures/demote_promote.wasm"), name);
     v
 }
 
 /// `f64` result of the demote/promote fixture.
 fn dp_f64(name: &str) -> f64 {
-    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/demote_promote.wasm"), name);
+    let (v,) = call_typed::<(f64,)>(include_bytes!("../fixtures/demote_promote.wasm"), name);
     v
 }
 
@@ -728,7 +658,9 @@ fn demote_passes_the_specials_through() {
 // bit-for-bit — including at `f32::MAX`, where demote is otherwise near overflow.
 #[test]
 fn promote_is_exact_so_the_round_trip_is_the_identity() {
-    assert_eq!(dp_f32("round_trip"), 3.1415927);
+    // The literal is `f32::consts::PI` — same bit pattern, named so clippy's
+    // `approx_constant` lint does not flag it.
+    assert_eq!(dp_f32("round_trip"), std::f32::consts::PI);
     assert_eq!(dp_f32("round_trip_max"), f32::MAX);
 }
 
@@ -763,24 +695,24 @@ fn promote_passes_the_specials_and_subnormals_through() {
 
 /// `i32` result of the reinterpretation fixture.
 fn rein_i32(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/reinterpret.wasm"), name)
+    call_i32(include_bytes!("../fixtures/reinterpret.wasm"), name)
 }
 
 /// `i64` result of the reinterpretation fixture.
 fn rein_i64(name: &str) -> i64 {
-    let (v,) = call_typed::<(i64,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    let (v,) = call_typed::<(i64,)>(include_bytes!("../fixtures/reinterpret.wasm"), name);
     v
 }
 
 /// `f32` result of the reinterpretation fixture.
 fn rein_f32(name: &str) -> f32 {
-    let (v,) = call_typed::<(f32,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    let (v,) = call_typed::<(f32,)>(include_bytes!("../fixtures/reinterpret.wasm"), name);
     v
 }
 
 /// `f64` result of the reinterpretation fixture.
 fn rein_f64(name: &str) -> f64 {
-    let (v,) = call_typed::<(f64,)>(include_bytes!("fixtures/reinterpret.wasm"), name);
+    let (v,) = call_typed::<(f64,)>(include_bytes!("../fixtures/reinterpret.wasm"), name);
     v
 }
 
@@ -848,7 +780,7 @@ fn reinterpretation_preserves_nan_payloads_without_canonicalising() {
 
 /// `i32` result of the `ref.is_null` fixture.
 fn ref_null(name: &str) -> i32 {
-    call_in(include_bytes!("fixtures/ref_is_null.wasm"), name)
+    call_i32(include_bytes!("../fixtures/ref_is_null.wasm"), name)
 }
 
 #[test]

@@ -339,9 +339,9 @@ impl_results!(A1, A2, A3);
 /// A host function usable as a wasm import: a callable taking `&mut Ctx` and a
 /// [`Params`] tuple, returning a [`Results`] tuple.
 ///
-/// Blanket-implemented for every matching closure/`fn`; used by
-/// [`assert_imported_func_trait`] to statically check that a `#[module]`-tagged
-/// method has a valid import signature.
+/// Blanket-implemented for every matching closure/`fn`, so it is a bound to
+/// write against rather than something to implement. [`assert_imported_func_trait`]
+/// exists to turn it into a compile-time check.
 pub trait ImportedFunc<Ctx, P, R>: Fn(&mut Ctx, P) -> R {}
 impl<P: Params, R: Results, Ctx, F: Fn(&mut Ctx, P) -> R> ImportedFunc<Ctx, P, R> for F {}
 
@@ -355,6 +355,13 @@ pub type ImportSignature = (ParamValTypes, ResultValTypes);
 pub trait ImportRegistry {
     /// Invokes the imported function `module_name::func_name` with `params`,
     /// returning its results.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the host function chose to fail with. The interpreter treats it
+    /// as a trap in the calling frame, wrapping it in an
+    /// [`InstructionExecutionError::Call`](crate::error::InstructionExecutionError::Call)
+    /// naming the callee.
     fn execute<V: MemoryView>(
         &mut self,
         module_name: &str,
@@ -386,7 +393,12 @@ pub trait ImportRegistry {
     fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError>;
 }
 
-/// Compile-time assertion helper used by the `#[imports]` macro: instantiating
-/// it forces `F` to satisfy [`ImportedFunc`], i.e. that a host function's params
-/// form a [`Params`] tuple and its results a [`Results`] tuple.
+/// Compile-time assertion helper: calling it forces `F` to satisfy
+/// [`ImportedFunc`], i.e. that a host function's params form a [`Params`] tuple
+/// and its results a [`Results`] tuple. Generates no code.
+///
+/// **Nothing currently calls it.** The `#[imports]` macro checks the same
+/// property with its own generated `__assert_params`/`__assert_results` helpers.
+/// This is kept as the hand-written equivalent, for asserting the bound on a
+/// function the macro does not see.
 pub fn assert_imported_func_trait<P: Params, R: Results, Ctx, F: ImportedFunc<Ctx, P, R>>(_f: F) {}

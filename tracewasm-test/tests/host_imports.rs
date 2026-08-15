@@ -1,5 +1,9 @@
-//! The `#[imports]` macro must forward the memory view to host functions that
-//! declare one, and stay usable by those that do not.
+//! Host-boundary coverage for the `#[imports]` macro, ported from
+//! `tracewasm-core/tests/macro_memory_view.rs`.
+//!
+//! These drive the generated `ImportRegistry` dispatch directly against a bare
+//! `LinearMemory`, without building a module at all — the point is the macro's
+//! marshalling and its `MemoryView` plumbing, not interpretation.
 
 use tracewasm_core::{
     error::TraceWasmError,

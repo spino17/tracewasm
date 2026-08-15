@@ -2,8 +2,8 @@
 //!
 //! `Instruction::emit_instruction_for_func` (function bodies) and
 //! `Instruction::emit_instruction_for_const_expr` (constant expressions) each
-//! consume a [`wasmparser::OperatorsReader`] and produce a `Vec<Instruction>` in
-//! which **structured control
+//! consume a [`wasmparser::OperatorsReader`] and produce a flat instruction list
+//! in which **structured control
 //! flow has been resolved into absolute indices** and **operand-stack heights
 //! have been precomputed**. The goal is that a downstream interpreter never has
 //! to re-scan for matching `end`s or rebuild block types at runtime: every
@@ -15,10 +15,10 @@
 //! 1. **Backpatching of forward references.** WebAssembly control flow is
 //!    structured (`block`/`loop`/`if`/`else`/`end`), but a *forward* branch or a
 //!    block's own `end` position is not known until that `end` is reached later
-//!    in the stream. Such fields are emitted with the sentinel [`usize::MAX`] and
-//!    filled in when the matching `End` operator is processed. `usize::MAX` (not
+//!    in the stream. Such fields are emitted with the sentinel [`u32::MAX`] and
+//!    filled in when the matching `End` operator is processed. `u32::MAX` (not
 //!    `0`) is used deliberately: `0` is a valid instruction index, so a missed
-//!    backpatch would silently jump to the first instruction, whereas `usize::MAX`
+//!    backpatch would silently jump to the first instruction, whereas `u32::MAX`
 //!    makes the bug trap on an out-of-bounds access.
 //!
 //! 2. **Operand-stack height precomputation.** `ControlStack::curr_height`
@@ -38,19 +38,54 @@
 //! are no-ops while the current block is traversing dead code, so height updates
 //! placed in unreachable code are safely dropped rather than underflowing the
 //! `u32` height on a stack-polymorphic operand.
+//!
+//! ## Keeping [`Instruction`] small (load-bearing)
+//!
+//! One `Instruction` is **at most 16 bytes** — asserted just below the enum, so
+//! a regression is a compile error rather than a silent cost. A function body holds
+//! one per operator, so the widest variant sets the memory cost of every compiled
+//! module, and at 16 bytes four of them share a cache line.
+//!
+//! Three narrowings keep it there. The size is set by whichever variant is widest,
+//! so relaxing *any one* of them puts the enum back to 24 bytes on its own:
+//!
+//! * **Instruction indices are `u32`, not `usize`.** Every backpatched index
+//!   (`Br::target_index`, `Block::end_index`, …) is a `u32`, which is what lets
+//!   those variants fit three fields in 12 bytes at align 4. The bound holds
+//!   because a function body's size is a `u32` in the binary and each operator is
+//!   at least one byte, so the instruction count cannot reach `u32::MAX`. This is
+//!   the same bound `instruction_offsets` already relies on.
+//!
+//! * **Immediates are narrowed to their real range.** `memarg` offsets are stored
+//!   as `u32` even though [`wasmparser`] reports them as `u64`. The narrowing is
+//!   lossless because `wasmparser` rejects an offset above `u32::MAX` on an
+//!   `i32`-indexed memory, and `Module::compile` refuses 64-bit memories outright
+//!   — so a `u64` offset can never reach here.
+//!
+//! * **Variable-length payloads live in side tables, not in the variant.** A
+//!   `Box<[T]>` is a 16-byte fat pointer at align 8, which by itself would hold the
+//!   enum at 24. [`Instruction::BrTable`] therefore stores an
+//!   `(start_index, len)` range into the function's flat
+//!   [`FuncBody::br_table_targets`](crate::module::FuncBody) array — 8 bytes, and a
+//!   plain slice index at execution rather than a pointer chase.
+//!
+//! Signatures are the same idea: [`Instruction::CallIndirect`] keeps a [`TyIndex`]
+//! and resolves the type at execution instead of carrying the parameter and result
+//! slices inline, which would make that variant 40 bytes on its own.
 
 use crate::{
     error::TraceWasmError,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, ValType},
+    instruction::{Block, BlockKind, params_and_results_from_blockty},
+    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
 ///
-/// `wasmparser` operators are translated into this owned form by
-/// [`Instruction::emit_instruction_for_func`] (function bodies) and
-/// [`Instruction::emit_instruction_for_const_expr`] (constant expressions); any
-/// operator TraceWasm does not model is rejected as unsupported at lowering time.
+/// `wasmparser` operators are translated into this owned form by the crate's
+/// internal lowering pass — `emit_instruction_for_func` for function bodies and
+/// `emit_instruction_for_const_expr` for constant expressions; any operator
+/// TraceWasm does not model is rejected as unsupported at lowering time.
 /// Index fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
 /// positions into the containing `Vec<Instruction>`, i.e. runtime program
 /// counters.
@@ -139,84 +174,84 @@ pub enum Instruction {
     /// `i32.load`: load 4 bytes as the `i32` result.
     I32Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load8_u`: load 1 byte, zero-extend to `i32`.
     I32Load8U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load8_s`: load 1 byte, sign-extend to `i32`.
     I32Load8S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load16_u`: load 2 bytes, zero-extend to `i32`.
     I32Load16U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.load16_s`: load 2 bytes, sign-extend to `i32`.
     I32Load16S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load`: load 8 bytes as the `i64` result.
     I64Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load8_u`: load 1 byte, zero-extend to `i64`.
     I64Load8U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load8_s`: load 1 byte, sign-extend to `i64`.
     I64Load8S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load16_u`: load 2 bytes, zero-extend to `i64`.
     I64Load16U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load16_s`: load 2 bytes, sign-extend to `i64`.
     I64Load16S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load32_u`: load 4 bytes, zero-extend to `i64`.
     I64Load32U {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.load32_s`: load 4 bytes, sign-extend to `i64`.
     I64Load32S {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -224,7 +259,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F32Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -232,7 +267,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F64Load {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -242,49 +277,49 @@ pub enum Instruction {
     /// `i32.store`: pop an `i32` value and an address, write the value's 4 bytes.
     I32Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.store8`: write the low 1 byte of the popped `i32` (wrapping).
     I32Store8 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i32.store16`: write the low 2 bytes of the popped `i32` (wrapping).
     I32Store16 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store`: pop an `i64` value and an address, write the value's 8 bytes.
     I64Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store8`: write the low 1 byte of the popped `i64` (wrapping).
     I64Store8 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store16`: write the low 2 bytes of the popped `i64` (wrapping).
     I64Store16 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
     /// `i64.store32`: write the low 4 bytes of the popped `i64` (wrapping).
     I64Store32 {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -292,7 +327,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F32Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -300,7 +335,7 @@ pub enum Instruction {
     /// pattern (no NaN canonicalization).
     F64Store {
         /// Static byte offset added to the popped address.
-        offset: u64,
+        offset: u32,
         /// Alignment hint (log2); ignored at execution.
         align: u8,
     },
@@ -764,12 +799,20 @@ pub enum Instruction {
     ///
     /// Traps if the index is out of the table's bounds, the slot is null, or the
     /// callee's signature differs from the type recorded here — that last check is
-    /// why the expected signature travels with the instruction.
+    /// why the expected type index travels with the instruction.
     CallIndirect {
-        /// The callee signature's parameter types.
-        params: Box<[ValType]>,
-        /// The callee signature's result types.
-        results: Box<[ValType]>,
+        /// Index into the module's type section of the signature this call site
+        /// expects.
+        ///
+        /// Storing the parameter and result lists inline instead would make this
+        /// variant 40 bytes — two fat pointers plus the table index — and it alone
+        /// would set the size of every [`Instruction`]. Resolving the index against
+        /// `module.types` at execution costs one indexing operation.
+        ///
+        /// The check compares the signature *structurally* against the callee's,
+        /// not by index: a module may declare two identical types under different
+        /// indices, and both satisfy the call.
+        ty_index: TyIndex,
         /// Table holding the callee function references.
         table_index: TableIndex,
     },
@@ -779,11 +822,7 @@ pub enum Instruction {
     Select,
     /// Opens a block. Purely a label: entering one does nothing at runtime, but a
     /// branch targeting it jumps forward to its `End`.
-    Block {
-        /// Absolute index of this block's matching `End`. Backpatched; a branch
-        /// that targets this block jumps here.
-        end_index: usize,
-    },
+    Block,
     /// Opens a loop. Branches targeting a loop jump back to this instruction
     /// (the loop start), so no `end` index is needed.
     Loop,
@@ -792,9 +831,9 @@ pub enum Instruction {
     If {
         /// Absolute index of the matching `Else`, if one exists. Backpatched at
         /// `End`.
-        else_index: Option<usize>,
+        else_index: Option<u32>,
         /// Absolute index of this `if`'s matching `End`. Backpatched.
-        end_index: usize,
+        end_index: u32,
     },
     /// Reached only by falling out of a taken then-branch, which must skip the
     /// else-branch entirely — control jumps straight to the owning `if`'s `End`.
@@ -804,15 +843,15 @@ pub enum Instruction {
     Else {
         /// Absolute index of the owning `if`'s `End`. When the then-branch falls
         /// through into `else`, control skips to this `End`. Backpatched.
-        if_end_index: usize,
+        if_end_index: u32,
     },
     /// `br`: unconditional branch to an enclosing label, unwinding the stack to
     /// that label's height while preserving the top `arity` values.
     Br {
         /// Absolute jump target. For a `loop` label this is the `Loop`
         /// instruction (a back-edge / "continue"); otherwise it is the label's
-        /// `End`. Backpatched (with `usize::MAX` sentinel) for non-loop targets.
-        target_index: usize,
+        /// `End`. Backpatched (with `u32::MAX` sentinel) for non-loop targets.
+        target_index: u32,
         /// Number of values transferred to the label (loop params, else results).
         arity: u32,
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
@@ -822,7 +861,7 @@ pub enum Instruction {
     /// otherwise fall through.
     BrIf {
         /// See `Br::target_index`. Same target rules as `Br`.
-        target_index: usize,
+        target_index: u32,
         /// Number of values transferred to the label; see `Br::arity`.
         arity: u32,
         /// Stack height the target label unwinds to; see `Block::recorded_height`.
@@ -833,17 +872,26 @@ pub enum Instruction {
     ///
     /// The index is unsigned, so a negative value selects the default rather than
     /// wrapping to a valid arm.
+    ///
+    /// The targets are *not* stored inline: a `Box<[TargetBranch]>` here would be a
+    /// 16-byte fat pointer and would hold the whole enum at 24 bytes (see the module
+    /// docs). Instead this is a range into the flat per-function array, which keeps
+    /// the variant at 8 bytes and makes resolution a slice index.
     BrTable {
-        /// One [`TargetBranch`] per explicit label, in order, followed by the
-        /// default label as the final element.
-        targets: Vec<TargetBranch>,
+        /// Offset of this table's first [`TargetBranch`] in the owning function's
+        /// [`FuncBody::br_table_targets`](crate::module::FuncBody).
+        start_index: u32,
+        /// Number of targets in this table: one per explicit label, in order,
+        /// followed by the default label as the final element. So `len` is always
+        /// at least 1, and the default lives at `start_index + len - 1`.
+        len: u32,
     },
     /// `return`: branch to the function's outermost label, leaving the frame's
     /// results on the stack.
     Return {
-        /// Absolute index of the function's `End`. Backpatched (`usize::MAX`
+        /// Absolute index of the function's `End`. Backpatched (`u32::MAX`
         /// sentinel) — `return` is a branch to the outermost function label.
-        target_index: usize,
+        target_index: u32,
         /// Number of result values the function returns.
         arity: u32,
         /// Stack height the function frame unwinds to before the `arity` results
@@ -863,6 +911,15 @@ pub enum Instruction {
     },
 }
 
+// A function body holds one `Instruction` per operator, so this size is multiplied
+// across every compiled module — see "Keeping `Instruction` small" in the module
+// docs for the three narrowings that hold it here, and why widening any one of them
+// costs 8 bytes on *every* instruction rather than just the variant touched.
+const _: () = assert!(
+    size_of::<Instruction>() <= 16,
+    "Instruction grew past 16 bytes. Need to keep it compact."
+);
+
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
 ///
 /// Each arm carries its own `recorded_height`/`arity` because a single
@@ -873,96 +930,20 @@ pub enum Instruction {
 pub struct TargetBranch {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
-    pub target_index: usize,
+    pub target_index: u32,
     /// Number of values transferred to the label (loop params, else results).
     pub arity: u32,
     /// Stack height the target label unwinds to; see `Block::recorded_height`.
     pub recorded_height: u32,
 }
 
-/// What kind of label a control-stack entry represents, plus the data needed to
-/// backpatch its originating instruction once its `end` is seen.
-enum BlockKind {
-    /// The implicit outermost frame for a function body. Not backpatched (its
-    /// `end` is the final instruction and no branch instruction stores its
-    /// index directly).
-    Func,
-    /// A `block`. `index` is the position of its `Instruction::Block`, so the
-    /// `end_index` field can be filled in later.
-    Block { index: usize },
-    /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
-    /// back-edge target used directly by branches (no backpatching needed).
-    Loop { index: usize },
-    /// An `if`. `index` locates the `Instruction::If`; `else_index` is filled in
-    /// when the `Else` operator is seen (if any) so both can be backpatched at
-    /// `end`.
-    If {
-        index: usize,
-        else_index: Option<usize>,
-    },
-}
-
-impl BlockKind {
-    /// Returns the loop's start-instruction index iff this label is a `loop`.
-    ///
-    /// Branch lowering keys off this: a branch to a loop is a back-edge whose
-    /// target is known immediately (the loop start) and whose arity is the
-    /// loop's *params*; a branch to any other label is a forward jump to its
-    /// `end` whose arity is the label's *results*.
-    fn is_loop(&self) -> Option<usize> {
-        if let BlockKind::Loop { index } = self {
-            Some(*index)
-        } else {
-            None
-        }
-    }
-}
-
-/// A live control-flow label on the [`ControlStack`].
-struct Block {
-    kind: BlockKind,
-    /// Operand-stack height this label unwinds to, *excluding* the label's own
-    /// arity values.
-    ///
-    /// Invariant: when control reaches this label's target (the `end` of a
-    /// block/if/func, or the start of a `loop`), the stack is truncated to
-    /// `recorded_height` and then exactly `arity` values remain on top — results
-    /// for block/if/func, params for a loop. It is captured at label entry as
-    /// "height below the params" (`curr_height - params`, and additionally minus
-    /// the condition for `if`). Meaningless while [`Self::has_inherited`] is set
-    /// (dead code), where it is stored as `0`.
-    recorded_height: u32,
-    /// Arity of the label's input type (block params). For a loop this is also
-    /// the branch arity.
-    params: u32,
-    /// Arity of the label's result type. For block/if/func this is the branch
-    /// arity and the height delta applied at `end`.
-    results: u32,
-    /// True while the remainder of this block's body is unreachable (dead code),
-    /// e.g. after `unreachable`, `br`, or `br_table`. While set, height tracking
-    /// is frozen (see [`ControlStack::set_height`]) because dead code has a
-    /// stack-polymorphic type and tracking it is both meaningless and prone to
-    /// underflow.
-    is_unreachable_traversing: bool,
-    /// True iff this block was *opened while its parent was already dead*, i.e.
-    /// it is unreachable for its entire lifetime.
-    ///
-    /// This distinguishes two reasons `is_unreachable_traversing` can be set:
-    /// - locally dead (a `br`/`unreachable` inside a live block) — recoverable
-    ///   at the block's `else`;
-    /// - inherited dead (born inside dead code) — must NEVER be cleared, because
-    ///   *both* arms of such an `if` are dead. [`ControlStack::end_unreachable_traversing`]
-    ///   consults this flag so an `else` does not resurrect genuinely dead code.
-    has_inherited: bool,
-    /// Branches (`br`/`br_if`/`br_table` arms, and `return` targeting the
-    /// function frame) that target this block's `end` and therefore need their
-    /// `target_index` backpatched once that `end` is reached.
-    ///
-    /// Each entry is `(instruction_index, brtable_target_slot)`. The second
-    /// field selects which arm of a `BrTable::targets` vec to patch; it is
-    /// `usize::MAX` (unused) for `Br`/`BrIf`, which have a single `target_index`.
-    attached_breaks: Vec<(usize, usize)>,
-}
+/// The three parallel outputs of lowering one function body: the instruction list,
+/// the source-offset sidecar indexed alongside it, and the flat `br_table` target
+/// array the [`Instruction::BrTable`] ranges point into.
+///
+/// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
+/// three together.
+type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, Box<[TargetBranch]>);
 
 /// The stack of currently-open control-flow labels, plus the running
 /// operand-stack height.
@@ -976,26 +957,21 @@ struct ControlStack {
     /// Current operand-stack depth at the point the pass has reached. See the
     /// module-level "Height-tracking invariant".
     curr_height: u32,
+    /// The largest [`Self::curr_height`] seen anywhere in this function body, i.e.
+    /// the deepest the operand stack can get while executing it.
+    ///
+    /// **Operands only.** Heights are relative to the frame's operand base, so a
+    /// consumer sizing storage for a call needs
+    /// `caller_base_height + locals_len + max_height`, not `max_height` alone.
+    ///
+    /// Maintained by [`Self::note_height`], which every write to `curr_height` goes
+    /// through — that is what makes this an upper bound rather than merely a
+    /// recently-seen value. Dead code is excluded, which is correct: unreachable
+    /// instructions never execute, so they cannot deepen the stack at runtime.
+    max_height: u32,
 }
 
 impl ControlStack {
-    /// Returns `(params, results)` *counts* for a block type. Only the arities
-    /// matter for height tracking, not the concrete value types.
-    ///
-    /// `BlockType::Type(_)` is the shorthand single-result form (`[] -> [t]`),
-    /// hence `(0, 1)`.
-    fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (u32, u32) {
-        match blockty {
-            BlockType::Empty => (0, 0),
-            BlockType::Type(_) => (0, 1),
-            BlockType::FuncType(index) => {
-                let ty = &types[*index as usize];
-
-                (ty.params.len() as u32, ty.results.len() as u32)
-            }
-        }
-    }
-
     fn len(&self) -> usize {
         self.inner.len()
     }
@@ -1012,7 +988,7 @@ impl ControlStack {
     /// subtracts one more for it. (The condition is popped from `curr_height` by
     /// the `If` arm's `PopPush` stack effect, not here.)
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
-        let (params, results) = Self::params_and_results_from_blockty(blockty, types);
+        let (params, results) = params_and_results_from_blockty(blockty, types);
 
         let is_unreachable_traversing = self
             .inner
@@ -1099,6 +1075,21 @@ impl ControlStack {
         self.inner.pop()
     }
 
+    /// The only writer of [`Self::curr_height`].
+    ///
+    /// Routing every write through one place is what makes [`Self::max_height`] a
+    /// true upper bound rather than a recently-seen value. Assigning `curr_height`
+    /// directly anywhere else breaks that, including on paths that look
+    /// inconsequential — [`Self::set_height`] reaches this with an empty control
+    /// stack when a function body's final `end` has popped its `Func` block.
+    fn note_height(&mut self, height: u32) {
+        self.curr_height = height;
+
+        if height > self.max_height {
+            self.max_height = height;
+        }
+    }
+
     /// Sets `curr_height`, unless the current block is traversing dead code.
     ///
     /// The dead-code guard is what makes it safe for branch/`end` handlers to
@@ -1114,7 +1105,7 @@ impl ControlStack {
     /// the current one instead of requiring the caller to compute it.
     fn set_height(&mut self, height: u32) {
         if self.inner.is_empty() {
-            self.curr_height = height;
+            self.note_height(height);
 
             return;
         }
@@ -1125,7 +1116,7 @@ impl ControlStack {
             return;
         }
 
-        self.curr_height = height;
+        self.note_height(height);
     }
 
     /// Applies an operator's net stack effect as the single expression
@@ -1147,7 +1138,7 @@ impl ControlStack {
             return;
         }
 
-        self.curr_height = self.curr_height - pops + pushes;
+        self.note_height(self.curr_height - pops + pushes);
     }
 }
 
@@ -1159,10 +1150,7 @@ impl ControlStack {
 enum StackEffectResult {
     /// The operator pops `pops` values and pushes `pushes`; the net change is
     /// applied to `curr_height` (skipped while traversing dead code).
-    PopPush {
-        pops: u32,
-        pushes: u32,
-    },
+    PopPush { pops: u32, pushes: u32 },
     /// The operator resets the height to a known absolute value, e.g. `else`/`end`
     /// restoring `recorded_height + arity`.
     SetHeight(u32),
@@ -1184,6 +1172,9 @@ enum StackEffectResult {
     /// comparison operators — the comparisons included, since they push an `i32`
     /// boolean rather than nothing.
     BinaryOperator,
+    /// Net-zero: pops one operand and pushes one result, leaving the height
+    /// unchanged. Covers the numeric conversions and the unary integer/float
+    /// operators.
     UnaryOperator,
 }
 
@@ -1201,12 +1192,13 @@ impl Instruction {
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
-    /// `is_func` is `Some((params, results))` for a function body, in which case
-    /// an implicit [`BlockKind::Func`] frame is pushed to catch top-level
-    /// branches and the trailing `end`. It is `None` for constant expressions
-    /// (global/table/element/data init), which carry no root frame; their
-    /// terminating `end` has nothing to pop and simply ends the pass (see the
-    /// `Operator::End` arm).
+    /// `params` and `results` are the body's own arity. They seed an implicit
+    /// [`BlockKind::Func`] frame at the root of the control stack, which is what
+    /// catches top-level branches and the trailing `end`.
+    ///
+    /// Constant expressions have no such frame and go through
+    /// [`Self::emit_instruction_for_const_expr`] instead: their terminating `end`
+    /// has nothing to pop and simply ends the pass.
     ///
     /// `types` is the module's type section, used to resolve `BlockType::FuncType`
     /// arities. `func_decls` is the module's function declarations, used by
@@ -1216,16 +1208,24 @@ impl Instruction {
     /// offsets: element `i` is the byte offset in the module binary of the
     /// operator that produced instruction `i`. The two are pushed together on
     /// every iteration, so they always have the same length and indexing.
+    ///
+    /// The third element is the function's flat `br_table` target array, holding
+    /// every table's arms concatenated in lowering order. Each
+    /// [`Instruction::BrTable`] owns the contiguous run named by its
+    /// `(start_index, len)`, which is why the targets are not stored in the variant
+    /// (see "Keeping [`Instruction`] small" in the module docs). Functions with no
+    /// `br_table` get an empty slice, which does not allocate.
     pub(crate) fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
         types: &[FuncType],
         func_decls: &[FuncDecl],
-    ) -> Result<(Vec<Instruction>, Vec<u32>), TraceWasmError> {
+    ) -> Result<LoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
+        let mut br_table_target_branches = vec![];
 
         control_stack.inner.push(Block {
             kind: BlockKind::Func,
@@ -1329,98 +1329,98 @@ impl Instruction {
                 // loads
                 Operator::I32Load { memarg } => (
                     Instruction::I32Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8U { memarg } => (
                     Instruction::I32Load8U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8S { memarg } => (
                     Instruction::I32Load8S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16U { memarg } => (
                     Instruction::I32Load16U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16S { memarg } => (
                     Instruction::I32Load16S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load { memarg } => (
                     Instruction::I64Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8U { memarg } => (
                     Instruction::I64Load8U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8S { memarg } => (
                     Instruction::I64Load8S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16U { memarg } => (
                     Instruction::I64Load16U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16S { memarg } => (
                     Instruction::I64Load16S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32U { memarg } => (
                     Instruction::I64Load32U {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32S { memarg } => (
                     Instruction::I64Load32S {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F32Load { memarg } => (
                     Instruction::F32Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F64Load { memarg } => (
                     Instruction::F64Load {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
@@ -1428,63 +1428,63 @@ impl Instruction {
                 // stores
                 Operator::I32Store { memarg } => (
                     Instruction::I32Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store8 { memarg } => (
                     Instruction::I32Store8 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store16 { memarg } => (
                     Instruction::I32Store16 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store { memarg } => (
                     Instruction::I64Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store8 { memarg } => (
                     Instruction::I64Store8 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store16 { memarg } => (
                     Instruction::I64Store16 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store32 { memarg } => (
                     Instruction::I64Store32 {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F32Store { memarg } => (
                     Instruction::F32Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F64Store { memarg } => (
                     Instruction::F64Store {
-                        offset: memarg.offset,
+                        offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
@@ -1748,7 +1748,7 @@ impl Instruction {
                     Instruction::LocalTee {
                         index: LocalIndex(local_index),
                     },
-                    StackEffectResult::NoEffect,
+                    StackEffectResult::PopPush { pops: 1, pushes: 1 },
                 ),
                 // globals
                 Operator::GlobalGet { global_index } => (
@@ -1786,18 +1786,19 @@ impl Instruction {
                     table_index,
                 } => {
                     let func_ty = &types[type_index as usize];
-                    let params = func_ty.params.clone();
-                    let results = func_ty.results.clone();
 
+                    // Only the arities are read here — the signature itself is
+                    // resolved from `ty_index` at execution rather than copied into
+                    // the instruction. The extra pop is the table index the callee
+                    // is resolved through.
                     let stack_effect = StackEffectResult::PopPush {
-                        pops: 1 + params.len() as u32,
-                        pushes: results.len() as u32,
+                        pops: 1 + func_ty.params.len() as u32,
+                        pushes: func_ty.results.len() as u32,
                     };
 
                     (
                         Instruction::CallIndirect {
-                            params,
-                            results,
+                            ty_index: TyIndex(type_index),
                             table_index: TableIndex(table_index),
                         },
                         stack_effect,
@@ -1813,25 +1814,14 @@ impl Instruction {
                 ),
                 // blocks
                 Operator::Block { blockty } => {
-                    control_stack.add_block(
-                        BlockKind::Block {
-                            index: instructions.len(),
-                        },
-                        &blockty,
-                        types,
-                    );
+                    control_stack.add_block(BlockKind::Block, &blockty, types);
 
-                    (
-                        Instruction::Block {
-                            end_index: usize::MAX, // dummy value! will backpath when we see END for this block
-                        },
-                        StackEffectResult::NoEffect,
-                    )
+                    (Instruction::Block, StackEffectResult::NoEffect)
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
                         BlockKind::Loop {
-                            index: instructions.len(),
+                            index: instructions.len() as u32,
                         },
                         &blockty,
                         types,
@@ -1842,7 +1832,7 @@ impl Instruction {
                 Operator::If { blockty } => {
                     control_stack.add_block(
                         BlockKind::If {
-                            index: instructions.len(),
+                            index: instructions.len() as u32,
                             else_index: None,
                         },
                         &blockty,
@@ -1852,13 +1842,13 @@ impl Instruction {
                     (
                         Instruction::If {
                             else_index: None,
-                            end_index: usize::MAX, // dummy value! will backpath when we see END for this `if`
+                            end_index: u32::MAX, // dummy value! will backpath when we see END for this `if`
                         },
                         StackEffectResult::PopPush { pops: 1, pushes: 0 },
                     )
                 }
                 Operator::Else => {
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
                     let block = control_stack.get_curr_block_mut();
                     let recorded_height = block.recorded_height;
                     let params = block.params;
@@ -1886,7 +1876,7 @@ impl Instruction {
 
                     (
                         Instruction::Else {
-                            if_end_index: usize::MAX,
+                            if_end_index: u32::MAX,
                         }, // dummy value! will backpatch when we see END for the `if` of this `else`
                         StackEffectResult::SetHeight(recorded_height + params),
                     )
@@ -1903,7 +1893,7 @@ impl Instruction {
                     let params = block.params;
                     let results = block.results;
                     let recorded_height = block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     // brs with a depth resolved to a "loop" block targets the loop start and so the arity
                     // will be params of the loop. For other blocks, the br targets the end of that block
@@ -1914,10 +1904,10 @@ impl Instruction {
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push((index, usize::MAX));
+                        block.attached_breaks.push((index, u32::MAX));
 
                         Instruction::Br {
-                            target_index: usize::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
+                            target_index: u32::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
                             arity: results,
                             recorded_height,
                         }
@@ -1943,7 +1933,7 @@ impl Instruction {
                     let params = block.params;
                     let results = block.results;
                     let recorded_height = block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
                         Instruction::BrIf {
@@ -1952,10 +1942,10 @@ impl Instruction {
                             recorded_height,
                         }
                     } else {
-                        block.attached_breaks.push((index, usize::MAX));
+                        block.attached_breaks.push((index, u32::MAX));
 
                         Instruction::BrIf {
-                            target_index: usize::MAX,
+                            target_index: u32::MAX,
                             arity: results,
                             recorded_height,
                         } // dummy value! will backpatch when we see END for the block this `br` is attached to
@@ -1975,8 +1965,9 @@ impl Instruction {
 
                     targets.push(table.default()); // default (last element) is taken when the popped index is out of range, i.e. i >= number of explicit targets
 
-                    let index = instructions.len();
-                    let mut br_targets = vec![];
+                    let index = instructions.len() as u32;
+                    let br_targets_start = br_table_target_branches.len() as u32;
+                    let mut br_targets_len: u32 = 0;
 
                     for (i, &relative_depth) in targets.iter().enumerate() {
                         let block_index = control_stack.len() - 1 - relative_depth as usize;
@@ -1986,29 +1977,35 @@ impl Instruction {
                         let recorded_height = block.recorded_height;
 
                         if let Some(loop_index) = block.kind.is_loop() {
-                            br_targets.push(TargetBranch {
+                            br_table_target_branches.push(TargetBranch {
                                 target_index: loop_index,
                                 arity: params,
                                 recorded_height,
                             });
                         } else {
-                            // record which arm (`i`) of this `br_table` to backpatch at the target's `end`
-                            block.attached_breaks.push((index, i));
+                            // record the absolute slot in the flat target array to backpatch
+                            // at the target's `end`
+                            block
+                                .attached_breaks
+                                .push((index, br_targets_start + i as u32));
 
                             // dummy value! will backpatch when we see END for the block this `br` is attached to
-                            br_targets.push(TargetBranch {
-                                target_index: usize::MAX,
+                            br_table_target_branches.push(TargetBranch {
+                                target_index: u32::MAX,
                                 arity: results,
                                 recorded_height,
                             });
                         };
+
+                        br_targets_len += 1;
                     }
 
                     control_stack.set_unreachable_traversing();
 
                     (
                         Instruction::BrTable {
-                            targets: br_targets,
+                            start_index: br_targets_start,
+                            len: br_targets_len,
                         },
                         StackEffectResult::Unreachable,
                     )
@@ -2021,14 +2018,14 @@ impl Instruction {
                     let func_block = control_stack.get_block_mut(0); // function is top-most block
                     let results = func_block.results;
                     let recorded_height = func_block.recorded_height;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
-                    func_block.attached_breaks.push((index, usize::MAX));
+                    func_block.attached_breaks.push((index, u32::MAX));
                     control_stack.set_unreachable_traversing();
 
                     (
                         Instruction::Return {
-                            target_index: usize::MAX,
+                            target_index: u32::MAX,
                             arity: results,
                             recorded_height,
                         },
@@ -2046,14 +2043,15 @@ impl Instruction {
                     let results = block.results;
                     let recorded_height = block.recorded_height;
                     let attached_breaks = &block.attached_breaks;
-                    let index = instructions.len();
+                    let index = instructions.len() as u32;
 
                     // Backpatch every forward branch that targeted this block: its jump target is this
-                    // `end`. For `br`/`br_if` there is a single `target_index`; for `br_table` the second
-                    // tuple field selects the specific arm to patch. Loops never appear here because a
-                    // branch to a loop resolves to the loop start immediately and is not attached.
+                    // `end`. For `br`/`br_if`/`return` there is a single `target_index` in the variant;
+                    // for `br_table` the second tuple field is an absolute slot in the flat target array,
+                    // so the write lands there rather than in the instruction. Loops never appear here
+                    // because a branch to a loop resolves to the loop start immediately and is not attached.
                     for (br_index, br_targets_index) in attached_breaks {
-                        match &mut instructions[*br_index] {
+                        match &mut instructions[*br_index as usize] {
                             Instruction::Br {
                                 target_index,
                                 arity: _arity,
@@ -2068,8 +2066,11 @@ impl Instruction {
                             } => {
                                 *target_index = index;
                             }
-                            Instruction::BrTable { targets } => {
-                                targets[*br_targets_index].target_index = index;
+                            Instruction::BrTable { .. } => {
+                                // `br_targets_index` is already absolute, so the table's own
+                                // range is not needed here.
+                                br_table_target_branches[*br_targets_index as usize].target_index =
+                                    index;
                             }
                             Instruction::Return {
                                 target_index,
@@ -2087,17 +2088,8 @@ impl Instruction {
                     // Backpatch this block's own structural indices. `func`/`loop` need none: a function's
                     // `end` is not referenced by index, and a loop's branch target is its start, not its end.
                     match block.kind {
-                        BlockKind::Func | BlockKind::Loop { .. } => {} // no backpatching required
-                        BlockKind::Block { index: block_index } => {
-                            let Instruction::Block { end_index } = &mut instructions[block_index]
-                            else {
-                                unreachable!(
-                                    "hitting this means TraceWasm has a bug recording the instructions"
-                                )
-                            };
-
-                            *end_index = index;
-                        }
+                        BlockKind::Func | BlockKind::Loop { .. } => {}
+                        BlockKind::Block => {} // no backpatching require
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
@@ -2106,7 +2098,7 @@ impl Instruction {
                             let Instruction::If {
                                 else_index,
                                 end_index,
-                            } = &mut instructions[if_index]
+                            } = &mut instructions[if_index as usize]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
@@ -2120,7 +2112,7 @@ impl Instruction {
                             // that falls through into `else` knows where the construct closes.
                             if let Some(else_index) = ei {
                                 let Instruction::Else { if_end_index } =
-                                    &mut instructions[else_index]
+                                    &mut instructions[else_index as usize]
                                 else {
                                     unreachable!(
                                         "hitting this means TraceWasm has a bug recording the instructions"
@@ -2176,9 +2168,24 @@ impl Instruction {
             instructions.push(instruction);
         }
 
-        Ok((instructions, instruction_offsets))
+        Ok((
+            instructions,
+            instruction_offsets,
+            br_table_target_branches.into_boxed_slice(),
+        ))
     }
 
+    /// Lowers a constant expression — a global, element, or data initializer.
+    ///
+    /// Accepts only the const-expr subset: the four `*.const` operators,
+    /// `global.get`, `ref.null`, `ref.func`, and `i32`/`i64` add/sub/mul. Anything
+    /// else is [`TraceWasmError::Unsupported`]. The terminating `end` closes the
+    /// expression and is consumed rather than emitted.
+    ///
+    /// Unlike [`Self::emit_instruction_for_func`] there is no control stack, no
+    /// height tracking, and no backpatching, because the subset contains no
+    /// branches — so this returns the instruction list alone, with no source-offset
+    /// sidecar and no `br_table` target array.
     pub(crate) fn emit_instruction_for_const_expr(
         mut operator_reader: OperatorsReader<'_>,
     ) -> Result<Vec<Instruction>, TraceWasmError> {

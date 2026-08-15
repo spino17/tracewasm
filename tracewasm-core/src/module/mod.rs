@@ -24,7 +24,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::Instruction,
+    instruction::stack::{Instruction, TargetBranch},
     memory::Memory,
     vm::{
         TraceVM,
@@ -44,8 +44,7 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 /// where `initial_pages` comes from the module's declared memory limits (see
 /// [`Module::instantiate`]).
 ///
-/// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB, and
-/// cap the initial allocation against the instance [`Config`].
+/// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB.
 pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The module's parsed DWARF, as loaded from its `.debug_*` custom sections.
@@ -62,6 +61,8 @@ pub type ModuleDwarf = Arc<Dwarf<EndianReader<RunTimeEndian, Arc<[u8]>>>>;
 pub struct GlobalType(wasmparser::GlobalType);
 
 impl GlobalType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::GlobalType) -> Self {
         GlobalType(value)
     }
@@ -90,6 +91,8 @@ impl GlobalType {
 pub struct MemoryType(wasmparser::MemoryType);
 
 impl MemoryType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::MemoryType) -> Self {
         MemoryType(value)
     }
@@ -130,6 +133,8 @@ impl MemoryType {
 pub struct TagType(wasmparser::TagType);
 
 impl TagType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::TagType) -> Self {
         TagType(value)
     }
@@ -173,6 +178,11 @@ impl ValType {
     /// Alias for the wasm `contref` type.
     pub const CONTREF: ValType = ValType::Ref(RefType(wasmparser::RefType::CONTREF));
 
+    /// Maps the parser's value type onto this crate's.
+    ///
+    /// Total, including `V128`: rejecting SIMD is left to the callers that would
+    /// have to represent a value of it, so the type itself can still be named in
+    /// a signature this crate merely reads past.
     pub(crate) fn from_wasmparser(value: wasmparser::ValType) -> Self {
         match value {
             wasmparser::ValType::I32 => ValType::I32,
@@ -206,6 +216,8 @@ pub(crate) fn formatted_val_types(types: &[ValType]) -> String {
 pub struct RefType(wasmparser::RefType);
 
 impl RefType {
+    /// Adopts the parser's representation. Crate-private so the wrapped type
+    /// stays out of this crate's public API.
     pub(crate) fn from_wasmparser(value: wasmparser::RefType) -> Self {
         RefType(value)
     }
@@ -413,8 +425,10 @@ impl EntityIndex for FieldIndex {}
 /// A fully parsed module: every section decoded into owned data.
 ///
 /// Field order roughly follows the binary section order. Index spaces that can
-/// be imported (functions here) fold imports and definitions into a single
-/// list; see the per-field docs.
+/// be imported — functions and globals — fold imports and definitions into a
+/// single list, imports first, matching how wasm numbers them; the
+/// `imported_*_count` fields record where the boundary falls. See the per-field
+/// docs.
 pub struct Module {
     /// The type section. Only function types are kept — GC composite types
     /// (struct/array) are rejected during parsing.
@@ -433,6 +447,9 @@ pub struct Module {
     pub globals: Box<[Global]>,
     /// The export section, keyed by export name.
     pub exports: FxHashMap<String, Export>,
+    /// Reverse index over the function entries of [`Self::exports`]: exported
+    /// function index to export name. Lets an error name the function it came from
+    /// without scanning the export table.
     pub exported_func_index_to_name: FxHashMap<FuncIndex, String>,
     /// The `start` function, run at instantiation, if the module declares one.
     pub start_section: Option<FuncIndex>,
@@ -540,6 +557,7 @@ impl Module {
         Ok(TypedFunc::new(func_index))
     }
 
+    /// The export name of function `index`, or `None` if it is not exported.
     pub fn exported_func_name(&self, index: FuncIndex) -> Option<&String> {
         self.exported_func_index_to_name.get(&index)
     }
@@ -561,6 +579,14 @@ pub struct FuncBody {
     /// `instructions[i]`, and both slices always have the same length. Lowering
     /// pushes the two together, which is what upholds this.
     pub instruction_offsets: Box<[u32]>,
+    /// Every `br_table` arm in this body, concatenated in lowering order.
+    ///
+    /// Each [`Instruction::BrTable`] holds a `(start_index, len)` range naming its
+    /// own contiguous run here instead of an inline `Box<[TargetBranch]>` — that fat
+    /// pointer would make the variant 16 bytes and hold the whole enum at 24 (see
+    /// the [`crate::instruction`] module docs). Empty, and unallocated, for the
+    /// common case of a body with no `br_table`.
+    pub(crate) br_table_targets: Box<[TargetBranch]>,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -778,7 +804,12 @@ impl Export {
 /// Whether a global is imported or locally defined.
 pub enum GlobalKind {
     /// Imported from `module`::`name`; its value is supplied at instantiation.
-    Imported { module: String, name: String },
+    Imported {
+        /// The import's module name.
+        module: String,
+        /// The import's field name within that module.
+        name: String,
+    },
     /// Locally defined; the constant expression computes its initial value.
     Local(Box<[Instruction]>),
 }
@@ -934,10 +965,14 @@ impl Module {
     ///
     /// # Errors
     ///
-    /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails, and
-    /// [`TraceWasmError::Unsupported`] for valid modules using features TraceWasm
-    /// does not model (components, GC types, non-function imports, or any
-    /// operator the lowering pass rejects).
+    /// Returns [`TraceWasmError::Parsing`] if validation or decoding fails. GC
+    /// types arrive this way too: `wasmparser` refuses them while reading the
+    /// type section, before this pass sees them.
+    ///
+    /// Returns [`TraceWasmError::Unsupported`] for valid modules using features
+    /// TraceWasm does not model: components, imports other than functions and
+    /// globals, 64-bit memory, more than one memory, tables of anything but
+    /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
     pub fn compile(buf: &[u8]) -> Result<Arc<Module>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
@@ -1107,6 +1142,20 @@ impl Module {
 
                     for mem in mem_iter {
                         let mem = mem?;
+
+                        // Rejected up front rather than trapping later: `wasmparser`
+                        // enables the memory64 proposal by default, but the
+                        // interpreter is 32-bit throughout — addresses are popped
+                        // with `Val::as_i32` and `memarg` offsets are stored as
+                        // `u32`. Both of those silently misbehave on a 64-bit
+                        // memory, so it cannot be allowed past compile time.
+                        //
+                        // Imported memories need no equivalent check: the import
+                        // section arm rejects every non-function, non-global import,
+                        // so the memory section is the only way a memory gets in.
+                        if mem.memory64 {
+                            return Err(TraceWasmError::Unsupported("64-bit memory".to_string()));
+                        }
 
                         memories.push(mem);
                     }
@@ -1284,9 +1333,8 @@ impl Module {
 
                         // Rejected here rather than when the frame is built: the
                         // local's type is static, so failing at compile time gives
-                        // a clearer error and keeps every runtime error out of
-                        // `TraceVM::execute` an `InstructionExecution` (the
-                        // invariant `FuncCallError` relies on).
+                        // a clearer error, and it lets frame setup treat `v128` as
+                        // unreachable instead of having to produce a trap for it.
                         if ty == ValType::V128 {
                             return Err(TraceWasmError::Unsupported("v128 local".to_string()));
                         }
@@ -1296,7 +1344,7 @@ impl Module {
                         }
                     }
 
-                    let (instructions, instruction_offsets) =
+                    let (instructions, instruction_offsets, br_table_targets) =
                         Instruction::emit_instruction_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
@@ -1309,6 +1357,7 @@ impl Module {
                         locals: locals.into_boxed_slice(), // params + declared locals
                         instructions: instructions.into_boxed_slice(),
                         instruction_offsets: instruction_offsets.into_boxed_slice(),
+                        br_table_targets,
                     });
                 }
                 CustomSection(custom_sec) => {
@@ -1518,9 +1567,14 @@ impl Module {
     /// Instantiates the module against an import registry, producing a runnable
     /// [`Instance`].
     ///
-    /// Allocates the instance's linear memory and validates the registry against
-    /// the module's declared imports: the function counts must agree, and every
-    /// imported function must exist in the registry with a matching signature.
+    /// In order: validates the registry against the module's declared function
+    /// imports (counts must agree, and each must exist with a matching
+    /// signature), allocates linear memory, resolves and type-checks imported
+    /// globals, builds tables, applies active element and data segments, and
+    /// finally runs the `start` function if the module has one.
+    ///
+    /// Imports are checked before anything is allocated, so a mismatched registry
+    /// costs nothing.
     ///
     /// # Errors
     ///
@@ -1530,12 +1584,18 @@ impl Module {
     /// - [`TraceWasmError::ImportSignatureMismatch`] if an imported function's
     ///   signature disagrees, or [`TraceWasmError::ImportGlobalTypeMismatch`] if
     ///   an imported global's type disagrees.
-    /// - [`TraceWasmError::TableTooLarge`] if a table's initial size exceeds the
-    ///   configured cap, and [`TraceWasmError::ElementSegmentOutOfBounds`] if an
-    ///   active element segment does not fit its target table.
+    /// - [`TraceWasmError::TableTooLarge`] / [`TraceWasmError::MemoryTooLarge`] if
+    ///   a table's or memory's initial size exceeds the configured cap, and
+    ///   [`TraceWasmError::ElementSegmentOutOfBounds`] if an active element segment
+    ///   does not fit its target table.
+    /// - [`TraceWasmError::Unsupported`] for constructs only reachable at
+    ///   instantiation: a non-`funcref` element expression, a data segment
+    ///   targeting a memory other than index 0, or a `v128` imported global.
+    /// - Anything the module's `start` function raises, since it runs before this
+    ///   returns.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: &Arc<Module>,
-        mut import_registry: I,
+        import_registry: I,
         config: Option<Config>,
     ) -> Result<Instance<M, I>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
@@ -1842,22 +1902,7 @@ impl Module {
             }
         }
 
-        // execute start function
-        if let Some(func_index) = self.start_section {
-            TraceVM::run(
-                func_index,
-                &[],
-                self.as_ref(),
-                &mut memory,
-                &mut import_registry,
-                &mut global_vals,
-                &mut table_vals,
-                &mut data_vals,
-                &config,
-            )?;
-        }
-
-        Ok(Instance::new(
+        let mut instance = Instance::new(
             memory,
             import_registry,
             self.clone(),
@@ -1866,6 +1911,13 @@ impl Module {
             table_vals.into_boxed_slice(),
             element_vals.into_boxed_slice(),
             data_vals.into_boxed_slice(),
-        ))
+        );
+
+        // execute start function
+        if let Some(func_index) = self.start_section {
+            TraceVM::run(func_index, &[], &mut instance, self)?;
+        }
+
+        Ok(instance)
     }
 }

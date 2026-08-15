@@ -17,6 +17,15 @@
 //! once (`VM_STACK_INITIAL_ALLOCATION_SIZE`) so steady-state execution does not
 //! reallocate.
 //!
+//! One `Stack` is held per [`Instance`](crate::instance::Instance) and shared by
+//! every frame of a call tree; [`Stack::reset`] empties it at each top-level entry
+//! without releasing the storage. Locals live below the operand region — see the
+//! frame layout in [`crate::vm`].
+//!
+//! Constant expressions are the exception: they run on their own short-lived
+//! stack from [`Stack::for_const_expr_evaluation`], because they are evaluated
+//! during instantiation, before the instance whose stack they would share exists.
+//!
 //! ## Ordering conventions
 //!
 //! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
@@ -28,28 +37,47 @@
 //!
 //! ## Preconditions
 //!
-//! For speed the stack methods are unchecked: they assume the caller respects
+//! The stack methods are infallible in signature: they assume the caller respects
 //! the operand-stack discipline that WebAssembly validation already guarantees
 //! (never pop below zero, never preserve more values than are present, only
-//! truncate downward). Violations panic via index/underflow rather than
-//! returning an error.
+//! truncate downward). Violations panic via index or underflow rather than
+//! returning an error, so the bounds check remains as a backstop.
+//!
+//! [`Instance::stack`](crate::instance::Instance)'s backing storage is also read
+//! directly, bypassing these methods, by the locals accessors in [`crate::vm`]:
+//! locals sit below `stack_pointer` for the whole life of a frame, so the operand
+//! discipline never touches them. Those accessors index unchecked and carry the
+//! safety argument for it.
 
 use crate::{
     error::TraceWasmError,
-    instance::traits::{ParamVals, ResultVals},
     module::{FuncIndex, ValType},
+    tracewasm_unreachable,
 };
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 /// Elements of backing storage reserved for a fresh operand stack, sized so a
 /// normal function's execution never has to reallocate mid-run.
-pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024; // 512Kib
+///
+/// A count of slots, not of bytes: at 8 bytes per [`Value`] this reserves 4 MiB.
+/// The pages are faulted lazily, so an instance that never runs deep pays only
+/// for what it touches.
+pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024;
 
 /// A concrete runtime value on the operand stack or in a local slot.
 ///
-/// One variant per supported WebAssembly value type. `V128` (SIMD) is
-/// intentionally absent and rejected at the `Val` constructors below. `Ref`
-/// holds an optional function index — `None` is a null reference.
+/// One variant per supported WebAssembly value type. `Ref` holds an optional
+/// function index — `None` is a null reference.
+///
+/// `V128` (SIMD) is intentionally absent, so there is no `Val` that can carry
+/// one. Where a [`ValType`] has to be turned into a value the type is rejected
+/// instead: [`Val::has_ty`] reports it as unsupported, and the interpreter's own
+/// frame setup treats it as unreachable, which is sound because
+/// `Module::compile` refuses such a module up front.
+///
+/// This is the tagged form, used at the API boundary and for globals. The
+/// interpreter's operand stack holds an untagged eight-byte slot instead, since
+/// there the type of every slot is already fixed by the instruction reading it.
 #[derive(Debug, Copy, Clone)]
 pub enum Val {
     /// A 32-bit integer value.
@@ -62,6 +90,40 @@ pub enum Val {
     F64(f64),
     /// A nullable function reference (`None` is a null reference).
     Ref(Option<FuncIndex>),
+}
+
+/// Reports an operand whose variant is not the one the instruction expected.
+///
+/// The accessors below are called once or more per interpreted instruction, so
+/// their failure path is outlined rather than written inline. `panic!` in the body
+/// would put a call there, and anything the accessor holds across it would have to
+/// occupy a callee-saved register — whose save and restore is emitted at the
+/// function's entry and exit, and so is paid on every call.
+///
+/// One helper per type, each taking no arguments, so there is nothing to keep
+/// live. They diverge, which lets the compiler reach them with a plain branch
+/// instead of a call.
+mod wrong_ty {
+    #[inline(never)]
+    pub fn i32() -> ! {
+        panic!("value is not i32")
+    }
+    #[inline(never)]
+    pub fn i64() -> ! {
+        panic!("value is not i64")
+    }
+    #[inline(never)]
+    pub fn f32() -> ! {
+        panic!("value is not f32")
+    }
+    #[inline(never)]
+    pub fn f64() -> ! {
+        panic!("value is not f64")
+    }
+    #[inline(never)]
+    pub fn reference() -> ! {
+        panic!("value is not ref")
+    }
 }
 
 impl Val {
@@ -93,36 +155,28 @@ impl Val {
     /// Unwraps an `i32` value. Panics if this value is not an `I32`; callers rely
     /// on validation having already type-checked the operand.
     pub fn as_i32(&self) -> i32 {
-        let Val::I32(val) = self else {
-            panic!("value is not i32")
-        };
+        let Val::I32(val) = self else { wrong_ty::i32() };
 
         *val
     }
 
     /// Unwraps an `i64` value. Panics if this value is not an `I64`.
     pub fn as_i64(&self) -> i64 {
-        let Val::I64(val) = self else {
-            panic!("value is not i64")
-        };
+        let Val::I64(val) = self else { wrong_ty::i64() };
 
         *val
     }
 
     /// Unwraps an `f32` value. Panics if this value is not an `F32`.
     pub fn as_f32(&self) -> f32 {
-        let Val::F32(val) = self else {
-            panic!("value is not f32")
-        };
+        let Val::F32(val) = self else { wrong_ty::f32() };
 
         *val
     }
 
     /// Unwraps an `f64` value. Panics if this value is not an `F64`.
     pub fn as_f64(&self) -> f64 {
-        let Val::F64(val) = self else {
-            panic!("value is not f64")
-        };
+        let Val::F64(val) = self else { wrong_ty::f64() };
 
         *val
     }
@@ -130,7 +184,7 @@ impl Val {
     /// Unwraps a reference value. Panics if this value is not a `Ref`.
     pub fn as_ref(&self) -> Option<FuncIndex> {
         let Val::Ref(val) = self else {
-            panic!("value is not ref")
+            wrong_ty::reference()
         };
 
         *val
@@ -179,6 +233,196 @@ impl Val {
     }
 }
 
+/// Drops the tag, keeping the bits: the inverse of [`Value::into_val`].
+///
+/// Used where a tagged value crosses into the interpreter — call arguments, host
+/// results, global reads.
+impl From<&Val> for Value {
+    #[inline(always)]
+    fn from(value: &Val) -> Self {
+        match value {
+            Val::I32(val) => Value::from_i32(*val),
+            Val::I64(val) => Value::from_i64(*val),
+            Val::F32(val) => Value::from_f32(*val),
+            Val::F64(val) => Value::from_f64(*val),
+            Val::Ref(func_ref) => Value::from_ref(*func_ref),
+        }
+    }
+}
+
+/// By-value form of [`From<&Val>`](Value); [`Val`] is `Copy`, so the two differ
+/// only in what the caller happens to hold.
+impl From<Val> for Value {
+    #[inline(always)]
+    fn from(value: Val) -> Self {
+        match value {
+            Val::I32(val) => Value::from_i32(val),
+            Val::I64(val) => Value::from_i64(val),
+            Val::F32(val) => Value::from_f32(val),
+            Val::F64(val) => Value::from_f64(val),
+            Val::Ref(func_ref) => Value::from_ref(func_ref),
+        }
+    }
+}
+
+/// Where [`Value`] keeps the "this reference is non-null" bit.
+///
+/// A `funcref` payload is a [`FuncIndex`], which is a `u32`, so the whole upper
+/// half of the word is free; 56 is simply a bit in that half.
+const TAG_SHIFT: u32 = 56;
+/// The bit pattern [`Value::from_ref`] sets for a non-null reference. A null one
+/// is all zeroes, which is what makes the tag necessary: without it a null
+/// reference and `Some(FuncIndex(0))` would be the same word.
+const TAG_SOME: u64 = 1 << TAG_SHIFT;
+
+/// One operand-stack slot: eight bytes, no type tag.
+///
+/// Every wasm value the interpreter holds fits in a `u64`, and the *type* of a
+/// given slot is already fixed by the validated instruction stream — an
+/// `i64.add` can only ever find two `i64`s beneath it. Carrying a discriminant
+/// alongside the bits would therefore pay, on every push and pop, for
+/// information the opcode already has. The tagged [`Val`] is used at the API
+/// boundary instead, where the type genuinely is dynamic.
+///
+/// # Invariant
+///
+/// **A slot must be read back with the same type it was written as.** The
+/// accessors reinterpret bits and cannot detect a mismatch: `from_i32(-1)`
+/// stores `0x0000_0000_FFFF_FFFF`, so reading it with [`Self::as_i64`] yields
+/// `4294967295` rather than `-1`. Validation is what upholds this, so a bug in
+/// lowering surfaces as a wrong answer rather than a panic.
+///
+/// Floats are stored as raw bits rather than converted, so NaN payloads and
+/// signed zeroes survive a round trip unchanged, as wasm requires.
+#[derive(Clone, Copy)]
+pub(crate) struct Value(u64);
+
+impl Value {
+    /// Stores an `i32` in the low half, zero-extended.
+    ///
+    /// Zero- rather than sign-extending keeps the upper half at zero, so the
+    /// 32-bit operations that read the slot back never have to mask.
+    #[inline(always)]
+    pub fn from_i32(val: i32) -> Self {
+        Value(val as u32 as u64)
+    }
+
+    /// Stores an `i64`, which occupies the whole slot.
+    #[inline(always)]
+    pub fn from_i64(val: i64) -> Self {
+        Value(val as u64)
+    }
+
+    /// Stores an `f32` as its raw bits in the low half, preserving NaN payloads.
+    #[inline(always)]
+    pub fn from_f32(val: f32) -> Self {
+        Value(val.to_bits() as u64)
+    }
+
+    /// Stores an `f64` as its raw bits, preserving NaN payloads.
+    #[inline(always)]
+    pub fn from_f64(val: f64) -> Self {
+        Value(val.to_bits())
+    }
+
+    /// Stores a `funcref`: the index in the low 32 bits, [`TAG_SOME`] set when
+    /// the reference is non-null. A null reference is the all-zero word.
+    #[inline(always)]
+    pub fn from_ref(func_ref: Option<FuncIndex>) -> Self {
+        let x = match func_ref {
+            Some(x) => x.0,
+            None => 0,
+        } as u64;
+
+        let tag = if func_ref.is_some() { TAG_SOME } else { 0 };
+
+        Value(tag | x)
+    }
+
+    /// Reads the low half as an `i32`, discarding the upper half.
+    ///
+    /// Correct only for a slot written by [`Self::from_i32`]; see the type's
+    /// invariant.
+    #[inline(always)]
+    pub fn as_i32(&self) -> i32 {
+        self.0 as u32 as i32
+    }
+
+    /// Reads the whole slot as an `i64`. See the type's invariant.
+    #[inline(always)]
+    pub fn as_i64(&self) -> i64 {
+        self.0 as i64
+    }
+
+    /// Reinterprets the low half as an `f32`. See the type's invariant.
+    #[inline(always)]
+    pub fn as_f32(&self) -> f32 {
+        f32::from_bits(self.0 as u32)
+    }
+
+    /// Reinterprets the whole slot as an `f64`. See the type's invariant.
+    #[inline(always)]
+    pub fn as_f64(&self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
+    /// Reads a `funcref`, `None` for a null one.
+    ///
+    /// Any bit set at or above [`TAG_SHIFT`] counts as non-null, not just the one
+    /// [`Self::from_ref`] writes, so this stays correct if the upper half is ever
+    /// used for more than the one flag.
+    #[inline(always)]
+    pub fn as_ref(&self) -> Option<FuncIndex> {
+        let is_some = (self.0 >> TAG_SHIFT) != 0;
+        let val = self.0 as u32;
+        if is_some { Some(FuncIndex(val)) } else { None }
+    }
+
+    /// The initial value wasm gives a declared local of type `ty` — zero for the
+    /// numeric types, a null reference for `funcref`.
+    ///
+    /// Every arm produces the all-zero word, so this compiles away to a store of
+    /// zero; it is written out per type to stay correct if a future
+    /// representation stops sharing that encoding.
+    ///
+    /// # Panics
+    ///
+    /// On [`ValType::V128`], which `Module::compile` rejects, so a frame setup
+    /// can never reach it.
+    #[inline(always)]
+    pub fn zero_of_ty(ty: ValType) -> Self {
+        match ty {
+            ValType::I32 => Value::from_i32(0),
+            ValType::I64 => Value::from_i64(0),
+            ValType::F32 => Value::from_f32(0.0),
+            ValType::F64 => Value::from_f64(0.0),
+            ValType::Ref(_) => Value::from_i32(0),
+            ValType::V128 => tracewasm_unreachable::unreachable(),
+        }
+    }
+
+    /// Re-attaches the type that the slot lost, producing the tagged [`Val`] the
+    /// public API and the host boundary deal in.
+    ///
+    /// `ty` must be the type the slot was written as — it is taken from the
+    /// function's declared signature, which is what makes that so.
+    ///
+    /// # Panics
+    ///
+    /// On [`ValType::V128`], as for [`Self::zero_of_ty`].
+    #[inline(always)]
+    pub fn into_val(self, ty: &ValType) -> Val {
+        match ty {
+            ValType::I32 => Val::I32(self.as_i32()),
+            ValType::I64 => Val::I64(self.as_i64()),
+            ValType::F32 => Val::F32(self.as_f32()),
+            ValType::F64 => Val::F64(self.as_f64()),
+            ValType::Ref(_) => Val::Ref(self.as_ref()),
+            ValType::V128 => tracewasm_unreachable::unreachable(),
+        }
+    }
+}
+
 /// A materialized table instance: its function-reference slots and the maximum
 /// number of elements it may grow to.
 pub(crate) struct TableVal {
@@ -206,6 +450,26 @@ pub(crate) enum DataVal {
     Passive(Box<[u8]>), // data blob
 }
 
+/// Reports a pop from an empty stack.
+///
+/// Not generic and takes no arguments, so one copy is shared by every `Stack<T>`
+/// and callers keep nothing live for it.
+#[inline(never)]
+fn pop_underflow() -> ! {
+    panic!("pop from an empty operand stack")
+}
+
+/// Reports a read of the top of an empty stack.
+///
+/// A sibling of [`pop_underflow`] rather than a shared helper, for the same
+/// reason [`wrong_ty`] has one function per type: each carries an accurate
+/// message while still taking no arguments, so neither costs the caller
+/// anything to keep live.
+#[inline(never)]
+fn top_underflow() -> ! {
+    panic!("top of an empty operand stack")
+}
+
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
 /// independently of the backing vector's length. See the module docs for the
 /// invariants and rationale.
@@ -215,7 +479,7 @@ pub(crate) enum DataVal {
 pub(crate) struct Stack<T> {
     /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
-    inner: Vec<T>,
+    pub inner: Vec<T>,
     /// Logical height: index one past the top value. The top is
     /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
     stack_pointer: usize, // points to the top of the stack
@@ -233,6 +497,13 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    pub fn new_with_capacity(cap: u32) -> Self {
+        Stack {
+            inner: Vec::with_capacity(cap as usize),
+            stack_pointer: 0,
+        }
+    }
+
     /// Creates an empty stack sized for constant-expression evaluation, which
     /// needs only a handful of slots, avoiding the large `Default` reservation.
     pub(crate) fn for_const_expr_evaluation() -> Self {
@@ -240,6 +511,36 @@ impl<T: Clone> Stack<T> {
             inner: Vec::with_capacity(2), // needs very small stack
             stack_pointer: 0,
         }
+    }
+
+    /// Borrows the top value without removing it.
+    ///
+    /// Precondition: the stack is non-empty, as for [`Self::pop`].
+    ///
+    /// Bounded by `stack_pointer`, not by `inner.len()` — the backing vector
+    /// extends past the live region (see the module docs), so slots at or above
+    /// the height hold stale values from earlier pops rather than being absent.
+    /// Deriving the index from `stack_pointer` is what keeps this a read of the
+    /// live top.
+    pub fn top(&self) -> &T {
+        // Indexing directly would reach `panic_bounds_check`, which takes the index
+        // and the length as arguments; `top_underflow` takes nothing. See the note
+        // in [`Self::pop`], whose shape this follows.
+        let Some(val) = self.inner.get(self.stack_pointer.wrapping_sub(1)) else {
+            top_underflow()
+        };
+
+        val
+    }
+
+    /// Empties the stack in O(1) by moving the pointer back to 0.
+    ///
+    /// The backing storage is left untouched, so both the allocation and the
+    /// high-water mark (`inner.len()`) survive. That is what keeps
+    /// [`Self::push_grow`] rare across the life of an instance rather than rare
+    /// only within a single call.
+    pub fn reset(&mut self) {
+        self.stack_pointer = 0;
     }
 
     /// The current logical height (number of live values).
@@ -252,13 +553,38 @@ impl<T: Clone> Stack<T> {
     /// Reuses a stale slot when the pointer is below `inner.len()` (i.e. after a
     /// prior pop/truncate), only growing the backing vector when the pointer is
     /// already at the high-water mark. Either way `stack_pointer` advances by one.
+    ///
+    /// Growth is outlined into [`Self::push_grow`] rather than calling `Vec::push`
+    /// here, and that is worth 5-10% of interpreter throughput. `Vec::push`'s body
+    /// calls the allocator, and values this function loads before the branch would
+    /// then be live across that call — forcing them into callee-saved registers,
+    /// whose save and restore is emitted at the function's entry and exit and so is
+    /// paid on every push. Keeping the call in a separate function leaves nothing
+    /// on the common path live across it, so the frame setup sinks into the cold
+    /// branch.
+    ///
+    /// Do not add `#[cold]` to the helper: it measures slower than `#[inline(never)]`
+    /// alone.
     pub fn push(&mut self, val: T) {
         if self.stack_pointer < self.inner.len() {
             self.inner[self.stack_pointer] = val;
+            self.stack_pointer += 1;
         } else {
-            self.inner.push(val);
+            self.push_grow(val);
         }
+    }
 
+    /// The high-water-mark case of [`Self::push`]: extends the backing storage.
+    ///
+    /// Runs at most once per stack slot over the life of the stack. Since the stack
+    /// lives on the [`Instance`](crate::instance::Instance) and [`Self::reset`]
+    /// leaves `inner` alone, that is once per slot per instance rather than per
+    /// call — on the order of tens of calls against hundreds of thousands of pushes.
+    ///
+    /// Kept out of line so [`Self::push`] stays cheap; see the note there.
+    #[inline(never)]
+    fn push_grow(&mut self, val: T) {
+        self.inner.push(val);
         self.stack_pointer += 1;
     }
 
@@ -267,8 +593,18 @@ impl<T: Clone> Stack<T> {
     /// Precondition: the stack is non-empty. Popping an empty stack underflows
     /// `stack_pointer` and panics.
     pub fn pop(&mut self) -> T {
-        let val = self.inner[self.stack_pointer - 1].clone();
-        self.stack_pointer -= 1;
+        // Indexing would reach `panic_bounds_check`, which takes the index and the
+        // length as arguments — both must be materialised and held to the call, and
+        // a value live across a call has to occupy a callee-saved register whose
+        // save and restore is then paid on every pop. `pop_underflow` takes nothing.
+        let sp = self.stack_pointer.wrapping_sub(1);
+
+        let Some(val) = self.inner.get(sp) else {
+            pop_underflow()
+        };
+
+        let val = val.clone();
+        self.stack_pointer = sp;
 
         val
     }
@@ -353,14 +689,18 @@ impl<T: Clone> Stack<T> {
     pub fn tee(&self) -> T {
         self.inner[self.stack_pointer - 1].clone()
     }
+
+    pub fn peek_from_top(&self, depth: u32) -> &T {
+        &self.inner[(self.height() - 1 - depth) as usize]
+    }
 }
 
-impl Stack<Val> {
+impl Stack<Value> {
     /// Removes the top `num` values and returns them as a callee's parameters, in
     /// push order (`arg0..argN-1`) for binding into the callee's locals.
     ///
     /// Precondition: at least `num` values are present.
-    pub fn pop_params(&mut self, num: u32) -> ParamVals {
+    pub fn pop_params(&mut self, num: u32) -> SmallVec<[Value; 5]> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
@@ -369,14 +709,14 @@ impl Stack<Val> {
 
         self.stack_pointer -= num as usize;
 
-        ParamVals::new(s)
+        s
     }
 
     /// Removes the top `num` values and returns them as a function's results, in
     /// push order (`result0..resultN-1`).
     ///
     /// Precondition: at least `num` values are present.
-    pub fn pop_results(&mut self, num: u32) -> ResultVals {
+    pub fn pop_results(&mut self, num: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
         for i in 0..(num as usize) {
@@ -385,7 +725,7 @@ impl Stack<Val> {
 
         self.stack_pointer -= num as usize;
 
-        ResultVals::new(s)
+        s
     }
 }
 
@@ -498,6 +838,54 @@ mod tests {
     fn tee_on_empty_panics() {
         let s = stack::<i32>();
         s.tee();
+    }
+
+    // ------------------------------------------------------------------
+    // top — borrows the live top without removing it
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn top_borrows_without_popping() {
+        let mut s = stack();
+        s.push(10);
+        s.push(20);
+
+        assert_eq!(*s.top(), 20);
+        // a borrow, not a pop: height and contents are untouched
+        assert_eq!(s.stack_pointer, 2);
+        assert_eq!(live(&s), vec![10, 20]);
+    }
+
+    #[test]
+    fn top_follows_the_pointer_past_stale_slots() {
+        let mut s = stack();
+        s.push(10);
+        s.push(20);
+        s.push(30);
+        s.pop();
+
+        // 30 is still sitting in `inner`, above the live region
+        assert!(s.inner.len() > s.stack_pointer);
+        assert_eq!(*s.top(), 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "top of an empty operand stack")]
+    fn top_of_empty_stack_panics() {
+        let s: Stack<i32> = stack();
+
+        let _ = s.top();
+    }
+
+    #[test]
+    #[should_panic(expected = "top of an empty operand stack")]
+    fn top_of_drained_stack_panics_rather_than_reading_a_stale_slot() {
+        let mut s = stack();
+        s.push(1);
+        s.pop();
+
+        // `stack_pointer` is 0 but `inner` still holds the 1
+        let _ = s.top();
     }
 
     // ------------------------------------------------------------------

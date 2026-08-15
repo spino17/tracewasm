@@ -1,7 +1,7 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
 use crate::{
-    instruction::Instruction,
     module::{FuncIndex, Module, TableIndex},
+    tracewasm_unreachable,
 };
 use addr2line::LookupResult;
 use rustc_demangle::demangle;
@@ -11,37 +11,27 @@ use std::{
 };
 use thiserror::Error;
 
-/// Any failure while validating, parsing, or lowering a WebAssembly module.
+/// Any failure while validating, parsing, lowering, instantiating, or executing
+/// a WebAssembly module.
 ///
 /// The `From<wasmparser::Error>` impl lets decode/validation failures propagate
 /// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
-    /// A trap or error raised while executing a single instruction, tagged with
-    /// where it happened. The interpreter's driver loop attaches these coordinates
-    /// to the [`InstructionExecutionError`] the instruction produced.
-    ///
-    /// Fields: the enclosing function index, the instruction's index in that
-    /// function's lowered instruction list, the instruction itself, the underlying
-    /// cause, and the instruction's byte offset in the module binary. The offset
-    /// is carried for DWARF lookup rather than display, so it is deliberately
-    /// absent from the message.
-    #[error("error occured while executing instruction `{1}`({2:?}) in func({0:?}): {3}")]
-    InstructionExecution(
-        FuncIndex,
-        usize,
-        Instruction,
-        InstructionExecutionError,
-        u32,
-    ),
-    /// A linear-memory access that ran past the memory's bounds (a wasm trap).
-    /// Fields: a description of the access, the byte offset attempted, and the
-    /// current memory length in bytes.
+    /// A call into the guest failed. The [`FuncCallError`] carries the trapping
+    /// [`InstructionExecutionError`] together with the frames that led to it, so
+    /// it can render a backtrace without the caller supplying context.
+    #[error("{0:?}")]
+    FuncCall(FuncCallError),
+    /// A linear-memory failure raised outside instruction execution — for example
+    /// a data-segment write during instantiation. Field: the specific
+    /// [`MemoryError`].
     #[error("{0:?}")]
     MemoryError(MemoryError),
     /// A well-formed construct that TraceWasm deliberately does not handle
-    /// (e.g. the component model, GC types, or non-function imports). The string
-    /// describes the specific unsupported feature.
+    /// (e.g. the component model, GC types, imports other than functions and
+    /// globals, or 64-bit memory). The string describes the specific unsupported
+    /// feature.
     #[error("not supported in TraceWasm: {0}")]
     Unsupported(String),
     /// The params or results supplied to / produced by a typed call don't match
@@ -118,15 +108,247 @@ impl From<wasmparser::Error> for TraceWasmError {
     }
 }
 
+/// A failed [`TypedFunc::call`](crate::instance::TypedFunc::call), carrying the
+/// context needed to explain it.
+///
+/// A trap is raised deep inside the interpreter, where the entry function and the
+/// [`Module`] are not in reach. This pairs the trace with both, so a caller can go
+/// straight from the error to a rendered backtrace via [`Self::stack_trace`]
+/// without threading that context in themselves.
+///
+/// The `Module` is held by `Arc` rather than borrowed so the error outlives the
+/// call it came from — a backtrace can be rendered long afterwards, and needs the
+/// name and DWARF sections to do it.
+pub struct FuncCallError {
+    func_name: String,
+    trace: Box<[TraceRecord]>,
+    module: Arc<Module>,
+}
+
+impl FuncCallError {
+    /// Pairs a completed trace with the entry function and module it happened in.
+    ///
+    /// # Invariants
+    ///
+    /// `trace` must be non-empty and innermost-first, and `trace[0]` must be a
+    /// [`TraceRecordKind::NonCall`] — the instruction that actually trapped. Both
+    /// [`Self::cause`] and [`Self::stack_trace`] rely on it, and `cause` treats a
+    /// violation as unreachable rather than returning an `Option`.
+    ///
+    /// The interpreter satisfies this by construction: a trap seeds the trace
+    /// with its own `NonCall` record before any caller appends a
+    /// [`TraceRecordKind::Call`] on top.
+    pub(crate) fn new(func_name: String, trace: Box<[TraceRecord]>, module: Arc<Module>) -> Self {
+        FuncCallError {
+            func_name,
+            trace,
+            module,
+        }
+    }
+
+    /// The underlying cause, without the call context.
+    ///
+    /// # Panics
+    ///
+    /// If the trace's innermost record is not a [`TraceRecordKind::NonCall`].
+    /// The interpreter cannot produce such a trace: a trap seeds it with its own
+    /// `NonCall` record before any caller appends a [`TraceRecordKind::Call`].
+    /// Diverging rather than returning an `Option` keeps the impossible case out
+    /// of every caller's signature.
+    pub fn cause(&self) -> &InstructionExecutionError {
+        let TraceRecordKind::NonCall(err) = &self.trace[0].kind else {
+            tracewasm_unreachable::unreachable()
+        };
+
+        err
+    }
+
+    /// The interpreter backtrace for this failure, innermost frame first.
+    ///
+    /// Always has at least one frame: frame `0` is the instruction that trapped,
+    /// which is what seeds the trace in the first place.
+    pub fn stack_trace(&self) -> StackTrace<'_> {
+        StackTrace(&self.trace, &self.func_name, &self.module)
+    }
+}
+
+// `Module` is large and deliberately not `Debug`, so this is written by hand to
+// show the parts that identify the failure.
+impl Debug for FuncCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FuncCallError")
+            .field("func_name", &self.func_name)
+            .field("err", self.cause())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Display for FuncCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Deliberately a one-liner: the backtrace can be long, so it is opt-in
+        // through `stack_trace().render()` rather than part of the message.
+        write!(f, "call to `{}` failed: {}", self.func_name, self.cause())
+    }
+}
+
+impl std::error::Error for FuncCallError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause())
+    }
+}
+
+impl From<FuncCallError> for TraceWasmError {
+    fn from(value: FuncCallError) -> Self {
+        TraceWasmError::FuncCall(value)
+    }
+}
+
+/// The cause of a failure while executing one instruction, one variant per
+/// instruction kind that can fail.
+///
+/// This says only *what* went wrong. Where it happened is added by the driver,
+/// which records it as the [`TraceRecordKind::NonCall`] at the head of a
+/// [`FuncCallError`]'s trace.
+#[derive(Error, Debug)]
+pub enum InstructionExecutionError {
+    /// Reached an `unreachable` instruction (a wasm trap).
+    #[error("reached an `unreachable` instruction")]
+    Unreachable,
+    /// A `call` failed; the boxed error carries the underlying cause, which for
+    /// an imported callee is whatever the host returned. Field: the callee's
+    /// function index.
+    ///
+    /// A locally-defined callee does not produce this: its trap propagates as the
+    /// callee's own record in the trace instead.
+    #[error("call to func({0:?}): {1}")]
+    Call(FuncIndex, Box<TraceWasmError>),
+    /// Guest recursion hit
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config). Field:
+    /// that limit.
+    ///
+    /// Raised at the `call` that would have exceeded it, before the callee is
+    /// entered, so the guard trips while there is still native stack left to
+    /// unwind on.
+    #[error("call stack exhausted: exceeded the maximum call depth of {0}")]
+    CallStackExhausted(u32),
+    /// A `call_indirect` failed — an out-of-bounds index, a null element, a
+    /// signature mismatch, or an error inside the callee. Fields: the table index
+    /// and the specific [`CallIndirectError`].
+    #[error("call_indirect via table({0:?}): {1}")]
+    CallIndirect(TableIndex, CallIndirectError),
+    /// A memory access failed (out of bounds, or effective-address overflow).
+    /// Field: the specific [`MemoryError`].
+    #[error("{0}")]
+    Memory(MemoryError),
+    /// An integer division trapped: a zero divisor, or the signed overflow case
+    /// `MIN / -1`. Fields: the rendered dividend and divisor.
+    #[error("division failed: {num}/{deno}")]
+    Division { num: String, deno: String },
+    /// An integer remainder trapped, which only happens on a zero divisor —
+    /// `MIN % -1` is defined as `0`. Fields: the rendered operands.
+    #[error("remainder failed: {left} % {right}")]
+    Remainder { left: String, right: String },
+    /// A `trunc` conversion could not represent its operand in the target integer
+    /// type — the operand was NaN, an infinity, or truncated to a value outside
+    /// the target's range. Fields: the operand, and the target type's name.
+    ///
+    /// The saturating `trunc_sat` family clamps instead of failing, so it never
+    /// produces this.
+    #[error("float truncation of `{0}` to {1} failed")]
+    FloatToIntTruncation(String, String),
+}
+
+/// Why a `call_indirect` failed: a table-access trap, a signature mismatch, or an
+/// error raised inside the resolved callee.
+#[derive(Error, Debug)]
+pub enum CallIndirectError {
+    /// The table index operand was outside the table's bounds (a wasm trap).
+    #[error("table slot out of bounds")]
+    TableSlotOutOfBounds,
+    /// The referenced table slot held a null element (a wasm trap).
+    #[error("null element in the table slot")]
+    NullElementInTable,
+    /// The callee's signature differs from the type the instruction expects (a
+    /// wasm trap). Fields: the expected signature and the callee's actual signature.
+    #[error("function signature mismatch: expected {0}, got {1}")]
+    FunctionSignatureMismatch(String, String),
+    /// The resolved callee itself failed; the boxed error carries the cause.
+    /// Field: the callee's function index.
+    #[error("call to func({0:?}): {1}")]
+    FunctionCall(FuncIndex, Box<TraceWasmError>),
+}
+
+/// Which direction a failed memory access was going, for error reporting.
+#[derive(Debug)]
+pub enum MemoryAccessKind {
+    /// A load.
+    Read,
+    /// A store.
+    Write,
+}
+
+impl Display for MemoryAccessKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// A linear-memory access failure (all are wasm traps).
+#[derive(Error, Debug)]
+pub enum MemoryError {
+    /// The access ran past the memory's end. Fields: whether it was a read or a
+    /// write, the byte offset attempted, and the current memory length.
+    #[error("out of bounds access: {0} at {1} on memory with length {2}")]
+    OutOfBoundsAccess(MemoryAccessKind, usize, usize), // (kind, offset, mem_len)
+    /// The effective address (popped address + static offset) overflowed the
+    /// 32-bit address space, so it is necessarily out of bounds. Fields: the
+    /// popped address and the static offset.
+    #[error(
+        "effective address overflow: address `{0}` + offset `{1}` exceeds the 32-bit address space"
+    )]
+    EffectiveAddressOverflow(u32, u32),
+    /// A `memory.grow` could not be satisfied — the requested delta would exceed
+    /// the allowed maximum, or the page count overflowed. Fields: the maximum size
+    /// in pages, the requested delta in pages, and the memory's current pages.
+    ///
+    /// Note this is *not* a trap: per the spec `memory.grow` reports failure by
+    /// pushing `-1`, so the interpreter converts this into that value rather than
+    /// propagating it. See [`Memory::grow`](crate::memory::Memory::grow).
+    #[error(
+        "memory grow failed: maximum cap on memory size in pages is `{0}`, request received for increasing `{1}` pages on a memory with `{2}` pages"
+    )]
+    GrowFailed(u64, u64, u64),
+}
+
+impl From<MemoryError> for InstructionExecutionError {
+    fn from(value: MemoryError) -> Self {
+        InstructionExecutionError::Memory(value)
+    }
+}
+
+/// Lets `?` on a memory operation propagate straight out of the dispatch, which
+/// boxes its error so its `Result` fits in registers. Without this the memory
+/// arms would each need an explicit `map_err`, the conversion being two steps.
+impl From<MemoryError> for Box<InstructionExecutionError> {
+    fn from(value: MemoryError) -> Self {
+        Box::new(InstructionExecutionError::Memory(value))
+    }
+}
+
+impl From<MemoryError> for TraceWasmError {
+    fn from(value: MemoryError) -> Self {
+        TraceWasmError::MemoryError(value)
+    }
+}
+
 /// One frame of a captured interpreter backtrace: the instruction (and its
 /// enclosing function) that either trapped or called into the next-inner frame.
+#[derive(Debug)]
 pub struct TraceRecord {
     /// The enclosing function this frame belongs to.
     pub func_index: FuncIndex,
     /// The instruction's index in that function's lowered instruction list.
     pub instr_index: usize,
-    /// The instruction at that index.
-    pub instr: Instruction,
     /// Whether this frame is a call into a deeper frame or the trapping leaf.
     pub kind: TraceRecordKind,
     /// The instruction's byte offset in the module binary, for resolving a source
@@ -136,21 +358,25 @@ pub struct TraceRecord {
 
 /// Distinguishes a caller frame (a `call`/`call_indirect` into a deeper frame)
 /// from the innermost frame where execution actually trapped.
+#[derive(Debug)]
 pub enum TraceRecordKind {
     /// A call frame leading into the next-inner frame. `callee_index` is the
     /// function called; `is_indirect` is `Some(table)` for a `call_indirect` and
     /// `None` for a direct `call`.
     Call {
+        /// The function this frame called.
         callee_index: FuncIndex,
+        /// `Some(table)` if the call went through that table via
+        /// `call_indirect`, `None` for a direct `call`.
         is_indirect: Option<TableIndex>,
     },
     /// The innermost frame: the instruction that trapped, carrying its message.
-    NonCall(String),
+    NonCall(InstructionExecutionError),
 }
 
 /// A captured interpreter backtrace, innermost-first: frame `0` is where
 /// execution trapped and each later frame is the caller that led to it.
-pub struct StackTrace<'a>(Vec<TraceRecord>, &'a str, &'a Arc<Module>);
+pub struct StackTrace<'a>(&'a [TraceRecord], &'a str, &'a Arc<Module>);
 
 impl<'a> StackTrace<'a> {
     /// Resolves each frame of this trace against the module's `dwarf`, expanding
@@ -242,6 +468,14 @@ impl<'a> StackTrace<'a> {
         Ok(SourceStackTrace(source_trace, self.1))
     }
 
+    /// The frames of this trace, innermost first.
+    ///
+    /// Element 0 is always the trapping instruction; the rest are its callers,
+    /// outward. Mirrors [`SourceStackTrace::records`].
+    pub fn records(&self) -> &[TraceRecord] {
+        self.0
+    }
+
     /// Renders the trace as a human-readable, innermost-first backtrace: frame
     /// `#0` is where execution trapped, and each subsequent frame is the caller
     /// that led to it.
@@ -284,10 +518,7 @@ impl<'a> StackTrace<'a> {
             let detail = match &record.kind {
                 // The innermost frame: the instruction that actually trapped.
                 TraceRecordKind::NonCall(err) => {
-                    format!(
-                        "at instr {} ({:?}) — trap: {err}",
-                        record.instr_index, record.instr
-                    )
+                    format!("at instr {} — trap: {err}", record.instr_index)
                 }
                 // A caller frame: the call that led into the next-inner frame.
                 TraceRecordKind::Call {
@@ -327,17 +558,6 @@ pub struct InlineFrameRecord {
     pub line: u32,
 }
 
-/// The source-level expansion of one interpreter frame.
-pub struct SourceTraceRecord {
-    /// Index of the [`TraceRecord`] in the originating [`StackTrace`] that this
-    /// expands, so the two traces can be shown side by side.
-    pub trace_record_index: u32,
-    /// The source frames for that instruction, outermost call site last. Empty
-    /// when the instruction's offset has no DWARF coverage — the record is still
-    /// emitted so no interpreter frame goes missing from the trace.
-    pub inline_trace: Vec<InlineFrameRecord>,
-}
-
 impl InlineFrameRecord {
     /// `file:line`, or just the file when DWARF recorded no line number.
     fn location(&self) -> String {
@@ -347,6 +567,17 @@ impl InlineFrameRecord {
             format!("{}:{}", self.file, self.line)
         }
     }
+}
+
+/// The source-level expansion of one interpreter frame.
+pub struct SourceTraceRecord {
+    /// Index of the [`TraceRecord`] in the originating [`StackTrace`] that this
+    /// expands, so the two traces can be shown side by side.
+    pub trace_record_index: u32,
+    /// The source frames for that instruction, outermost call site last. Empty
+    /// when the instruction's offset has no DWARF coverage — the record is still
+    /// emitted so no interpreter frame goes missing from the trace.
+    pub inline_trace: Vec<InlineFrameRecord>,
 }
 
 impl SourceTraceRecord {
@@ -433,266 +664,6 @@ pub enum SourceStackTraceError {
     /// the wasm to contain `.debug_*` sections.
     #[error("the module has no debug info; rebuild the wasm with debug info enabled")]
     NoDebugInfo,
-}
-
-impl TraceWasmError {
-    fn _extract_stack_trace(&self, trace: &mut Vec<TraceRecord>) -> Option<()> {
-        let TraceWasmError::InstructionExecution(func_index, instr_index, instr, err, instr_offset) =
-            self
-        else {
-            return None;
-        };
-
-        let callee_index: Option<(FuncIndex, Option<TableIndex>)> = match err {
-            InstructionExecutionError::Call(callee_func_index, err) => {
-                err._extract_stack_trace(trace);
-
-                Some((*callee_func_index, None))
-            }
-            InstructionExecutionError::CallIndirect(
-                table_index,
-                CallIndirectError::FunctionCall(callee_func_index, err),
-            ) => {
-                err._extract_stack_trace(trace);
-
-                Some((*callee_func_index, Some(*table_index)))
-            }
-            _ => None,
-        };
-
-        trace.push(TraceRecord {
-            func_index: *func_index,
-            kind: if let Some((callee_index, table_index)) = callee_index {
-                TraceRecordKind::Call {
-                    callee_index,
-                    is_indirect: table_index,
-                }
-            } else {
-                TraceRecordKind::NonCall(err.to_string())
-            },
-            instr: instr.clone(),
-            instr_index: *instr_index,
-            instr_offset: *instr_offset,
-        });
-
-        Some(())
-    }
-}
-
-/// A failed [`TypedFunc::call`](crate::instance::TypedFunc::call), carrying the
-/// context needed to explain it.
-///
-/// The underlying [`TraceWasmError`] is raised deep inside the interpreter, where
-/// the entry function and the [`Module`] are not in reach. This pairs the cause
-/// with both, so a caller can go straight from the error to a rendered backtrace
-/// via [`Self::stack_trace`] without threading that context in themselves.
-pub struct FuncCallError {
-    func_name: String,
-    err: TraceWasmError,
-    module: Arc<Module>,
-}
-
-impl FuncCallError {
-    /// Pairs a failure with the entry function and module it happened in.
-    ///
-    /// `err` must be a [`TraceWasmError::InstructionExecution`]: every error path
-    /// out of the interpreter is tagged with the instruction that raised it, which
-    /// is what lets [`Self::stack_trace`] always produce at least one frame. The
-    /// `debug_assert` below pins that invariant at construction, so a violation
-    /// surfaces where the error is built rather than where it is read.
-    pub(crate) fn new(func_name: String, err: TraceWasmError, module: Arc<Module>) -> Self {
-        debug_assert!(matches!(
-            err,
-            TraceWasmError::InstructionExecution(_, _, _, _, _)
-        ));
-
-        FuncCallError {
-            func_name,
-            err,
-            module,
-        }
-    }
-
-    /// The underlying cause, without the call context.
-    pub fn cause(&self) -> &TraceWasmError {
-        &self.err
-    }
-
-    /// The interpreter backtrace for this failure, innermost frame first.
-    ///
-    /// Always has at least one frame: [`Self::new`] requires the cause to be a
-    /// [`TraceWasmError::InstructionExecution`].
-    pub fn stack_trace(&self) -> StackTrace<'_> {
-        let mut trace = vec![];
-
-        self.err._extract_stack_trace(&mut trace);
-
-        StackTrace(trace, &self.func_name, &self.module)
-    }
-}
-
-// `Module` is large and deliberately not `Debug`, so this is written by hand to
-// show the parts that identify the failure.
-impl Debug for FuncCallError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FuncCallError")
-            .field("func_name", &self.func_name)
-            .field("err", &self.err)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Display for FuncCallError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Deliberately a one-liner: the backtrace can be long, so it is opt-in
-        // through `stack_trace().render()` rather than part of the message.
-        write!(f, "call to `{}` failed: {}", self.func_name, self.err)
-    }
-}
-
-impl std::error::Error for FuncCallError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.err)
-    }
-}
-
-impl From<FuncCallError> for TraceWasmError {
-    fn from(value: FuncCallError) -> Self {
-        value.err
-    }
-}
-
-/// The cause of a failure while executing one instruction, one variant per
-/// instruction kind that can fail. The interpreter's driver loop tags this with
-/// the enclosing function and instruction index via
-/// [`Self::into_tracewasm_err`], producing a [`TraceWasmError::InstructionExecution`].
-#[derive(Error, Debug)]
-pub enum InstructionExecutionError {
-    /// Reached an `unreachable` instruction (a wasm trap).
-    #[error("reached an `unreachable` instruction")]
-    Unreachable,
-    /// A `call` failed; the boxed error carries the underlying cause (typically a
-    /// nested [`TraceWasmError::InstructionExecution`] from the callee, or a host
-    /// error for an imported callee). Field: the callee's function index.
-    #[error("call to func({0:?}): {1}")]
-    Call(FuncIndex, Box<TraceWasmError>),
-    /// A `call_indirect` failed — an out-of-bounds index, a null element, a
-    /// signature mismatch, or an error inside the callee. Fields: the table index
-    /// and the specific [`CallIndirectError`].
-    #[error("call_indirect via table({0:?}): {1}")]
-    CallIndirect(TableIndex, CallIndirectError),
-    /// A memory access failed (out of bounds, offset too large, or effective-
-    /// address overflow). Field: the specific [`MemoryError`].
-    #[error("{0}")]
-    Memory(MemoryError),
-    #[error("division failed: {num}/{deno}")]
-    Division { num: String, deno: String },
-    #[error("remainder failed: {left} % {right}")]
-    Remainder { left: String, right: String },
-    /// A `trunc` conversion could not represent its operand in the target integer
-    /// type — the operand was NaN, an infinity, or truncated to a value outside
-    /// the target's range. Fields: the operand, and the target type's name.
-    ///
-    /// The saturating `trunc_sat` family clamps instead of failing, so it never
-    /// produces this.
-    #[error("float truncation of `{0}` to {1} failed")]
-    FloatToIntTruncation(String, String),
-}
-
-impl InstructionExecutionError {
-    /// Tags this cause with where it happened, producing the crate-wide error.
-    pub fn into_tracewasm_err(
-        self,
-        instr_index: usize,
-        enclosing_func_index: FuncIndex,
-        instr: &Instruction,
-        offset: u32,
-    ) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(
-            enclosing_func_index,
-            instr_index,
-            instr.clone(),
-            self,
-            offset,
-        )
-    }
-}
-
-/// Why a `call_indirect` failed: a table-access trap, a signature mismatch, or an
-/// error raised inside the resolved callee.
-#[derive(Error, Debug)]
-pub enum CallIndirectError {
-    /// The table index operand was outside the table's bounds (a wasm trap).
-    #[error("table slot out of bounds")]
-    TableSlotOutOfBounds,
-    /// The referenced table slot held a null element (a wasm trap).
-    #[error("null element in the table slot")]
-    NullElementInTable,
-    /// The callee's signature differs from the type the instruction expects (a
-    /// wasm trap). Fields: the expected signature and the callee's actual signature.
-    #[error("function signature mismatch: expected {0}, got {1}")]
-    FunctionSignatureMismatch(String, String),
-    /// The resolved callee itself failed; the boxed error carries the cause.
-    /// Field: the callee's function index.
-    #[error("call to func({0:?}): {1}")]
-    FunctionCall(FuncIndex, Box<TraceWasmError>),
-}
-
-/// Which direction a failed memory access was going, for error reporting.
-#[derive(Debug)]
-pub enum MemoryAccessKind {
-    /// A load.
-    Read,
-    /// A store.
-    Write,
-}
-
-impl Display for MemoryAccessKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-/// A linear-memory access failure (all are wasm traps).
-#[derive(Error, Debug)]
-pub enum MemoryError {
-    /// The access ran past the memory's end. Fields: whether it was a read or a
-    /// write, the byte offset attempted, and the current memory length.
-    #[error("out of bounds access: {0} at {1} on memory with length {2}")]
-    OutOfBoundsAccess(MemoryAccessKind, usize, usize), // (kind, offset, mem_len)
-    /// A static `memarg` offset did not fit in a 32-bit memory's address space.
-    #[error("offset too large for 32-bit memory")]
-    OffsetTooLarge,
-    /// The effective address (popped address + static offset) overflowed the
-    /// 32-bit address space, so it is necessarily out of bounds. Fields: the
-    /// popped address and the static offset.
-    #[error(
-        "effective address overflow: address `{0}` + offset `{1}` exceeds the 32-bit address space"
-    )]
-    EffectiveAddressOverflow(u32, u32),
-    /// A `memory.grow` could not be satisfied — the requested delta would exceed
-    /// the allowed maximum, or the page count overflowed. Fields: the maximum size
-    /// in pages, the requested delta in pages, and the memory's current pages.
-    ///
-    /// Note this is *not* a trap: per the spec `memory.grow` reports failure by
-    /// pushing `-1`, so the interpreter converts this into that value rather than
-    /// propagating it. See [`Memory::grow`](crate::memory::Memory::grow).
-    #[error(
-        "memory grow failed: maximum cap on memory size in pages is `{0}`, request received for increasing `{1}` pages on a memory with `{2}` pages"
-    )]
-    GrowFailed(u64, u64, u64),
-}
-
-impl From<MemoryError> for InstructionExecutionError {
-    fn from(value: MemoryError) -> Self {
-        InstructionExecutionError::Memory(value)
-    }
-}
-
-impl From<MemoryError> for TraceWasmError {
-    fn from(value: MemoryError) -> Self {
-        TraceWasmError::MemoryError(value)
-    }
 }
 
 #[cfg(test)]
@@ -792,224 +763,114 @@ mod source_trace_render_tests {
 }
 
 #[cfg(test)]
-impl TraceWasmError {
-    /// Test-only counterpart of [`FuncCallError::stack_trace`], returning just the
-    /// frames.
-    ///
-    /// The public path borrows the entry-function name and the [`Module`] to build
-    /// a [`StackTrace`], neither of which the extraction logic itself uses — this
-    /// exposes the frames so that logic can be tested without standing up a whole
-    /// module.
-    fn stack_trace(&self) -> Option<Vec<TraceRecord>> {
-        let mut trace = vec![];
-
-        self._extract_stack_trace(&mut trace)?;
-
-        Some(trace)
-    }
-}
-
-#[cfg(test)]
 mod stack_trace_tests {
     use super::*;
 
-    /// Build an `InstructionExecution` error: func `func`, instruction index
-    /// `instr`, with the given per-instruction cause. The recorded `Instruction`
-    /// is a fixed placeholder — the trace-extraction logic only clones it through,
-    /// so its value is irrelevant to these tests.
-    fn ie(func: u32, instr: usize, cause: InstructionExecutionError) -> TraceWasmError {
-        TraceWasmError::InstructionExecution(FuncIndex(func), instr, Instruction::Nop, cause, 0)
+    /// A `NonCall` leaf record at `(func, instr)`.
+    fn leaf(func: u32, instr: usize) -> TraceRecord {
+        TraceRecord {
+            func_index: FuncIndex(func),
+            instr_index: instr,
+            kind: TraceRecordKind::NonCall(InstructionExecutionError::Unreachable),
+            instr_offset: 0,
+        }
     }
 
-    /// Assert a record is a `NonCall` at `(func, instr)`.
-    fn assert_noncall(rec: &TraceRecord, func: u32, instr: usize) {
-        assert_eq!(rec.func_index, FuncIndex(func));
-        assert_eq!(rec.instr_index, instr);
-        assert!(
-            matches!(rec.kind, TraceRecordKind::NonCall(_)),
-            "expected a NonCall record"
-        );
+    /// A `Call` record at `(func, instr)` into `callee`, direct unless `table`.
+    fn call(func: u32, instr: usize, callee: u32, table: Option<u32>) -> TraceRecord {
+        TraceRecord {
+            func_index: FuncIndex(func),
+            instr_index: instr,
+            kind: TraceRecordKind::Call {
+                callee_index: FuncIndex(callee),
+                is_indirect: table.map(TableIndex),
+            },
+            instr_offset: 0,
+        }
     }
 
-    /// Assert a record is a `Call` at `(func, instr)` to `callee`, with the given
-    /// `is_indirect` table (None for a direct call, Some(table) for indirect).
-    fn assert_call(rec: &TraceRecord, func: u32, instr: usize, callee: u32, table: Option<u32>) {
-        assert_eq!(rec.func_index, FuncIndex(func));
-        assert_eq!(rec.instr_index, instr);
-        match &rec.kind {
+    /// The smallest valid module: `(module)`. Only needed because a
+    /// `FuncCallError` carries one for name and DWARF lookup; these tests never
+    /// read through it.
+    fn empty_module() -> std::sync::Arc<Module> {
+        let bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+
+        crate::module::Module::compile(&bytes).expect("`(module)` compiles")
+    }
+
+    fn err_with(trace: Vec<TraceRecord>) -> FuncCallError {
+        FuncCallError::new(
+            "entry".to_string(),
+            trace.into_boxed_slice(),
+            empty_module(),
+        )
+    }
+
+    /// `cause` reads the leaf out of the trace, so it depends on the leaf being
+    /// first — the ordering `TraceVM::func_call_err` produces.
+    #[test]
+    fn cause_is_the_leaf_record() {
+        let err = err_with(vec![leaf(3, 1), call(2, 5, 3, None)]);
+
+        assert!(matches!(
+            err.cause(),
+            InstructionExecutionError::Unreachable
+        ));
+    }
+
+    /// The trace is innermost-first: the trapping frame, then its callers
+    /// outward. Renderers and `cause` both rely on this direction.
+    #[test]
+    fn trace_is_innermost_first() {
+        let err = err_with(vec![
+            leaf(6, 0),
+            call(1, 9, 6, Some(4)),
+            call(0, 2, 1, None),
+        ]);
+        let trace = err.stack_trace();
+        let records = trace.0;
+
+        assert_eq!(records.len(), 3);
+
+        assert_eq!(records[0].func_index, FuncIndex(6));
+        assert!(matches!(records[0].kind, TraceRecordKind::NonCall(_)));
+
+        // the indirect call carries the table it dispatched through
+        match records[1].kind {
             TraceRecordKind::Call {
                 callee_index,
                 is_indirect,
             } => {
-                assert_eq!(*callee_index, FuncIndex(callee));
-                assert_eq!(*is_indirect, table.map(TableIndex));
+                assert_eq!(callee_index, FuncIndex(6));
+                assert_eq!(is_indirect, Some(TableIndex(4)));
             }
-            TraceRecordKind::NonCall(_) => panic!("expected a Call record, got NonCall"),
+            TraceRecordKind::NonCall(_) => panic!("expected a Call record"),
+        }
+
+        // a direct call records no table
+        match records[2].kind {
+            TraceRecordKind::Call {
+                callee_index,
+                is_indirect,
+            } => {
+                assert_eq!(callee_index, FuncIndex(1));
+                assert_eq!(is_indirect, None);
+            }
+            TraceRecordKind::NonCall(_) => panic!("expected a Call record"),
         }
     }
 
-    // top-level guard: a non-`InstructionExecution` error has no trace.
+    /// A trap with no calls below it is a single-record trace, and `cause` still
+    /// resolves.
     #[test]
-    fn non_instruction_error_yields_no_trace() {
-        assert!(
-            TraceWasmError::Unsupported("x".to_string())
-                .stack_trace()
-                .is_none()
-        );
-        assert!(
-            TraceWasmError::ExportNotA("function".to_string())
-                .stack_trace()
-                .is_none()
-        );
-    }
+    fn single_frame_trace() {
+        let err = err_with(vec![leaf(0, 7)]);
 
-    // leaf `Unreachable` (the catch-all IE arm) → single NonCall record.
-    #[test]
-    fn single_unreachable_frame() {
-        let trace = ie(0, 7, InstructionExecutionError::Unreachable)
-            .stack_trace()
-            .expect("top-level is an InstructionExecution");
-
-        assert_eq!(trace.len(), 1);
-        assert_noncall(&trace[0], 0, 7);
-    }
-
-    // every non-`FunctionCall` `CallIndirect` cause hits the inner `_ => None`
-    // arm and becomes a NonCall leaf.
-    #[test]
-    fn call_indirect_leaf_traps_are_noncall() {
-        let leaves = [
-            CallIndirectError::TableSlotOutOfBounds,
-            CallIndirectError::NullElementInTable,
-            CallIndirectError::FunctionSignatureMismatch("(I32)".to_string(), "()".to_string()),
-        ];
-
-        for (i, leaf) in leaves.into_iter().enumerate() {
-            let trace = ie(
-                1,
-                i,
-                InstructionExecutionError::CallIndirect(TableIndex(3), leaf),
-            )
-            .stack_trace()
-            .unwrap();
-
-            assert_eq!(trace.len(), 1);
-            assert_noncall(&trace[0], 1, i);
-        }
-    }
-
-    // direct `Call` recursion: caller frame recorded as a Call, callee's trap as
-    // a NonCall, innermost first.
-    #[test]
-    fn direct_call_chain() {
-        let err = ie(
-            2,
-            5,
-            InstructionExecutionError::Call(
-                FuncIndex(3),
-                Box::new(ie(3, 1, InstructionExecutionError::Unreachable)),
-            ),
-        );
-
-        let trace = err.stack_trace().unwrap();
-
-        assert_eq!(trace.len(), 2);
-        assert_noncall(&trace[0], 3, 1); // innermost first
-        assert_call(&trace[1], 2, 5, 3, None); // direct call → is_indirect None
-    }
-
-    // `CallIndirect::FunctionCall` recursion: Call record carries the table index.
-    #[test]
-    fn indirect_call_chain() {
-        let err = ie(
-            1,
-            9,
-            InstructionExecutionError::CallIndirect(
-                TableIndex(4),
-                CallIndirectError::FunctionCall(
-                    FuncIndex(6),
-                    Box::new(ie(6, 0, InstructionExecutionError::Unreachable)),
-                ),
-            ),
-        );
-
-        let trace = err.stack_trace().unwrap();
-
-        assert_eq!(trace.len(), 2);
-        assert_noncall(&trace[0], 6, 0);
-        assert_call(&trace[1], 1, 9, 6, Some(4)); // indirect → is_indirect Some(table)
-    }
-
-    // the `?`-free recursion: a nested non-`InstructionExecution` error (e.g. a
-    // host/import failure) must NOT discard the trace — the calling frame is still
-    // recorded, the non-instruction leaf is simply omitted.
-    #[test]
-    fn nested_non_instruction_error_keeps_caller_frame() {
-        // direct call whose callee is an import that failed
-        let via_call = ie(
-            0,
-            3,
-            InstructionExecutionError::Call(
-                FuncIndex(5),
-                Box::new(TraceWasmError::ImportNotFound(
-                    "env".to_string(),
-                    "log".to_string(),
-                )),
-            ),
-        );
-        let trace = via_call.stack_trace().unwrap();
-        assert_eq!(trace.len(), 1, "caller frame must survive a non-IE leaf");
-        assert_call(&trace[0], 0, 3, 5, None);
-
-        // same for the indirect path
-        let via_indirect = ie(
-            0,
-            2,
-            InstructionExecutionError::CallIndirect(
-                TableIndex(1),
-                CallIndirectError::FunctionCall(
-                    FuncIndex(9),
-                    Box::new(TraceWasmError::ImportNotFound(
-                        "env".to_string(),
-                        "log".to_string(),
-                    )),
-                ),
-            ),
-        );
-        let trace = via_indirect.stack_trace().unwrap();
-        assert_eq!(trace.len(), 1);
-        assert_call(&trace[0], 0, 2, 9, Some(1));
-    }
-
-    // deep mixed chain A --call--> B --call_indirect--> C(unreachable): exercises
-    // both recursion arms together and pins the innermost-first ordering.
-    #[test]
-    fn deep_mixed_chain_ordering() {
-        let err = ie(
-            0,
-            10,
-            InstructionExecutionError::Call(
-                FuncIndex(1),
-                Box::new(ie(
-                    1,
-                    4,
-                    InstructionExecutionError::CallIndirect(
-                        TableIndex(2),
-                        CallIndirectError::FunctionCall(
-                            FuncIndex(2),
-                            Box::new(ie(2, 0, InstructionExecutionError::Unreachable)),
-                        ),
-                    ),
-                )),
-            ),
-        );
-
-        let trace = err.stack_trace().unwrap();
-
-        assert_eq!(trace.len(), 3);
-        assert_noncall(&trace[0], 2, 0); // innermost: the trap
-        assert_call(&trace[1], 1, 4, 2, Some(2)); // B called C indirectly via table 2
-        assert_call(&trace[2], 0, 10, 1, None); // A called B directly
+        assert_eq!(err.stack_trace().0.len(), 1);
+        assert!(matches!(
+            err.cause(),
+            InstructionExecutionError::Unreachable
+        ));
     }
 }
 
@@ -1017,14 +878,15 @@ mod stack_trace_tests {
 mod func_call_error_tests {
     use super::*;
 
-    fn err() -> TraceWasmError {
-        TraceWasmError::InstructionExecution(
-            FuncIndex(3),
-            7,
-            Instruction::Nop,
-            InstructionExecutionError::Unreachable,
-            0x2a,
-        )
+    /// A minimal one-frame trace: an `unreachable` trap in func 3.
+    fn trace() -> Box<[TraceRecord]> {
+        vec![TraceRecord {
+            func_index: FuncIndex(3),
+            instr_index: 7,
+            kind: TraceRecordKind::NonCall(InstructionExecutionError::Unreachable),
+            instr_offset: 0x2a,
+        }]
+        .into_boxed_slice()
     }
 
     // The whole point of the type: it must work as an ordinary error.
@@ -1033,7 +895,7 @@ mod func_call_error_tests {
         fn assert_is_error<E: std::error::Error + 'static>(_: &E) {}
 
         let module = crate::module::Module::compile(&wat_min()).unwrap();
-        let e = FuncCallError::new("entry".to_string(), err(), module);
+        let e = FuncCallError::new("entry".to_string(), trace(), module);
 
         assert_is_error(&e);
         assert!(
@@ -1051,7 +913,7 @@ mod func_call_error_tests {
     #[test]
     fn source_trace_without_debug_info_errors_instead_of_panicking() {
         let module = crate::module::Module::compile(&wat_min()).unwrap();
-        let e = FuncCallError::new("entry".to_string(), err(), module);
+        let e = FuncCallError::new("entry".to_string(), trace(), module);
 
         assert!(matches!(
             e.stack_trace().to_source_trace(),
