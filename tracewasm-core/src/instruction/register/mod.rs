@@ -160,6 +160,20 @@ pub enum Const {
     F32(f32),
     /// A 64-bit float immediate; the bit pattern is preserved exactly.
     F64(f64),
+    /// A function reference, `None` being null.
+    ///
+    /// `ref.func` and `ref.null` are immediates like any other: the operator
+    /// describes the whole value, so nothing is emitted for one and it is read in
+    /// place by whatever consumes it.
+    ///
+    /// The heap type `ref.null` names is deliberately not carried, matching
+    /// [`Instruction::RefNull`](crate::instruction::stack::Instruction::RefNull) in
+    /// the stack pass and
+    /// [`Val::Ref`](crate::vm::stack::Val::Ref) at execution: a null is a null,
+    /// validation has already established that each one reached a slot willing to
+    /// hold it, and nothing downstream can distinguish a null `funcref` from a null
+    /// `externref`. A *non-null* `externref` would not fit here — none can exist
+    /// while references are `Option<FuncIndex>` end to end.
     Ref(Option<FuncIndex>),
 }
 
