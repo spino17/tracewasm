@@ -64,7 +64,7 @@
 //! A `Dropped` result does not mean memory was reclaimed.
 
 use id_arena::{Arena, Id};
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
 /// Where the value behind a [`LazyEntry`] currently lives.
 ///
@@ -79,7 +79,7 @@ pub enum LazyLocation {
     /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) or
     /// [`GlobalSpill`](super::RegInstruction::GlobalSpill) emitted just before the
     /// write that ended the forwarding.
-    Spilled(u32),
+    Spilled(SpillIndex),
 }
 
 /// Whether [`LazySlot::decrease_ref_count`] released the last borrow.
@@ -228,7 +228,7 @@ impl<T> LazySlot<T> {
     /// entry is ever stored back. Spilling twice would therefore mean that
     /// tracking has broken, and silently ignoring it would leak the reserved slot
     /// and emit a spill instruction nothing reads.
-    pub fn spill(&self, spill_index: u32, arena: &mut LazyArena<T>) {
+    pub fn spill(&self, spill_index: SpillIndex, arena: &mut LazyArena<T>) {
         let entry = arena.get_mut_entry(*self);
 
         let LazyLocation::Original(_) = entry.location else {
@@ -263,23 +263,23 @@ pub(crate) struct SpillArena {
 impl SpillArena {
     /// Reserves a slot for a value about to be materialized, reusing a freed one
     /// when possible so [`Self::allocation_len`] tracks peak live usage.
-    pub fn reserve_slot(&mut self) -> u32 {
+    pub fn reserve_slot(&mut self) -> SpillIndex {
         if !self.free_slots.is_empty() {
-            return self.free_slots.pop().unwrap();
+            return SpillIndex(self.free_slots.pop().unwrap());
         }
 
         let slot = self.allocation_len;
         self.allocation_len += 1;
 
-        slot
+        SpillIndex(slot)
     }
 
     /// Returns a slot to the pool once the last stack slot reading it is popped.
     ///
     /// Safe to reuse immediately: lowering order is execution order, so any later
     /// reservation belongs to an instruction that runs after the last reader.
-    pub fn free_slot(&mut self, slot: u32) {
-        self.free_slots.push(slot);
+    pub fn free_slot(&mut self, slot: SpillIndex) {
+        self.free_slots.push(slot.0);
     }
 
     /// Number of spill slots a frame must reserve.
@@ -290,5 +290,14 @@ impl SpillArena {
     /// once — which is exactly what the frame has to hold.
     pub fn allocation_len(&self) -> u32 {
         self.allocation_len
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpillIndex(u32);
+
+impl fmt::Display for SpillIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }

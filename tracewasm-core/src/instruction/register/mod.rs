@@ -109,7 +109,7 @@ use crate::{
         Block, BlockKind, params_and_results_from_blockty,
         register::lazy::{
             Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
-            LocalSlot, SpillArena,
+            LocalSlot, SpillArena, SpillIndex,
         },
     },
     module::{FuncDecl, FuncType, GlobalIndex, LocalIndex},
@@ -168,7 +168,7 @@ pub enum Slot {
     Global(u32),
     /// Read the frame spill slot holding a local or global that was materialized
     /// before a write to its origin. See [`lazy`].
-    Spilled(u32),
+    Spilled(SpillIndex),
     /// Read an operand register, i.e. a value some earlier instruction produced.
     Register(u32),
 }
@@ -998,7 +998,7 @@ impl SimulatedStack {
         location: u32,
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
-    ) -> Option<u32> {
+    ) -> Option<SpillIndex> {
         let Some(slot) = arena.origin[location as usize] else {
             return None;
         };
@@ -1094,11 +1094,14 @@ pub enum RegInstruction {
     },
     /// Copies a local into a spill slot, immediately before a write that would
     /// otherwise invalidate operands still reading it. See [`lazy`].
-    LocalSpill { index: LocalIndex, spill_index: u32 },
+    LocalSpill {
+        index: LocalIndex,
+        spill_index: SpillIndex,
+    },
     /// [`Self::LocalSpill`] for a global.
     GlobalSpill {
         index: GlobalIndex,
-        spill_index: u32,
+        spill_index: SpillIndex,
     },
     /// `if`: fall through when the condition is non-zero, otherwise jump past
     /// `else_index` to the else-arm — or to `end_index` when there is none.
@@ -1266,7 +1269,7 @@ impl RegInstruction {
         });
 
         while !operator_reader.eof() {
-            let (operator, offset) = operator_reader.read_with_offset()?;
+            let (operator, _offset) = operator_reader.read_with_offset()?;
 
             if !matches!(
                 unreachable_tracking_stack.check_unreachablity(&operator),
