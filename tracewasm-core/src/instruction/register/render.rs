@@ -333,6 +333,15 @@ impl RegInstruction {
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
+            // Three operands and no result, so there is nothing to point an arrow
+            // at: destination, byte, length, in that order.
+            RegInstruction::MemoryFill(input) => {
+                format!(
+                    "{:<12} {}",
+                    mnemonic(self.kind()),
+                    list(input.registers(ins))
+                )
+            }
             // Kept out of the value-op groups above: it has the shape of a unary
             // operator but a side effect they do not, and the group comment there
             // says "pure".

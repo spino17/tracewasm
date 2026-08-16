@@ -1921,6 +1921,7 @@ pub enum RegInstruction {
     Move(DynSignature),
     MemorySize(Registers<1, u32>),
     MemoryGrow(Signature<1, 1>),
+    MemoryFill(Registers<3, Slot>),
     /// Closes a label, one per `end` operator.
     ///
     /// This is where branches to a `block` or `if` label land — a `loop`'s
@@ -2245,7 +2246,7 @@ impl RegInstruction {
                 Operator::MemoryFill { mem } => {
                     check_memory_index(mem)?;
 
-                    todo!()
+                    emit!(|sig: Signature<3, 0>| { RegInstruction::MemoryFill(sig.input) })
                 }
                 Operator::MemoryInit { data_index, mem } => {
                     check_memory_index(mem)?;
