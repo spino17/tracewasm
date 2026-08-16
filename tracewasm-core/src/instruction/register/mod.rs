@@ -1321,130 +1321,51 @@ pub enum RegInstruction {
     // which lowering does not model — an executor must not commit the
     // destination register before the trap. The `trunc_sat_f*` forms do not
     // trap; that is the whole difference.
-    /// `f32.abs`.
-    F32Abs(Signature<1, 1>),
-    /// `f32.add`.
-    F32Add(Signature<2, 1>),
-    /// `f32.ceil`.
-    F32Ceil(Signature<1, 1>),
-    /// `f32.convert_i32_s`.
-    F32ConvertI32S(Signature<1, 1>),
-    /// `f32.convert_i32_u`.
-    F32ConvertI32U(Signature<1, 1>),
-    /// `f32.convert_i64_s`.
-    F32ConvertI64S(Signature<1, 1>),
-    /// `f32.convert_i64_u`.
-    F32ConvertI64U(Signature<1, 1>),
-    /// `f32.copysign`.
-    F32Copysign(Signature<2, 1>),
-    /// `f32.demote_f64`.
-    F32DemoteF64(Signature<1, 1>),
-    /// `f32.div`.
-    F32Div(Signature<2, 1>),
-    /// `f32.eq`.
-    F32Eq(Signature<2, 1>),
-    /// `f32.floor`.
-    F32Floor(Signature<1, 1>),
-    /// `f32.ge`.
-    F32Ge(Signature<2, 1>),
-    /// `f32.gt`.
-    F32Gt(Signature<2, 1>),
-    /// `f32.le`.
-    F32Le(Signature<2, 1>),
-    /// `f32.lt`.
-    F32Lt(Signature<2, 1>),
-    /// `f32.max`.
-    F32Max(Signature<2, 1>),
-    /// `f32.min`.
-    F32Min(Signature<2, 1>),
-    /// `f32.mul`.
-    F32Mul(Signature<2, 1>),
-    /// `f32.ne`.
-    F32Ne(Signature<2, 1>),
-    /// `f32.nearest`.
-    F32Nearest(Signature<1, 1>),
-    /// `f32.neg`.
-    F32Neg(Signature<1, 1>),
-    /// `f32.reinterpret_i32`.
-    F32ReinterpretI32(Signature<1, 1>),
-    /// `f32.sqrt`.
-    F32Sqrt(Signature<1, 1>),
-    /// `f32.sub`.
-    F32Sub(Signature<2, 1>),
-    /// `f32.trunc`.
-    F32Trunc(Signature<1, 1>),
-    /// `f64.abs`.
-    F64Abs(Signature<1, 1>),
-    /// `f64.add`.
-    F64Add(Signature<2, 1>),
-    /// `f64.ceil`.
-    F64Ceil(Signature<1, 1>),
-    /// `f64.convert_i32_s`.
-    F64ConvertI32S(Signature<1, 1>),
-    /// `f64.convert_i32_u`.
-    F64ConvertI32U(Signature<1, 1>),
-    /// `f64.convert_i64_s`.
-    F64ConvertI64S(Signature<1, 1>),
-    /// `f64.convert_i64_u`.
-    F64ConvertI64U(Signature<1, 1>),
-    /// `f64.copysign`.
-    F64Copysign(Signature<2, 1>),
-    /// `f64.div`.
-    F64Div(Signature<2, 1>),
-    /// `f64.eq`.
-    F64Eq(Signature<2, 1>),
-    /// `f64.floor`.
-    F64Floor(Signature<1, 1>),
-    /// `f64.ge`.
-    F64Ge(Signature<2, 1>),
-    /// `f64.gt`.
-    F64Gt(Signature<2, 1>),
-    /// `f64.le`.
-    F64Le(Signature<2, 1>),
-    /// `f64.lt`.
-    F64Lt(Signature<2, 1>),
-    /// `f64.max`.
-    F64Max(Signature<2, 1>),
-    /// `f64.min`.
-    F64Min(Signature<2, 1>),
-    /// `f64.mul`.
-    F64Mul(Signature<2, 1>),
-    /// `f64.ne`.
-    F64Ne(Signature<2, 1>),
-    /// `f64.nearest`.
-    F64Nearest(Signature<1, 1>),
-    /// `f64.neg`.
-    F64Neg(Signature<1, 1>),
-    /// `f64.promote_f32`.
-    F64PromoteF32(Signature<1, 1>),
-    /// `f64.reinterpret_i64`.
-    F64ReinterpretI64(Signature<1, 1>),
-    /// `f64.sqrt`.
-    F64Sqrt(Signature<1, 1>),
-    /// `f64.sub`.
-    F64Sub(Signature<2, 1>),
-    /// `f64.trunc`.
-    F64Trunc(Signature<1, 1>),
-    /// `i32.add`.
-    I32Add(Signature<2, 1>),
-    /// `i32.and`.
-    I32And(Signature<2, 1>),
+    // i32 — unary
     /// `i32.clz`.
     I32Clz(Signature<1, 1>),
     /// `i32.ctz`.
     I32Ctz(Signature<1, 1>),
-    /// `i32.div_s`.
-    I32DivS(Signature<2, 1>),
-    /// `i32.div_u`.
-    I32DivU(Signature<2, 1>),
-    /// `i32.eq`.
-    I32Eq(Signature<2, 1>),
     /// `i32.eqz`.
     I32Eqz(Signature<1, 1>),
     /// `i32.extend16_s`.
     I32Extend16S(Signature<1, 1>),
     /// `i32.extend8_s`.
     I32Extend8S(Signature<1, 1>),
+    /// `i32.popcnt`.
+    I32Popcnt(Signature<1, 1>),
+    /// `i32.reinterpret_f32`.
+    I32ReinterpretF32(Signature<1, 1>),
+    /// `i32.trunc_f32_s`.
+    I32TruncF32S(Signature<1, 1>),
+    /// `i32.trunc_f32_u`.
+    I32TruncF32U(Signature<1, 1>),
+    /// `i32.trunc_f64_s`.
+    I32TruncF64S(Signature<1, 1>),
+    /// `i32.trunc_f64_u`.
+    I32TruncF64U(Signature<1, 1>),
+    /// `i32.trunc_sat_f32_s`.
+    I32TruncSatF32S(Signature<1, 1>),
+    /// `i32.trunc_sat_f32_u`.
+    I32TruncSatF32U(Signature<1, 1>),
+    /// `i32.trunc_sat_f64_s`.
+    I32TruncSatF64S(Signature<1, 1>),
+    /// `i32.trunc_sat_f64_u`.
+    I32TruncSatF64U(Signature<1, 1>),
+    /// `i32.wrap_i64`.
+    I32WrapI64(Signature<1, 1>),
+
+    // i32 — binary
+    /// `i32.add`.
+    I32Add(Signature<2, 1>),
+    /// `i32.and`.
+    I32And(Signature<2, 1>),
+    /// `i32.div_s`.
+    I32DivS(Signature<2, 1>),
+    /// `i32.div_u`.
+    I32DivU(Signature<2, 1>),
+    /// `i32.eq`.
+    I32Eq(Signature<2, 1>),
     /// `i32.ge_s`.
     I32GeS(Signature<2, 1>),
     /// `i32.ge_u`.
@@ -1467,10 +1388,6 @@ pub enum RegInstruction {
     I32Ne(Signature<2, 1>),
     /// `i32.or`.
     I32Or(Signature<2, 1>),
-    /// `i32.popcnt`.
-    I32Popcnt(Signature<1, 1>),
-    /// `i32.reinterpret_f32`.
-    I32ReinterpretF32(Signature<1, 1>),
     /// `i32.rem_s`.
     I32RemS(Signature<2, 1>),
     /// `i32.rem_u`.
@@ -1487,40 +1404,14 @@ pub enum RegInstruction {
     I32ShrU(Signature<2, 1>),
     /// `i32.sub`.
     I32Sub(Signature<2, 1>),
-    /// `i32.trunc_f32_s`.
-    I32TruncF32S(Signature<1, 1>),
-    /// `i32.trunc_f32_u`.
-    I32TruncF32U(Signature<1, 1>),
-    /// `i32.trunc_f64_s`.
-    I32TruncF64S(Signature<1, 1>),
-    /// `i32.trunc_f64_u`.
-    I32TruncF64U(Signature<1, 1>),
-    /// `i32.trunc_sat_f32_s`.
-    I32TruncSatF32S(Signature<1, 1>),
-    /// `i32.trunc_sat_f32_u`.
-    I32TruncSatF32U(Signature<1, 1>),
-    /// `i32.trunc_sat_f64_s`.
-    I32TruncSatF64S(Signature<1, 1>),
-    /// `i32.trunc_sat_f64_u`.
-    I32TruncSatF64U(Signature<1, 1>),
-    /// `i32.wrap_i64`.
-    I32WrapI64(Signature<1, 1>),
     /// `i32.xor`.
     I32Xor(Signature<2, 1>),
-    /// `i64.add`.
-    I64Add(Signature<2, 1>),
-    /// `i64.and`.
-    I64And(Signature<2, 1>),
+
+    // i64 — unary
     /// `i64.clz`.
     I64Clz(Signature<1, 1>),
     /// `i64.ctz`.
     I64Ctz(Signature<1, 1>),
-    /// `i64.div_s`.
-    I64DivS(Signature<2, 1>),
-    /// `i64.div_u`.
-    I64DivU(Signature<2, 1>),
-    /// `i64.eq`.
-    I64Eq(Signature<2, 1>),
     /// `i64.eqz`.
     I64Eqz(Signature<1, 1>),
     /// `i64.extend16_s`.
@@ -1533,6 +1424,38 @@ pub enum RegInstruction {
     I64ExtendI32S(Signature<1, 1>),
     /// `i64.extend_i32_u`.
     I64ExtendI32U(Signature<1, 1>),
+    /// `i64.popcnt`.
+    I64Popcnt(Signature<1, 1>),
+    /// `i64.reinterpret_f64`.
+    I64ReinterpretF64(Signature<1, 1>),
+    /// `i64.trunc_f32_s`.
+    I64TruncF32S(Signature<1, 1>),
+    /// `i64.trunc_f32_u`.
+    I64TruncF32U(Signature<1, 1>),
+    /// `i64.trunc_f64_s`.
+    I64TruncF64S(Signature<1, 1>),
+    /// `i64.trunc_f64_u`.
+    I64TruncF64U(Signature<1, 1>),
+    /// `i64.trunc_sat_f32_s`.
+    I64TruncSatF32S(Signature<1, 1>),
+    /// `i64.trunc_sat_f32_u`.
+    I64TruncSatF32U(Signature<1, 1>),
+    /// `i64.trunc_sat_f64_s`.
+    I64TruncSatF64S(Signature<1, 1>),
+    /// `i64.trunc_sat_f64_u`.
+    I64TruncSatF64U(Signature<1, 1>),
+
+    // i64 — binary
+    /// `i64.add`.
+    I64Add(Signature<2, 1>),
+    /// `i64.and`.
+    I64And(Signature<2, 1>),
+    /// `i64.div_s`.
+    I64DivS(Signature<2, 1>),
+    /// `i64.div_u`.
+    I64DivU(Signature<2, 1>),
+    /// `i64.eq`.
+    I64Eq(Signature<2, 1>),
     /// `i64.ge_s`.
     I64GeS(Signature<2, 1>),
     /// `i64.ge_u`.
@@ -1555,10 +1478,6 @@ pub enum RegInstruction {
     I64Ne(Signature<2, 1>),
     /// `i64.or`.
     I64Or(Signature<2, 1>),
-    /// `i64.popcnt`.
-    I64Popcnt(Signature<1, 1>),
-    /// `i64.reinterpret_f64`.
-    I64ReinterpretF64(Signature<1, 1>),
     /// `i64.rem_s`.
     I64RemS(Signature<2, 1>),
     /// `i64.rem_u`.
@@ -1575,24 +1494,120 @@ pub enum RegInstruction {
     I64ShrU(Signature<2, 1>),
     /// `i64.sub`.
     I64Sub(Signature<2, 1>),
-    /// `i64.trunc_f32_s`.
-    I64TruncF32S(Signature<1, 1>),
-    /// `i64.trunc_f32_u`.
-    I64TruncF32U(Signature<1, 1>),
-    /// `i64.trunc_f64_s`.
-    I64TruncF64S(Signature<1, 1>),
-    /// `i64.trunc_f64_u`.
-    I64TruncF64U(Signature<1, 1>),
-    /// `i64.trunc_sat_f32_s`.
-    I64TruncSatF32S(Signature<1, 1>),
-    /// `i64.trunc_sat_f32_u`.
-    I64TruncSatF32U(Signature<1, 1>),
-    /// `i64.trunc_sat_f64_s`.
-    I64TruncSatF64S(Signature<1, 1>),
-    /// `i64.trunc_sat_f64_u`.
-    I64TruncSatF64U(Signature<1, 1>),
     /// `i64.xor`.
     I64Xor(Signature<2, 1>),
+
+    // f32 — unary
+    /// `f32.abs`.
+    F32Abs(Signature<1, 1>),
+    /// `f32.ceil`.
+    F32Ceil(Signature<1, 1>),
+    /// `f32.convert_i32_s`.
+    F32ConvertI32S(Signature<1, 1>),
+    /// `f32.convert_i32_u`.
+    F32ConvertI32U(Signature<1, 1>),
+    /// `f32.convert_i64_s`.
+    F32ConvertI64S(Signature<1, 1>),
+    /// `f32.convert_i64_u`.
+    F32ConvertI64U(Signature<1, 1>),
+    /// `f32.demote_f64`.
+    F32DemoteF64(Signature<1, 1>),
+    /// `f32.floor`.
+    F32Floor(Signature<1, 1>),
+    /// `f32.nearest`.
+    F32Nearest(Signature<1, 1>),
+    /// `f32.neg`.
+    F32Neg(Signature<1, 1>),
+    /// `f32.reinterpret_i32`.
+    F32ReinterpretI32(Signature<1, 1>),
+    /// `f32.sqrt`.
+    F32Sqrt(Signature<1, 1>),
+    /// `f32.trunc`.
+    F32Trunc(Signature<1, 1>),
+
+    // f32 — binary
+    /// `f32.add`.
+    F32Add(Signature<2, 1>),
+    /// `f32.copysign`.
+    F32Copysign(Signature<2, 1>),
+    /// `f32.div`.
+    F32Div(Signature<2, 1>),
+    /// `f32.eq`.
+    F32Eq(Signature<2, 1>),
+    /// `f32.ge`.
+    F32Ge(Signature<2, 1>),
+    /// `f32.gt`.
+    F32Gt(Signature<2, 1>),
+    /// `f32.le`.
+    F32Le(Signature<2, 1>),
+    /// `f32.lt`.
+    F32Lt(Signature<2, 1>),
+    /// `f32.max`.
+    F32Max(Signature<2, 1>),
+    /// `f32.min`.
+    F32Min(Signature<2, 1>),
+    /// `f32.mul`.
+    F32Mul(Signature<2, 1>),
+    /// `f32.ne`.
+    F32Ne(Signature<2, 1>),
+    /// `f32.sub`.
+    F32Sub(Signature<2, 1>),
+
+    // f64 — unary
+    /// `f64.abs`.
+    F64Abs(Signature<1, 1>),
+    /// `f64.ceil`.
+    F64Ceil(Signature<1, 1>),
+    /// `f64.convert_i32_s`.
+    F64ConvertI32S(Signature<1, 1>),
+    /// `f64.convert_i32_u`.
+    F64ConvertI32U(Signature<1, 1>),
+    /// `f64.convert_i64_s`.
+    F64ConvertI64S(Signature<1, 1>),
+    /// `f64.convert_i64_u`.
+    F64ConvertI64U(Signature<1, 1>),
+    /// `f64.floor`.
+    F64Floor(Signature<1, 1>),
+    /// `f64.nearest`.
+    F64Nearest(Signature<1, 1>),
+    /// `f64.neg`.
+    F64Neg(Signature<1, 1>),
+    /// `f64.promote_f32`.
+    F64PromoteF32(Signature<1, 1>),
+    /// `f64.reinterpret_i64`.
+    F64ReinterpretI64(Signature<1, 1>),
+    /// `f64.sqrt`.
+    F64Sqrt(Signature<1, 1>),
+    /// `f64.trunc`.
+    F64Trunc(Signature<1, 1>),
+
+    // f64 — binary
+    /// `f64.add`.
+    F64Add(Signature<2, 1>),
+    /// `f64.copysign`.
+    F64Copysign(Signature<2, 1>),
+    /// `f64.div`.
+    F64Div(Signature<2, 1>),
+    /// `f64.eq`.
+    F64Eq(Signature<2, 1>),
+    /// `f64.ge`.
+    F64Ge(Signature<2, 1>),
+    /// `f64.gt`.
+    F64Gt(Signature<2, 1>),
+    /// `f64.le`.
+    F64Le(Signature<2, 1>),
+    /// `f64.lt`.
+    F64Lt(Signature<2, 1>),
+    /// `f64.max`.
+    F64Max(Signature<2, 1>),
+    /// `f64.min`.
+    F64Min(Signature<2, 1>),
+    /// `f64.mul`.
+    F64Mul(Signature<2, 1>),
+    /// `f64.ne`.
+    F64Ne(Signature<2, 1>),
+    /// `f64.sub`.
+    F64Sub(Signature<2, 1>),
     /// `select`: `input[2] != 0 ? input[0] : input[1]`.
     Select(Signature<3, 1>),
     /// `return`: leave the function, carrying its results.
@@ -2051,68 +2066,28 @@ impl RegInstruction {
                     offset: memarg.offset as u32,
                     sig,
                 }),
-                Operator::F32Abs => emit!(RegInstruction::F32Abs),
-                Operator::F32Add => emit!(RegInstruction::F32Add),
-                Operator::F32Ceil => emit!(RegInstruction::F32Ceil),
-                Operator::F32ConvertI32S => emit!(RegInstruction::F32ConvertI32S),
-                Operator::F32ConvertI32U => emit!(RegInstruction::F32ConvertI32U),
-                Operator::F32ConvertI64S => emit!(RegInstruction::F32ConvertI64S),
-                Operator::F32ConvertI64U => emit!(RegInstruction::F32ConvertI64U),
-                Operator::F32Copysign => emit!(RegInstruction::F32Copysign),
-                Operator::F32DemoteF64 => emit!(RegInstruction::F32DemoteF64),
-                Operator::F32Div => emit!(RegInstruction::F32Div),
-                Operator::F32Eq => emit!(RegInstruction::F32Eq),
-                Operator::F32Floor => emit!(RegInstruction::F32Floor),
-                Operator::F32Ge => emit!(RegInstruction::F32Ge),
-                Operator::F32Gt => emit!(RegInstruction::F32Gt),
-                Operator::F32Le => emit!(RegInstruction::F32Le),
-                Operator::F32Lt => emit!(RegInstruction::F32Lt),
-                Operator::F32Max => emit!(RegInstruction::F32Max),
-                Operator::F32Min => emit!(RegInstruction::F32Min),
-                Operator::F32Mul => emit!(RegInstruction::F32Mul),
-                Operator::F32Ne => emit!(RegInstruction::F32Ne),
-                Operator::F32Nearest => emit!(RegInstruction::F32Nearest),
-                Operator::F32Neg => emit!(RegInstruction::F32Neg),
-                Operator::F32ReinterpretI32 => emit!(RegInstruction::F32ReinterpretI32),
-                Operator::F32Sqrt => emit!(RegInstruction::F32Sqrt),
-                Operator::F32Sub => emit!(RegInstruction::F32Sub),
-                Operator::F32Trunc => emit!(RegInstruction::F32Trunc),
-                Operator::F64Abs => emit!(RegInstruction::F64Abs),
-                Operator::F64Add => emit!(RegInstruction::F64Add),
-                Operator::F64Ceil => emit!(RegInstruction::F64Ceil),
-                Operator::F64ConvertI32S => emit!(RegInstruction::F64ConvertI32S),
-                Operator::F64ConvertI32U => emit!(RegInstruction::F64ConvertI32U),
-                Operator::F64ConvertI64S => emit!(RegInstruction::F64ConvertI64S),
-                Operator::F64ConvertI64U => emit!(RegInstruction::F64ConvertI64U),
-                Operator::F64Copysign => emit!(RegInstruction::F64Copysign),
-                Operator::F64Div => emit!(RegInstruction::F64Div),
-                Operator::F64Eq => emit!(RegInstruction::F64Eq),
-                Operator::F64Floor => emit!(RegInstruction::F64Floor),
-                Operator::F64Ge => emit!(RegInstruction::F64Ge),
-                Operator::F64Gt => emit!(RegInstruction::F64Gt),
-                Operator::F64Le => emit!(RegInstruction::F64Le),
-                Operator::F64Lt => emit!(RegInstruction::F64Lt),
-                Operator::F64Max => emit!(RegInstruction::F64Max),
-                Operator::F64Min => emit!(RegInstruction::F64Min),
-                Operator::F64Mul => emit!(RegInstruction::F64Mul),
-                Operator::F64Ne => emit!(RegInstruction::F64Ne),
-                Operator::F64Nearest => emit!(RegInstruction::F64Nearest),
-                Operator::F64Neg => emit!(RegInstruction::F64Neg),
-                Operator::F64PromoteF32 => emit!(RegInstruction::F64PromoteF32),
-                Operator::F64ReinterpretI64 => emit!(RegInstruction::F64ReinterpretI64),
-                Operator::F64Sqrt => emit!(RegInstruction::F64Sqrt),
-                Operator::F64Sub => emit!(RegInstruction::F64Sub),
-                Operator::F64Trunc => emit!(RegInstruction::F64Trunc),
-                Operator::I32Add => emit!(RegInstruction::I32Add),
-                Operator::I32And => emit!(RegInstruction::I32And),
                 Operator::I32Clz => emit!(RegInstruction::I32Clz),
                 Operator::I32Ctz => emit!(RegInstruction::I32Ctz),
-                Operator::I32DivS => emit!(RegInstruction::I32DivS),
-                Operator::I32DivU => emit!(RegInstruction::I32DivU),
-                Operator::I32Eq => emit!(RegInstruction::I32Eq),
                 Operator::I32Eqz => emit!(RegInstruction::I32Eqz),
                 Operator::I32Extend16S => emit!(RegInstruction::I32Extend16S),
                 Operator::I32Extend8S => emit!(RegInstruction::I32Extend8S),
+                Operator::I32Popcnt => emit!(RegInstruction::I32Popcnt),
+                Operator::I32ReinterpretF32 => emit!(RegInstruction::I32ReinterpretF32),
+                Operator::I32TruncF32S => emit!(RegInstruction::I32TruncF32S),
+                Operator::I32TruncF32U => emit!(RegInstruction::I32TruncF32U),
+                Operator::I32TruncF64S => emit!(RegInstruction::I32TruncF64S),
+                Operator::I32TruncF64U => emit!(RegInstruction::I32TruncF64U),
+                Operator::I32TruncSatF32S => emit!(RegInstruction::I32TruncSatF32S),
+                Operator::I32TruncSatF32U => emit!(RegInstruction::I32TruncSatF32U),
+                Operator::I32TruncSatF64S => emit!(RegInstruction::I32TruncSatF64S),
+                Operator::I32TruncSatF64U => emit!(RegInstruction::I32TruncSatF64U),
+                Operator::I32WrapI64 => emit!(RegInstruction::I32WrapI64),
+
+                Operator::I32Add => emit!(RegInstruction::I32Add),
+                Operator::I32And => emit!(RegInstruction::I32And),
+                Operator::I32DivS => emit!(RegInstruction::I32DivS),
+                Operator::I32DivU => emit!(RegInstruction::I32DivU),
+                Operator::I32Eq => emit!(RegInstruction::I32Eq),
                 Operator::I32GeS => emit!(RegInstruction::I32GeS),
                 Operator::I32GeU => emit!(RegInstruction::I32GeU),
                 Operator::I32GtS => emit!(RegInstruction::I32GtS),
@@ -2124,8 +2099,6 @@ impl RegInstruction {
                 Operator::I32Mul => emit!(RegInstruction::I32Mul),
                 Operator::I32Ne => emit!(RegInstruction::I32Ne),
                 Operator::I32Or => emit!(RegInstruction::I32Or),
-                Operator::I32Popcnt => emit!(RegInstruction::I32Popcnt),
-                Operator::I32ReinterpretF32 => emit!(RegInstruction::I32ReinterpretF32),
                 Operator::I32RemS => emit!(RegInstruction::I32RemS),
                 Operator::I32RemU => emit!(RegInstruction::I32RemU),
                 Operator::I32Rotl => emit!(RegInstruction::I32Rotl),
@@ -2134,29 +2107,32 @@ impl RegInstruction {
                 Operator::I32ShrS => emit!(RegInstruction::I32ShrS),
                 Operator::I32ShrU => emit!(RegInstruction::I32ShrU),
                 Operator::I32Sub => emit!(RegInstruction::I32Sub),
-                Operator::I32TruncF32S => emit!(RegInstruction::I32TruncF32S),
-                Operator::I32TruncF32U => emit!(RegInstruction::I32TruncF32U),
-                Operator::I32TruncF64S => emit!(RegInstruction::I32TruncF64S),
-                Operator::I32TruncF64U => emit!(RegInstruction::I32TruncF64U),
-                Operator::I32TruncSatF32S => emit!(RegInstruction::I32TruncSatF32S),
-                Operator::I32TruncSatF32U => emit!(RegInstruction::I32TruncSatF32U),
-                Operator::I32TruncSatF64S => emit!(RegInstruction::I32TruncSatF64S),
-                Operator::I32TruncSatF64U => emit!(RegInstruction::I32TruncSatF64U),
-                Operator::I32WrapI64 => emit!(RegInstruction::I32WrapI64),
                 Operator::I32Xor => emit!(RegInstruction::I32Xor),
-                Operator::I64Add => emit!(RegInstruction::I64Add),
-                Operator::I64And => emit!(RegInstruction::I64And),
+
                 Operator::I64Clz => emit!(RegInstruction::I64Clz),
                 Operator::I64Ctz => emit!(RegInstruction::I64Ctz),
-                Operator::I64DivS => emit!(RegInstruction::I64DivS),
-                Operator::I64DivU => emit!(RegInstruction::I64DivU),
-                Operator::I64Eq => emit!(RegInstruction::I64Eq),
                 Operator::I64Eqz => emit!(RegInstruction::I64Eqz),
                 Operator::I64Extend16S => emit!(RegInstruction::I64Extend16S),
                 Operator::I64Extend32S => emit!(RegInstruction::I64Extend32S),
                 Operator::I64Extend8S => emit!(RegInstruction::I64Extend8S),
                 Operator::I64ExtendI32S => emit!(RegInstruction::I64ExtendI32S),
                 Operator::I64ExtendI32U => emit!(RegInstruction::I64ExtendI32U),
+                Operator::I64Popcnt => emit!(RegInstruction::I64Popcnt),
+                Operator::I64ReinterpretF64 => emit!(RegInstruction::I64ReinterpretF64),
+                Operator::I64TruncF32S => emit!(RegInstruction::I64TruncF32S),
+                Operator::I64TruncF32U => emit!(RegInstruction::I64TruncF32U),
+                Operator::I64TruncF64S => emit!(RegInstruction::I64TruncF64S),
+                Operator::I64TruncF64U => emit!(RegInstruction::I64TruncF64U),
+                Operator::I64TruncSatF32S => emit!(RegInstruction::I64TruncSatF32S),
+                Operator::I64TruncSatF32U => emit!(RegInstruction::I64TruncSatF32U),
+                Operator::I64TruncSatF64S => emit!(RegInstruction::I64TruncSatF64S),
+                Operator::I64TruncSatF64U => emit!(RegInstruction::I64TruncSatF64U),
+
+                Operator::I64Add => emit!(RegInstruction::I64Add),
+                Operator::I64And => emit!(RegInstruction::I64And),
+                Operator::I64DivS => emit!(RegInstruction::I64DivS),
+                Operator::I64DivU => emit!(RegInstruction::I64DivU),
+                Operator::I64Eq => emit!(RegInstruction::I64Eq),
                 Operator::I64GeS => emit!(RegInstruction::I64GeS),
                 Operator::I64GeU => emit!(RegInstruction::I64GeU),
                 Operator::I64GtS => emit!(RegInstruction::I64GtS),
@@ -2168,8 +2144,6 @@ impl RegInstruction {
                 Operator::I64Mul => emit!(RegInstruction::I64Mul),
                 Operator::I64Ne => emit!(RegInstruction::I64Ne),
                 Operator::I64Or => emit!(RegInstruction::I64Or),
-                Operator::I64Popcnt => emit!(RegInstruction::I64Popcnt),
-                Operator::I64ReinterpretF64 => emit!(RegInstruction::I64ReinterpretF64),
                 Operator::I64RemS => emit!(RegInstruction::I64RemS),
                 Operator::I64RemU => emit!(RegInstruction::I64RemU),
                 Operator::I64Rotl => emit!(RegInstruction::I64Rotl),
@@ -2178,15 +2152,63 @@ impl RegInstruction {
                 Operator::I64ShrS => emit!(RegInstruction::I64ShrS),
                 Operator::I64ShrU => emit!(RegInstruction::I64ShrU),
                 Operator::I64Sub => emit!(RegInstruction::I64Sub),
-                Operator::I64TruncF32S => emit!(RegInstruction::I64TruncF32S),
-                Operator::I64TruncF32U => emit!(RegInstruction::I64TruncF32U),
-                Operator::I64TruncF64S => emit!(RegInstruction::I64TruncF64S),
-                Operator::I64TruncF64U => emit!(RegInstruction::I64TruncF64U),
-                Operator::I64TruncSatF32S => emit!(RegInstruction::I64TruncSatF32S),
-                Operator::I64TruncSatF32U => emit!(RegInstruction::I64TruncSatF32U),
-                Operator::I64TruncSatF64S => emit!(RegInstruction::I64TruncSatF64S),
-                Operator::I64TruncSatF64U => emit!(RegInstruction::I64TruncSatF64U),
                 Operator::I64Xor => emit!(RegInstruction::I64Xor),
+
+                Operator::F32Abs => emit!(RegInstruction::F32Abs),
+                Operator::F32Ceil => emit!(RegInstruction::F32Ceil),
+                Operator::F32ConvertI32S => emit!(RegInstruction::F32ConvertI32S),
+                Operator::F32ConvertI32U => emit!(RegInstruction::F32ConvertI32U),
+                Operator::F32ConvertI64S => emit!(RegInstruction::F32ConvertI64S),
+                Operator::F32ConvertI64U => emit!(RegInstruction::F32ConvertI64U),
+                Operator::F32DemoteF64 => emit!(RegInstruction::F32DemoteF64),
+                Operator::F32Floor => emit!(RegInstruction::F32Floor),
+                Operator::F32Nearest => emit!(RegInstruction::F32Nearest),
+                Operator::F32Neg => emit!(RegInstruction::F32Neg),
+                Operator::F32ReinterpretI32 => emit!(RegInstruction::F32ReinterpretI32),
+                Operator::F32Sqrt => emit!(RegInstruction::F32Sqrt),
+                Operator::F32Trunc => emit!(RegInstruction::F32Trunc),
+
+                Operator::F32Add => emit!(RegInstruction::F32Add),
+                Operator::F32Copysign => emit!(RegInstruction::F32Copysign),
+                Operator::F32Div => emit!(RegInstruction::F32Div),
+                Operator::F32Eq => emit!(RegInstruction::F32Eq),
+                Operator::F32Ge => emit!(RegInstruction::F32Ge),
+                Operator::F32Gt => emit!(RegInstruction::F32Gt),
+                Operator::F32Le => emit!(RegInstruction::F32Le),
+                Operator::F32Lt => emit!(RegInstruction::F32Lt),
+                Operator::F32Max => emit!(RegInstruction::F32Max),
+                Operator::F32Min => emit!(RegInstruction::F32Min),
+                Operator::F32Mul => emit!(RegInstruction::F32Mul),
+                Operator::F32Ne => emit!(RegInstruction::F32Ne),
+                Operator::F32Sub => emit!(RegInstruction::F32Sub),
+
+                Operator::F64Abs => emit!(RegInstruction::F64Abs),
+                Operator::F64Ceil => emit!(RegInstruction::F64Ceil),
+                Operator::F64ConvertI32S => emit!(RegInstruction::F64ConvertI32S),
+                Operator::F64ConvertI32U => emit!(RegInstruction::F64ConvertI32U),
+                Operator::F64ConvertI64S => emit!(RegInstruction::F64ConvertI64S),
+                Operator::F64ConvertI64U => emit!(RegInstruction::F64ConvertI64U),
+                Operator::F64Floor => emit!(RegInstruction::F64Floor),
+                Operator::F64Nearest => emit!(RegInstruction::F64Nearest),
+                Operator::F64Neg => emit!(RegInstruction::F64Neg),
+                Operator::F64PromoteF32 => emit!(RegInstruction::F64PromoteF32),
+                Operator::F64ReinterpretI64 => emit!(RegInstruction::F64ReinterpretI64),
+                Operator::F64Sqrt => emit!(RegInstruction::F64Sqrt),
+                Operator::F64Trunc => emit!(RegInstruction::F64Trunc),
+
+                Operator::F64Add => emit!(RegInstruction::F64Add),
+                Operator::F64Copysign => emit!(RegInstruction::F64Copysign),
+                Operator::F64Div => emit!(RegInstruction::F64Div),
+                Operator::F64Eq => emit!(RegInstruction::F64Eq),
+                Operator::F64Ge => emit!(RegInstruction::F64Ge),
+                Operator::F64Gt => emit!(RegInstruction::F64Gt),
+                Operator::F64Le => emit!(RegInstruction::F64Le),
+                Operator::F64Lt => emit!(RegInstruction::F64Lt),
+                Operator::F64Max => emit!(RegInstruction::F64Max),
+                Operator::F64Min => emit!(RegInstruction::F64Min),
+                Operator::F64Mul => emit!(RegInstruction::F64Mul),
+                Operator::F64Ne => emit!(RegInstruction::F64Ne),
+                Operator::F64Sub => emit!(RegInstruction::F64Sub),
                 Operator::Nop => {
                     continue;
                 }

@@ -196,6 +196,18 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             .join(", ")
     };
 
+    // Every pure value operator renders alike, so the arms below carry no body of
+    // their own. They are split by arity because an or-pattern binds one type, and
+    // then by family, so they scan in the order the enum declares them.
+    let value_op = |kind, inputs: &[Slot], outputs: &[u32]| {
+        format!(
+            "{:<12} {} -> {}",
+            mnemonic(kind),
+            list(inputs),
+            regs(outputs)
+        )
+    };
+
     let mut out = String::new();
 
     for (pc, i) in instructions.iter().enumerate() {
@@ -235,33 +247,8 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             // arms — one per arity, since an or-pattern can only bind one type.
             // The mnemonic comes from the kind rather than a table; `mnemonic`
             // says why that is checked rather than merely convenient.
-            RegInstruction::F32Abs(sig)
-            | RegInstruction::F32Ceil(sig)
-            | RegInstruction::F32ConvertI32S(sig)
-            | RegInstruction::F32ConvertI32U(sig)
-            | RegInstruction::F32ConvertI64S(sig)
-            | RegInstruction::F32ConvertI64U(sig)
-            | RegInstruction::F32DemoteF64(sig)
-            | RegInstruction::F32Floor(sig)
-            | RegInstruction::F32Nearest(sig)
-            | RegInstruction::F32Neg(sig)
-            | RegInstruction::F32ReinterpretI32(sig)
-            | RegInstruction::F32Sqrt(sig)
-            | RegInstruction::F32Trunc(sig)
-            | RegInstruction::F64Abs(sig)
-            | RegInstruction::F64Ceil(sig)
-            | RegInstruction::F64ConvertI32S(sig)
-            | RegInstruction::F64ConvertI32U(sig)
-            | RegInstruction::F64ConvertI64S(sig)
-            | RegInstruction::F64ConvertI64U(sig)
-            | RegInstruction::F64Floor(sig)
-            | RegInstruction::F64Nearest(sig)
-            | RegInstruction::F64Neg(sig)
-            | RegInstruction::F64PromoteF32(sig)
-            | RegInstruction::F64ReinterpretI64(sig)
-            | RegInstruction::F64Sqrt(sig)
-            | RegInstruction::F64Trunc(sig)
-            | RegInstruction::I32Clz(sig)
+            // i32 - unary
+            RegInstruction::I32Clz(sig)
             | RegInstruction::I32Ctz(sig)
             | RegInstruction::I32Eqz(sig)
             | RegInstruction::I32Extend16S(sig)
@@ -276,57 +263,13 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             | RegInstruction::I32TruncSatF32U(sig)
             | RegInstruction::I32TruncSatF64S(sig)
             | RegInstruction::I32TruncSatF64U(sig)
-            | RegInstruction::I32WrapI64(sig)
-            | RegInstruction::I64Clz(sig)
-            | RegInstruction::I64Ctz(sig)
-            | RegInstruction::I64Eqz(sig)
-            | RegInstruction::I64Extend16S(sig)
-            | RegInstruction::I64Extend32S(sig)
-            | RegInstruction::I64Extend8S(sig)
-            | RegInstruction::I64ExtendI32S(sig)
-            | RegInstruction::I64ExtendI32U(sig)
-            | RegInstruction::I64Popcnt(sig)
-            | RegInstruction::I64ReinterpretF64(sig)
-            | RegInstruction::I64TruncF32S(sig)
-            | RegInstruction::I64TruncF32U(sig)
-            | RegInstruction::I64TruncF64S(sig)
-            | RegInstruction::I64TruncF64U(sig)
-            | RegInstruction::I64TruncSatF32S(sig)
-            | RegInstruction::I64TruncSatF32U(sig)
-            | RegInstruction::I64TruncSatF64S(sig)
-            | RegInstruction::I64TruncSatF64U(sig) => format!(
-                "{:<12} {} -> {}",
-                mnemonic(i.kind()),
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
+            | RegInstruction::I32WrapI64(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
             ),
-            RegInstruction::F32Add(sig)
-            | RegInstruction::F32Copysign(sig)
-            | RegInstruction::F32Div(sig)
-            | RegInstruction::F32Eq(sig)
-            | RegInstruction::F32Ge(sig)
-            | RegInstruction::F32Gt(sig)
-            | RegInstruction::F32Le(sig)
-            | RegInstruction::F32Lt(sig)
-            | RegInstruction::F32Max(sig)
-            | RegInstruction::F32Min(sig)
-            | RegInstruction::F32Mul(sig)
-            | RegInstruction::F32Ne(sig)
-            | RegInstruction::F32Sub(sig)
-            | RegInstruction::F64Add(sig)
-            | RegInstruction::F64Copysign(sig)
-            | RegInstruction::F64Div(sig)
-            | RegInstruction::F64Eq(sig)
-            | RegInstruction::F64Ge(sig)
-            | RegInstruction::F64Gt(sig)
-            | RegInstruction::F64Le(sig)
-            | RegInstruction::F64Lt(sig)
-            | RegInstruction::F64Max(sig)
-            | RegInstruction::F64Min(sig)
-            | RegInstruction::F64Mul(sig)
-            | RegInstruction::F64Ne(sig)
-            | RegInstruction::F64Sub(sig)
-            | RegInstruction::I32Add(sig)
+            // i32 - binary
+            RegInstruction::I32Add(sig)
             | RegInstruction::I32And(sig)
             | RegInstruction::I32DivS(sig)
             | RegInstruction::I32DivU(sig)
@@ -350,8 +293,36 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             | RegInstruction::I32ShrS(sig)
             | RegInstruction::I32ShrU(sig)
             | RegInstruction::I32Sub(sig)
-            | RegInstruction::I32Xor(sig)
-            | RegInstruction::I64Add(sig)
+            | RegInstruction::I32Xor(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // i64 - unary
+            RegInstruction::I64Clz(sig)
+            | RegInstruction::I64Ctz(sig)
+            | RegInstruction::I64Eqz(sig)
+            | RegInstruction::I64Extend16S(sig)
+            | RegInstruction::I64Extend32S(sig)
+            | RegInstruction::I64Extend8S(sig)
+            | RegInstruction::I64ExtendI32S(sig)
+            | RegInstruction::I64ExtendI32U(sig)
+            | RegInstruction::I64Popcnt(sig)
+            | RegInstruction::I64ReinterpretF64(sig)
+            | RegInstruction::I64TruncF32S(sig)
+            | RegInstruction::I64TruncF32U(sig)
+            | RegInstruction::I64TruncF64S(sig)
+            | RegInstruction::I64TruncF64U(sig)
+            | RegInstruction::I64TruncSatF32S(sig)
+            | RegInstruction::I64TruncSatF32U(sig)
+            | RegInstruction::I64TruncSatF64S(sig)
+            | RegInstruction::I64TruncSatF64U(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // i64 - binary
+            RegInstruction::I64Add(sig)
             | RegInstruction::I64And(sig)
             | RegInstruction::I64DivS(sig)
             | RegInstruction::I64DivU(sig)
@@ -375,11 +346,82 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             | RegInstruction::I64ShrS(sig)
             | RegInstruction::I64ShrU(sig)
             | RegInstruction::I64Sub(sig)
-            | RegInstruction::I64Xor(sig) => format!(
-                "{:<12} {} -> {}",
-                mnemonic(i.kind()),
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
+            | RegInstruction::I64Xor(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // f32 - unary
+            RegInstruction::F32Abs(sig)
+            | RegInstruction::F32Ceil(sig)
+            | RegInstruction::F32ConvertI32S(sig)
+            | RegInstruction::F32ConvertI32U(sig)
+            | RegInstruction::F32ConvertI64S(sig)
+            | RegInstruction::F32ConvertI64U(sig)
+            | RegInstruction::F32DemoteF64(sig)
+            | RegInstruction::F32Floor(sig)
+            | RegInstruction::F32Nearest(sig)
+            | RegInstruction::F32Neg(sig)
+            | RegInstruction::F32ReinterpretI32(sig)
+            | RegInstruction::F32Sqrt(sig)
+            | RegInstruction::F32Trunc(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // f32 - binary
+            RegInstruction::F32Add(sig)
+            | RegInstruction::F32Copysign(sig)
+            | RegInstruction::F32Div(sig)
+            | RegInstruction::F32Eq(sig)
+            | RegInstruction::F32Ge(sig)
+            | RegInstruction::F32Gt(sig)
+            | RegInstruction::F32Le(sig)
+            | RegInstruction::F32Lt(sig)
+            | RegInstruction::F32Max(sig)
+            | RegInstruction::F32Min(sig)
+            | RegInstruction::F32Mul(sig)
+            | RegInstruction::F32Ne(sig)
+            | RegInstruction::F32Sub(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // f64 - unary
+            RegInstruction::F64Abs(sig)
+            | RegInstruction::F64Ceil(sig)
+            | RegInstruction::F64ConvertI32S(sig)
+            | RegInstruction::F64ConvertI32U(sig)
+            | RegInstruction::F64ConvertI64S(sig)
+            | RegInstruction::F64ConvertI64U(sig)
+            | RegInstruction::F64Floor(sig)
+            | RegInstruction::F64Nearest(sig)
+            | RegInstruction::F64Neg(sig)
+            | RegInstruction::F64PromoteF32(sig)
+            | RegInstruction::F64ReinterpretI64(sig)
+            | RegInstruction::F64Sqrt(sig)
+            | RegInstruction::F64Trunc(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+            // f64 - binary
+            RegInstruction::F64Add(sig)
+            | RegInstruction::F64Copysign(sig)
+            | RegInstruction::F64Div(sig)
+            | RegInstruction::F64Eq(sig)
+            | RegInstruction::F64Ge(sig)
+            | RegInstruction::F64Gt(sig)
+            | RegInstruction::F64Le(sig)
+            | RegInstruction::F64Lt(sig)
+            | RegInstruction::F64Max(sig)
+            | RegInstruction::F64Min(sig)
+            | RegInstruction::F64Mul(sig)
+            | RegInstruction::F64Ne(sig)
+            | RegInstruction::F64Sub(sig) => value_op(
+                i.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
             ),
             RegInstruction::RefIsNull(sig) => format!(
                 "ref.is_null  {} -> {}",
@@ -434,6 +476,7 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             } => {
                 let arms = &frame.br_targets_arena
                     [*targets_start as usize..(targets_start + targets_len) as usize];
+
                 let rendered: Vec<String> = arms
                     .iter()
                     .map(|a| {
@@ -3513,33 +3556,8 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         // The pure value ops, whose case is derived from the kind: the mnemonic
         // and the operand type are both recoverable from the name, so 136
         // hand-written bodies would be 136 chances to mistype one.
-        RegInstructionKind::F32Abs
-        | RegInstructionKind::F32Ceil
-        | RegInstructionKind::F32ConvertI32S
-        | RegInstructionKind::F32ConvertI32U
-        | RegInstructionKind::F32ConvertI64S
-        | RegInstructionKind::F32ConvertI64U
-        | RegInstructionKind::F32DemoteF64
-        | RegInstructionKind::F32Floor
-        | RegInstructionKind::F32Nearest
-        | RegInstructionKind::F32Neg
-        | RegInstructionKind::F32ReinterpretI32
-        | RegInstructionKind::F32Sqrt
-        | RegInstructionKind::F32Trunc
-        | RegInstructionKind::F64Abs
-        | RegInstructionKind::F64Ceil
-        | RegInstructionKind::F64ConvertI32S
-        | RegInstructionKind::F64ConvertI32U
-        | RegInstructionKind::F64ConvertI64S
-        | RegInstructionKind::F64ConvertI64U
-        | RegInstructionKind::F64Floor
-        | RegInstructionKind::F64Nearest
-        | RegInstructionKind::F64Neg
-        | RegInstructionKind::F64PromoteF32
-        | RegInstructionKind::F64ReinterpretI64
-        | RegInstructionKind::F64Sqrt
-        | RegInstructionKind::F64Trunc
-        | RegInstructionKind::I32Clz
+        // i32 - unary
+        RegInstructionKind::I32Clz
         | RegInstructionKind::I32Ctz
         | RegInstructionKind::I32Eqz
         | RegInstructionKind::I32Extend16S
@@ -3554,52 +3572,10 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I32TruncSatF32U
         | RegInstructionKind::I32TruncSatF64S
         | RegInstructionKind::I32TruncSatF64U
-        | RegInstructionKind::I32WrapI64
-        | RegInstructionKind::I64Clz
-        | RegInstructionKind::I64Ctz
-        | RegInstructionKind::I64Eqz
-        | RegInstructionKind::I64Extend16S
-        | RegInstructionKind::I64Extend32S
-        | RegInstructionKind::I64Extend8S
-        | RegInstructionKind::I64ExtendI32S
-        | RegInstructionKind::I64ExtendI32U
-        | RegInstructionKind::I64Popcnt
-        | RegInstructionKind::I64ReinterpretF64
-        | RegInstructionKind::I64TruncF32S
-        | RegInstructionKind::I64TruncF32U
-        | RegInstructionKind::I64TruncF64S
-        | RegInstructionKind::I64TruncF64U
-        | RegInstructionKind::I64TruncSatF32S
-        | RegInstructionKind::I64TruncSatF32U
-        | RegInstructionKind::I64TruncSatF64S
-        | RegInstructionKind::I64TruncSatF64U => Some(value_op_case(kind, 1)),
-        RegInstructionKind::F32Add
-        | RegInstructionKind::F32Copysign
-        | RegInstructionKind::F32Div
-        | RegInstructionKind::F32Eq
-        | RegInstructionKind::F32Ge
-        | RegInstructionKind::F32Gt
-        | RegInstructionKind::F32Le
-        | RegInstructionKind::F32Lt
-        | RegInstructionKind::F32Max
-        | RegInstructionKind::F32Min
-        | RegInstructionKind::F32Mul
-        | RegInstructionKind::F32Ne
-        | RegInstructionKind::F32Sub
-        | RegInstructionKind::F64Add
-        | RegInstructionKind::F64Copysign
-        | RegInstructionKind::F64Div
-        | RegInstructionKind::F64Eq
-        | RegInstructionKind::F64Ge
-        | RegInstructionKind::F64Gt
-        | RegInstructionKind::F64Le
-        | RegInstructionKind::F64Lt
-        | RegInstructionKind::F64Max
-        | RegInstructionKind::F64Min
-        | RegInstructionKind::F64Mul
-        | RegInstructionKind::F64Ne
-        | RegInstructionKind::F64Sub
-        | RegInstructionKind::I32Add
+        | RegInstructionKind::I32WrapI64 => Some(value_op_case(kind, 1)),
+
+        // i32 - binary
+        RegInstructionKind::I32Add
         | RegInstructionKind::I32And
         | RegInstructionKind::I32DivS
         | RegInstructionKind::I32DivU
@@ -3623,8 +3599,30 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I32ShrS
         | RegInstructionKind::I32ShrU
         | RegInstructionKind::I32Sub
-        | RegInstructionKind::I32Xor
-        | RegInstructionKind::I64Add
+        | RegInstructionKind::I32Xor => Some(value_op_case(kind, 2)),
+
+        // i64 - unary
+        RegInstructionKind::I64Clz
+        | RegInstructionKind::I64Ctz
+        | RegInstructionKind::I64Eqz
+        | RegInstructionKind::I64Extend16S
+        | RegInstructionKind::I64Extend32S
+        | RegInstructionKind::I64Extend8S
+        | RegInstructionKind::I64ExtendI32S
+        | RegInstructionKind::I64ExtendI32U
+        | RegInstructionKind::I64Popcnt
+        | RegInstructionKind::I64ReinterpretF64
+        | RegInstructionKind::I64TruncF32S
+        | RegInstructionKind::I64TruncF32U
+        | RegInstructionKind::I64TruncF64S
+        | RegInstructionKind::I64TruncF64U
+        | RegInstructionKind::I64TruncSatF32S
+        | RegInstructionKind::I64TruncSatF32U
+        | RegInstructionKind::I64TruncSatF64S
+        | RegInstructionKind::I64TruncSatF64U => Some(value_op_case(kind, 1)),
+
+        // i64 - binary
+        RegInstructionKind::I64Add
         | RegInstructionKind::I64And
         | RegInstructionKind::I64DivS
         | RegInstructionKind::I64DivU
@@ -3649,6 +3647,66 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I64ShrU
         | RegInstructionKind::I64Sub
         | RegInstructionKind::I64Xor => Some(value_op_case(kind, 2)),
+
+        // f32 - unary
+        RegInstructionKind::F32Abs
+        | RegInstructionKind::F32Ceil
+        | RegInstructionKind::F32ConvertI32S
+        | RegInstructionKind::F32ConvertI32U
+        | RegInstructionKind::F32ConvertI64S
+        | RegInstructionKind::F32ConvertI64U
+        | RegInstructionKind::F32DemoteF64
+        | RegInstructionKind::F32Floor
+        | RegInstructionKind::F32Nearest
+        | RegInstructionKind::F32Neg
+        | RegInstructionKind::F32ReinterpretI32
+        | RegInstructionKind::F32Sqrt
+        | RegInstructionKind::F32Trunc => Some(value_op_case(kind, 1)),
+
+        // f32 - binary
+        RegInstructionKind::F32Add
+        | RegInstructionKind::F32Copysign
+        | RegInstructionKind::F32Div
+        | RegInstructionKind::F32Eq
+        | RegInstructionKind::F32Ge
+        | RegInstructionKind::F32Gt
+        | RegInstructionKind::F32Le
+        | RegInstructionKind::F32Lt
+        | RegInstructionKind::F32Max
+        | RegInstructionKind::F32Min
+        | RegInstructionKind::F32Mul
+        | RegInstructionKind::F32Ne
+        | RegInstructionKind::F32Sub => Some(value_op_case(kind, 2)),
+
+        // f64 - unary
+        RegInstructionKind::F64Abs
+        | RegInstructionKind::F64Ceil
+        | RegInstructionKind::F64ConvertI32S
+        | RegInstructionKind::F64ConvertI32U
+        | RegInstructionKind::F64ConvertI64S
+        | RegInstructionKind::F64ConvertI64U
+        | RegInstructionKind::F64Floor
+        | RegInstructionKind::F64Nearest
+        | RegInstructionKind::F64Neg
+        | RegInstructionKind::F64PromoteF32
+        | RegInstructionKind::F64ReinterpretI64
+        | RegInstructionKind::F64Sqrt
+        | RegInstructionKind::F64Trunc => Some(value_op_case(kind, 1)),
+
+        // f64 - binary
+        RegInstructionKind::F64Add
+        | RegInstructionKind::F64Copysign
+        | RegInstructionKind::F64Div
+        | RegInstructionKind::F64Eq
+        | RegInstructionKind::F64Ge
+        | RegInstructionKind::F64Gt
+        | RegInstructionKind::F64Le
+        | RegInstructionKind::F64Lt
+        | RegInstructionKind::F64Max
+        | RegInstructionKind::F64Min
+        | RegInstructionKind::F64Mul
+        | RegInstructionKind::F64Ne
+        | RegInstructionKind::F64Sub => Some(value_op_case(kind, 2)),
 
         // The rest carry something the derivation cannot supply: `select` takes
         // three operands rather than one or two, `ref.is_null` is not named
