@@ -1921,6 +1921,7 @@ pub enum RegInstruction {
     Move(DynSignature),
     MemorySize(Registers<1, u32>),
     MemoryGrow(Signature<1, 1>),
+    MemoryCopy(Registers<3, Slot>),
     MemoryFill(Registers<3, Slot>),
     /// Closes a label, one per `end` operator.
     ///
@@ -2241,7 +2242,7 @@ impl RegInstruction {
                     check_memory_index(dst_mem)?;
                     check_memory_index(src_mem)?;
 
-                    todo!()
+                    emit!(|sig: Signature<3, 0>| { RegInstruction::MemoryCopy(sig.input) })
                 }
                 Operator::MemoryFill { mem } => {
                     check_memory_index(mem)?;

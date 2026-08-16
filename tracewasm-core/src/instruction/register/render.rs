@@ -334,8 +334,9 @@ impl RegInstruction {
                 regs(sig.output.registers(outs))
             ),
             // Three operands and no result, so there is nothing to point an arrow
-            // at: destination, byte, length, in that order.
-            RegInstruction::MemoryFill(input) => {
+            // at. `memory.copy` reads destination, source, length; `memory.fill`
+            // reads destination, byte, length.
+            RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => {
                 format!(
                     "{:<12} {}",
                     mnemonic(self.kind()),
