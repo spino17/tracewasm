@@ -1,7 +1,12 @@
 use crate::{
-    error::TraceWasmError,
-    module::{FuncDecl, FuncType},
-    runtime::value::{Val, Value},
+    error::{InstructionExecutionError, TraceWasmError},
+    instance::{Instance, traits::ImportRegistry},
+    memory::Memory,
+    module::{FuncDecl, FuncType, Module, ValType},
+    runtime::{
+        Step,
+        value::{Val, Value},
+    },
 };
 use smallvec::SmallVec;
 use wasmparser::{BlockType, OperatorsReader};
@@ -9,16 +14,51 @@ use wasmparser::{BlockType, OperatorsReader};
 pub mod register;
 pub mod stack;
 
+pub trait CallerBaseData {
+    fn base_offset(&self) -> u32;
+    fn set_callee_locals_count(&mut self, count: u32);
+}
+
 pub trait RuntimeFrame {
+    type CallerBaseData: CallerBaseData;
+
     fn set_params(&mut self, params: &[Val]);
+    fn get_params(
+        &mut self,
+        params_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+    ) -> SmallVec<[Value; 5]>;
+    fn set_results<R: IntoIterator<Item = Val>>(
+        &mut self,
+        results: R,
+        caller_base_data: &Self::CallerBaseData,
+    );
     fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]>;
     fn reset(&mut self);
+    fn set_zero_values_in_locals_after_params(
+        &mut self,
+        params_count: u32,
+        locals_ty: &[ValType],
+        caller_base_data: &Self::CallerBaseData,
+    );
+    fn tear_callee_frame_and_set_results(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+    );
+}
+
+pub trait FrameLayout {
+    type BrTableTarget;
+
+    fn br_table_targets(&self) -> &[Self::BrTableTarget];
 }
 
 pub trait Instruction: Sized {
     type BrTableTarget;
-    type FrameLayout;
-    type RuntimeFrame: Default + RuntimeFrame;
+    type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
+    type RuntimeFrame: Default + RuntimeFrame<CallerBaseData = Self::CallerBaseData>;
+    type CallerBaseData: CallerBaseData;
 
     fn emit_instruction_for_func(
         operator_reader: OperatorsReader<'_>,
@@ -29,6 +69,15 @@ pub trait Instruction: Sized {
         _locals_count: u32,
         _globals_count: u32,
     ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError<Self>>;
+
+    fn execute<M: Memory, I: ImportRegistry>(
+        &self,
+        module: &Module<Self>,
+        instance: &mut Instance<M, I, Self>,
+        br_table_targets: &[Self::BrTableTarget],
+        caller_base_data: &Self::CallerBaseData,
+        imported_func_count: u32,
+    ) -> Result<Step<Self>, Box<InstructionExecutionError<Self>>>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to

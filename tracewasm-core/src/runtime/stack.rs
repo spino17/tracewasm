@@ -50,7 +50,7 @@
 //! safety argument for it.
 
 use crate::{
-    instruction::RuntimeFrame,
+    instruction::{RuntimeFrame, stack::StackCallerBaseData},
     runtime::{Value, value::Val},
 };
 use smallvec::{SmallVec, smallvec};
@@ -280,25 +280,9 @@ impl<T: Clone> Stack<T> {
     }
 }
 
-impl Stack<Value> {
-    /// Removes the top `num` values and returns them as a callee's parameters, in
-    /// push order (`arg0..argN-1`) for binding into the callee's locals.
-    ///
-    /// Precondition: at least `num` values are present.
-    pub fn pop_params(&mut self, num: u32) -> SmallVec<[Value; 5]> {
-        let mut s = smallvec![];
-
-        for i in 0..(num as usize) {
-            s.push(self.inner[self.stack_pointer - num as usize + i]);
-        }
-
-        self.stack_pointer -= num as usize;
-
-        s
-    }
-}
-
 impl RuntimeFrame for Stack<Value> {
+    type CallerBaseData = StackCallerBaseData;
+
     fn reset(&mut self) {
         self.reset();
     }
@@ -306,6 +290,32 @@ impl RuntimeFrame for Stack<Value> {
     fn set_params(&mut self, params: &[Val]) {
         for param in params {
             self.push(param.into());
+        }
+    }
+
+    fn get_params(
+        &mut self,
+        params_count: u32,
+        _caller_base_data: &StackCallerBaseData,
+    ) -> SmallVec<[Value; 5]> {
+        let mut s = smallvec![];
+
+        for i in 0..(params_count as usize) {
+            s.push(self.inner[self.stack_pointer - params_count as usize + i]);
+        }
+
+        self.stack_pointer -= params_count as usize;
+
+        s
+    }
+
+    fn set_results<R: IntoIterator<Item = Val>>(
+        &mut self,
+        results: R,
+        _caller_base_data: &Self::CallerBaseData,
+    ) {
+        for res in results {
+            self.push(res.into());
         }
     }
 
@@ -323,6 +333,30 @@ impl RuntimeFrame for Stack<Value> {
         self.stack_pointer -= results_count as usize;
 
         s
+    }
+
+    fn set_zero_values_in_locals_after_params(
+        &mut self,
+        params_count: u32,
+        locals_ty: &[crate::module::ValType],
+        _caller_base_data: &StackCallerBaseData,
+    ) {
+        let locals_len = locals_ty.len();
+        let params_count = params_count as usize;
+
+        for i in 0..(locals_len - params_count) {
+            let ty = locals_ty[i + params_count];
+
+            self.push(Value::zero_of_ty(ty));
+        }
+    }
+
+    fn tear_callee_frame_and_set_results(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+    ) {
+        self.truncate_by_preserving_arity(caller_base_data.base_height, results_count as u32);
     }
 }
 

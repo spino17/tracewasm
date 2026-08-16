@@ -966,9 +966,7 @@ impl<Instr: Instruction> Module<Instr> {
     /// TraceWasm does not model: components, imports other than functions and
     /// globals, 64-bit memory, more than one memory, tables of anything but
     /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
-    pub fn compile(
-        buf: &[u8],
-    ) -> Result<Arc<Module<StackInstruction>>, TraceWasmError<StackInstruction>> {
+    pub fn compile(buf: &[u8]) -> Result<Arc<Module<Instr>>, TraceWasmError<Instr>> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
         // that is known to be well-formed.
@@ -1119,7 +1117,8 @@ impl<Instr: Instruction> Module<Instr> {
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     const_expr.get_operators_reader(),
-                                )?
+                                )
+                                .unwrap() // todo!
                                 .into_boxed_slice(),
                             ),
                         };
@@ -1172,7 +1171,8 @@ impl<Instr: Instruction> Module<Instr> {
                             kind: GlobalKind::Local(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     global.init_expr.get_operators_reader(),
-                                )?
+                                )
+                                .unwrap() // todo!
                                 .into_boxed_slice(),
                             ),
                         });
@@ -1225,7 +1225,8 @@ impl<Instr: Instruction> Module<Instr> {
                                     table_index: table_index.map(TableIndex),
                                     offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
-                                    )?
+                                    )
+                                    .unwrap() // todo!
                                     .into_boxed_slice(),
                                 },
                             },
@@ -1251,7 +1252,8 @@ impl<Instr: Instruction> Module<Instr> {
                                         exprs.push(
                                             StackInstruction::emit_instruction_for_const_expr(
                                                 expr.get_operators_reader(),
-                                            )?
+                                            )
+                                            .unwrap() // todo!
                                             .into_boxed_slice(),
                                         );
                                     }
@@ -1287,7 +1289,8 @@ impl<Instr: Instruction> Module<Instr> {
                                     memory_index: MemoryIndex(memory_index),
                                     offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
-                                    )?
+                                    )
+                                    .unwrap() // todo!
                                     .into_boxed_slice(),
                                 },
                             },
@@ -1340,7 +1343,7 @@ impl<Instr: Instruction> Module<Instr> {
                     }
 
                     let (instructions, instruction_offsets, frame_layout) =
-                        StackInstruction::emit_instruction_for_func(
+                        Instr::emit_instruction_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
                             results.len() as u32,

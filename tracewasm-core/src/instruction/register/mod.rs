@@ -106,7 +106,8 @@
 use crate::{
     error::TraceWasmError,
     instruction::{
-        Block, BlockKind, Instruction, check_memory_index, params_and_results_from_blockty,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        params_and_results_from_blockty,
         register::lazy::{
             Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
             LocalSlot, SpillArena, SpillIndex,
@@ -1213,6 +1214,14 @@ pub struct RegFrameLayout {
     pub br_targets_arena: Box<[RegBrTableTarget]>,
 }
 
+impl FrameLayout for RegFrameLayout {
+    type BrTableTarget = RegBrTableTarget;
+
+    fn br_table_targets(&self) -> &[Self::BrTableTarget] {
+        &self.br_targets_arena
+    }
+}
+
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
 type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
@@ -2089,10 +2098,26 @@ impl RegInstruction {
     }
 }
 
+pub struct RegCallerBaseData {
+    base_register_index: u32,
+    callee_frame_base_register_index: u32,
+}
+
+impl CallerBaseData for RegCallerBaseData {
+    fn base_offset(&self) -> u32 {
+        self.base_register_index
+    }
+
+    fn set_callee_locals_count(&mut self, count: u32) {
+        self.callee_frame_base_register_index = self.base_register_index + count;
+    }
+}
+
 impl Instruction for RegInstruction {
     type BrTableTarget = RegBrTableTarget;
     type FrameLayout = RegFrameLayout;
     type RuntimeFrame = RegFrame;
+    type CallerBaseData = RegCallerBaseData;
 
     /// Lowers one function body's operator stream into register form.
     ///
@@ -2984,6 +3009,18 @@ impl Instruction for RegInstruction {
         };
 
         Ok((instructions, instruction_offsets, frame))
+    }
+
+    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
+        &self,
+        module: &crate::module::Module<Self>,
+        instance: &mut crate::instance::Instance<M, I, Self>,
+        br_table_targets: &[Self::BrTableTarget],
+        caller_base_data: &Self::CallerBaseData,
+        imported_func_count: u32,
+    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError<Self>>>
+    {
+        todo!()
     }
 }
 
