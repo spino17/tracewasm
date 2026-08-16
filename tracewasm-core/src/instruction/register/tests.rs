@@ -3271,6 +3271,166 @@ fn a_trapping_block_still_reserves_its_results() {
 }
 
 // ---------------------------------------------------------------------------
+// arity cross-check
+//
+// An operator lowered through `emit!` names only its variant, so the arity comes
+// from the variant's own `Signature<I, O>` declaration and no arm restates it.
+// That removes the one thing that used to disagree when a declaration was wrong:
+// declaring `RefIsNull(Signature<2, 1>)` compiles with no error and no warning,
+// and pops an operand that isn't there.
+//
+// So the declaration needs an outside opinion, and the only one that is neither
+// this pass nor a number someone typed is wasmparser's validator: it type-checks
+// the body against the spec, and `operand_stack_height` reads off what the spec
+// says each operator did. Comparing that against what the pass recorded is what
+// makes a wrong `Signature` a test failure instead of a silent miscompile.
+//
+// The `.wat` is self-checking too. Push one operand too few or too many and the
+// module fails to validate — as a leftover value at the end of a body with no
+// results, or as a missing one — so a case cannot quietly encode the wrong arity
+// either.
+// ---------------------------------------------------------------------------
+
+/// Every operator that lowers through `emit!`, applied to exactly the operands it
+/// takes with its result dropped, so the body lowers to that one instruction and
+/// nothing else — no trailing `Move`, since these bodies return nothing.
+///
+/// One line per operator. The name is the `Operator` variant, used to find the
+/// operator among the `local.get`s that feed it.
+const ARITY_CASES: &[(&str, &str)] = &[
+    (
+        "I32Add",
+        "(module (func (param i32) local.get 0 local.get 0 i32.add drop))",
+    ),
+    (
+        "I32Eqz",
+        "(module (func (param i32) local.get 0 i32.eqz drop))",
+    ),
+    (
+        "Select",
+        "(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))",
+    ),
+    (
+        "RefIsNull",
+        "(module (func (param funcref) local.get 0 ref.is_null drop))",
+    ),
+    (
+        "I32Load",
+        "(module (memory 1) (func (param i32) local.get 0 i32.load drop))",
+    ),
+    (
+        "I32Store",
+        "(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))",
+    ),
+];
+
+/// The net stack effect the *validator* attributes to each operator of a module's
+/// first function, keyed by variant name.
+///
+/// This is the oracle. It is read from the validator that type-checked the body,
+/// so it is the spec's arity rather than anything this crate believes.
+fn validator_stack_deltas(bytes: &[u8]) -> Vec<(String, i64)> {
+    let mut validator = wasmparser::Validator::new();
+    let mut deltas = vec![];
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = payload.expect("parse");
+
+        if let wasmparser::ValidPayload::Func(to_validate, body) =
+            validator.payload(&payload).expect("validate")
+        {
+            let mut func = to_validate.into_validator(Default::default());
+
+            // the validator needs the body's local declarations before its
+            // operators; the operators reader starts past them
+            func.read_locals(&mut body.get_binary_reader())
+                .expect("locals");
+
+            let mut reader = body.get_operators_reader().expect("operators");
+
+            while !reader.eof() {
+                let (operator, offset) = reader.read_with_offset().expect("operator");
+                let before = func.operand_stack_height() as i64;
+
+                func.op(offset, &operator).expect("operator validates");
+
+                let after = func.operand_stack_height() as i64;
+                // `Debug` renders as `I32Add` or `I32Load { memarg: .. }`; the
+                // variant name is everything up to the first space.
+                let name = format!("{operator:?}");
+                let name = name.split_whitespace().next().unwrap_or_default();
+
+                deltas.push((name.to_string(), after - before));
+            }
+
+            // only the first function is measured
+            break;
+        }
+    }
+
+    deltas
+}
+
+#[test]
+fn every_operator_pops_and_pushes_what_the_spec_says() {
+    for (name, wat) in ARITY_CASES {
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+
+        let expected = validator_stack_deltas(&bytes)
+            .into_iter()
+            .find(|(op, _)| op == name)
+            .unwrap_or_else(|| panic!("{name} does not appear in its own case"))
+            .1;
+
+        let body = lower(wat);
+        let (prog, frame) = (&body.0, &body.1);
+
+        // the case is built so the body is exactly this instruction and `end`,
+        // which is what lets the arenas be read as that instruction's operands
+        assert_eq!(
+            prog.len(),
+            2,
+            "{name}: case must lower to one instruction and `end`:\n{}",
+            render(&body, &[])
+        );
+
+        let pops = frame.input_registers_arena.len() as i64;
+        let pushes = frame.output_registers_arena.len() as i64;
+
+        assert_eq!(
+            pushes - pops,
+            expected,
+            "{name}: lowered as {pops} -> {pushes}, but the spec says the net \
+             stack effect is {expected}. The `Signature<I, O>` on the variant is \
+             wrong — nothing else records an arity."
+        );
+    }
+}
+
+/// The cross-check is only worth having if it fails when the declaration is
+/// wrong, and the failure it guards against compiles cleanly. This pins the
+/// measurement half: an operator's operands are exactly what its arena runs hold,
+/// which is the step that would silently drift if a case stopped lowering to a
+/// single instruction.
+#[test]
+fn the_arity_cross_check_measures_one_instruction() {
+    for (name, wat) in ARITY_CASES {
+        let (prog, _) = lower(wat);
+
+        assert!(
+            matches!(prog.last(), Some(RegInstruction::End)),
+            "{name}: the body must end with `end`"
+        );
+
+        assert!(
+            !matches!(prog.first(), Some(RegInstruction::Move(_))),
+            "{name}: a `Move` means the body carries results, and its operands \
+             would be counted as the instruction's"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // frame layout
 // ---------------------------------------------------------------------------
 
