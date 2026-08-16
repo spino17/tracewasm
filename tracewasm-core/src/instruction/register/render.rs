@@ -336,6 +336,21 @@ impl RegInstruction {
             // Three operands and no result, so there is nothing to point an arrow
             // at. `memory.copy` reads destination, source, length; `memory.fill`
             // reads destination, byte, length.
+            // The segment it reads from is an immediate, so it leads: the three
+            // operands after it are destination, source offset, length.
+            RegInstruction::MemoryInit {
+                data_index,
+                operands,
+            } => format!(
+                "{:<12} data{data_index} {}",
+                mnemonic(self.kind()),
+                list(operands.registers(ins))
+            ),
+            // No operands and no result — the segment it releases is the whole
+            // instruction.
+            RegInstruction::DataDrop(data_index) => {
+                format!("{:<12} data{data_index}", mnemonic(self.kind()))
+            }
             RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => {
                 format!(
                     "{:<12} {}",

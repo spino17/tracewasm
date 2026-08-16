@@ -1923,6 +1923,11 @@ pub enum RegInstruction {
     MemoryGrow(Signature<1, 1>),
     MemoryCopy(Registers<3, Slot>),
     MemoryFill(Registers<3, Slot>),
+    MemoryInit {
+        data_index: u32,
+        operands: Registers<3, Slot>,
+    },
+    DataDrop(u32),
     /// Closes a label, one per `end` operator.
     ///
     /// This is where branches to a `block` or `if` label land — a `loop`'s
@@ -2252,9 +2257,16 @@ impl RegInstruction {
                 Operator::MemoryInit { data_index, mem } => {
                     check_memory_index(mem)?;
 
-                    todo!()
+                    emit!(|sig: Signature<3, 0>| {
+                        RegInstruction::MemoryInit {
+                            data_index,
+                            operands: sig.input,
+                        }
+                    })
                 }
-                Operator::DataDrop { data_index } => todo!(),
+                Operator::DataDrop { data_index } => {
+                    instructions.push(RegInstruction::DataDrop(data_index));
+                }
 
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
