@@ -937,13 +937,17 @@ pub struct BrTableTarget {
     pub recorded_height: u32,
 }
 
+pub struct FrameLayout {
+    pub br_targets_arena: Box<[BrTableTarget]>,
+}
+
 /// The three parallel outputs of lowering one function body: the instruction list,
 /// the source-offset sidecar indexed alongside it, and the flat `br_table` target
 /// array the [`Instruction::BrTable`] ranges point into.
 ///
 /// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
 /// three together.
-type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, Box<[BrTableTarget]>);
+type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, FrameLayout);
 
 /// The stack of currently-open control-flow labels, plus the running
 /// operand-stack height.
@@ -2163,7 +2167,9 @@ impl Instruction {
         Ok((
             instructions,
             instruction_offsets,
-            br_table_target_branches.into_boxed_slice(),
+            FrameLayout {
+                br_targets_arena: br_table_target_branches.into_boxed_slice(),
+            },
         ))
     }
 

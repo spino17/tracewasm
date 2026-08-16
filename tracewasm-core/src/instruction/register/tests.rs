@@ -1866,7 +1866,7 @@ fn writing_a_borrowed_local_rescues_it_first() {
 
 #[test]
 fn an_unborrowed_write_rescues_nothing() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              i32.const 5
              local.set 0))"#,
@@ -1921,7 +1921,7 @@ fn an_if_else_wires_both_arms_to_one_end() {
 
 #[test]
 fn an_if_without_an_else_jumps_straight_to_the_end() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32)
              local.get 0
              if i32.const 5 local.set 0 end))"#,
@@ -1948,7 +1948,7 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
 
 #[test]
 fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0
              if (result i32) i32.const 1 else i32.const 2 end))"#,
@@ -1995,7 +1995,7 @@ fn a_branch_lands_past_the_fallthrough_move() {
 
 #[test]
 fn an_outward_branch_targets_the_outer_label() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32)
                block (result i32) local.get 0 br 1 end
@@ -2048,7 +2048,7 @@ fn a_loop_back_edge_skips_the_entry_spill() {
 
 #[test]
 fn a_branch_to_a_loop_carries_the_loops_params() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              i32.const 1
              loop (param i32) (result i32)
@@ -2079,7 +2079,7 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
 #[test]
 fn br_table_arms_resolve_to_their_own_labels() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
@@ -2118,7 +2118,7 @@ fn br_table_arms_resolve_to_their_own_labels() {
 
 #[test]
 fn each_br_table_arm_carries_its_own_move() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32) block (result i32)
                i32.const 9 local.get 0 br_table 0 1 0
@@ -2186,7 +2186,7 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
 
 #[test]
 fn the_br_if_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2206,7 +2206,7 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
 
 #[test]
 fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              loop
@@ -2238,7 +2238,7 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
 
 #[test]
 fn the_br_table_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2294,7 +2294,7 @@ fn a_return_with_no_results_transfers_nothing() {
 
 #[test]
 fn a_return_lands_on_the_final_end_from_any_depth() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block block local.get 0 return end end
              i32.const 9))"#,
@@ -2317,7 +2317,7 @@ fn a_return_lands_on_the_final_end_from_any_depth() {
 
 #[test]
 fn a_conditional_return_shares_the_functions_result_register() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0
              if (result i32) i32.const 1 return else i32.const 2 end))"#,
@@ -2370,7 +2370,7 @@ fn a_return_reads_the_snapshot_the_hoist_preserved() {
 
 #[test]
 fn a_return_makes_the_rest_of_its_block_unreachable() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32)
                local.get 0
@@ -2406,7 +2406,7 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 
 /// Two callers of the same function, differing only in what sits below the call.
 fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
-    let (prog, frame) = lower_func(wat, 1);
+    let (prog, _, frame) = lower_func(wat, 1);
     let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
@@ -2569,7 +2569,7 @@ fn a_zero_param_call_still_reports_its_result_base() {
 
 #[test]
 fn arguments_are_staged_at_the_caller_base() {
-    let (prog, frame) = lower_func(
+    let (prog, _, frame) = lower_func(
         r#"(module
              (func (param i32 i32) (result i32) local.get 0)
              (func (param i32) (result i32)
@@ -2621,7 +2621,7 @@ fn a_global_read_across_a_call_is_rescued() {
 
 #[test]
 fn a_local_read_across_a_call_needs_no_rescue() {
-    let (prog, _) = lower_func(
+    let (prog, _, _) = lower_func(
         r#"(module
              (func)
              (func (param i32) (result i32)
@@ -2736,7 +2736,7 @@ fn a_zero_argument_call_indirect_still_pops_its_index() {
 #[test]
 fn caller_base_counts_past_the_index_to_the_deepest_argument() {
     let base_of = |wat: &str| {
-        let (prog, _) = lower_func(wat, 0);
+        let (prog, _, _) = lower_func(wat, 0);
         let at = index_of_kind(&prog, RegInstructionKind::CallIndirect).unwrap();
 
         let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
@@ -3050,7 +3050,7 @@ fn a_spill_live_across_an_unreachable_survives_it() {
 /// the cheap side of the trade.
 #[test]
 fn a_trapping_block_still_reserves_its_results() {
-    let (_, frame) = lower(
+    let (_, _, frame) = lower(
         r#"(module (func (result i32)
              block (result i32 i32)
                unreachable
@@ -3470,7 +3470,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             .1;
 
         let body = lower(&wat);
-        let (prog, frame) = (&body.0, &body.1);
+        let (prog, frame) = (&body.0, &body.2);
 
         // the case is built so the body is exactly this instruction and `end`,
         // which is what lets the arenas be read as that instruction's operands
@@ -3503,7 +3503,7 @@ fn every_case_lowers_to_the_kind_it_is_filed_under() {
             continue;
         };
 
-        let (prog, _) = lower(&wat);
+        let (prog, _, _) = lower(&wat);
 
         assert_eq!(
             prog[0].kind(),
@@ -3525,7 +3525,7 @@ fn every_case_lowers_to_the_kind_it_is_filed_under() {
 
 #[test]
 fn the_frame_reports_peak_register_use() {
-    let (_, frame) = lower(
+    let (_, _, frame) = lower(
         r#"(module (memory 1) (func (param i32) (result i32)
              local.get 0 i32.load
              local.get 0 i32.load
@@ -3537,7 +3537,7 @@ fn the_frame_reports_peak_register_use() {
 
 #[test]
 fn the_frame_reports_peak_spill_use() {
-    let (_, frame) = lower(
+    let (_, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0 i32.const 1 local.set 0
              local.get 0 i32.const 2 local.set 0
@@ -3552,7 +3552,7 @@ fn the_frame_reports_peak_spill_use() {
 
 #[test]
 fn the_arenas_ship_with_the_body() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );

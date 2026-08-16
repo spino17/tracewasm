@@ -269,7 +269,7 @@ impl TraceVM {
         // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
         // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
         // loads for a pair that is fixed for the whole frame.
-        let br_table_targets: &[BrTableTarget] = &func_body.br_table_targets;
+        let br_table_targets: &[BrTableTarget] = &func_body.frame_layout.br_targets_arena;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -457,7 +457,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let mut instructions = func_body.instructions.as_ref();
         let mut instruction_offsets = func_body.instruction_offsets.as_ref();
-        let mut br_table_targets = func_body.br_table_targets.as_ref();
+        let mut br_table_targets = func_body.frame_layout.br_targets_arena.as_ref();
 
         let locals_ty = &func_body.locals;
         let locals_len = locals_ty.len();
@@ -532,7 +532,7 @@ impl TraceVM {
                         &module.func_bodies[(callee_func_index.0 - imported_func_count) as usize];
                     let callee_instructions = &callee_func_body.instructions;
                     let callee_locals_ty = &callee_func_body.locals;
-                    let callee_br_table_targets = &callee_func_body.br_table_targets;
+                    let callee_br_table_targets = &callee_func_body.frame_layout.br_targets_arena;
                     let callee_instruction_offsets = &callee_func_body.instruction_offsets;
 
                     // save current frame's state

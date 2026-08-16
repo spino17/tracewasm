@@ -1212,7 +1212,7 @@ pub struct FrameLayout {
 
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
-pub type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
+pub type LoweredRegFuncBody = (Vec<RegInstruction>, Vec<u32>, FrameLayout);
 
 /// One lowered instruction.
 ///
@@ -2108,6 +2108,7 @@ impl RegInstruction {
         globals_count: u32,
     ) -> Result<LoweredRegFuncBody, TraceWasmError> {
         let mut instructions: Vec<RegInstruction> = vec![];
+        let mut instruction_offsets: Vec<u32> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
         let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
 
@@ -2973,7 +2974,7 @@ impl RegInstruction {
             br_targets_arena: simulated_stack.br_targets.into_boxed_slice(),
         };
 
-        Ok((instructions, frame))
+        Ok((instructions, instruction_offsets, frame))
     }
 }
 

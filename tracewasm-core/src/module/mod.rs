@@ -24,7 +24,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::stack::{BrTableTarget, Instruction},
+    instruction::stack::{FrameLayout, Instruction},
     memory::Memory,
     vm::{
         TraceVM,
@@ -579,14 +579,7 @@ pub struct FuncBody {
     /// `instructions[i]`, and both slices always have the same length. Lowering
     /// pushes the two together, which is what upholds this.
     pub instruction_offsets: Box<[u32]>,
-    /// Every `br_table` arm in this body, concatenated in lowering order.
-    ///
-    /// Each [`Instruction::BrTable`] holds a `(start_index, len)` range naming its
-    /// own contiguous run here instead of an inline `Box<[TargetBranch]>` — that fat
-    /// pointer would make the variant 16 bytes and hold the whole enum at 24 (see
-    /// the [`crate::instruction`] module docs). Empty, and unallocated, for the
-    /// common case of a body with no `br_table`.
-    pub(crate) br_table_targets: Box<[BrTableTarget]>,
+    pub(crate) frame_layout: FrameLayout,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -1344,7 +1337,7 @@ impl Module {
                         }
                     }
 
-                    let (instructions, instruction_offsets, br_table_targets) =
+                    let (instructions, instruction_offsets, frame_layout) =
                         Instruction::emit_instruction_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
@@ -1359,7 +1352,7 @@ impl Module {
                         locals: locals.into_boxed_slice(), // params + declared locals
                         instructions: instructions.into_boxed_slice(),
                         instruction_offsets: instruction_offsets.into_boxed_slice(),
-                        br_table_targets,
+                        frame_layout,
                     });
                 }
                 CustomSection(custom_sec) => {

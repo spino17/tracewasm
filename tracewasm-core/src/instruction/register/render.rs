@@ -487,7 +487,7 @@ impl RegInstruction {
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.
     pub fn render_body(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
-        let (instructions, frame) = body;
+        let (instructions, _, frame) = body;
         let mut out = String::new();
 
         for (pc, i) in instructions.iter().enumerate() {
