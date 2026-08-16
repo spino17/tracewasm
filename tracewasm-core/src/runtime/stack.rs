@@ -49,37 +49,11 @@
 //! discipline never touches them. Those accessors index unchecked and carry the
 //! safety argument for it.
 
+use crate::{
+    instruction::RuntimeFrame,
+    runtime::{Value, value::Val},
+};
 use smallvec::{SmallVec, smallvec};
-
-use crate::runtime::Value;
-
-/// Elements of backing storage reserved for a fresh operand stack, sized so a
-/// normal function's execution never has to reallocate mid-run.
-///
-/// A count of slots, not of bytes: at 8 bytes per [`Value`] this reserves 4 MiB.
-/// The pages are faulted lazily, so an instance that never runs deep pays only
-/// for what it touches.
-pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024;
-
-/// Reports a pop from an empty stack.
-///
-/// Not generic and takes no arguments, so one copy is shared by every `Stack<T>`
-/// and callers keep nothing live for it.
-#[inline(never)]
-fn pop_underflow() -> ! {
-    panic!("pop from an empty operand stack")
-}
-
-/// Reports a read of the top of an empty stack.
-///
-/// A sibling of [`pop_underflow`] rather than a shared helper, for the same
-/// reason [`wrong_ty`] has one function per type: each carries an accurate
-/// message while still taking no arguments, so neither costs the caller
-/// anything to keep live.
-#[inline(never)]
-fn top_underflow() -> ! {
-    panic!("top of an empty operand stack")
-}
 
 /// A LIFO operand stack whose logical height (`stack_pointer`) is tracked
 /// independently of the backing vector's length. See the module docs for the
@@ -322,22 +296,62 @@ impl Stack<Value> {
 
         s
     }
+}
+
+impl RuntimeFrame for Stack<Value> {
+    fn reset(&mut self) {
+        self.reset();
+    }
+
+    fn set_params(&mut self, params: &[Val]) {
+        for param in params {
+            self.push(param.into());
+        }
+    }
 
     /// Removes the top `num` values and returns them as a function's results, in
     /// push order (`result0..resultN-1`).
     ///
     /// Precondition: at least `num` values are present.
-    pub fn pop_results(&mut self, num: u32) -> SmallVec<[Value; 3]> {
+    fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
-        for i in 0..(num as usize) {
-            s.push(self.inner[self.stack_pointer - num as usize + i]);
+        for i in 0..(results_count as usize) {
+            s.push(self.inner[self.stack_pointer - results_count as usize + i]);
         }
 
-        self.stack_pointer -= num as usize;
+        self.stack_pointer -= results_count as usize;
 
         s
     }
+}
+
+/// Elements of backing storage reserved for a fresh operand stack, sized so a
+/// normal function's execution never has to reallocate mid-run.
+///
+/// A count of slots, not of bytes: at 8 bytes per [`Value`] this reserves 4 MiB.
+/// The pages are faulted lazily, so an instance that never runs deep pays only
+/// for what it touches.
+pub const VM_STACK_INITIAL_ALLOCATION_SIZE: usize = 512 * 1024;
+
+/// Reports a pop from an empty stack.
+///
+/// Not generic and takes no arguments, so one copy is shared by every `Stack<T>`
+/// and callers keep nothing live for it.
+#[inline(never)]
+fn pop_underflow() -> ! {
+    panic!("pop from an empty operand stack")
+}
+
+/// Reports a read of the top of an empty stack.
+///
+/// A sibling of [`pop_underflow`] rather than a shared helper, for the same
+/// reason [`wrong_ty`] has one function per type: each carries an accurate
+/// message while still taking no arguments, so neither costs the caller
+/// anything to keep live.
+#[inline(never)]
+fn top_underflow() -> ! {
+    panic!("top of an empty operand stack")
 }
 
 #[cfg(test)]

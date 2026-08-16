@@ -81,7 +81,7 @@ use crate::{
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
     instruction::{
-        Instruction,
+        Instruction, RuntimeFrame,
         stack::{StackBrTableTarget, StackInstruction},
     },
     memory::Memory,
@@ -173,14 +173,6 @@ struct Frame<'a> {
 /// everything mutable lives on the [`Instance`], and a frame's own data lives in
 /// the locals of the driver running it.
 pub(crate) struct TraceVM;
-
-pub struct FuncBody<Instr: Instruction> {
-    instructions: Box<[Instr]>,
-    instruction_offsets: Box<[u32]>,
-    br_table_targets: Box<[Instr::BrTableTarget]>,
-    frame_layout: Instr::FrameLayout,
-    locals: Box<[ValType]>,
-}
 
 impl TraceVM {
     /*pub(crate) fn run_<M: Memory, I: ImportRegistry, Instr: Instruction>(
@@ -429,10 +421,7 @@ impl TraceVM {
         let mut call_stack_depth = 0;
 
         instance.frame.reset();
-
-        for param in params {
-            instance.frame.push(param.into());
-        }
+        instance.frame.set_params(params);
 
         // The reset above put the stack at height 0, so this frame's base is 0.
         Self::execute_on_native_stack(func_index, instance, module, &mut call_stack_depth)
@@ -443,15 +432,13 @@ impl TraceVM {
         let results_ty = &module.types[func_decl.ty.0 as usize].results;
         let results_len = results_ty.len() as u32;
 
-        let results = instance.frame.pop_results(results_len);
+        let results = instance.frame.results(results_len);
 
         let mut s: SmallVec<[Val; 3]> = smallvec![];
 
         for (i, result) in results.iter().enumerate() {
             s.push(result.into_val(&results_ty[i]));
         }
-
-        debug_assert!(instance.frame.height() == 0);
 
         Ok(ResultVals::new(s))
     }

@@ -1,16 +1,24 @@
 use crate::{
     error::TraceWasmError,
     module::{FuncDecl, FuncType},
+    runtime::value::{Val, Value},
 };
+use smallvec::SmallVec;
 use wasmparser::{BlockType, OperatorsReader};
 
 pub mod register;
 pub mod stack;
 
+pub trait RuntimeFrame {
+    fn set_params(&mut self, params: &[Val]);
+    fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]>;
+    fn reset(&mut self);
+}
+
 pub trait Instruction: Sized {
     type BrTableTarget;
     type FrameLayout;
-    type RuntimeFrame: Default;
+    type RuntimeFrame: Default + RuntimeFrame;
 
     fn emit_instruction_for_func(
         operator_reader: OperatorsReader<'_>,
