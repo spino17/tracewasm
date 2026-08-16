@@ -4,6 +4,10 @@ use wasmparser::BlockType;
 pub mod register;
 pub mod stack;
 
+pub trait Instruction {
+    type BrTableTarget;
+}
+
 /// What kind of label a control-stack entry represents, plus the data needed to
 /// backpatch its originating instruction once its `end` is seen.
 #[derive(Clone, Copy)]

@@ -80,7 +80,7 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
-    instruction::stack::{Instruction, TargetBranch},
+    instruction::stack::{BrTableTarget, Instruction},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
     vm::stack::{DataVal, Stack, Val, Value},
@@ -150,7 +150,7 @@ struct Frame<'a> {
     pc: u32,
     caller_base_height: u32,
     frame_base_height: u32,
-    br_table_targets: &'a [TargetBranch],
+    br_table_targets: &'a [BrTableTarget],
     instruction_offsets: &'a [u32],
     /// Result count of the callee, needed on return to know how much of its
     /// region to keep when truncating back to `caller_base_height`.
@@ -269,7 +269,7 @@ impl TraceVM {
         // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
         // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
         // loads for a pair that is fixed for the whole frame.
-        let br_table_targets: &[TargetBranch] = &func_body.br_table_targets;
+        let br_table_targets: &[BrTableTarget] = &func_body.br_table_targets;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -817,7 +817,7 @@ impl TraceVM {
         frame_base_height: u32,
         module: &Module,
         instance: &mut Instance<M, I>,
-        br_table_targets: &[TargetBranch],
+        br_table_targets: &[BrTableTarget],
         imported_func_count: u32,
     ) -> Result<Step, Box<InstructionExecutionError>> {
         let res = match instr {

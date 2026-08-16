@@ -1717,7 +1717,7 @@ fn br_table_arms_survive_lowering() {
     for base in [inner, outer, inner] {
         let mov = s.br_truncation_registers(base, 1);
 
-        s.br_targets.push(BrTarget {
+        s.br_targets.push(BrTableTarget {
             mov,
             target_index: u32::MAX,
         });

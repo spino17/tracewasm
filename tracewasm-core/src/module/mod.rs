@@ -24,7 +24,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::stack::{Instruction, TargetBranch},
+    instruction::stack::{BrTableTarget, Instruction},
     memory::Memory,
     vm::{
         TraceVM,
@@ -586,7 +586,7 @@ pub struct FuncBody {
     /// pointer would make the variant 16 bytes and hold the whole enum at 24 (see
     /// the [`crate::instruction`] module docs). Empty, and unallocated, for the
     /// common case of a body with no `br_table`.
-    pub(crate) br_table_targets: Box<[TargetBranch]>,
+    pub(crate) br_table_targets: Box<[BrTableTarget]>,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -1351,6 +1351,8 @@ impl Module {
                             results.len() as u32,
                             &types,
                             &func_decls,
+                            locals.len() as u32,
+                            globals.len() as u32,
                         )?;
 
                     func_bodies.push(FuncBody {

@@ -524,7 +524,7 @@ impl UnreachableTrackingControlStack {
 /// loop and non-loop labels: validation only requires the label *types* to match, so
 /// the arities agree but the unwind heights — and therefore the destination registers
 /// — differ per arm.
-pub struct BrTarget {
+pub struct BrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
     pub mov: DynSignature,
@@ -561,7 +561,7 @@ struct SimulatedStack {
     control_stack: ControlStack,
     /// Flat arena of `br_table` arms, indexed by
     /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
-    br_targets: Vec<BrTarget>,
+    br_targets: Vec<BrTableTarget>,
 }
 
 impl SimulatedStack {
@@ -1207,7 +1207,7 @@ pub struct FrameLayout {
     /// A [`RegInstruction::BrTable`] owns the contiguous run named by its
     /// `(targets_start, targets_len)`, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
-    pub br_targets_arena: Box<[BrTarget]>,
+    pub br_targets_arena: Box<[BrTableTarget]>,
 }
 
 /// The two outputs of lowering one function body into register form: the
@@ -2762,7 +2762,7 @@ impl RegInstruction {
                             (move_registers, u32::MAX)
                         };
 
-                        let br_target = BrTarget {
+                        let br_target = BrTableTarget {
                             mov: move_registers,
                             target_index,
                         };

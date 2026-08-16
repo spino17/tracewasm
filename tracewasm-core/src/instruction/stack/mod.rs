@@ -927,7 +927,7 @@ const _: () = assert!(
 /// requires the label *types* to match); their unwind targets and heights
 /// differ even though the value counts agree.
 #[derive(Debug, Clone)]
-pub struct TargetBranch {
+pub struct BrTableTarget {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
     pub target_index: u32,
@@ -943,7 +943,7 @@ pub struct TargetBranch {
 ///
 /// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
 /// three together.
-type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, Box<[TargetBranch]>);
+type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, Box<[BrTableTarget]>);
 
 /// The stack of currently-open control-flow labels, plus the running
 /// operand-stack height.
@@ -1211,6 +1211,8 @@ impl Instruction {
         results: u32,
         types: &[FuncType],
         func_decls: &[FuncDecl],
+        _locals_count: u32,
+        _globals_count: u32,
     ) -> Result<LoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<Instruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
@@ -1967,7 +1969,7 @@ impl Instruction {
                         let recorded_height = block.recorded_height;
 
                         if let Some(loop_index) = block.kind.is_loop() {
-                            br_table_target_branches.push(TargetBranch {
+                            br_table_target_branches.push(BrTableTarget {
                                 target_index: loop_index,
                                 arity: params,
                                 recorded_height,
@@ -1980,7 +1982,7 @@ impl Instruction {
                                 .push((index, br_targets_start + i as u32));
 
                             // dummy value! will backpatch when we see END for the block this `br` is attached to
-                            br_table_target_branches.push(TargetBranch {
+                            br_table_target_branches.push(BrTableTarget {
                                 target_index: u32::MAX,
                                 arity: results,
                                 recorded_height,
