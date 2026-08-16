@@ -13,6 +13,11 @@
 //!
 //! Export names are prefixed `fr_`.
 
+// A wide, hand-shaped frame is the subject here: the locals are declared in one
+// parallel block and updated with explicit `x = x op y` so the wasm reads as the
+// operations under test. Clippy's tighter spellings compile to the same thing and
+// lose that.
+#![allow(unused_mut, clippy::assign_op_pattern)]
 #![allow(dead_code)]
 
 use std::hint::black_box;

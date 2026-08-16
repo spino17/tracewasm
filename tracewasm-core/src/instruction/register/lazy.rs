@@ -174,7 +174,7 @@ pub struct LazySlot<T>(Id<LazyEntry<T>>);
 
 impl<T> Clone for LazySlot<T> {
     fn clone(&self) -> Self {
-        LazySlot(self.0)
+        *self
     }
 }
 

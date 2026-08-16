@@ -147,6 +147,7 @@ enum BlockVariant {
     /// that [`Block`] itself rather than going through [`SimulatedStack::add_block`],
     /// since a function frame has no operator to open it and no block type to read.
     /// The variant exists for the mapping in `add_block` to be total.
+    #[allow(dead_code, reason = "kept so `add_block`'s mapping stays total")]
     Func,
 }
 
@@ -652,7 +653,7 @@ impl SimulatedStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block { .. } => self.stack.height() - params,
+            BlockKind::Block => self.stack.height() - params,
             BlockKind::Loop { .. } => self.stack.height() - params,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params
@@ -733,7 +734,7 @@ impl SimulatedStack {
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
     ) -> LazyLocation {
-        let location = slot.location(&arena);
+        let location = slot.location(arena);
 
         if matches!(slot.decrease_ref_count(arena), LazyEntryDropResult::Dropped) {
             match location {
@@ -751,7 +752,7 @@ impl SimulatedStack {
     /// entry, so a later spill redirects both at once. Otherwise a fresh entry is
     /// allocated and recorded as the origin's live borrow.
     fn push_lazy<T>(location: u32, arena: &mut LazyArena<T>) -> LazySlot<T> {
-        let slot = match arena.origin[location as usize] {
+        match arena.origin[location as usize] {
             Some(slot) => {
                 slot.advanced_ref_count(arena);
 
@@ -763,9 +764,7 @@ impl SimulatedStack {
 
                 slot
             }
-        };
-
-        slot
+        }
     }
 
     /// Consumes the top operand and resolves it to the [`Slot`] an instruction will
@@ -780,7 +779,7 @@ impl SimulatedStack {
     fn pop(&mut self) -> Slot {
         let val = self.stack.pop();
 
-        let slot = match val {
+        match val {
             StackSlot::Const(val) => Slot::Const(val),
             StackSlot::Register(val) => {
                 self.recede_register_index();
@@ -803,9 +802,7 @@ impl SimulatedStack {
                     LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
                 }
             }
-        };
-
-        slot
+        }
     }
 
     /// Resolves the operand `depth` entries below the top *without* consuming it.
@@ -831,7 +828,7 @@ impl SimulatedStack {
     fn simulated_pop(&self, depth: u32) -> Slot {
         let val = *self.stack.peek_from_top(depth);
 
-        let slot = match val {
+        match val {
             StackSlot::Const(val) => Slot::Const(val),
             StackSlot::Register(val) => Slot::Register(val),
             StackSlot::Local(slot) => {
@@ -850,9 +847,7 @@ impl SimulatedStack {
                     LazyLocation::Spilled(spill_index) => Slot::Spilled(spill_index),
                 }
             }
-        };
-
-        slot
+        }
     }
 
     /// Pushes one operand onto the simulated stack.
@@ -1028,11 +1023,11 @@ impl SimulatedStack {
 
         Signature {
             input: Registers {
-                start: result.input_start as u32,
+                start: result.input_start,
                 phantom: PhantomData,
             },
             output: Registers {
-                start: result.output_start as u32,
+                start: result.output_start,
                 phantom: PhantomData,
             },
         }
@@ -1144,9 +1139,7 @@ impl SimulatedStack {
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
     ) -> Option<SpillIndex> {
-        let Some(slot) = arena.origin[location as usize] else {
-            return None;
-        };
+        let slot = arena.origin[location as usize]?;
 
         let spill_index = spills.reserve_slot();
 
@@ -2927,10 +2920,7 @@ impl RegInstruction {
         // freed spill slot can be reused — so they are read off directly here
         // rather than recomputed from the instruction list.
         let frame = FrameLayout {
-            // Bounded by the operand-stack depth, which a function body's size in
-            // the binary already bounds well below `u32::MAX`, so this cannot
-            // truncate for any module that could be loaded at all.
-            registers: simulated_stack.max_registers as u32,
+            registers: simulated_stack.max_registers,
             spills: simulated_stack.spills.allocation_len(),
             input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
             output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),

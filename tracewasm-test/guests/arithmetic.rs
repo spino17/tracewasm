@@ -12,6 +12,13 @@
 //! bit. `sqrt` is exact per IEEE 754 and is fair game.
 
 #![allow(dead_code)]
+// `x == x`, `x != x`, `inf - inf`, `0.0 / 0.0`: these are the point. NaN makes
+// every ordered comparison false and `!=` true, and the degenerate float
+// identities are exactly where a plausible interpreter diverges from the spec.
+// Clippy reads them as mistakes; rewriting them would delete the test.
+#![allow(clippy::eq_op, clippy::zero_divided_by_zero)]
+// A redundant-looking `as i64` keeps a table of cases visually parallel.
+#![allow(clippy::unnecessary_cast)]
 
 use std::hint::black_box;
 

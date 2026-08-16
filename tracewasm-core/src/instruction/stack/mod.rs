@@ -1011,7 +1011,7 @@ impl ControlStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block { .. } => self.curr_height - params,
+            BlockKind::Block => self.curr_height - params,
             BlockKind::Loop { .. } => self.curr_height - params,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params

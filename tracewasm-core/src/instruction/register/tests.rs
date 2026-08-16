@@ -1522,7 +1522,7 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     s.push_const(Const::I32(0)); // the loop's param
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
 
-    let loop_block = *&s.get_curr_block().recorded_height;
+    let loop_block = s.get_curr_block().recorded_height;
     let loop_params = s.get_curr_block().params;
 
     let _ = s.materialize_stack_slots_in_registers(loop_params);
@@ -1680,11 +1680,7 @@ fn deeply_nested_dead_constructs_unwind_in_order() {
     ];
     let live = reachability(&seq);
 
-    assert_eq!(
-        live[live.len() - 1],
-        true,
-        "the live block's end must resume"
-    );
+    assert!(live[live.len() - 1], "the live block's end must resume");
     assert!(
         live[2..live.len() - 1].iter().all(|r| !r),
         "everything nested inside stays dead: {live:?}"
