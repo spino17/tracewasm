@@ -199,6 +199,24 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
     // Every pure value operator renders alike, so the arms below carry no body of
     // their own. They are split by arity because an or-pattern binds one type, and
     // then by family, so they scan in the order the enum declares them.
+    let load_op = |kind, offset: u32, inputs: &[Slot], outputs: &[u32]| {
+        format!(
+            "{:<12} [{}]+{offset} -> {}",
+            mnemonic(kind),
+            slot(&inputs[0]),
+            regs(outputs)
+        )
+    };
+
+    let store_op = |kind, offset: u32, inputs: &[Slot]| {
+        format!(
+            "{:<12} [{}]+{offset} <- {}",
+            mnemonic(kind),
+            slot(&inputs[0]),
+            slot(&inputs[1])
+        )
+    };
+
     let value_op = |kind, inputs: &[Slot], outputs: &[u32]| {
         format!(
             "{:<12} {} -> {}",
@@ -212,42 +230,31 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
 
     for (pc, i) in instructions.iter().enumerate() {
         let line = match i {
-            RegInstruction::I32Load { offset, sig } => format!(
-                "i32.load     [{}]+{offset} -> {}",
-                slot(&sig.input.registers(ins)[0]),
-                regs(sig.output.registers(outs))
+            // Numeric instructions, in the order the enum declares them.
+            //
+            // Split by shape because an or-pattern binds one type, and the three
+            // shapes bind different ones — but each body is a single call, so the
+            // arms stay one line and the families stay in step with the enum.
+            // i32 — loads
+            RegInstruction::I32Load { offset, sig }
+            | RegInstruction::I32Load8S { offset, sig }
+            | RegInstruction::I32Load8U { offset, sig }
+            | RegInstruction::I32Load16S { offset, sig }
+            | RegInstruction::I32Load16U { offset, sig } => load_op(
+                i.kind(),
+                *offset,
+                sig.input.registers(ins),
+                sig.output.registers(outs),
             ),
-            RegInstruction::I32Store { offset, sig } => {
-                let a = sig.input.registers(ins);
 
-                format!("i32.store    [{}]+{offset} <- {}", slot(&a[0]), slot(&a[1]))
+            // i32 — stores
+            RegInstruction::I32Store { offset, sig }
+            | RegInstruction::I32Store8 { offset, sig }
+            | RegInstruction::I32Store16 { offset, sig } => {
+                store_op(i.kind(), *offset, sig.input.registers(ins))
             }
-            RegInstruction::LocalSet { index, sig } => format!(
-                "local.set    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalTee { index, sig } => format!(
-                "local.tee    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::GlobalSet { index, sig } => format!(
-                "global.set   global{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalSpill { index, spill_index } => {
-                format!("local.spill  local{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                format!("global.spill global{} -> spill{spill_index}", index.0)
-            }
-            // Every pure value operator renders the same way, so they share two
-            // arms — one per arity, since an or-pattern can only bind one type.
-            // The mnemonic comes from the kind rather than a table; `mnemonic`
-            // says why that is checked rather than merely convenient.
-            // i32 - unary
+
+            // i32 — unary
             RegInstruction::I32Clz(sig)
             | RegInstruction::I32Ctz(sig)
             | RegInstruction::I32Eqz(sig)
@@ -268,7 +275,8 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // i32 - binary
+
+            // i32 — binary
             RegInstruction::I32Add(sig)
             | RegInstruction::I32And(sig)
             | RegInstruction::I32DivS(sig)
@@ -298,7 +306,30 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // i64 - unary
+
+            // i64 — loads
+            RegInstruction::I64Load { offset, sig }
+            | RegInstruction::I64Load8S { offset, sig }
+            | RegInstruction::I64Load8U { offset, sig }
+            | RegInstruction::I64Load16S { offset, sig }
+            | RegInstruction::I64Load16U { offset, sig }
+            | RegInstruction::I64Load32S { offset, sig }
+            | RegInstruction::I64Load32U { offset, sig } => load_op(
+                i.kind(),
+                *offset,
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+
+            // i64 — stores
+            RegInstruction::I64Store { offset, sig }
+            | RegInstruction::I64Store8 { offset, sig }
+            | RegInstruction::I64Store16 { offset, sig }
+            | RegInstruction::I64Store32 { offset, sig } => {
+                store_op(i.kind(), *offset, sig.input.registers(ins))
+            }
+
+            // i64 — unary
             RegInstruction::I64Clz(sig)
             | RegInstruction::I64Ctz(sig)
             | RegInstruction::I64Eqz(sig)
@@ -321,7 +352,8 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // i64 - binary
+
+            // i64 — binary
             RegInstruction::I64Add(sig)
             | RegInstruction::I64And(sig)
             | RegInstruction::I64DivS(sig)
@@ -351,7 +383,21 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // f32 - unary
+
+            // f32 — loads
+            RegInstruction::F32Load { offset, sig } => load_op(
+                i.kind(),
+                *offset,
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+
+            // f32 — stores
+            RegInstruction::F32Store { offset, sig } => {
+                store_op(i.kind(), *offset, sig.input.registers(ins))
+            }
+
+            // f32 — unary
             RegInstruction::F32Abs(sig)
             | RegInstruction::F32Ceil(sig)
             | RegInstruction::F32ConvertI32S(sig)
@@ -369,7 +415,8 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // f32 - binary
+
+            // f32 — binary
             RegInstruction::F32Add(sig)
             | RegInstruction::F32Copysign(sig)
             | RegInstruction::F32Div(sig)
@@ -387,7 +434,21 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // f64 - unary
+
+            // f64 — loads
+            RegInstruction::F64Load { offset, sig } => load_op(
+                i.kind(),
+                *offset,
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
+
+            // f64 — stores
+            RegInstruction::F64Store { offset, sig } => {
+                store_op(i.kind(), *offset, sig.input.registers(ins))
+            }
+
+            // f64 — unary
             RegInstruction::F64Abs(sig)
             | RegInstruction::F64Ceil(sig)
             | RegInstruction::F64ConvertI32S(sig)
@@ -405,7 +466,8 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
-            // f64 - binary
+
+            // f64 — binary
             RegInstruction::F64Add(sig)
             | RegInstruction::F64Copysign(sig)
             | RegInstruction::F64Div(sig)
@@ -423,6 +485,28 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
                 sig.input.registers(ins),
                 sig.output.registers(outs),
             ),
+
+            RegInstruction::LocalSet { index, sig } => format!(
+                "local.set    local{} <- {}",
+                index.0,
+                slot(&sig.input.registers(ins)[0])
+            ),
+            RegInstruction::LocalTee { index, sig } => format!(
+                "local.tee    local{} <- {}",
+                index.0,
+                slot(&sig.input.registers(ins)[0])
+            ),
+            RegInstruction::GlobalSet { index, sig } => format!(
+                "global.set   global{} <- {}",
+                index.0,
+                slot(&sig.input.registers(ins)[0])
+            ),
+            RegInstruction::LocalSpill { index, spill_index } => {
+                format!("local.spill  local{} -> spill{spill_index}", index.0)
+            }
+            RegInstruction::GlobalSpill { index, spill_index } => {
+                format!("global.spill global{} -> spill{spill_index}", index.0)
+            }
             RegInstruction::RefIsNull(sig) => format!(
                 "ref.is_null  {} -> {}",
                 list(sig.input.registers(ins)),
@@ -3523,6 +3607,31 @@ fn operand_type(kind: RegInstructionKind) -> String {
         .to_string()
 }
 
+/// A `.wat` loading through a `memory 1` and dropping the value read.
+///
+/// The address is always an `i32`, and what the load widens to is its own business
+/// since the result is dropped — so one shape covers all thirteen.
+fn load_case(kind: RegInstructionKind) -> String {
+    format!(
+        "(module (memory 1) (func (param i32) local.get 0 {} drop))",
+        mnemonic(kind)
+    )
+}
+
+/// A `.wat` storing through a `memory 1`.
+///
+/// Two operands of different types — an `i32` address and a value of the store's
+/// own type — so the value comes from a second param rather than a repeated
+/// `local.get 0`. `i64.store8` stores an `i64`: the `8` is the width written, not
+/// the type accepted, which is why [`operand_type`] reads the prefix here.
+fn store_case(kind: RegInstructionKind) -> String {
+    format!(
+        "(module (memory 1) (func (param i32 {}) local.get 0 local.get 1 {}))",
+        operand_type(kind),
+        mnemonic(kind)
+    )
+}
+
 /// A `.wat` applying one value op to `operands` operands of its own operand type,
 /// dropping the result.
 fn value_op_case(kind: RegInstructionKind, operands: usize) -> String {
@@ -3553,10 +3662,23 @@ fn value_op_case(kind: RegInstructionKind, operands: usize) -> String {
 /// trailing `Move`, since these bodies return nothing.
 fn arity_case(kind: RegInstructionKind) -> Option<String> {
     match kind {
-        // The pure value ops, whose case is derived from the kind: the mnemonic
-        // and the operand type are both recoverable from the name, so 136
-        // hand-written bodies would be 136 chances to mistype one.
-        // i32 - unary
+        // Every numeric instruction, in the order the enum declares them. Their
+        // cases are derived from the kind — the mnemonic and the operand type are
+        // both recoverable from the name, so 159 hand-written bodies would be 159
+        // chances to mistype one.
+        // i32 — loads
+        RegInstructionKind::I32Load
+        | RegInstructionKind::I32Load8S
+        | RegInstructionKind::I32Load8U
+        | RegInstructionKind::I32Load16S
+        | RegInstructionKind::I32Load16U => Some(load_case(kind)),
+
+        // i32 — stores
+        RegInstructionKind::I32Store
+        | RegInstructionKind::I32Store8
+        | RegInstructionKind::I32Store16 => Some(store_case(kind)),
+
+        // i32 — unary
         RegInstructionKind::I32Clz
         | RegInstructionKind::I32Ctz
         | RegInstructionKind::I32Eqz
@@ -3574,7 +3696,7 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I32TruncSatF64U
         | RegInstructionKind::I32WrapI64 => Some(value_op_case(kind, 1)),
 
-        // i32 - binary
+        // i32 — binary
         RegInstructionKind::I32Add
         | RegInstructionKind::I32And
         | RegInstructionKind::I32DivS
@@ -3601,7 +3723,22 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I32Sub
         | RegInstructionKind::I32Xor => Some(value_op_case(kind, 2)),
 
-        // i64 - unary
+        // i64 — loads
+        RegInstructionKind::I64Load
+        | RegInstructionKind::I64Load8S
+        | RegInstructionKind::I64Load8U
+        | RegInstructionKind::I64Load16S
+        | RegInstructionKind::I64Load16U
+        | RegInstructionKind::I64Load32S
+        | RegInstructionKind::I64Load32U => Some(load_case(kind)),
+
+        // i64 — stores
+        RegInstructionKind::I64Store
+        | RegInstructionKind::I64Store8
+        | RegInstructionKind::I64Store16
+        | RegInstructionKind::I64Store32 => Some(store_case(kind)),
+
+        // i64 — unary
         RegInstructionKind::I64Clz
         | RegInstructionKind::I64Ctz
         | RegInstructionKind::I64Eqz
@@ -3621,7 +3758,7 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I64TruncSatF64S
         | RegInstructionKind::I64TruncSatF64U => Some(value_op_case(kind, 1)),
 
-        // i64 - binary
+        // i64 — binary
         RegInstructionKind::I64Add
         | RegInstructionKind::I64And
         | RegInstructionKind::I64DivS
@@ -3648,7 +3785,13 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::I64Sub
         | RegInstructionKind::I64Xor => Some(value_op_case(kind, 2)),
 
-        // f32 - unary
+        // f32 — loads
+        RegInstructionKind::F32Load => Some(load_case(kind)),
+
+        // f32 — stores
+        RegInstructionKind::F32Store => Some(store_case(kind)),
+
+        // f32 — unary
         RegInstructionKind::F32Abs
         | RegInstructionKind::F32Ceil
         | RegInstructionKind::F32ConvertI32S
@@ -3663,7 +3806,7 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::F32Sqrt
         | RegInstructionKind::F32Trunc => Some(value_op_case(kind, 1)),
 
-        // f32 - binary
+        // f32 — binary
         RegInstructionKind::F32Add
         | RegInstructionKind::F32Copysign
         | RegInstructionKind::F32Div
@@ -3678,7 +3821,13 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::F32Ne
         | RegInstructionKind::F32Sub => Some(value_op_case(kind, 2)),
 
-        // f64 - unary
+        // f64 — loads
+        RegInstructionKind::F64Load => Some(load_case(kind)),
+
+        // f64 — stores
+        RegInstructionKind::F64Store => Some(store_case(kind)),
+
+        // f64 — unary
         RegInstructionKind::F64Abs
         | RegInstructionKind::F64Ceil
         | RegInstructionKind::F64ConvertI32S
@@ -3693,7 +3842,7 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::F64Sqrt
         | RegInstructionKind::F64Trunc => Some(value_op_case(kind, 1)),
 
-        // f64 - binary
+        // f64 — binary
         RegInstructionKind::F64Add
         | RegInstructionKind::F64Copysign
         | RegInstructionKind::F64Div
@@ -3716,12 +3865,6 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         ),
         RegInstructionKind::RefIsNull => {
             Some("(module (func (param funcref) local.get 0 ref.is_null drop))".into())
-        }
-        RegInstructionKind::I32Load => {
-            Some("(module (memory 1) (func (param i32) local.get 0 i32.load drop))".into())
-        }
-        RegInstructionKind::I32Store => {
-            Some("(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))".into())
         }
 
         RegInstructionKind::LocalSet

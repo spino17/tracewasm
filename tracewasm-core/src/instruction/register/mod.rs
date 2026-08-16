@@ -1212,12 +1212,6 @@ pub type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 /// visited in full — see the derive's docs for why both halves matter.
 #[derive(tracewasm_macros::Kind)]
 pub enum RegInstruction {
-    /// `i32.load`: read four bytes at `address + offset`.
-    I32Load {
-        /// Static byte offset added to the popped address.
-        offset: u32,
-        sig: Signature<1, 1>,
-    },
     /// `global.set`: write the operand into a global.
     ///
     /// Any operand still forwarding to this global was rescued by a preceding
@@ -1226,11 +1220,22 @@ pub enum RegInstruction {
         index: GlobalIndex,
         sig: Signature<1, 0>,
     },
+    /// [`Self::LocalSpill`] for a global.
+    GlobalSpill {
+        index: GlobalIndex,
+        spill_index: SpillIndex,
+    },
     /// `local.set`: write the operand into a local. See [`Self::GlobalSet`] on
     /// rescues.
     LocalSet {
         index: LocalIndex,
         sig: Signature<1, 0>,
+    },
+    /// Copies a local into a spill slot, immediately before a write that would
+    /// otherwise invalidate operands still reading it. See [`lazy`].
+    LocalSpill {
+        index: LocalIndex,
+        spill_index: SpillIndex,
     },
     /// `local.tee`: write the operand into a local, leaving it on the operand stack.
     ///
@@ -1239,23 +1244,6 @@ pub enum RegInstruction {
     LocalTee {
         index: LocalIndex,
         sig: Signature<1, 0>,
-    },
-    /// `i32.store`: write `sig.input[1]` to `sig.input[0] + offset`.
-    I32Store {
-        /// Static byte offset added to the popped address.
-        offset: u32,
-        sig: Signature<2, 0>,
-    },
-    /// Copies a local into a spill slot, immediately before a write that would
-    /// otherwise invalidate operands still reading it. See [`lazy`].
-    LocalSpill {
-        index: LocalIndex,
-        spill_index: SpillIndex,
-    },
-    /// [`Self::LocalSpill`] for a global.
-    GlobalSpill {
-        index: GlobalIndex,
-        spill_index: SpillIndex,
     },
     /// `if`: fall through when the condition is non-zero, otherwise jump past
     /// `else_index` to the else-arm — or to `end_index` when there is none.
@@ -1309,18 +1297,80 @@ pub enum RegInstruction {
         targets_start: u32,
         targets_len: u32,
     },
-    // The pure value operators: everything whose whole effect is to pop its
-    // operands and push its results. They carry nothing but their operand runs,
-    // and their arity lives in the `Signature<I, O>` here — with `emit!`, this
-    // declaration is the only place it is written down, which is why
-    // `arity_case` in the tests checks every one of them against the spec.
+    // The numeric instructions, grouped by the type they are named for and then
+    // by shape: loads, stores, unary, binary. Same order as the lowering match, so
+    // the two read side by side.
     //
-    // Three things the names do not say. A comparison pushes an `i32` rather
-    // than nothing, so it is `<2, 1>` like the arithmetic. `div_s`/`div_u`/
-    // `rem_s`/`rem_u` and the non-saturating `trunc_f*` trap at execution,
-    // which lowering does not model — an executor must not commit the
-    // destination register before the trap. The `trunc_sat_f*` forms do not
-    // trap; that is the whole difference.
+    // A load pops an address and pushes the value read; a store pops the address
+    // and the value and pushes nothing. `offset` is the static displacement folded
+    // into the address, and the narrow forms name the width they touch and how it
+    // is widened: `i64.load8_s` reads one byte and sign-extends it to 64 bits. The
+    // memarg's alignment is deliberately not carried — it is a hint with no effect
+    // on semantics, and the stack pass keeps a field the interpreter ignores at
+    // every use site.
+    //
+    // The rest carry nothing but their operand runs, and their arity lives in the
+    // `Signature<I, O>` here — with `emit!`, this declaration is the only place it
+    // is written down, which is why `arity_case` in the tests checks every one of
+    // them against the spec. Three things the names do not say. A comparison
+    // pushes an `i32` rather than nothing, so it is `<2, 1>` like the arithmetic.
+    // `div_s`/`div_u`/`rem_s`/`rem_u` and the non-saturating `trunc_f*` trap at
+    // execution, which lowering does not model — an executor must not commit the
+    // destination register before the trap. The `trunc_sat_f*` forms do not trap;
+    // that is the whole difference.
+
+    // i32 — loads
+    /// `i32.load`.
+    I32Load {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i32.load8_s`.
+    I32Load8S {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i32.load8_u`.
+    I32Load8U {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i32.load16_s`.
+    I32Load16S {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i32.load16_u`.
+    I32Load16U {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+
+    // i32 — stores
+    /// `i32.store`.
+    I32Store {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    /// `i32.store8`.
+    I32Store8 {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    /// `i32.store16`.
+    I32Store16 {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+
     // i32 — unary
     /// `i32.clz`.
     I32Clz(Signature<1, 1>),
@@ -1406,6 +1456,76 @@ pub enum RegInstruction {
     I32Sub(Signature<2, 1>),
     /// `i32.xor`.
     I32Xor(Signature<2, 1>),
+
+    // i64 — loads
+    /// `i64.load`.
+    I64Load {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load8_s`.
+    I64Load8S {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load8_u`.
+    I64Load8U {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load16_s`.
+    I64Load16S {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load16_u`.
+    I64Load16U {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load32_s`.
+    I64Load32S {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+    /// `i64.load32_u`.
+    I64Load32U {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+
+    // i64 — stores
+    /// `i64.store`.
+    I64Store {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    /// `i64.store8`.
+    I64Store8 {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    /// `i64.store16`.
+    I64Store16 {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+    /// `i64.store32`.
+    I64Store32 {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
 
     // i64 — unary
     /// `i64.clz`.
@@ -1497,6 +1617,22 @@ pub enum RegInstruction {
     /// `i64.xor`.
     I64Xor(Signature<2, 1>),
 
+    // f32 — loads
+    /// `f32.load`.
+    F32Load {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+
+    // f32 — stores
+    /// `f32.store`.
+    F32Store {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
+
     // f32 — unary
     /// `f32.abs`.
     F32Abs(Signature<1, 1>),
@@ -1552,6 +1688,22 @@ pub enum RegInstruction {
     F32Ne(Signature<2, 1>),
     /// `f32.sub`.
     F32Sub(Signature<2, 1>),
+
+    // f64 — loads
+    /// `f64.load`.
+    F64Load {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<1, 1>,
+    },
+
+    // f64 — stores
+    /// `f64.store`.
+    F64Store {
+        /// Static byte offset added to the popped address.
+        offset: u32,
+        sig: Signature<2, 0>,
+    },
 
     // f64 — unary
     /// `f64.abs`.
@@ -2055,6 +2207,7 @@ impl RegInstruction {
                     simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
                 }
                 Operator::RefIsNull => emit!(RegInstruction::RefIsNull),
+
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
                 }
@@ -2062,7 +2215,31 @@ impl RegInstruction {
                     offset: memarg.offset as u32,
                     sig,
                 }),
+                Operator::I32Load8S { memarg } => emit!(|sig| RegInstruction::I32Load8S {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Load8U { memarg } => emit!(|sig| RegInstruction::I32Load8U {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Load16S { memarg } => emit!(|sig| RegInstruction::I32Load16S {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Load16U { memarg } => emit!(|sig| RegInstruction::I32Load16U {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
                 Operator::I32Store { memarg } => emit!(|sig| RegInstruction::I32Store {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Store8 { memarg } => emit!(|sig| RegInstruction::I32Store8 {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I32Store16 { memarg } => emit!(|sig| RegInstruction::I32Store16 {
                     offset: memarg.offset as u32,
                     sig,
                 }),
@@ -2109,6 +2286,53 @@ impl RegInstruction {
                 Operator::I32Sub => emit!(RegInstruction::I32Sub),
                 Operator::I32Xor => emit!(RegInstruction::I32Xor),
 
+                Operator::I64Const { value } => {
+                    simulated_stack.push_const(Const::I64(value));
+                }
+                Operator::I64Load { memarg } => emit!(|sig| RegInstruction::I64Load {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load8S { memarg } => emit!(|sig| RegInstruction::I64Load8S {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load8U { memarg } => emit!(|sig| RegInstruction::I64Load8U {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load16S { memarg } => emit!(|sig| RegInstruction::I64Load16S {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load16U { memarg } => emit!(|sig| RegInstruction::I64Load16U {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load32S { memarg } => emit!(|sig| RegInstruction::I64Load32S {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Load32U { memarg } => emit!(|sig| RegInstruction::I64Load32U {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Store { memarg } => emit!(|sig| RegInstruction::I64Store {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Store8 { memarg } => emit!(|sig| RegInstruction::I64Store8 {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Store16 { memarg } => emit!(|sig| RegInstruction::I64Store16 {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::I64Store32 { memarg } => emit!(|sig| RegInstruction::I64Store32 {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
                 Operator::I64Clz => emit!(RegInstruction::I64Clz),
                 Operator::I64Ctz => emit!(RegInstruction::I64Ctz),
                 Operator::I64Eqz => emit!(RegInstruction::I64Eqz),
@@ -2154,6 +2378,17 @@ impl RegInstruction {
                 Operator::I64Sub => emit!(RegInstruction::I64Sub),
                 Operator::I64Xor => emit!(RegInstruction::I64Xor),
 
+                Operator::F32Const { value } => {
+                    simulated_stack.push_const(Const::F32(f32::from_bits(value.bits())));
+                }
+                Operator::F32Load { memarg } => emit!(|sig| RegInstruction::F32Load {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::F32Store { memarg } => emit!(|sig| RegInstruction::F32Store {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
                 Operator::F32Abs => emit!(RegInstruction::F32Abs),
                 Operator::F32Ceil => emit!(RegInstruction::F32Ceil),
                 Operator::F32ConvertI32S => emit!(RegInstruction::F32ConvertI32S),
@@ -2182,6 +2417,17 @@ impl RegInstruction {
                 Operator::F32Ne => emit!(RegInstruction::F32Ne),
                 Operator::F32Sub => emit!(RegInstruction::F32Sub),
 
+                Operator::F64Const { value } => {
+                    simulated_stack.push_const(Const::F64(f64::from_bits(value.bits())));
+                }
+                Operator::F64Load { memarg } => emit!(|sig| RegInstruction::F64Load {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
+                Operator::F64Store { memarg } => emit!(|sig| RegInstruction::F64Store {
+                    offset: memarg.offset as u32,
+                    sig,
+                }),
                 Operator::F64Abs => emit!(RegInstruction::F64Abs),
                 Operator::F64Ceil => emit!(RegInstruction::F64Ceil),
                 Operator::F64ConvertI32S => emit!(RegInstruction::F64ConvertI32S),
