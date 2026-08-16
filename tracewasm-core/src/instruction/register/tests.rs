@@ -231,18 +231,158 @@ fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
             RegInstruction::GlobalSpill { index, spill_index } => {
                 format!("global.spill global{} -> spill{spill_index}", index.0)
             }
-            RegInstruction::I32Add(sig) => format!(
-                "i32.add      {} -> {}",
+            // Every pure value operator renders the same way, so they share two
+            // arms — one per arity, since an or-pattern can only bind one type.
+            // The mnemonic comes from the kind rather than a table; `mnemonic`
+            // says why that is checked rather than merely convenient.
+            RegInstruction::F32Abs(sig)
+            | RegInstruction::F32Ceil(sig)
+            | RegInstruction::F32ConvertI32S(sig)
+            | RegInstruction::F32ConvertI32U(sig)
+            | RegInstruction::F32ConvertI64S(sig)
+            | RegInstruction::F32ConvertI64U(sig)
+            | RegInstruction::F32DemoteF64(sig)
+            | RegInstruction::F32Floor(sig)
+            | RegInstruction::F32Nearest(sig)
+            | RegInstruction::F32Neg(sig)
+            | RegInstruction::F32ReinterpretI32(sig)
+            | RegInstruction::F32Sqrt(sig)
+            | RegInstruction::F32Trunc(sig)
+            | RegInstruction::F64Abs(sig)
+            | RegInstruction::F64Ceil(sig)
+            | RegInstruction::F64ConvertI32S(sig)
+            | RegInstruction::F64ConvertI32U(sig)
+            | RegInstruction::F64ConvertI64S(sig)
+            | RegInstruction::F64ConvertI64U(sig)
+            | RegInstruction::F64Floor(sig)
+            | RegInstruction::F64Nearest(sig)
+            | RegInstruction::F64Neg(sig)
+            | RegInstruction::F64PromoteF32(sig)
+            | RegInstruction::F64ReinterpretI64(sig)
+            | RegInstruction::F64Sqrt(sig)
+            | RegInstruction::F64Trunc(sig)
+            | RegInstruction::I32Clz(sig)
+            | RegInstruction::I32Ctz(sig)
+            | RegInstruction::I32Eqz(sig)
+            | RegInstruction::I32Extend16S(sig)
+            | RegInstruction::I32Extend8S(sig)
+            | RegInstruction::I32Popcnt(sig)
+            | RegInstruction::I32ReinterpretF32(sig)
+            | RegInstruction::I32TruncF32S(sig)
+            | RegInstruction::I32TruncF32U(sig)
+            | RegInstruction::I32TruncF64S(sig)
+            | RegInstruction::I32TruncF64U(sig)
+            | RegInstruction::I32TruncSatF32S(sig)
+            | RegInstruction::I32TruncSatF32U(sig)
+            | RegInstruction::I32TruncSatF64S(sig)
+            | RegInstruction::I32TruncSatF64U(sig)
+            | RegInstruction::I32WrapI64(sig)
+            | RegInstruction::I64Clz(sig)
+            | RegInstruction::I64Ctz(sig)
+            | RegInstruction::I64Eqz(sig)
+            | RegInstruction::I64Extend16S(sig)
+            | RegInstruction::I64Extend32S(sig)
+            | RegInstruction::I64Extend8S(sig)
+            | RegInstruction::I64ExtendI32S(sig)
+            | RegInstruction::I64ExtendI32U(sig)
+            | RegInstruction::I64Popcnt(sig)
+            | RegInstruction::I64ReinterpretF64(sig)
+            | RegInstruction::I64TruncF32S(sig)
+            | RegInstruction::I64TruncF32U(sig)
+            | RegInstruction::I64TruncF64S(sig)
+            | RegInstruction::I64TruncF64U(sig)
+            | RegInstruction::I64TruncSatF32S(sig)
+            | RegInstruction::I64TruncSatF32U(sig)
+            | RegInstruction::I64TruncSatF64S(sig)
+            | RegInstruction::I64TruncSatF64U(sig) => format!(
+                "{:<12} {} -> {}",
+                mnemonic(i.kind()),
+                list(sig.input.registers(ins)),
+                regs(sig.output.registers(outs))
+            ),
+            RegInstruction::F32Add(sig)
+            | RegInstruction::F32Copysign(sig)
+            | RegInstruction::F32Div(sig)
+            | RegInstruction::F32Eq(sig)
+            | RegInstruction::F32Ge(sig)
+            | RegInstruction::F32Gt(sig)
+            | RegInstruction::F32Le(sig)
+            | RegInstruction::F32Lt(sig)
+            | RegInstruction::F32Max(sig)
+            | RegInstruction::F32Min(sig)
+            | RegInstruction::F32Mul(sig)
+            | RegInstruction::F32Ne(sig)
+            | RegInstruction::F32Sub(sig)
+            | RegInstruction::F64Add(sig)
+            | RegInstruction::F64Copysign(sig)
+            | RegInstruction::F64Div(sig)
+            | RegInstruction::F64Eq(sig)
+            | RegInstruction::F64Ge(sig)
+            | RegInstruction::F64Gt(sig)
+            | RegInstruction::F64Le(sig)
+            | RegInstruction::F64Lt(sig)
+            | RegInstruction::F64Max(sig)
+            | RegInstruction::F64Min(sig)
+            | RegInstruction::F64Mul(sig)
+            | RegInstruction::F64Ne(sig)
+            | RegInstruction::F64Sub(sig)
+            | RegInstruction::I32Add(sig)
+            | RegInstruction::I32And(sig)
+            | RegInstruction::I32DivS(sig)
+            | RegInstruction::I32DivU(sig)
+            | RegInstruction::I32Eq(sig)
+            | RegInstruction::I32GeS(sig)
+            | RegInstruction::I32GeU(sig)
+            | RegInstruction::I32GtS(sig)
+            | RegInstruction::I32GtU(sig)
+            | RegInstruction::I32LeS(sig)
+            | RegInstruction::I32LeU(sig)
+            | RegInstruction::I32LtS(sig)
+            | RegInstruction::I32LtU(sig)
+            | RegInstruction::I32Mul(sig)
+            | RegInstruction::I32Ne(sig)
+            | RegInstruction::I32Or(sig)
+            | RegInstruction::I32RemS(sig)
+            | RegInstruction::I32RemU(sig)
+            | RegInstruction::I32Rotl(sig)
+            | RegInstruction::I32Rotr(sig)
+            | RegInstruction::I32Shl(sig)
+            | RegInstruction::I32ShrS(sig)
+            | RegInstruction::I32ShrU(sig)
+            | RegInstruction::I32Sub(sig)
+            | RegInstruction::I32Xor(sig)
+            | RegInstruction::I64Add(sig)
+            | RegInstruction::I64And(sig)
+            | RegInstruction::I64DivS(sig)
+            | RegInstruction::I64DivU(sig)
+            | RegInstruction::I64Eq(sig)
+            | RegInstruction::I64GeS(sig)
+            | RegInstruction::I64GeU(sig)
+            | RegInstruction::I64GtS(sig)
+            | RegInstruction::I64GtU(sig)
+            | RegInstruction::I64LeS(sig)
+            | RegInstruction::I64LeU(sig)
+            | RegInstruction::I64LtS(sig)
+            | RegInstruction::I64LtU(sig)
+            | RegInstruction::I64Mul(sig)
+            | RegInstruction::I64Ne(sig)
+            | RegInstruction::I64Or(sig)
+            | RegInstruction::I64RemS(sig)
+            | RegInstruction::I64RemU(sig)
+            | RegInstruction::I64Rotl(sig)
+            | RegInstruction::I64Rotr(sig)
+            | RegInstruction::I64Shl(sig)
+            | RegInstruction::I64ShrS(sig)
+            | RegInstruction::I64ShrU(sig)
+            | RegInstruction::I64Sub(sig)
+            | RegInstruction::I64Xor(sig) => format!(
+                "{:<12} {} -> {}",
+                mnemonic(i.kind()),
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
             RegInstruction::RefIsNull(sig) => format!(
                 "ref.is_null  {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::I32Eqz(sig) => format!(
-                "i32.eqz      {} -> {}",
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
@@ -3296,6 +3436,62 @@ fn a_trapping_block_still_reserves_its_results() {
 // either.
 // ---------------------------------------------------------------------------
 
+/// The wasm mnemonic for a value-op kind: `I32TruncSatF32U` → `i32.trunc_sat_f32_u`.
+///
+/// Derived rather than tabulated, because 136 hand-written strings is 136 chances
+/// to write `i32.extend_8_s` for `i32.extend8_s`. The rule is one line: start a
+/// word at each capital, so digits stay attached to the word they follow, and the
+/// first word is the type prefix.
+///
+/// It is not taken on trust — [`arity_case`] builds each operator's `.wat` from
+/// this, and that `.wat` has to assemble, validate, and contain the operator the
+/// kind is named after. A wrong mnemonic fails those rather than quietly
+/// rendering an instruction under a name that does not exist.
+fn mnemonic(kind: RegInstructionKind) -> String {
+    let mut words: Vec<String> = vec![];
+
+    for character in format!("{kind:?}").chars() {
+        if character.is_ascii_uppercase() || words.is_empty() {
+            words.push(String::new());
+        }
+
+        words
+            .last_mut()
+            .expect("just pushed")
+            .push(character.to_ascii_lowercase());
+    }
+
+    format!("{}.{}", words[0], words[1..].join("_"))
+}
+
+/// The type a value op's operands have, which its `.wat` case has to declare.
+///
+/// It is the source type the name carries when there is one — `i64.extend_i32_s`
+/// takes an `i32`, `i32.trunc_sat_f32_u` an `f32` — and the type prefix otherwise.
+/// `i32.extend8_s` has no source type: the `8` is a width, not an operand, which
+/// is exactly the distinction the mnemonic's underscores encode.
+fn operand_type(kind: RegInstructionKind) -> String {
+    let mnemonic = mnemonic(kind);
+    let (prefix, tail) = mnemonic.split_once('.').expect("a mnemonic has a prefix");
+
+    tail.split('_')
+        .find(|word| matches!(*word, "i32" | "i64" | "f32" | "f64"))
+        .unwrap_or(prefix)
+        .to_string()
+}
+
+/// A `.wat` applying one value op to `operands` operands of its own operand type,
+/// dropping the result.
+fn value_op_case(kind: RegInstructionKind, operands: usize) -> String {
+    let gets = "local.get 0 ".repeat(operands);
+
+    format!(
+        "(module (func (param {}) {gets}{} drop))",
+        operand_type(kind),
+        mnemonic(kind)
+    )
+}
+
 /// The `.wat` that pins one kind's arity, or `None` for a kind `emit!` does not
 /// lower.
 ///
@@ -3312,30 +3508,164 @@ fn a_trapping_block_still_reserves_its_results() {
 /// A case applies the operator to exactly the operands it takes and drops the
 /// result, so the body lowers to that one instruction and nothing else — no
 /// trailing `Move`, since these bodies return nothing.
-fn arity_case(kind: RegInstructionKind) -> Option<&'static str> {
+fn arity_case(kind: RegInstructionKind) -> Option<String> {
     match kind {
-        RegInstructionKind::I32Add => {
-            Some("(module (func (param i32) local.get 0 local.get 0 i32.add drop))")
-        }
-        RegInstructionKind::I32Eqz => Some("(module (func (param i32) local.get 0 i32.eqz drop))"),
-        RegInstructionKind::Select => {
-            Some("(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))")
-        }
+        // The pure value ops, whose case is derived from the kind: the mnemonic
+        // and the operand type are both recoverable from the name, so 136
+        // hand-written bodies would be 136 chances to mistype one.
+        RegInstructionKind::F32Abs
+        | RegInstructionKind::F32Ceil
+        | RegInstructionKind::F32ConvertI32S
+        | RegInstructionKind::F32ConvertI32U
+        | RegInstructionKind::F32ConvertI64S
+        | RegInstructionKind::F32ConvertI64U
+        | RegInstructionKind::F32DemoteF64
+        | RegInstructionKind::F32Floor
+        | RegInstructionKind::F32Nearest
+        | RegInstructionKind::F32Neg
+        | RegInstructionKind::F32ReinterpretI32
+        | RegInstructionKind::F32Sqrt
+        | RegInstructionKind::F32Trunc
+        | RegInstructionKind::F64Abs
+        | RegInstructionKind::F64Ceil
+        | RegInstructionKind::F64ConvertI32S
+        | RegInstructionKind::F64ConvertI32U
+        | RegInstructionKind::F64ConvertI64S
+        | RegInstructionKind::F64ConvertI64U
+        | RegInstructionKind::F64Floor
+        | RegInstructionKind::F64Nearest
+        | RegInstructionKind::F64Neg
+        | RegInstructionKind::F64PromoteF32
+        | RegInstructionKind::F64ReinterpretI64
+        | RegInstructionKind::F64Sqrt
+        | RegInstructionKind::F64Trunc
+        | RegInstructionKind::I32Clz
+        | RegInstructionKind::I32Ctz
+        | RegInstructionKind::I32Eqz
+        | RegInstructionKind::I32Extend16S
+        | RegInstructionKind::I32Extend8S
+        | RegInstructionKind::I32Popcnt
+        | RegInstructionKind::I32ReinterpretF32
+        | RegInstructionKind::I32TruncF32S
+        | RegInstructionKind::I32TruncF32U
+        | RegInstructionKind::I32TruncF64S
+        | RegInstructionKind::I32TruncF64U
+        | RegInstructionKind::I32TruncSatF32S
+        | RegInstructionKind::I32TruncSatF32U
+        | RegInstructionKind::I32TruncSatF64S
+        | RegInstructionKind::I32TruncSatF64U
+        | RegInstructionKind::I32WrapI64
+        | RegInstructionKind::I64Clz
+        | RegInstructionKind::I64Ctz
+        | RegInstructionKind::I64Eqz
+        | RegInstructionKind::I64Extend16S
+        | RegInstructionKind::I64Extend32S
+        | RegInstructionKind::I64Extend8S
+        | RegInstructionKind::I64ExtendI32S
+        | RegInstructionKind::I64ExtendI32U
+        | RegInstructionKind::I64Popcnt
+        | RegInstructionKind::I64ReinterpretF64
+        | RegInstructionKind::I64TruncF32S
+        | RegInstructionKind::I64TruncF32U
+        | RegInstructionKind::I64TruncF64S
+        | RegInstructionKind::I64TruncF64U
+        | RegInstructionKind::I64TruncSatF32S
+        | RegInstructionKind::I64TruncSatF32U
+        | RegInstructionKind::I64TruncSatF64S
+        | RegInstructionKind::I64TruncSatF64U => Some(value_op_case(kind, 1)),
+        RegInstructionKind::F32Add
+        | RegInstructionKind::F32Copysign
+        | RegInstructionKind::F32Div
+        | RegInstructionKind::F32Eq
+        | RegInstructionKind::F32Ge
+        | RegInstructionKind::F32Gt
+        | RegInstructionKind::F32Le
+        | RegInstructionKind::F32Lt
+        | RegInstructionKind::F32Max
+        | RegInstructionKind::F32Min
+        | RegInstructionKind::F32Mul
+        | RegInstructionKind::F32Ne
+        | RegInstructionKind::F32Sub
+        | RegInstructionKind::F64Add
+        | RegInstructionKind::F64Copysign
+        | RegInstructionKind::F64Div
+        | RegInstructionKind::F64Eq
+        | RegInstructionKind::F64Ge
+        | RegInstructionKind::F64Gt
+        | RegInstructionKind::F64Le
+        | RegInstructionKind::F64Lt
+        | RegInstructionKind::F64Max
+        | RegInstructionKind::F64Min
+        | RegInstructionKind::F64Mul
+        | RegInstructionKind::F64Ne
+        | RegInstructionKind::F64Sub
+        | RegInstructionKind::I32Add
+        | RegInstructionKind::I32And
+        | RegInstructionKind::I32DivS
+        | RegInstructionKind::I32DivU
+        | RegInstructionKind::I32Eq
+        | RegInstructionKind::I32GeS
+        | RegInstructionKind::I32GeU
+        | RegInstructionKind::I32GtS
+        | RegInstructionKind::I32GtU
+        | RegInstructionKind::I32LeS
+        | RegInstructionKind::I32LeU
+        | RegInstructionKind::I32LtS
+        | RegInstructionKind::I32LtU
+        | RegInstructionKind::I32Mul
+        | RegInstructionKind::I32Ne
+        | RegInstructionKind::I32Or
+        | RegInstructionKind::I32RemS
+        | RegInstructionKind::I32RemU
+        | RegInstructionKind::I32Rotl
+        | RegInstructionKind::I32Rotr
+        | RegInstructionKind::I32Shl
+        | RegInstructionKind::I32ShrS
+        | RegInstructionKind::I32ShrU
+        | RegInstructionKind::I32Sub
+        | RegInstructionKind::I32Xor
+        | RegInstructionKind::I64Add
+        | RegInstructionKind::I64And
+        | RegInstructionKind::I64DivS
+        | RegInstructionKind::I64DivU
+        | RegInstructionKind::I64Eq
+        | RegInstructionKind::I64GeS
+        | RegInstructionKind::I64GeU
+        | RegInstructionKind::I64GtS
+        | RegInstructionKind::I64GtU
+        | RegInstructionKind::I64LeS
+        | RegInstructionKind::I64LeU
+        | RegInstructionKind::I64LtS
+        | RegInstructionKind::I64LtU
+        | RegInstructionKind::I64Mul
+        | RegInstructionKind::I64Ne
+        | RegInstructionKind::I64Or
+        | RegInstructionKind::I64RemS
+        | RegInstructionKind::I64RemU
+        | RegInstructionKind::I64Rotl
+        | RegInstructionKind::I64Rotr
+        | RegInstructionKind::I64Shl
+        | RegInstructionKind::I64ShrS
+        | RegInstructionKind::I64ShrU
+        | RegInstructionKind::I64Sub
+        | RegInstructionKind::I64Xor => Some(value_op_case(kind, 2)),
+
+        // The rest carry something the derivation cannot supply: `select` takes
+        // three operands rather than one or two, `ref.is_null` is not named
+        // after a numeric type, and the memory ops need a memory to address.
+        RegInstructionKind::Select => Some(
+            "(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))".into(),
+        ),
         RegInstructionKind::RefIsNull => {
-            Some("(module (func (param funcref) local.get 0 ref.is_null drop))")
+            Some("(module (func (param funcref) local.get 0 ref.is_null drop))".into())
         }
         RegInstructionKind::I32Load => {
-            Some("(module (memory 1) (func (param i32) local.get 0 i32.load drop))")
+            Some("(module (memory 1) (func (param i32) local.get 0 i32.load drop))".into())
         }
         RegInstructionKind::I32Store => {
-            Some("(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))")
+            Some("(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))".into())
         }
 
-        // Not `emit!`-shaped, and each for a reason this check cannot model: the
-        // writes run a spill rescue before their own operands, the spills are
-        // emitted by that rescue rather than by an operator at all, and the control
-        // flow either carries no operands or carries them through a `DynSignature`
-        // whose length is a label's arity rather than an opcode's.
         RegInstructionKind::LocalSet
         | RegInstructionKind::LocalTee
         | RegInstructionKind::GlobalSet
@@ -3409,7 +3739,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             continue;
         };
 
-        let bytes = wat::parse_str(wat).expect("invalid wat");
+        let bytes = wat::parse_str(&wat).expect("invalid wat");
 
         // the kind is named after the operator it lowers, which is what lets the
         // operator under test be picked out of the `local.get`s feeding it
@@ -3421,7 +3751,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             .unwrap_or_else(|| panic!("{operator} does not occur in its own case:\n{wat}"))
             .1;
 
-        let body = lower(wat);
+        let body = lower(&wat);
         let (prog, frame) = (&body.0, &body.1);
 
         // the case is built so the body is exactly this instruction and `end`,
@@ -3455,7 +3785,7 @@ fn every_case_lowers_to_the_kind_it_is_filed_under() {
             continue;
         };
 
-        let (prog, _) = lower(wat);
+        let (prog, _) = lower(&wat);
 
         assert_eq!(
             prog[0].kind(),
