@@ -1,6 +1,6 @@
 use crate::runtime::value::Value;
 
-pub(crate) struct RegFrame {
+pub struct RegFrame {
     inner: Vec<Value>,
 }
 

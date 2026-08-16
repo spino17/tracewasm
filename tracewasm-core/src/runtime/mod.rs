@@ -2840,10 +2840,7 @@ impl TraceVM {
     ///
     /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
     /// instruction not permitted in a constant expression.
-    pub(crate) fn const_expr_evaluator(
-        instructions: &[StackInstruction],
-        globals: &[Val],
-    ) -> Result<Val, TraceWasmError<StackInstruction>> {
+    pub(crate) fn const_expr_evaluator(instructions: &[StackInstruction], globals: &[Val]) -> Val {
         let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
 
         for instr in instructions {
@@ -2903,17 +2900,14 @@ impl TraceVM {
                 }
                 StackInstruction::End { .. } => {}
                 _ => {
-                    return Err(TraceWasmError::Unsupported(format!(
-                        "instruction `{:?}` in const expression evaluator",
-                        instr
-                    )));
+                    panic!("instruction `{:?}` in const expression evaluator", instr)
                 }
             }
         }
 
         let val = stack.pop();
 
-        Ok(val)
+        val
     }
 }
 

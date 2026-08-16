@@ -951,7 +951,7 @@ static DEBUG_SECTION_NAMES: phf::Set<&'static str> = phf_set! {
     ".debug_types"
 };
 
-impl Module<StackInstruction> {
+impl<Instr: Instruction> Module<Instr> {
     /// Validates `buf` as a core WebAssembly module and builds an owned
     /// [`Module`] from it, wrapped in an `Arc` so it can be shared across
     /// instances.
@@ -1560,9 +1560,7 @@ impl Module<StackInstruction> {
             dwarf: possible_dwarf,
         }))
     }
-}
 
-impl Module<StackInstruction> {
     /// Instantiates the module against an import registry, producing a runnable
     /// [`Instance`].
     ///
@@ -1593,10 +1591,10 @@ impl Module<StackInstruction> {
     /// - Anything the module's `start` function raises, since it runs before this
     ///   returns.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
-        self: &Arc<Module<StackInstruction>>,
+        self: &Arc<Module<Instr>>,
         import_registry: I,
         config: Option<Config>,
-    ) -> Result<Instance<M, I, StackInstruction>, TraceWasmError<StackInstruction>> {
+    ) -> Result<Instance<M, I, Instr>, TraceWasmError<Instr>> {
         let initial_pages = if !self.memories.is_empty() {
             self.memories[0].initial()
         } else {
@@ -1743,7 +1741,7 @@ impl Module<StackInstruction> {
                 )
             };
 
-            let val = TraceVM::const_expr_evaluator(const_expr_instructions, &global_vals)?;
+            let val = TraceVM::const_expr_evaluator(const_expr_instructions, &global_vals);
 
             global_vals.push(val);
         }
@@ -1776,7 +1774,7 @@ impl Module<StackInstruction> {
                 TableInit::Expr(const_expr) => {
                     // The element type is validated to be funcref, so the const
                     // expr yields a `Val::Ref` and `as_ref` cannot panic.
-                    let val = TraceVM::const_expr_evaluator(const_expr, &global_vals)?.as_ref();
+                    let val = TraceVM::const_expr_evaluator(const_expr, &global_vals).as_ref();
 
                     vec![val; initial_size]
                 }
@@ -1810,7 +1808,7 @@ impl Module<StackInstruction> {
                     for const_expr in exprs {
                         // The element type is validated to be funcref, so the const
                         // expr yields a `Val::Ref` and `as_ref` cannot panic.
-                        v.push(TraceVM::const_expr_evaluator(const_expr, &global_vals)?.as_ref());
+                        v.push(TraceVM::const_expr_evaluator(const_expr, &global_vals).as_ref());
                     }
 
                     v
@@ -1832,7 +1830,7 @@ impl Module<StackInstruction> {
                     // `table64` offset would be an `i64` and `as_i32` would panic.
                     // TraceWasm does not support table64 yet, so this is fine.
                     let offset =
-                        TraceVM::const_expr_evaluator(offset_expr, &global_vals)?.as_i32() as usize;
+                        TraceVM::const_expr_evaluator(offset_expr, &global_vals).as_i32() as usize;
 
                     let table = &mut table_vals[table_index].table;
 
@@ -1890,7 +1888,7 @@ impl Module<StackInstruction> {
                     // `memory64` offset would be an `i64` and `as_i32` would panic.
                     // TraceWasm does not support memory64 yet, so this is fine.
                     let offset =
-                        TraceVM::const_expr_evaluator(offset_expr, &global_vals)?.as_i32() as usize;
+                        TraceVM::const_expr_evaluator(offset_expr, &global_vals).as_i32() as usize;
 
                     // `write` bounds-checks (with `checked_add`) and traps on an
                     // out-of-bounds segment, so no manual bounds check is needed.
@@ -1914,7 +1912,8 @@ impl Module<StackInstruction> {
 
         // execute start function
         if let Some(func_index) = self.start_section {
-            TraceVM::run(func_index, &[], &mut instance, self)?;
+            // TraceVM::run(func_index, &[], &mut instance, self)?;
+            todo!()
         }
 
         Ok(instance)

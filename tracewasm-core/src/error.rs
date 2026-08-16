@@ -1,6 +1,6 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
 use crate::{
-    instruction::{Instruction, stack::StackInstruction},
+    instruction::{Instruction, register::RegInstruction, stack::StackInstruction},
     module::{FuncIndex, Module, TableIndex},
     tracewasm_unreachable,
 };
@@ -817,7 +817,7 @@ mod stack_trace_tests {
     fn empty_module() -> std::sync::Arc<Module<StackInstruction>> {
         let bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
-        crate::module::Module::compile(&bytes).expect("`(module)` compiles")
+        crate::module::Module::<StackInstruction>::compile(&bytes).expect("`(module)` compiles")
     }
 
     fn err_with(trace: Vec<TraceRecord<StackInstruction>>) -> FuncCallError<StackInstruction> {
@@ -919,7 +919,7 @@ mod func_call_error_tests {
         fn assert_is_error<E: std::error::Error + 'static>(_: &E) {}
 
         let module: Arc<Module<StackInstruction>> =
-            crate::module::Module::compile(&wat_min()).unwrap();
+            crate::module::Module::<StackInstruction>::compile(&wat_min()).unwrap();
         let e = FuncCallError::new("entry".to_string(), trace(), module);
 
         assert_is_error(&e);
@@ -937,7 +937,7 @@ mod func_call_error_tests {
     // A release module has no `.debug_*` sections; that must be an error, not a panic.
     #[test]
     fn source_trace_without_debug_info_errors_instead_of_panicking() {
-        let module = crate::module::Module::compile(&wat_min()).unwrap();
+        let module = crate::module::Module::<StackInstruction>::compile(&wat_min()).unwrap();
         let e = FuncCallError::new("entry".to_string(), trace(), module);
 
         assert!(matches!(

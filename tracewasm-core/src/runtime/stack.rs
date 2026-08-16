@@ -87,10 +87,10 @@ fn top_underflow() -> ! {
 ///
 /// Generic over the element type so the same machinery can hold runtime `Val`s
 /// during execution and be unit-tested with simpler types.
-pub(crate) struct Stack<T> {
+pub struct Stack<T> {
     /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
-    pub inner: Vec<T>,
+    pub(crate) inner: Vec<T>,
     /// Logical height: index one past the top value. The top is
     /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
     stack_pointer: usize, // points to the top of the stack

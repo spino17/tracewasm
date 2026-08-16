@@ -124,7 +124,7 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
 pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError<StackInstruction>> {
-    let module = Module::compile(wasm).expect("module should compile");
+    let module = Module::<StackInstruction>::compile(wasm).expect("module should compile");
 
     let func = module
         .get_typed_func::<(), R>(name)
@@ -191,7 +191,7 @@ impl Guest {
     /// stack is the binding constraint, and a "how deep can we go" measurement
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
-        let module = Module::compile(wasm).expect("guest should compile");
+        let module = Module::<StackInstruction>::compile(wasm).expect("guest should compile");
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");

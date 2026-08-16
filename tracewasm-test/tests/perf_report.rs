@@ -271,7 +271,7 @@ struct RssMilestones {
 fn rss_milestones() -> RssMilestones {
     let start = rss_kib();
 
-    let module = Module::compile(guests::HEAP).expect("guest compiles");
+    let module = Module::<StackInstruction>::compile(guests::HEAP).expect("guest compiles");
     let after_compile = rss_kib();
 
     let mut instance = module
@@ -385,7 +385,7 @@ fn startup() {
         let mut compile = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
-            let m = Module::compile(wasm).expect("guest compiles");
+            let m = Module::<StackInstruction>::compile(wasm).expect("guest compiles");
             compile.push(t.elapsed().as_secs_f64() * 1e3);
             std::hint::black_box(&m);
         }
@@ -394,7 +394,7 @@ fn startup() {
         // Instantiation is measured separately: it allocates linear memory and
         // runs the start section, and scales with the guest's data segments
         // rather than its code size.
-        let module = Module::compile(wasm).expect("guest compiles");
+        let module = Module::<StackInstruction>::compile(wasm).expect("guest compiles");
         let mut inst = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
@@ -543,7 +543,7 @@ fn memory(rss: &RssMilestones) {
 
     for w in GUESTS {
         let (name, wasm) = (w.name, w.wasm);
-        let m = Module::compile(wasm).expect("guest compiles");
+        let m = Module::<StackInstruction>::compile(wasm).expect("guest compiles");
         let instrs: usize = m.func_bodies.iter().map(|b| b.instructions.len()).sum();
         let offs: usize = m
             .func_bodies

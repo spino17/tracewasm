@@ -7,7 +7,7 @@ use wasmparser::{BlockType, OperatorsReader};
 pub mod register;
 pub mod stack;
 
-pub(crate) trait Instruction: Sized {
+pub trait Instruction: Sized {
     type BrTableTarget;
     type FrameLayout;
     type RuntimeFrame: Default;
