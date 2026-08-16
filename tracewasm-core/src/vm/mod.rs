@@ -192,6 +192,7 @@ impl TraceVM {
         module: &Arc<Module>,
     ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
+
         instance.stack.reset();
 
         for param in params {
@@ -208,6 +209,7 @@ impl TraceVM {
         let results_len = results_ty.len() as u32;
 
         let results = instance.stack.pop_results(results_len);
+
         let mut s: SmallVec<[Val; 3]> = smallvec![];
 
         for (i, result) in results.iter().enumerate() {
