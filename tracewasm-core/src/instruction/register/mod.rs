@@ -1206,6 +1206,11 @@ pub type LoweredRegFuncBody = (Vec<RegInstruction>, FrameLayout);
 /// [`FrameLayout`], resolved through [`Signature`] or [`DynSignature`]. Jump fields
 /// are absolute indices into the containing `Vec<RegInstruction>`, i.e. runtime
 /// program counters.
+///
+/// [`Kind`](tracewasm_macros::Kind) derives the fieldless [`RegInstructionKind`]
+/// alongside this, so a table keyed by kind is an exhaustive `match` *and* is
+/// visited in full — see the derive's docs for why both halves matter.
+#[derive(tracewasm_macros::Kind)]
 pub enum RegInstruction {
     /// `i32.load`: read four bytes at `address + offset`.
     I32Load {

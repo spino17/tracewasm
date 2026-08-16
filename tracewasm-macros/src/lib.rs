@@ -477,3 +477,87 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         };
     })
 }
+
+/// Derives a fieldless `…Kind` twin of an enum, plus the mapping from the enum to
+/// it.
+///
+/// For `enum RegInstruction { I32Add(Signature<2, 1>), End, .. }` this generates
+/// `enum RegInstructionKind { I32Add, End, .. }`, a `RegInstructionKind::ALL`
+/// listing every kind, and `RegInstruction::kind()`.
+///
+/// # Why
+///
+/// Rust cannot enumerate the variants of an enum whose variants carry data — a
+/// test that wants to visit every instruction has to build one of each by hand,
+/// and that list goes stale silently the moment a variant is added. Stripping the
+/// fields removes the obstacle: the kinds are unit variants, so `ALL` is just a
+/// list of names the macro already has.
+///
+/// The point is what that buys at the use site. A table keyed by kind is an
+/// exhaustive `match`, so adding a variant to the instruction enum stops the
+/// table compiling until it is handled, *and* `ALL` grows to include it, so
+/// whatever the table says about it actually runs. Neither half can be forgotten,
+/// which is what a hand-maintained list of variants could never promise.
+#[proc_macro_derive(Kind)]
+pub fn kind(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+
+    match expand_kind(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_kind(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let syn::Data::Enum(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "`Kind` can only be derived for an enum",
+        ));
+    };
+
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "`Kind` does not support generic enums",
+        ));
+    }
+
+    let name = &input.ident;
+    let kind_name = syn::Ident::new(&format!("{name}Kind"), name.span());
+    let vis = &input.vis;
+    let variants: Vec<_> = data.variants.iter().map(|variant| &variant.ident).collect();
+
+    // One arm per variant, ignoring whatever it carries: `Named { .. }` also
+    // matches a tuple variant and a unit one, so a single pattern shape covers
+    // all three.
+    let arms = variants.iter().map(|variant| {
+        quote! { #name::#variant { .. } => #kind_name::#variant }
+    });
+
+    let doc = format!("The variants of [`{name}`], without their operands.");
+
+    Ok(quote! {
+        #[doc = #doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #vis enum #kind_name {
+            #(#variants,)*
+        }
+
+        impl #kind_name {
+            /// Every kind, in declaration order.
+            #vis const ALL: &'static [#kind_name] = &[
+                #(#kind_name::#variants,)*
+            ];
+        }
+
+        impl #name {
+            /// Which variant this is, without its operands.
+            #vis fn kind(&self) -> #kind_name {
+                match self {
+                    #(#arms,)*
+                }
+            }
+        }
+    })
+}

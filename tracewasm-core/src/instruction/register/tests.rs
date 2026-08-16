@@ -1995,6 +1995,12 @@ fn index_of(prog: &[RegInstruction], pred: impl Fn(&RegInstruction) -> bool) -> 
     prog.iter().position(pred)
 }
 
+/// [`index_of`] for the common case of looking for an instruction by kind rather
+/// than by anything it carries.
+fn index_of_kind(prog: &[RegInstruction], kind: RegInstructionKind) -> Option<usize> {
+    index_of(prog, |instruction| instruction.kind() == kind)
+}
+
 // ---------------------------------------------------------------------------
 // operand forwarding
 // ---------------------------------------------------------------------------
@@ -2081,7 +2087,7 @@ fn an_unborrowed_write_rescues_nothing() {
     );
 
     assert!(
-        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).is_none(),
         "nothing borrows local 0"
     );
 
@@ -2135,7 +2141,7 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
              if i32.const 5 local.set 0 end))"#,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::If { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::If).unwrap();
 
     let (else_index, end_index) = match &prog[at] {
         RegInstruction::If {
@@ -2210,7 +2216,7 @@ fn an_outward_branch_targets_the_outer_label() {
              end))"#,
     );
 
-    let br = index_of(&prog, |i| matches!(i, RegInstruction::Br { .. })).unwrap();
+    let br = index_of_kind(&prog, RegInstructionKind::Br).unwrap();
 
     let RegInstruction::Br { target_index } = &prog[br] else {
         unreachable!()
@@ -2219,7 +2225,7 @@ fn an_outward_branch_targets_the_outer_label() {
     let ends: Vec<usize> = prog
         .iter()
         .enumerate()
-        .filter(|(_, i)| matches!(i, RegInstruction::End))
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
         .map(|(n, _)| n)
         .collect();
 
@@ -2264,7 +2270,7 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
              end))"#,
     );
 
-    let br = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+    let br = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
     let RegInstruction::BrIf {
         mov, target_index, ..
@@ -2292,7 +2298,7 @@ fn br_table_arms_resolve_to_their_own_labels() {
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
 
-    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+    let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
     let RegInstruction::BrTable {
         targets_start,
@@ -2333,7 +2339,7 @@ fn each_br_table_arm_carries_its_own_move() {
              end end))"#,
     );
 
-    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+    let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
     let RegInstruction::BrTable {
         targets_start,
@@ -2381,9 +2387,9 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
 
     let prog = &body.0;
 
-    let spill = index_of(prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch = index_of(prog, |i| matches!(i, RegInstruction::If { .. })).expect("the if");
+    let spill =
+        index_of_kind(prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
+    let branch = index_of_kind(prog, RegInstructionKind::If).expect("the if");
 
     assert!(
         spill < branch,
@@ -2405,9 +2411,9 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
              end))"#,
     );
 
-    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).expect("the br_if");
+    let spill =
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
+    let branch = index_of_kind(&prog, RegInstructionKind::BrIf).expect("the br_if");
 
     assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
@@ -2425,7 +2431,7 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
              end))"#,
     );
 
-    let back_edge = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+    let back_edge = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
     let RegInstruction::BrIf { target_index, .. } = &prog[back_edge] else {
         unreachable!()
@@ -2457,10 +2463,9 @@ fn the_br_table_arm_hoists_the_spill_above_the_branch() {
              end))"#,
     );
 
-    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch =
-        index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).expect("the br_table");
+    let spill =
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
+    let branch = index_of_kind(&prog, RegInstructionKind::BrTable).expect("the br_table");
 
     assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
@@ -2509,7 +2514,7 @@ fn a_return_lands_on_the_final_end_from_any_depth() {
              i32.const 9))"#,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Return).unwrap();
 
     let RegInstruction::Return { target_index } = &prog[at] else {
         unreachable!()
@@ -2592,12 +2597,12 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 
     // the operators after `return` are dropped, so nothing between the return and
     // the block's end survives except that end's own materialisation
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Return).unwrap();
 
     let ends = prog
         .iter()
         .skip(at)
-        .filter(|i| matches!(i, RegInstruction::End))
+        .filter(|i| i.kind() == RegInstructionKind::End)
         .count();
 
     assert_eq!(ends, 2, "only the block's end and the body's end follow");
@@ -2616,7 +2621,7 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 /// Two callers of the same function, differing only in what sits below the call.
 fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
     let (prog, frame) = lower_func(wat, 1);
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
         unreachable!()
@@ -2786,7 +2791,7 @@ fn arguments_are_staged_at_the_caller_base() {
         1,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
         unreachable!()
@@ -2842,7 +2847,7 @@ fn a_local_read_across_a_call_needs_no_rescue() {
     );
 
     assert!(
-        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).is_none(),
         "a callee cannot write the caller's locals"
     );
 }
@@ -2946,7 +2951,7 @@ fn a_zero_argument_call_indirect_still_pops_its_index() {
 fn caller_base_counts_past_the_index_to_the_deepest_argument() {
     let base_of = |wat: &str| {
         let (prog, _) = lower_func(wat, 0);
-        let at = index_of(&prog, |i| matches!(i, RegInstruction::CallIndirect { .. })).unwrap();
+        let at = index_of_kind(&prog, RegInstructionKind::CallIndirect).unwrap();
 
         let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
             unreachable!()
@@ -3169,7 +3174,7 @@ fn code_after_an_unreachable_is_dropped() {
     );
 
     assert!(
-        index_of(&body.0, |i| matches!(i, RegInstruction::I32Add(_))).is_none(),
+        index_of(&body.0, |i| i.kind() == RegInstructionKind::I32Add).is_none(),
         "the operators after the trap cannot execute:\n{}",
         render(&body, &[]),
     );
@@ -3291,38 +3296,64 @@ fn a_trapping_block_still_reserves_its_results() {
 // either.
 // ---------------------------------------------------------------------------
 
-/// Every operator that lowers through `emit!`, applied to exactly the operands it
-/// takes with its result dropped, so the body lowers to that one instruction and
-/// nothing else — no trailing `Move`, since these bodies return nothing.
+/// The `.wat` that pins one kind's arity, or `None` for a kind `emit!` does not
+/// lower.
 ///
-/// One line per operator. The name is the `Operator` variant, used to find the
-/// operator among the `local.get`s that feed it.
-const ARITY_CASES: &[(&str, &str)] = &[
-    (
-        "I32Add",
-        "(module (func (param i32) local.get 0 local.get 0 i32.add drop))",
-    ),
-    (
-        "I32Eqz",
-        "(module (func (param i32) local.get 0 i32.eqz drop))",
-    ),
-    (
-        "Select",
-        "(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))",
-    ),
-    (
-        "RefIsNull",
-        "(module (func (param funcref) local.get 0 ref.is_null drop))",
-    ),
-    (
-        "I32Load",
-        "(module (memory 1) (func (param i32) local.get 0 i32.load drop))",
-    ),
-    (
-        "I32Store",
-        "(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))",
-    ),
-];
+/// **Exhaustive on purpose, and visited in full.** [`RegInstructionKind`] is
+/// derived from [`RegInstruction`], so adding a variant does two things at once:
+/// this `match` stops compiling until the new kind is handled, and
+/// [`RegInstructionKind::ALL`] grows to include it, so whatever this says about it
+/// actually runs. A hand-written list of cases could only ever promise the first.
+///
+/// That matters more here than for most tables: with `emit!` the variant's own
+/// `Signature<I, O>` is the only place its arity is written down, so an operator
+/// that slipped past this would have nothing at all checking it.
+///
+/// A case applies the operator to exactly the operands it takes and drops the
+/// result, so the body lowers to that one instruction and nothing else — no
+/// trailing `Move`, since these bodies return nothing.
+fn arity_case(kind: RegInstructionKind) -> Option<&'static str> {
+    match kind {
+        RegInstructionKind::I32Add => {
+            Some("(module (func (param i32) local.get 0 local.get 0 i32.add drop))")
+        }
+        RegInstructionKind::I32Eqz => Some("(module (func (param i32) local.get 0 i32.eqz drop))"),
+        RegInstructionKind::Select => {
+            Some("(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))")
+        }
+        RegInstructionKind::RefIsNull => {
+            Some("(module (func (param funcref) local.get 0 ref.is_null drop))")
+        }
+        RegInstructionKind::I32Load => {
+            Some("(module (memory 1) (func (param i32) local.get 0 i32.load drop))")
+        }
+        RegInstructionKind::I32Store => {
+            Some("(module (memory 1) (func (param i32) local.get 0 local.get 0 i32.store))")
+        }
+
+        // Not `emit!`-shaped, and each for a reason this check cannot model: the
+        // writes run a spill rescue before their own operands, the spills are
+        // emitted by that rescue rather than by an operator at all, and the control
+        // flow either carries no operands or carries them through a `DynSignature`
+        // whose length is a label's arity rather than an opcode's.
+        RegInstructionKind::LocalSet
+        | RegInstructionKind::LocalTee
+        | RegInstructionKind::GlobalSet
+        | RegInstructionKind::LocalSpill
+        | RegInstructionKind::GlobalSpill
+        | RegInstructionKind::If
+        | RegInstructionKind::Else
+        | RegInstructionKind::Br
+        | RegInstructionKind::BrIf
+        | RegInstructionKind::BrTable
+        | RegInstructionKind::Return
+        | RegInstructionKind::Call
+        | RegInstructionKind::CallIndirect
+        | RegInstructionKind::Unreachable
+        | RegInstructionKind::Move
+        | RegInstructionKind::End => None,
+    }
+}
 
 /// The net stack effect the *validator* attributes to each operator of a module's
 /// first function, keyed by variant name.
@@ -3373,13 +3404,21 @@ fn validator_stack_deltas(bytes: &[u8]) -> Vec<(String, i64)> {
 
 #[test]
 fn every_operator_pops_and_pushes_what_the_spec_says() {
-    for (name, wat) in ARITY_CASES {
+    for &kind in RegInstructionKind::ALL {
+        let Some(wat) = arity_case(kind) else {
+            continue;
+        };
+
         let bytes = wat::parse_str(wat).expect("invalid wat");
+
+        // the kind is named after the operator it lowers, which is what lets the
+        // operator under test be picked out of the `local.get`s feeding it
+        let operator = format!("{kind:?}");
 
         let expected = validator_stack_deltas(&bytes)
             .into_iter()
-            .find(|(op, _)| op == name)
-            .unwrap_or_else(|| panic!("{name} does not appear in its own case"))
+            .find(|(name, _)| *name == operator)
+            .unwrap_or_else(|| panic!("{operator} does not occur in its own case:\n{wat}"))
             .1;
 
         let body = lower(wat);
@@ -3390,7 +3429,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
         assert_eq!(
             prog.len(),
             2,
-            "{name}: case must lower to one instruction and `end`:\n{}",
+            "{operator}: case must lower to one instruction and `end`:\n{}",
             render(&body, &[])
         );
 
@@ -3400,32 +3439,34 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
         assert_eq!(
             pushes - pops,
             expected,
-            "{name}: lowered as {pops} -> {pushes}, but the spec says the net \
+            "{operator}: lowered as {pops} -> {pushes}, but the spec says the net \
              stack effect is {expected}. The `Signature<I, O>` on the variant is \
              wrong — nothing else records an arity."
         );
     }
 }
 
-/// The cross-check is only worth having if it fails when the declaration is
-/// wrong, and the failure it guards against compiles cleanly. This pins the
-/// measurement half: an operator's operands are exactly what its arena runs hold,
-/// which is the step that would silently drift if a case stopped lowering to a
-/// single instruction.
+/// A case filed under the wrong kind would check some other operator's arity and
+/// pass, so each case must lower to the kind it is filed under.
 #[test]
-fn the_arity_cross_check_measures_one_instruction() {
-    for (name, wat) in ARITY_CASES {
+fn every_case_lowers_to_the_kind_it_is_filed_under() {
+    for &kind in RegInstructionKind::ALL {
+        let Some(wat) = arity_case(kind) else {
+            continue;
+        };
+
         let (prog, _) = lower(wat);
 
-        assert!(
-            matches!(prog.last(), Some(RegInstruction::End)),
-            "{name}: the body must end with `end`"
+        assert_eq!(
+            prog[0].kind(),
+            kind,
+            "the case filed under {kind:?} lowers to {:?}:\n{wat}",
+            prog[0].kind()
         );
 
         assert!(
-            !matches!(prog.first(), Some(RegInstruction::Move(_))),
-            "{name}: a `Move` means the body carries results, and its operands \
-             would be counted as the instruction's"
+            matches!(prog.last(), Some(RegInstruction::End)),
+            "{kind:?}: the body must end with `end`"
         );
     }
 }
