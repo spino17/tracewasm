@@ -407,6 +407,7 @@ name = "tracewasm-core"
 version = "0.1.0"
 dependencies = [
  "addr2line",
+ "anyhow",
  "bytemuck",
  "gimli",
  "id-arena",

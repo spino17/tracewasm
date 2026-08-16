@@ -80,10 +80,16 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
-    instruction::stack::{StackBrTableTarget, StackInstruction},
+    instruction::{
+        Instruction,
+        stack::{StackBrTableTarget, StackInstruction},
+    },
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
-    vm::stack::{DataVal, Stack, Val, Value},
+    runtime::{
+        stack::Stack,
+        value::{DataVal, Val, Value},
+    },
 };
 use smallvec::{SmallVec, smallvec};
 use std::{
@@ -91,7 +97,9 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) mod reg;
 pub(crate) mod stack;
+pub mod value;
 
 // Bounds for the `trunc` targets. Each `_HIGH` is the power of two just *past*
 // the target's range and is treated as exclusive; see `trunc_float_to_int`.
@@ -166,6 +174,233 @@ struct Frame<'a> {
 /// the locals of the driver running it.
 pub(crate) struct TraceVM;
 
+pub struct FuncBody<Instr: Instruction> {
+    instructions: Box<[Instr]>,
+    instruction_offsets: Box<[u32]>,
+    br_table_targets: Box<[Instr::BrTableTarget]>,
+    frame_layout: Instr::FrameLayout,
+    locals: Box<[ValType]>,
+}
+
+impl TraceVM {
+    /*pub(crate) fn run_<M: Memory, I: ImportRegistry, Instr: Instruction>(
+        func_index: FuncIndex,
+        params: &[Val],
+        instance: &mut Instance<M, I, Instr>,
+        module: &Arc<Module<Instr>>,
+    ) -> Result<ResultVals, FuncCallError> {
+        let mut call_stack_depth = 0;
+
+        instance.frame.reset();
+
+        for param in params {
+            instance.frame.push(param.into());
+        }
+
+        // The reset above put the stack at height 0, so this frame's base is 0.
+        Self::execute_on_native_stack_::<_, _, Instr>(
+            func_index,
+            instance,
+            module,
+            &mut call_stack_depth,
+        )
+        .map_err(|trace| func_call_err_from_unwind(func_index, trace, module))?;
+
+        // How many result values the function leaves on the stack.
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let results_ty = &module.types[func_decl.ty.0 as usize].results;
+        let results_len = results_ty.len() as u32;
+
+        let results = instance.frame.pop_results(results_len);
+
+        let mut s: SmallVec<[Val; 3]> = smallvec![];
+
+        for (i, result) in results.iter().enumerate() {
+            s.push(result.into_val(&results_ty[i]));
+        }
+
+        debug_assert!(instance.frame.height() == 0);
+
+        Ok(ResultVals::new(s))
+    }
+
+    fn func_body<Instr: Instruction>(
+        func_index: FuncIndex,
+        module: &Module<Instr>,
+    ) -> &FuncBody<Instr> {
+        todo!()
+    }
+
+    pub(crate) fn execute_on_native_stack_<M: Memory, I: ImportRegistry, Instr: Instruction>(
+        func_index: FuncIndex,
+        instance: &mut Instance<M, I, Instr>,
+        module: &Arc<Module<Instr>>,
+        call_stack_depth: &mut u32,
+    ) -> Result<(), Unwind> {
+        // `func_bodies` holds only locally-defined functions, so shift the global
+        // function index down by the number of imports to index into it.
+        let imported_func_count = module.imported_func_count;
+
+        debug_assert!(func_index.0 >= imported_func_count);
+
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let ty = &module.types[func_decl.ty.0 as usize];
+        let params_len = ty.params.len();
+        let results_len = ty.results.len();
+        let func_body: &FuncBody<Instr> = Self::func_body(func_index, module);
+        let instructions = &func_body.instructions;
+        let instruction_offsets = &func_body.instruction_offsets;
+        // Annotated as a slice so the `Box` is dereferenced here rather than at the
+        // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
+        // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
+        // loads for a pair that is fixed for the whole frame.
+        let br_table_targets: &[Instr::BrTableTarget] = &func_body.br_table_targets;
+
+        // `locals` in the body is laid out params-first, then declared locals,
+        // and `locals_ty[i]` is the declared type of local slot `i`. So
+        // `locals_len >= params_len` always, and the subtraction below cannot
+        // underflow.
+        let locals_ty = &func_body.locals;
+        let locals_len = locals_ty.len();
+
+        // Frame setup. The arguments are already the topmost values on the shared
+        // stack, so the locals region starts just below them and the args become
+        // slots `0..params_len` without being copied anywhere.
+        let caller_base_height = instance.frame.height() - params_len as u32;
+
+        // The declared locals follow the params and must start at the zero value
+        // of their type, per the spec. Pushing them here is what makes the locals
+        // region contiguous, so `get_local` can index it directly.
+        for i in 0..(locals_len - params_len) {
+            let ty = locals_ty[i + params_len];
+
+            instance.frame.push(Value::zero_of_ty(ty));
+        }
+
+        // Entering a frame. The matching decrement is after the driver loop; the
+        // error paths out of the loop deliberately skip it, because an error always
+        // propagates to the top-level `run` (nothing in the interpreter catches
+        // one) and the counter is a fresh local per `run`. The depth *limit* is
+        // enforced at the call site in `call_func`, not here, so that the top-level
+        // frame is always admitted — an error raised during frame setup would
+        // otherwise escape without the enclosing-instruction tag that
+        // `FuncCallError` requires.
+        *call_stack_depth += 1;
+
+        // Driver loop. `pc` indexes this function's instruction list only.
+        //
+        // `pc` is passed to `execute` by value and the next one comes back as the
+        // return value, deliberately: lending it out as `&mut` would give it an
+        // address and force it to a stack slot, reloaded on every iteration.
+        // `instr_count` is hoisted for the same reason — reading
+        // `instructions.len()` in the condition reloads the slice length each time
+        // round.
+        let mut pc = 0;
+        let instr_count = instructions.len();
+
+        // Both are fixed for the whole frame, so they are computed here rather
+        // than in the call below: an expression in the argument list is an add and
+        // a load per instruction executed, not per frame.
+        let frame_base_height = caller_base_height + locals_len as u32;
+
+        /*loop {
+            let instr = &instructions[pc];
+
+            let step = Self::execute_instruction(
+                instr,
+                caller_base_height,
+                frame_base_height,
+                module,
+                instance,
+                br_table_targets,
+                imported_func_count,
+            );
+
+            let step = match step {
+                Ok(step) => step,
+                Err(err) => return Err(trap_here(func_index, pc, instruction_offsets, *err)),
+            };
+
+            match step {
+                Step::Next => {
+                    pc += 1;
+                }
+                Step::JumpTo(target_index) => {
+                    pc = target_index as usize;
+                }
+                Step::Call {
+                    func_index: callee_func_index,
+                    params_count: _,
+                    is_indirect,
+                } => {
+                    // Checked *before* recursing: the callee increments the counter
+                    // on entry, so testing after would admit one frame past the
+                    // limit. Every wasm frame costs a native one here, so the
+                    // ceiling is what keeps a deep guest from overflowing the host
+                    // stack, which aborts rather than unwinding.
+                    let max_depth = instance.config().get_max_call_stack_depth();
+
+                    if *call_stack_depth >= max_depth {
+                        return Err(trap_here(
+                            func_index,
+                            pc,
+                            instruction_offsets,
+                            InstructionExecutionError::CallStackExhausted(max_depth),
+                        ));
+                    }
+
+                    if let Err(mut trace) = TraceVM::execute_on_native_stack(
+                        callee_func_index,
+                        instance,
+                        module,
+                        call_stack_depth,
+                    ) {
+                        // This frame is one link in the chain that led to the
+                        // trap, so it appends itself as the error passes through.
+                        trace.push(TraceRecord {
+                            func_index,
+                            instr_index: pc,
+                            kind: TraceRecordKind::Call {
+                                callee_index: callee_func_index,
+                                is_indirect,
+                            },
+                            instr_offset: instruction_offsets[pc],
+                        });
+
+                        return Err(trace);
+                    }
+
+                    // The callee left its results in the caller's argument slots,
+                    // so there is nothing to do but resume past the call.
+                    pc += 1;
+                }
+            }
+
+            // Advancing past the last instruction means we just executed the
+            // function's terminating `End`: the frame is complete. (`return` and
+            // branches out of the outermost block also land here, since their
+            // target is that final `End`.) Branch targets are always real
+            // instruction indices, so only a fall-through can reach `len`.
+            if pc == instr_count {
+                break;
+            }
+        }
+
+        *call_stack_depth -= 1;
+
+        // Tear the frame down: truncating to `caller_base_height` (the locals
+        // base, *not* `frame_base_height`) discards this frame's locals while
+        // preserving the results on top. They therefore land in exactly the slots
+        // the caller's arguments occupied, which is what lets the caller do
+        // nothing at all after a `Call` returns.
+        instance
+            .frame
+            .truncate_by_preserving_arity(caller_base_height, results_len as u32);*/
+
+        Ok(())
+    }*/
+}
+
 impl TraceVM {
     /// Top-level entry point: runs a locally-defined function and returns its
     /// result values (in declaration order).
@@ -188,15 +423,15 @@ impl TraceVM {
     pub(crate) fn run<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
         params: &[Val],
-        instance: &mut Instance<M, I>,
-        module: &Arc<Module>,
-    ) -> Result<ResultVals, FuncCallError> {
+        instance: &mut Instance<M, I, StackInstruction>,
+        module: &Arc<Module<StackInstruction>>,
+    ) -> Result<ResultVals, FuncCallError<StackInstruction>> {
         let mut call_stack_depth = 0;
 
-        instance.stack.reset();
+        instance.frame.reset();
 
         for param in params {
-            instance.stack.push(param.into());
+            instance.frame.push(param.into());
         }
 
         // The reset above put the stack at height 0, so this frame's base is 0.
@@ -208,7 +443,7 @@ impl TraceVM {
         let results_ty = &module.types[func_decl.ty.0 as usize].results;
         let results_len = results_ty.len() as u32;
 
-        let results = instance.stack.pop_results(results_len);
+        let results = instance.frame.pop_results(results_len);
 
         let mut s: SmallVec<[Val; 3]> = smallvec![];
 
@@ -216,7 +451,7 @@ impl TraceVM {
             s.push(result.into_val(&results_ty[i]));
         }
 
-        debug_assert!(instance.stack.height() == 0);
+        debug_assert!(instance.frame.height() == 0);
 
         Ok(ResultVals::new(s))
     }
@@ -250,10 +485,10 @@ impl TraceVM {
     /// entry function's name and the module are in reach.
     fn execute_on_native_stack<M: Memory, I: ImportRegistry>(
         func_index: FuncIndex,
-        instance: &mut Instance<M, I>,
-        module: &Arc<Module>,
+        instance: &mut Instance<M, I, StackInstruction>,
+        module: &Arc<Module<StackInstruction>>,
         call_stack_depth: &mut u32,
-    ) -> Result<(), Unwind> {
+    ) -> Result<(), Unwind<StackInstruction>> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
@@ -283,7 +518,7 @@ impl TraceVM {
         // Frame setup. The arguments are already the topmost values on the shared
         // stack, so the locals region starts just below them and the args become
         // slots `0..params_len` without being copied anywhere.
-        let caller_base_height = instance.stack.height() - params_len as u32;
+        let caller_base_height = instance.frame.height() - params_len as u32;
 
         // The declared locals follow the params and must start at the zero value
         // of their type, per the spec. Pushing them here is what makes the locals
@@ -291,7 +526,7 @@ impl TraceVM {
         for i in 0..(locals_len - params_len) {
             let ty = locals_ty[i + params_len];
 
-            instance.stack.push(Value::zero_of_ty(ty));
+            instance.frame.push(Value::zero_of_ty(ty));
         }
 
         // Entering a frame. The matching decrement is after the driver loop; the
@@ -411,7 +646,7 @@ impl TraceVM {
         // the caller's arguments occupied, which is what lets the caller do
         // nothing at all after a `Call` returns.
         instance
-            .stack
+            .frame
             .truncate_by_preserving_arity(caller_base_height, results_len as u32);
 
         Ok(())
@@ -443,9 +678,9 @@ impl TraceVM {
     /// the `Vec` length *is* the depth.
     fn _execute_on_frame_stack<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
-        instance: &mut Instance<M, I>,
-        module: &Arc<Module>,
-    ) -> Result<(), FuncCallError> {
+        instance: &mut Instance<M, I, StackInstruction>,
+        module: &Arc<Module<StackInstruction>>,
+    ) -> Result<(), FuncCallError<StackInstruction>> {
         let mut frames: Vec<Frame> = Vec::with_capacity(10);
         let imported_func_count = module.imported_func_count;
 
@@ -470,7 +705,7 @@ impl TraceVM {
         for i in 0..(locals_len - params_len) {
             let ty = locals_ty[i + params_len];
 
-            instance.stack.push(Value::zero_of_ty(ty));
+            instance.frame.push(Value::zero_of_ty(ty));
         }
 
         loop {
@@ -558,7 +793,7 @@ impl TraceVM {
                     func_index = callee_func_index;
                     instructions = callee_instructions;
                     pc = 0;
-                    caller_base_height = instance.stack.height() - callee_params_count;
+                    caller_base_height = instance.frame.height() - callee_params_count;
                     frame_base_height = caller_base_height + callee_locals_len as u32;
                     br_table_targets = callee_br_table_targets;
                     instruction_offsets = callee_instruction_offsets;
@@ -567,7 +802,7 @@ impl TraceVM {
                     for i in 0..(callee_locals_len - callee_params_len) {
                         let ty = callee_locals_ty[i + callee_params_len];
 
-                        instance.stack.push(Value::zero_of_ty(ty));
+                        instance.frame.push(Value::zero_of_ty(ty));
                     }
 
                     continue;
@@ -585,7 +820,7 @@ impl TraceVM {
                 // tear down the locals and operands of the frame to just retain the results on top of the
                 // old frame's height
                 instance
-                    .stack
+                    .frame
                     .truncate_by_preserving_arity(caller_base_height, frame.callee_results_len);
 
                 // reset the state of the frame which executed call instruction
@@ -600,7 +835,7 @@ impl TraceVM {
         }
 
         instance
-            .stack
+            .frame
             .truncate_by_preserving_arity(caller_base_height, results_len as u32);
 
         Ok(())
@@ -630,10 +865,10 @@ impl TraceVM {
     fn call_imported<M: Memory, I: ImportRegistry>(
         callee_func_index: FuncIndex,
         callee_params_count: u32,
-        module: &Module,
-        instance: &mut Instance<M, I>,
+        module: &Module<StackInstruction>,
+        instance: &mut Instance<M, I, StackInstruction>,
         is_indirect: Option<TableIndex>,
-    ) -> Result<(), Box<InstructionExecutionError>> {
+    ) -> Result<(), Box<InstructionExecutionError<StackInstruction>>> {
         let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
         let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
 
@@ -653,7 +888,7 @@ impl TraceVM {
         // import of five or fewer parameters costs no allocation.
         let callee_params = ParamVals::new(
             instance
-                .stack
+                .frame
                 .pop_params(callee_params_count)
                 .iter()
                 .zip(callee_params_ty)
@@ -670,19 +905,21 @@ impl TraceVM {
                 callee_params.as_ref(),
                 &mut instance.memory,
             )
-            .map_err(|err| {
-                Box::new(match is_indirect {
-                    Some(table_index) => InstructionExecutionError::CallIndirect(
-                        table_index,
-                        FunctionCall(callee_func_index, Box::new(err)),
-                    ),
-                    None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
-                })
-            })?;
+            .unwrap();
+        /*
+         todo!.map_err(|err| {
+            Box::new(match is_indirect {
+                Some(table_index) => InstructionExecutionError::CallIndirect(
+                    table_index,
+                    FunctionCall(callee_func_index, Box::new(err)),
+                ),
+                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
+            })
+        })?;*/
 
         // push results to the stack
         for res in results {
-            instance.stack.push(res.into());
+            instance.frame.push(res.into());
         }
 
         Ok(())
@@ -692,17 +929,17 @@ impl TraceVM {
     fn get_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
         caller_base_height: u32,
-        instance: &Instance<M, I>,
+        instance: &Instance<M, I, StackInstruction>,
     ) -> Value {
         let slot = (index.0 + caller_base_height) as usize;
 
         // Mirrors the SAFETY argument below, so a broken link shows up as a failed
         // test rather than as a silent out-of-bounds read. Compiled out in release.
         debug_assert!(
-            slot < instance.stack.inner.len(),
+            slot < instance.frame.inner.len(),
             "local slot {slot} is outside the operand stack's backing storage \
              (len {}) — one of the invariants in the SAFETY comment no longer holds",
-            instance.stack.inner.len()
+            instance.frame.inner.len()
         );
 
         // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
@@ -728,7 +965,7 @@ impl TraceVM {
         // smaller `Stack::for_const_expr_evaluation`, and
         // `emit_instruction_for_const_expr` accepts a closed whitelist of operators
         // that excludes `local.get`/`local.set`/`local.tee`.
-        unsafe { *instance.stack.inner.get_unchecked(slot) }
+        unsafe { *instance.frame.inner.get_unchecked(slot) }
     }
 
     /// Writes local slot `index` of the frame based at `caller_base_height`.
@@ -740,16 +977,16 @@ impl TraceVM {
         index: LocalIndex,
         val: Value,
         caller_base_height: u32,
-        instance: &mut Instance<M, I>,
+        instance: &mut Instance<M, I, StackInstruction>,
     ) {
         let slot = (index.0 + caller_base_height) as usize;
 
         debug_assert!(
-            slot < instance.stack.inner.len(),
+            slot < instance.frame.inner.len(),
             "local slot {slot} is outside the operand stack's backing storage \
              (len {}) — one of the invariants in `get_local`'s SAFETY comment no \
              longer holds",
-            instance.stack.inner.len()
+            instance.frame.inner.len()
         );
 
         // SAFETY: identical to [`Self::get_local`] — see the four invariants
@@ -757,7 +994,7 @@ impl TraceVM {
         // slot is inside this frame's locals region, which the operand discipline
         // never touches for the life of the frame.
         unsafe {
-            *instance.stack.inner.get_unchecked_mut(slot) = val;
+            *instance.frame.inner.get_unchecked_mut(slot) = val;
         }
     }
 
@@ -777,9 +1014,9 @@ impl TraceVM {
     #[inline(always)]
     fn pop_effective_address<M: Memory, I: ImportRegistry>(
         memarg_offset: u32,
-        instance: &mut Instance<M, I>,
+        instance: &mut Instance<M, I, StackInstruction>,
     ) -> Result<usize, MemoryError> {
-        let addr = instance.stack.pop().as_i32() as u32;
+        let addr = instance.frame.pop().as_i32() as u32;
 
         let effective_offset = addr
             .checked_add(memarg_offset)
@@ -817,11 +1054,11 @@ impl TraceVM {
         instr: &StackInstruction,
         caller_base_height: u32,
         frame_base_height: u32,
-        module: &Module,
-        instance: &mut Instance<M, I>,
+        module: &Module<StackInstruction>,
+        instance: &mut Instance<M, I, StackInstruction>,
         br_table_targets: &[StackBrTableTarget],
         imported_func_count: u32,
-    ) -> Result<Step, Box<InstructionExecutionError>> {
+    ) -> Result<Step, Box<InstructionExecutionError<StackInstruction>>> {
         let res = match instr {
             StackInstruction::Call {
                 func_index: callee_func_index,
@@ -855,7 +1092,7 @@ impl TraceVM {
                 let table = &instance.table_vals[table_index.0 as usize];
                 // The index operand is an unsigned i32; a negative value becomes a
                 // large `usize` and fails the bounds check below.
-                let slot = instance.stack.pop().as_i32() as u32 as usize;
+                let slot = instance.frame.pop().as_i32() as u32 as usize;
 
                 // Trap if the index is past the table's end (wasm: "undefined element").
                 let Some(func_ref) = table.table.get(slot).copied() else {
@@ -922,49 +1159,49 @@ impl TraceVM {
             }
             StackInstruction::Nop => Step::Next,
             StackInstruction::I32Const { value } => {
-                instance.stack.push(Value::from_i32(*value));
+                instance.frame.push(Value::from_i32(*value));
 
                 Step::Next
             }
             StackInstruction::I64Const { value } => {
-                instance.stack.push(Value::from_i64(*value));
+                instance.frame.push(Value::from_i64(*value));
 
                 Step::Next
             }
             StackInstruction::F32Const { value } => {
-                instance.stack.push(Value::from_f32(*value));
+                instance.frame.push(Value::from_f32(*value));
 
                 Step::Next
             }
             StackInstruction::F64Const { value } => {
-                instance.stack.push(Value::from_f64(*value));
+                instance.frame.push(Value::from_f64(*value));
 
                 Step::Next
             }
             StackInstruction::RefNull => {
-                instance.stack.push(Value::from_ref(None));
+                instance.frame.push(Value::from_ref(None));
 
                 Step::Next
             }
             StackInstruction::RefFunc { function_index } => {
-                instance.stack.push(Value::from_ref(Some(*function_index)));
+                instance.frame.push(Value::from_ref(Some(*function_index)));
 
                 Step::Next
             }
             StackInstruction::RefIsNull => {
-                let func_ref = instance.stack.pop().as_ref();
+                let func_ref = instance.frame.pop().as_ref();
 
                 if func_ref.is_none() {
-                    instance.stack.push(Value::from_i32(1));
+                    instance.frame.push(Value::from_i32(1));
                 } else {
-                    instance.stack.push(Value::from_i32(0));
+                    instance.frame.push(Value::from_i32(0));
                 }
 
                 Step::Next
             }
             StackInstruction::MemorySize => {
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(instance.memory.size_in_pages() as i32));
 
                 Step::Next
@@ -972,42 +1209,42 @@ impl TraceVM {
             StackInstruction::MemoryGrow => {
                 // The delta is an unsigned i32; going through `u32` keeps a
                 // high-bit-set value from sign-extending into a different number.
-                let delta_in_pages = instance.stack.pop().as_i32() as u32 as u64;
+                let delta_in_pages = instance.frame.pop().as_i32() as u32 as u64;
                 let max_pages = instance.config.get_max_memory_size_in_pages();
 
                 // `instantiate` already narrowed this to the module's declared
                 // maximum, so the configured cap is the effective ceiling here.
                 match instance.memory.grow(delta_in_pages, max_pages) {
-                    Ok(old_page) => instance.stack.push(Value::from_i32(old_page as i32)),
+                    Ok(old_page) => instance.frame.push(Value::from_i32(old_page as i32)),
                     // Per the spec `memory.grow` does not trap: a request it cannot
                     // satisfy reports `-1` and execution continues.
-                    Err(_) => instance.stack.push(Value::from_i32(-1)),
+                    Err(_) => instance.frame.push(Value::from_i32(-1)),
                 }
 
                 Step::Next
             }
             StackInstruction::MemoryCopy => {
-                let len = instance.stack.pop().as_i32() as usize;
-                let src = instance.stack.pop().as_i32() as usize;
-                let dest = instance.stack.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as usize;
+                let src = instance.frame.pop().as_i32() as usize;
+                let dest = instance.frame.pop().as_i32() as usize;
 
                 instance.memory.copy_within(dest, src, len)?;
 
                 Step::Next
             }
             StackInstruction::MemoryFill => {
-                let len = instance.stack.pop().as_i32() as usize;
-                let val = instance.stack.pop().as_i32() as u32;
-                let dest = instance.stack.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as usize;
+                let val = instance.frame.pop().as_i32() as u32;
+                let dest = instance.frame.pop().as_i32() as usize;
 
                 instance.memory.fill(dest, val, len)?;
 
                 Step::Next
             }
             StackInstruction::MemoryInit { data_index } => {
-                let len = instance.stack.pop().as_i32() as usize;
-                let src = instance.stack.pop().as_i32() as usize;
-                let dest = instance.stack.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as usize;
+                let src = instance.frame.pop().as_i32() as usize;
+                let dest = instance.frame.pop().as_i32() as usize;
 
                 // A dropped segment reads as *empty*, not as an outright trap: the
                 // spec replaces its bytes with the empty sequence, so a
@@ -1015,7 +1252,7 @@ impl TraceVM {
                 // any non-empty read fails the bounds check below.
                 let segment: &[u8] = match &instance.data_vals[*data_index as usize] {
                     DataVal::Dropped => &[],
-                    DataVal::Passive(segment) => segment,
+                    DataVal::Passive(segment) => &segment,
                 };
 
                 // The source range is validated against the segment before
@@ -1045,7 +1282,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)?;
 
-                instance.stack.push(Value::from_i32(val));
+                instance.frame.push(Value::from_i32(val));
 
                 Step::Next
             }
@@ -1053,7 +1290,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i32;
 
-                instance.stack.push(Value::from_i32(val));
+                instance.frame.push(Value::from_i32(val));
 
                 Step::Next
             }
@@ -1061,7 +1298,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i32;
 
-                instance.stack.push(Value::from_i32(val));
+                instance.frame.push(Value::from_i32(val));
 
                 Step::Next
             }
@@ -1069,7 +1306,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i32;
 
-                instance.stack.push(Value::from_i32(val));
+                instance.frame.push(Value::from_i32(val));
 
                 Step::Next
             }
@@ -1077,7 +1314,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i32;
 
-                instance.stack.push(Value::from_i32(val));
+                instance.frame.push(Value::from_i32(val));
 
                 Step::Next
             }
@@ -1085,7 +1322,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i64(effective_offset)?;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1093,7 +1330,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1101,7 +1338,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1109,7 +1346,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1117,7 +1354,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1125,7 +1362,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u32(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1133,7 +1370,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)? as i64;
 
-                instance.stack.push(Value::from_i64(val));
+                instance.frame.push(Value::from_i64(val));
 
                 Step::Next
             }
@@ -1141,7 +1378,7 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f32(effective_offset)?;
 
-                instance.stack.push(Value::from_f32(val));
+                instance.frame.push(Value::from_f32(val));
 
                 Step::Next
             }
@@ -1149,12 +1386,12 @@ impl TraceVM {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f64(effective_offset)?;
 
-                instance.stack.push(Value::from_f64(val));
+                instance.frame.push(Value::from_f64(val));
 
                 Step::Next
             }
             StackInstruction::I32Store { offset, align: _ } => {
-                let val = instance.stack.pop().as_i32();
+                let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u32(effective_offset, val as u32)?;
@@ -1162,7 +1399,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32Store8 { offset, align: _ } => {
-                let val = instance.stack.pop().as_i32();
+                let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u8(effective_offset, val as u8)?;
@@ -1170,7 +1407,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32Store16 { offset, align: _ } => {
-                let val = instance.stack.pop().as_i32();
+                let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u16(effective_offset, val as u16)?;
@@ -1178,7 +1415,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64Store { offset, align: _ } => {
-                let val = instance.stack.pop().as_i64();
+                let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u64(effective_offset, val as u64)?;
@@ -1186,7 +1423,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64Store8 { offset, align: _ } => {
-                let val = instance.stack.pop().as_i64();
+                let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u8(effective_offset, val as u8)?;
@@ -1194,7 +1431,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64Store16 { offset, align: _ } => {
-                let val = instance.stack.pop().as_i64();
+                let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u16(effective_offset, val as u16)?;
@@ -1202,7 +1439,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64Store32 { offset, align: _ } => {
-                let val = instance.stack.pop().as_i64();
+                let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_u32(effective_offset, val as u32)?;
@@ -1210,7 +1447,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::F32Store { offset, align: _ } => {
-                let val = instance.stack.pop().as_f32();
+                let val = instance.frame.pop().as_f32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_f32(effective_offset, val)?;
@@ -1218,7 +1455,7 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::F64Store { offset, align: _ } => {
-                let val = instance.stack.pop().as_f64();
+                let val = instance.frame.pop().as_f64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
                 instance.memory.write_f64(effective_offset, val)?;
@@ -1226,169 +1463,169 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32Clz => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.leading_zeros() as i32));
 
                 Step::Next
             }
             StackInstruction::I32Ctz => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.trailing_zeros() as i32));
 
                 Step::Next
             }
             StackInstruction::I32Popcnt => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 // Counts set bits in the two's-complement representation, so a
                 // negative operand counts its sign bits too — which is what the
                 // spec's bit-level definition asks for.
-                instance.stack.push(Value::from_i32(a.count_ones() as i32));
+                instance.frame.push(Value::from_i32(a.count_ones() as i32));
 
                 Step::Next
             }
             StackInstruction::I32Eqz => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
 
                 Step::Next
             }
             StackInstruction::I32Extend8S => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a as i8 as i32));
+                instance.frame.push(Value::from_i32(a as i8 as i32));
 
                 Step::Next
             }
             StackInstruction::I32Extend16S => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a as i16 as i32));
+                instance.frame.push(Value::from_i32(a as i16 as i32));
 
                 Step::Next
             }
             StackInstruction::I32WrapI64 => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32(a as i32));
+                instance.frame.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = instance.stack.pop().as_f32() as f64;
+                let a = instance.frame.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 // The result is the `u32` bit pattern held in an `i32`, so values
                 // above `i32::MAX` come back out negative.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(truncated as u32 as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = instance.stack.pop().as_f32() as f64;
+                let a = instance.frame.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
-                instance.stack.push(Value::from_i32(truncated as i32));
+                instance.frame.push(Value::from_i32(truncated as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncF64U => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(truncated as u32 as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncF64S => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
-                instance.stack.push(Value::from_i32(truncated as i32));
+                instance.frame.push(Value::from_i32(truncated as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncSatF32U => {
-                let a = instance.stack.pop().as_f32() as u32;
+                let a = instance.frame.pop().as_f32() as u32;
 
-                instance.stack.push(Value::from_i32(a as i32));
+                instance.frame.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncSatF32S => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32(a as i32));
+                instance.frame.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncSatF64U => {
                 // Saturate to `u32`, the *target* width — going through `u64` here
                 // would clamp at the wrong bound and then wrap on the way down.
-                let a = instance.stack.pop().as_f64() as u32;
+                let a = instance.frame.pop().as_f64() as u32;
 
-                instance.stack.push(Value::from_i32(a as i32));
+                instance.frame.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
             StackInstruction::I32TruncSatF64S => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32(a as i32));
+                instance.frame.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
             StackInstruction::I32ReinterpretF32 => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32(a.to_bits() as i32));
+                instance.frame.push(Value::from_i32(a.to_bits() as i32));
 
                 Step::Next
             }
             StackInstruction::I32Add => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.wrapping_add(b)));
+                instance.frame.push(Value::from_i32(a.wrapping_add(b)));
 
                 Step::Next
             }
             StackInstruction::I32Sub => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.wrapping_sub(b)));
+                instance.frame.push(Value::from_i32(a.wrapping_sub(b)));
 
                 Step::Next
             }
             StackInstruction::I32Mul => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.wrapping_mul(b)));
+                instance.frame.push(Value::from_i32(a.wrapping_mul(b)));
 
                 Step::Next
             }
             StackInstruction::I32DivU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32(a.checked_div(b).ok_or(
+                instance.frame.push(Value::from_i32(a.checked_div(b).ok_or(
                     InstructionExecutionError::Division {
                         num: a.to_string(),
                         deno: b.to_string(),
@@ -1398,10 +1635,10 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32DivS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.checked_div(b).ok_or(
+                instance.frame.push(Value::from_i32(a.checked_div(b).ok_or(
                     InstructionExecutionError::Division {
                         num: a.to_string(),
                         deno: b.to_string(),
@@ -1411,10 +1648,10 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32RemU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32(a.checked_rem(b).ok_or(
+                instance.frame.push(Value::from_i32(a.checked_rem(b).ok_or(
                     InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
@@ -1424,8 +1661,8 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I32RemS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 // A zero divisor is the *only* trap here. Unlike `i32.div_s`,
                 // `rem_s` does not trap on overflow: the spec defines
@@ -1438,31 +1675,31 @@ impl TraceVM {
                     }));
                 }
 
-                instance.stack.push(Value::from_i32(a.wrapping_rem(b)));
+                instance.frame.push(Value::from_i32(a.wrapping_rem(b)));
 
                 Step::Next
             }
             StackInstruction::I32And => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.bitand(b)));
+                instance.frame.push(Value::from_i32(a.bitand(b)));
 
                 Step::Next
             }
             StackInstruction::I32Or => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.bitor(b)));
+                instance.frame.push(Value::from_i32(a.bitor(b)));
 
                 Step::Next
             }
             StackInstruction::I32Xor => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32(a.bitxor(b)));
+                instance.frame.push(Value::from_i32(a.bitxor(b)));
 
                 Step::Next
             }
@@ -1471,315 +1708,315 @@ impl TraceVM {
             // `wrapping_*`/`rotate_*` methods apply exactly that masking; the plain
             // `<<`/`>>` operators would instead panic in debug builds.
             StackInstruction::I32Shl => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.wrapping_shl(b as u32)));
 
                 Step::Next
             }
             StackInstruction::I32ShrU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
                 // Logical shift: done on `u32` so the vacated high bits are zeros.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.wrapping_shr(b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32ShrS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
                 // Arithmetic shift: on `i32` the sign bit is replicated.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.wrapping_shr(b as u32)));
 
                 Step::Next
             }
             StackInstruction::I32Rotl => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.rotate_left(b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32Rotr => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(a.rotate_right(b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32Eq => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a == b) as i32));
+                instance.frame.push(Value::from_i32((a == b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32Ne => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a != b) as i32));
+                instance.frame.push(Value::from_i32((a != b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32LtU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32LtS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32GtU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32GtS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32LeU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32LeS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32GeU => {
-                let b = instance.stack.pop().as_i32() as u32;
-                let a = instance.stack.pop().as_i32() as u32;
+                let b = instance.frame.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I32GeS => {
-                let b = instance.stack.pop().as_i32();
-                let a = instance.stack.pop().as_i32();
+                let b = instance.frame.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64Clz => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.leading_zeros() as i64));
 
                 Step::Next
             }
             StackInstruction::I64Ctz => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.trailing_zeros() as i64));
 
                 Step::Next
             }
             StackInstruction::I64Popcnt => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 // See `I32Popcnt`. The count is at most 64, but the result type is
                 // `i64` — unary integer ops keep their operand's width, unlike the
                 // comparisons.
-                instance.stack.push(Value::from_i64(a.count_ones() as i64));
+                instance.frame.push(Value::from_i64(a.count_ones() as i64));
 
                 Step::Next
             }
             StackInstruction::I64Eqz => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i32(if a == 0 { 1 } else { 0 }));
 
                 Step::Next
             }
             StackInstruction::I64Extend8S => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a as i8 as i64));
+                instance.frame.push(Value::from_i64(a as i8 as i64));
 
                 Step::Next
             }
             StackInstruction::I64Extend16S => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a as i16 as i64));
+                instance.frame.push(Value::from_i64(a as i16 as i64));
 
                 Step::Next
             }
             StackInstruction::I64Extend32S => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a as i32 as i64));
+                instance.frame.push(Value::from_i64(a as i32 as i64));
 
                 Step::Next
             }
             StackInstruction::I64ExtendI32U => {
-                let a = instance.stack.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64ExtendI32S => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = instance.stack.pop().as_f32() as f64;
+                let a = instance.frame.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 // As with the `i32` forms, the result is the unsigned bit pattern
                 // held in a signed value.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(truncated as u64 as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = instance.stack.pop().as_f32() as f64;
+                let a = instance.frame.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
-                instance.stack.push(Value::from_i64(truncated as i64));
+                instance.frame.push(Value::from_i64(truncated as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncF64U => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(truncated as u64 as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncF64S => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
-                instance.stack.push(Value::from_i64(truncated as i64));
+                instance.frame.push(Value::from_i64(truncated as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncSatF32U => {
                 // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
                 // first would lose every value an `i64` can still represent.
-                let a = instance.stack.pop().as_f32() as u64;
+                let a = instance.frame.pop().as_f32() as u64;
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncSatF32S => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncSatF64U => {
-                let a = instance.stack.pop().as_f64() as u64;
+                let a = instance.frame.pop().as_f64() as u64;
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64TruncSatF64S => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i64(a as i64));
+                instance.frame.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
             StackInstruction::I64ReinterpretF64 => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i64(a.to_bits() as i64));
+                instance.frame.push(Value::from_i64(a.to_bits() as i64));
 
                 Step::Next
             }
             StackInstruction::I64Add => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.wrapping_add(b)));
+                instance.frame.push(Value::from_i64(a.wrapping_add(b)));
 
                 Step::Next
             }
             StackInstruction::I64Sub => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.wrapping_sub(b)));
+                instance.frame.push(Value::from_i64(a.wrapping_sub(b)));
 
                 Step::Next
             }
             StackInstruction::I64Mul => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.wrapping_mul(b)));
+                instance.frame.push(Value::from_i64(a.wrapping_mul(b)));
 
                 Step::Next
             }
             StackInstruction::I64DivU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i64(a.checked_div(b).ok_or(
+                instance.frame.push(Value::from_i64(a.checked_div(b).ok_or(
                     InstructionExecutionError::Division {
                         num: a.to_string(),
                         deno: b.to_string(),
@@ -1789,10 +2026,10 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64DivS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.checked_div(b).ok_or(
+                instance.frame.push(Value::from_i64(a.checked_div(b).ok_or(
                     InstructionExecutionError::Division {
                         num: a.to_string(),
                         deno: b.to_string(),
@@ -1802,10 +2039,10 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64RemU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i64(a.checked_rem(b).ok_or(
+                instance.frame.push(Value::from_i64(a.checked_rem(b).ok_or(
                     InstructionExecutionError::Remainder {
                         left: a.to_string(),
                         right: b.to_string(),
@@ -1815,8 +2052,8 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::I64RemS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
                 if b == 0 {
@@ -1826,31 +2063,31 @@ impl TraceVM {
                     }));
                 }
 
-                instance.stack.push(Value::from_i64(a.wrapping_rem(b)));
+                instance.frame.push(Value::from_i64(a.wrapping_rem(b)));
 
                 Step::Next
             }
             StackInstruction::I64And => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.bitand(b)));
+                instance.frame.push(Value::from_i64(a.bitand(b)));
 
                 Step::Next
             }
             StackInstruction::I64Or => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.bitor(b)));
+                instance.frame.push(Value::from_i64(a.bitor(b)));
 
                 Step::Next
             }
             StackInstruction::I64Xor => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i64(a.bitxor(b)));
+                instance.frame.push(Value::from_i64(a.bitxor(b)));
 
                 Step::Next
             }
@@ -1858,313 +2095,313 @@ impl TraceVM {
             // the shift methods take `u32`, so it is narrowed first — harmless,
             // since only the low 6 bits survive the masking anyway.
             StackInstruction::I64Shl => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.wrapping_shl(b as u32)));
 
                 Step::Next
             }
             StackInstruction::I64ShrU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
                 // Logical shift: done on `u64` so the vacated high bits are zeros.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.wrapping_shr(b as u32) as i64));
 
                 Step::Next
             }
             StackInstruction::I64ShrS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
                 // Arithmetic shift: on `i64` the sign bit is replicated.
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.wrapping_shr(b as u32)));
 
                 Step::Next
             }
             StackInstruction::I64Rotl => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.rotate_left(b as u32) as i64));
 
                 Step::Next
             }
             StackInstruction::I64Rotr => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
                 instance
-                    .stack
+                    .frame
                     .push(Value::from_i64(a.rotate_right(b as u32) as i64));
 
                 Step::Next
             }
             StackInstruction::I64Eq => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a == b) as i32));
+                instance.frame.push(Value::from_i32((a == b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64Ne => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a != b) as i32));
+                instance.frame.push(Value::from_i32((a != b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64LtU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64LtS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64GtU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64GtS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64LeU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64LeS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64GeU => {
-                let b = instance.stack.pop().as_i64() as u64;
-                let a = instance.stack.pop().as_i64() as u64;
+                let b = instance.frame.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::I64GeS => {
-                let b = instance.stack.pop().as_i64();
-                let a = instance.stack.pop().as_i64();
+                let b = instance.frame.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Abs => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.abs()));
+                instance.frame.push(Value::from_f32(a.abs()));
 
                 Step::Next
             }
             StackInstruction::F32Neg => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.neg()));
+                instance.frame.push(Value::from_f32(a.neg()));
 
                 Step::Next
             }
             StackInstruction::F32Ceil => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.ceil()));
+                instance.frame.push(Value::from_f32(a.ceil()));
 
                 Step::Next
             }
             StackInstruction::F32Floor => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.floor()));
+                instance.frame.push(Value::from_f32(a.floor()));
 
                 Step::Next
             }
             StackInstruction::F32Trunc => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.trunc()));
+                instance.frame.push(Value::from_f32(a.trunc()));
 
                 Step::Next
             }
             StackInstruction::F32Sqrt => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.sqrt()));
+                instance.frame.push(Value::from_f32(a.sqrt()));
 
                 Step::Next
             }
             StackInstruction::F32Nearest => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a.round_ties_even()));
+                instance.frame.push(Value::from_f32(a.round_ties_even()));
 
                 Step::Next
             }
             StackInstruction::F32ConvertI32U => {
-                let a = instance.stack.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_f32(a as f32));
+                instance.frame.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
             StackInstruction::F32ConvertI32S => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_f32(a as f32));
+                instance.frame.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
             StackInstruction::F32ConvertI64U => {
-                let a = instance.stack.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_f32(a as f32));
+                instance.frame.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
             StackInstruction::F32ConvertI64S => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_f32(a as f32));
+                instance.frame.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
             StackInstruction::F32DemoteF64 => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f32(a as f32));
+                instance.frame.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
             StackInstruction::F32ReinterpretI32 => {
-                let a = instance.stack.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_f32(f32::from_bits(a)));
+                instance.frame.push(Value::from_f32(f32::from_bits(a)));
 
                 Step::Next
             }
             StackInstruction::F32Add => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a + b));
+                instance.frame.push(Value::from_f32(a + b));
 
                 Step::Next
             }
             StackInstruction::F32Sub => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a - b));
+                instance.frame.push(Value::from_f32(a - b));
 
                 Step::Next
             }
             StackInstruction::F32Mul => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f32(a * b));
+                instance.frame.push(Value::from_f32(a * b));
 
                 Step::Next
             }
             StackInstruction::F32Div => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
                 // Unlike the integer divides this never traps: IEEE 754 gives
                 // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
-                instance.stack.push(Value::from_f32(a / b));
+                instance.frame.push(Value::from_f32(a / b));
 
                 Step::Next
             }
             StackInstruction::F32Eq => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a == b) as i32));
+                instance.frame.push(Value::from_i32((a == b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Ne => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a != b) as i32));
+                instance.frame.push(Value::from_i32((a != b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Lt => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Gt => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Le => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Ge => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::F32Min => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
                 let r = if a.is_nan() || b.is_nan() {
                     f32::NAN
@@ -2177,13 +2414,13 @@ impl TraceVM {
                     b
                 };
 
-                instance.stack.push(Value::from_f32(r));
+                instance.frame.push(Value::from_f32(r));
 
                 Step::Next
             }
             StackInstruction::F32Max => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
                 let r = if a.is_nan() || b.is_nan() {
                     f32::NAN
@@ -2196,198 +2433,198 @@ impl TraceVM {
                     b
                 };
 
-                instance.stack.push(Value::from_f32(r));
+                instance.frame.push(Value::from_f32(r));
 
                 Step::Next
             }
             StackInstruction::F32Copysign => {
-                let b = instance.stack.pop().as_f32();
-                let a = instance.stack.pop().as_f32();
+                let b = instance.frame.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
                 // Purely a sign-bit transplant: the magnitude of `a` with the sign
                 // of `b`. Defined even when either operand is NaN — the sign is
                 // copied without inspecting the payload — so unlike `min`/`max`
                 // this needs no NaN special case, and Rust's method matches.
-                instance.stack.push(Value::from_f32(a.copysign(b)));
+                instance.frame.push(Value::from_f32(a.copysign(b)));
 
                 Step::Next
             }
             StackInstruction::F64Abs => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.abs()));
+                instance.frame.push(Value::from_f64(a.abs()));
 
                 Step::Next
             }
             StackInstruction::F64Neg => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.neg()));
+                instance.frame.push(Value::from_f64(a.neg()));
 
                 Step::Next
             }
             StackInstruction::F64Ceil => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.ceil()));
+                instance.frame.push(Value::from_f64(a.ceil()));
 
                 Step::Next
             }
             StackInstruction::F64Floor => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.floor()));
+                instance.frame.push(Value::from_f64(a.floor()));
 
                 Step::Next
             }
             StackInstruction::F64Trunc => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.trunc()));
+                instance.frame.push(Value::from_f64(a.trunc()));
 
                 Step::Next
             }
             StackInstruction::F64Sqrt => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.sqrt()));
+                instance.frame.push(Value::from_f64(a.sqrt()));
 
                 Step::Next
             }
             StackInstruction::F64Nearest => {
-                let a = instance.stack.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a.round_ties_even()));
+                instance.frame.push(Value::from_f64(a.round_ties_even()));
 
                 Step::Next
             }
             StackInstruction::F64ConvertI32U => {
-                let a = instance.stack.pop().as_i32() as u32;
+                let a = instance.frame.pop().as_i32() as u32;
 
-                instance.stack.push(Value::from_f64(a as f64));
+                instance.frame.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
             StackInstruction::F64ConvertI32S => {
-                let a = instance.stack.pop().as_i32();
+                let a = instance.frame.pop().as_i32();
 
-                instance.stack.push(Value::from_f64(a as f64));
+                instance.frame.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
             StackInstruction::F64ConvertI64U => {
-                let a = instance.stack.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_f64(a as f64));
+                instance.frame.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
             StackInstruction::F64ConvertI64S => {
-                let a = instance.stack.pop().as_i64();
+                let a = instance.frame.pop().as_i64();
 
-                instance.stack.push(Value::from_f64(a as f64));
+                instance.frame.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
             StackInstruction::F64PromoteF32 => {
-                let a = instance.stack.pop().as_f32();
+                let a = instance.frame.pop().as_f32();
 
-                instance.stack.push(Value::from_f64(a as f64));
+                instance.frame.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
             StackInstruction::F64ReinterpretI64 => {
-                let a = instance.stack.pop().as_i64() as u64;
+                let a = instance.frame.pop().as_i64() as u64;
 
-                instance.stack.push(Value::from_f64(f64::from_bits(a)));
+                instance.frame.push(Value::from_f64(f64::from_bits(a)));
 
                 Step::Next
             }
             StackInstruction::F64Add => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a + b));
+                instance.frame.push(Value::from_f64(a + b));
 
                 Step::Next
             }
             StackInstruction::F64Sub => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a - b));
+                instance.frame.push(Value::from_f64(a - b));
 
                 Step::Next
             }
             StackInstruction::F64Mul => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_f64(a * b));
+                instance.frame.push(Value::from_f64(a * b));
 
                 Step::Next
             }
             StackInstruction::F64Div => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
                 // See `F32Div`: division by zero yields an infinity or NaN, never
                 // a trap.
-                instance.stack.push(Value::from_f64(a / b));
+                instance.frame.push(Value::from_f64(a / b));
 
                 Step::Next
             }
             StackInstruction::F64Eq => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a == b) as i32));
+                instance.frame.push(Value::from_i32((a == b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Ne => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a != b) as i32));
+                instance.frame.push(Value::from_i32((a != b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Lt => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a < b) as i32));
+                instance.frame.push(Value::from_i32((a < b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Gt => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a > b) as i32));
+                instance.frame.push(Value::from_i32((a > b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Le => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a <= b) as i32));
+                instance.frame.push(Value::from_i32((a <= b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Ge => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
-                instance.stack.push(Value::from_i32((a >= b) as i32));
+                instance.frame.push(Value::from_i32((a >= b) as i32));
 
                 Step::Next
             }
             StackInstruction::F64Min => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
                 let r = if a.is_nan() || b.is_nan() {
                     f64::NAN
@@ -2400,13 +2637,13 @@ impl TraceVM {
                     b
                 };
 
-                instance.stack.push(Value::from_f64(r));
+                instance.frame.push(Value::from_f64(r));
 
                 Step::Next
             }
             StackInstruction::F64Max => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
                 let r = if a.is_nan() || b.is_nan() {
                     f64::NAN
@@ -2419,35 +2656,35 @@ impl TraceVM {
                     b
                 };
 
-                instance.stack.push(Value::from_f64(r));
+                instance.frame.push(Value::from_f64(r));
 
                 Step::Next
             }
             StackInstruction::F64Copysign => {
-                let b = instance.stack.pop().as_f64();
-                let a = instance.stack.pop().as_f64();
+                let b = instance.frame.pop().as_f64();
+                let a = instance.frame.pop().as_f64();
 
                 // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
-                instance.stack.push(Value::from_f64(a.copysign(b)));
+                instance.frame.push(Value::from_f64(a.copysign(b)));
 
                 Step::Next
             }
             StackInstruction::LocalGet { index } => {
                 instance
-                    .stack
+                    .frame
                     .push(Self::get_local(*index, caller_base_height, instance));
 
                 Step::Next
             }
             StackInstruction::LocalSet { index } => {
-                let val = instance.stack.pop();
+                let val = instance.frame.pop();
 
                 Self::set_local(*index, val, caller_base_height, instance);
 
                 Step::Next
             }
             StackInstruction::LocalTee { index } => {
-                let val = instance.stack.tee();
+                let val = instance.frame.tee();
 
                 Self::set_local(*index, val, caller_base_height, instance);
 
@@ -2455,13 +2692,13 @@ impl TraceVM {
             }
             StackInstruction::GlobalGet { index } => {
                 instance
-                    .stack
+                    .frame
                     .push(instance.global_vals[index.0 as usize].into());
 
                 Step::Next
             }
             StackInstruction::GlobalSet { index } => {
-                let val = instance.stack.pop();
+                let val = instance.frame.pop();
                 let ty = module.globals[index.0 as usize].ty.content_type();
 
                 instance.global_vals[index.0 as usize] = val.into_val(&ty);
@@ -2469,20 +2706,20 @@ impl TraceVM {
                 Step::Next
             }
             StackInstruction::Drop => {
-                let _ = instance.stack.pop();
+                let _ = instance.frame.pop();
 
                 Step::Next
             }
             StackInstruction::Select => {
-                let cond = instance.stack.pop().as_i32();
-                let b = instance.stack.pop();
-                let a = instance.stack.pop();
+                let cond = instance.frame.pop().as_i32();
+                let b = instance.frame.pop();
+                let a = instance.frame.pop();
 
                 // true condition
                 if cond != 0 {
-                    instance.stack.push(a);
+                    instance.frame.push(a);
                 } else {
-                    instance.stack.push(b);
+                    instance.frame.push(b);
                 }
 
                 Step::Next
@@ -2493,7 +2730,7 @@ impl TraceVM {
                 else_index,
                 end_index,
             } => {
-                let cond = instance.stack.pop().as_i32();
+                let cond = instance.frame.pop().as_i32();
 
                 if cond != 0 {
                     Step::Next
@@ -2517,7 +2754,7 @@ impl TraceVM {
                 // Unwind to the target label's absolute height (frame base + its
                 // recorded height) while keeping the top `arity` values, then jump.
                 instance
-                    .stack
+                    .frame
                     .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
 
                 Step::JumpTo(*target_index)
@@ -2527,11 +2764,11 @@ impl TraceVM {
                 arity,
                 recorded_height,
             } => {
-                let cond = instance.stack.pop().as_i32();
+                let cond = instance.frame.pop().as_i32();
 
                 if cond != 0 {
                     instance
-                        .stack
+                        .frame
                         .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
 
                     Step::JumpTo(*target_index)
@@ -2549,7 +2786,7 @@ impl TraceVM {
                 // the branch index is an unsigned i32; go through u32 so a
                 // high-bit-set value maps to a large index (→ default), not a
                 // sign-extended one.
-                let index = instance.stack.pop().as_i32() as u32 as usize;
+                let index = instance.frame.pop().as_i32() as u32 as usize;
                 let target_count = targets.len() - 1;
 
                 let branch = if target_count <= index {
@@ -2558,7 +2795,7 @@ impl TraceVM {
                     &targets[index]
                 };
 
-                instance.stack.truncate_by_preserving_arity(
+                instance.frame.truncate_by_preserving_arity(
                     branch.recorded_height + frame_base_height,
                     branch.arity,
                 );
@@ -2571,7 +2808,7 @@ impl TraceVM {
                 recorded_height,
             } => {
                 instance
-                    .stack
+                    .frame
                     .truncate_by_preserving_arity(*recorded_height + frame_base_height, *arity);
 
                 Step::JumpTo(*target_index)
@@ -2585,7 +2822,7 @@ impl TraceVM {
                 // Both are frame-relative, so shift by this frame's base to compare
                 // against the shared stack's absolute height.
                 debug_assert!(
-                    instance.stack.height() == *recorded_height + *arity + frame_base_height
+                    instance.frame.height() == *recorded_height + *arity + frame_base_height
                 );
 
                 Step::Next
@@ -2606,7 +2843,7 @@ impl TraceVM {
     pub(crate) fn const_expr_evaluator(
         instructions: &[StackInstruction],
         globals: &[Val],
-    ) -> Result<Val, TraceWasmError> {
+    ) -> Result<Val, TraceWasmError<StackInstruction>> {
         let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
 
         for instr in instructions {
@@ -2706,12 +2943,12 @@ impl TraceVM {
 /// legibility — it states the intent without asking the reader to work through
 /// IEEE comparison semantics — so note that no input can reach the range test
 /// only to be caught by the guard, and removing it would not change behaviour.
-fn trunc_float_to_int(
+fn trunc_float_to_int<Instr: Instruction>(
     operand: f64,
     low: f64,
     high: f64,
     target: &str,
-) -> Result<f64, InstructionExecutionError> {
+) -> Result<f64, InstructionExecutionError<Instr>> {
     if operand.is_nan() || operand.is_infinite() {
         return Err(InstructionExecutionError::FloatToIntTruncation(
             operand.to_string(),
@@ -2737,13 +2974,13 @@ fn trunc_float_to_int(
 /// arm is inlined into the driver loop along with the rest of dispatch — where
 /// that expansion inflates the loop's frame for a path taken only on a trap.
 #[inline(never)]
-fn signature_mismatch(
+fn signature_mismatch<Instr: Instruction>(
     table_index: TableIndex,
     declared_params: &[ValType],
     declared_results: &[ValType],
     params: &[ValType],
     results: &[ValType],
-) -> InstructionExecutionError {
+) -> InstructionExecutionError<Instr> {
     InstructionExecutionError::CallIndirect(
         table_index,
         CallIndirectError::FunctionSignatureMismatch(
@@ -2768,7 +3005,7 @@ fn signature_mismatch(
 /// it during the unwind rather than reconstructing it afterwards: the trapping
 /// instruction seeds it, and each enclosing frame appends its `call` as the error
 /// passes through. [`TraceVM::run`] closes it into a [`FuncCallError`].
-type Unwind = Vec<TraceRecord>;
+type Unwind<Instr> = Vec<TraceRecord<Instr>>;
 
 /// Seeds an [`Unwind`] at the instruction that trapped.
 ///
@@ -2777,12 +3014,12 @@ type Unwind = Vec<TraceRecord>;
 /// instruction it executes.
 #[inline(never)]
 #[cold]
-fn trap_here(
+fn trap_here<Instr: Instruction>(
     func_index: FuncIndex,
     pc: usize,
     instruction_offsets: &[u32],
-    err: InstructionExecutionError,
-) -> Unwind {
+    err: InstructionExecutionError<Instr>,
+) -> Unwind<Instr> {
     vec![TraceRecord {
         func_index,
         instr_index: pc,
@@ -2794,11 +3031,11 @@ fn trap_here(
 /// Closes a completed [`Unwind`] into the error the caller sees, naming the entry
 /// function the call was made through.
 #[inline(never)]
-fn func_call_err_from_unwind(
+fn func_call_err_from_unwind<Instr: Instruction>(
     func_index: FuncIndex,
-    trace: Unwind,
-    module: &Arc<Module>,
-) -> FuncCallError {
+    trace: Unwind<Instr>,
+    module: &Arc<Module<Instr>>,
+) -> FuncCallError<Instr> {
     // A `TypedFunc` is only handed out for an export, so the lookup resolves;
     // falling back rather than unwrapping keeps a failure while *reporting* a
     // trap from replacing it with a panic.
@@ -2825,20 +3062,20 @@ fn func_call_err_from_unwind(
 ///
 /// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
-fn func_call_err(
+fn func_call_err<Instr: Instruction>(
     func_index: FuncIndex,
     frames: Vec<Frame>,
-    err: InstructionExecutionError,
+    err: InstructionExecutionError<Instr>,
     instr_index: usize,
     instr_offset: u32,
-    module: &Arc<Module>,
-) -> FuncCallError {
+    module: &Arc<Module<Instr>>,
+) -> FuncCallError<Instr> {
     let func_name = module
         .exported_func_name(func_index)
         .map(String::as_str)
         .unwrap_or("<unknown>");
 
-    let mut trace: Vec<TraceRecord> = vec![];
+    let mut trace: Vec<TraceRecord<Instr>> = vec![];
 
     trace.push(TraceRecord {
         func_index: if frames.is_empty() {

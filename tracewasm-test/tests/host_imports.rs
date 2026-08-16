@@ -6,7 +6,7 @@
 //! marshalling and its `MemoryView` plumbing, not interpretation.
 
 use tracewasm_core::{
-    error::TraceWasmError,
+    error::MemoryError,
     instance::traits::{ImportRegistry, Val},
     memory::{MemoryView, linear::LinearMemory},
 };
@@ -34,14 +34,15 @@ impl Host {
     }
 
     /// Fallible: an out-of-bounds pointer from the guest must trap, not panic.
-    /// The `?` converts `MemoryError` through its `From` impl.
+    /// The `?` converts `MemoryError` into the `anyhow::Error` the registry
+    /// reports failures with.
     #[module("env")]
     fn checked_poke<V: MemoryView>(
         &mut self,
         addr: i32,
         byte: i32,
         mem: &mut V,
-    ) -> Result<(i32,), TraceWasmError> {
+    ) -> Result<(i32,), tracewasm_core::anyhow::Error> {
         mem.write_u8(addr as usize, byte as u8)?;
 
         Ok((mem.read_u8(addr as usize)? as i32,))
@@ -106,10 +107,13 @@ fn fallible_host_fn_traps_instead_of_panicking_on_a_bad_pointer() {
         &mut mem,
     );
 
-    // The error reaches the interpreter as a normal trap.
+    // The error reaches the interpreter as a normal trap, and the `MemoryError`
+    // it came from survives being carried as an `anyhow::Error`.
+    let err = res.expect_err("an out-of-bounds poke must fail");
+
     assert!(
-        matches!(res, Err(TraceWasmError::MemoryError(_))),
-        "expected a memory trap, got: {res:?}"
+        err.downcast_ref::<MemoryError>().is_some(),
+        "expected a memory trap, got: {err:?}"
     );
 }
 

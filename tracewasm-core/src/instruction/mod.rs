@@ -7,9 +7,10 @@ use wasmparser::{BlockType, OperatorsReader};
 pub mod register;
 pub mod stack;
 
-pub trait Instruction: Sized {
+pub(crate) trait Instruction: Sized {
     type BrTableTarget;
     type FrameLayout;
+    type RuntimeFrame: Default;
 
     fn emit_instruction_for_func(
         operator_reader: OperatorsReader<'_>,
@@ -19,7 +20,7 @@ pub trait Instruction: Sized {
         func_decls: &[FuncDecl],
         _locals_count: u32,
         _globals_count: u32,
-    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError>;
+    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError<Self>>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to
@@ -126,7 +127,7 @@ fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (
     }
 }
 
-fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
+fn check_memory_index<Instr: Instruction>(index: u32) -> Result<(), TraceWasmError<Instr>> {
     if index != 0 {
         return Err(TraceWasmError::Unsupported(
             "more than one memory".to_string(),

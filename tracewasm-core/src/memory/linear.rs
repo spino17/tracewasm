@@ -346,6 +346,7 @@ mod tests {
     fn allocate_initial_memory_is_page_granular() {
         // The trait API is in pages, so 4 means 4 pages of zeroed bytes.
         let m = <LinearMemory as Memory>::allocate_initial_memory(4);
+
         assert_eq!(m.inner.len(), 4 * WASM_MEMORY_PAGE_SIZE as usize);
         assert!(m.inner.iter().all(|&b| b == 0));
         assert_eq!(m.size_in_pages(), 4);
@@ -356,6 +357,7 @@ mod tests {
         assert_eq!(LinearMemory::with_byte_len(0).size_in_pages(), 0);
         // a partial page reports 0 whole pages
         assert_eq!(LinearMemory::with_byte_len(8).size_in_pages(), 0);
+
         assert_eq!(
             LinearMemory::with_byte_len(WASM_MEMORY_PAGE_SIZE as usize + 1).size_in_pages(),
             1
@@ -369,8 +371,10 @@ mod tests {
     #[test]
     fn fill_writes_only_its_range_with_the_low_byte() {
         let mut m = LinearMemory::with_byte_len(6);
+
         // 0x1FF truncates to 0xFF: `memory.fill` uses only the low byte.
         m.fill(1, 0x1FF, 3).unwrap();
+
         assert_eq!(m.inner, vec![0, 0xFF, 0xFF, 0xFF, 0, 0]);
     }
 
@@ -383,6 +387,7 @@ mod tests {
         m.fill(8, 0xAB, len).unwrap();
 
         assert!(m.inner[..8].iter().all(|&b| b == 0), "prefix untouched");
+
         assert!(
             m.inner[8..].iter().all(|&b| b == 0xAB),
             "whole range filled"
@@ -392,21 +397,27 @@ mod tests {
     #[test]
     fn fill_to_the_exact_end_is_allowed() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.fill(0, 1, 4).unwrap();
+
         assert_eq!(m.inner, vec![1, 1, 1, 1]);
     }
 
     #[test]
     fn fill_zero_length_is_a_noop() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.fill(4, 9, 0).unwrap(); // dest == mem_len with len 0 does not trap
+
         assert_eq!(m.inner, vec![0, 0, 0, 0]);
     }
 
     #[test]
     fn fill_past_end_traps_without_writing_anything() {
         let mut m = LinearMemory::with_byte_len(4);
+
         let res = m.fill(2, 7, 3); // 2 + 3 = 5 > 4
+
         assert!(is_oob(&res, 2, 4));
         assert_eq!(m.inner, vec![0, 0, 0, 0], "must be all-or-nothing");
     }
@@ -414,7 +425,9 @@ mod tests {
     #[test]
     fn fill_length_overflow_traps_instead_of_wrapping() {
         let mut m = LinearMemory::with_byte_len(4);
+
         let res = m.fill(8, 7, usize::MAX); // 8 + usize::MAX would wrap
+
         assert!(is_oob(&res, 8, 4));
         assert_eq!(m.inner, vec![0, 0, 0, 0]);
     }
@@ -426,8 +439,8 @@ mod tests {
     #[test]
     fn copy_within_copies_disjoint_range() {
         let mut m = LinearMemory::with_byte_len(6);
-        m.write(0, &[1, 2, 3]).unwrap();
 
+        m.write(0, &[1, 2, 3]).unwrap();
         m.copy_within(3, 0, 3).unwrap(); // dest = 3, src = 0
 
         assert_eq!(m.inner, vec![1, 2, 3, 1, 2, 3]);
@@ -438,8 +451,8 @@ mod tests {
         // Regression guard: the trait declares (dest, src, len). Swapping them
         // would copy the wrong direction and yield [1,2,3,1,2,3] here.
         let mut m = LinearMemory::with_byte_len(6);
-        m.write(3, &[7, 8, 9]).unwrap(); // [0,0,0,7,8,9]
 
+        m.write(3, &[7, 8, 9]).unwrap(); // [0,0,0,7,8,9]
         m.copy_within(0, 3, 3).unwrap(); // copy src=3..6 into dest=0
 
         assert_eq!(m.inner, vec![7, 8, 9, 7, 8, 9]);
@@ -450,8 +463,8 @@ mod tests {
         // dest just above src: a naive forward byte loop would smear the first
         // byte across the range instead of memmove semantics.
         let mut m = LinearMemory::with_byte_len(5);
-        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
 
+        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
         m.copy_within(1, 0, 4).unwrap(); // [1,1,2,3,4]
 
         assert_eq!(m.inner, vec![1, 1, 2, 3, 4]);
@@ -460,8 +473,8 @@ mod tests {
     #[test]
     fn copy_within_handles_overlap_backward() {
         let mut m = LinearMemory::with_byte_len(5);
-        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
 
+        m.write(0, &[1, 2, 3, 4, 5]).unwrap();
         m.copy_within(0, 1, 4).unwrap(); // [2,3,4,5,5]
 
         assert_eq!(m.inner, vec![2, 3, 4, 5, 5]);
@@ -470,8 +483,8 @@ mod tests {
     #[test]
     fn copy_within_zero_length_is_a_noop() {
         let mut m = LinearMemory::with_byte_len(4);
-        m.write(0, &[1, 2, 3, 4]).unwrap();
 
+        m.write(0, &[1, 2, 3, 4]).unwrap();
         m.copy_within(4, 4, 0).unwrap(); // both ends at mem_len, len 0
 
         assert_eq!(m.inner, vec![1, 2, 3, 4]);
@@ -480,9 +493,11 @@ mod tests {
     #[test]
     fn copy_within_out_of_bounds_src_traps_and_changes_nothing() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.write(0, &[1, 2, 3, 4]).unwrap();
 
         let res = m.copy_within(0, 2, 3); // src 2 + 3 = 5 > 4
+
         assert!(is_oob(&res, 2, 4));
         assert_eq!(m.inner, vec![1, 2, 3, 4], "must be all-or-nothing");
     }
@@ -490,9 +505,11 @@ mod tests {
     #[test]
     fn copy_within_out_of_bounds_dest_traps_and_changes_nothing() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.write(0, &[1, 2, 3, 4]).unwrap();
 
         let res = m.copy_within(2, 0, 3); // dest 2 + 3 = 5 > 4
+
         assert!(is_oob(&res, 2, 4));
         assert_eq!(m.inner, vec![1, 2, 3, 4]);
     }
@@ -500,7 +517,9 @@ mod tests {
     #[test]
     fn copy_within_length_overflow_traps_instead_of_wrapping() {
         let mut m = LinearMemory::with_byte_len(4);
+
         let res = m.copy_within(0, 8, usize::MAX);
+
         assert!(is_oob(&res, 8, 4));
     }
 
@@ -511,6 +530,7 @@ mod tests {
     #[test]
     fn grow_returns_previous_size_and_zeroes_new_pages() {
         let mut m = LinearMemory::new(1);
+
         m.write(0, &[7, 7]).unwrap();
 
         assert_eq!(m.grow(2, 10).unwrap(), 1, "returns the pre-growth size");
@@ -518,7 +538,9 @@ mod tests {
 
         // existing bytes survive, freshly added pages are zeroed
         let mut buf = [0u8; 2];
+
         m.read(0, &mut buf).unwrap();
+
         assert_eq!(buf, [7, 7]);
         assert_eq!(m.read_u8(WASM_MEMORY_PAGE_SIZE as usize).unwrap(), 0);
     }
@@ -528,6 +550,7 @@ mod tests {
         let mut m = LinearMemory::new(2);
 
         let res = m.grow(3, 4); // 2 + 3 = 5 > 4
+
         assert!(matches!(res, Err(MemoryError::GrowFailed(4, 3, 2))));
         assert_eq!(m.size_in_pages(), 2, "a failed grow must not resize");
     }
@@ -535,6 +558,7 @@ mod tests {
     #[test]
     fn grow_to_exactly_max_is_allowed() {
         let mut m = LinearMemory::new(2);
+
         assert_eq!(m.grow(2, 4).unwrap(), 2);
         assert_eq!(m.size_in_pages(), 4);
     }
@@ -542,6 +566,7 @@ mod tests {
     #[test]
     fn grow_by_zero_is_a_noop_reporting_current_size() {
         let mut m = LinearMemory::new(3);
+
         assert_eq!(m.grow(0, 10).unwrap(), 3);
         assert_eq!(m.size_in_pages(), 3);
     }
@@ -551,6 +576,7 @@ mod tests {
         let mut m = LinearMemory::new(1);
         // 1 + u64::MAX would wrap to 0 and wrongly look acceptable.
         let res = m.grow(u64::MAX, u64::MAX);
+
         assert!(matches!(res, Err(MemoryError::GrowFailed(..))));
         assert_eq!(m.size_in_pages(), 1);
     }
@@ -558,6 +584,7 @@ mod tests {
     #[test]
     fn zero_sized_memory_is_empty() {
         let m = LinearMemory::with_byte_len(0);
+
         assert_eq!(m.inner.len(), 0);
     }
 
@@ -568,17 +595,22 @@ mod tests {
     #[test]
     fn write_then_read_roundtrip() {
         let mut m = LinearMemory::with_byte_len(8);
+
         m.write(2, &[0xAA, 0xBB, 0xCC]).unwrap();
 
         let mut buf = [0u8; 3];
+
         m.read(2, &mut buf).unwrap();
+
         assert_eq!(buf, [0xAA, 0xBB, 0xCC]);
     }
 
     #[test]
     fn write_only_touches_its_range() {
         let mut m = LinearMemory::with_byte_len(5);
+
         m.write(1, &[9, 9]).unwrap();
+
         // bytes 0, 3, 4 stay zero; only 1 and 2 change.
         assert_eq!(m.inner, vec![0, 9, 9, 0, 0]);
     }
@@ -586,9 +618,13 @@ mod tests {
     #[test]
     fn access_exactly_to_the_end_is_allowed() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.write(0, &[1, 2, 3, 4]).unwrap(); // offset + len == mem_len
+
         let mut buf = [0u8; 4];
+
         m.read(0, &mut buf).unwrap();
+
         assert_eq!(buf, [1, 2, 3, 4]);
     }
 
@@ -599,22 +635,29 @@ mod tests {
     #[test]
     fn read_past_end_traps() {
         let m = LinearMemory::with_byte_len(4);
+
         let mut buf = [0u8; 2];
+
         let res = m.read(3, &mut buf); // 3 + 2 = 5 > 4
+
         assert!(is_oob(&res, 3, 4));
     }
 
     #[test]
     fn write_past_end_traps() {
         let mut m = LinearMemory::with_byte_len(4);
+
         let res = m.write(3, &[1, 2]); // 3 + 2 = 5 > 4
+
         assert!(is_oob(&res, 3, 4));
     }
 
     #[test]
     fn write_reports_write_not_read_in_error() {
         let mut m = LinearMemory::with_byte_len(1);
+
         let err = m.write(0, &[1, 2]).unwrap_err();
+
         // regression guard for the copy-paste bug where write said "read".
         assert_eq!(
             err.to_string(),
@@ -625,15 +668,19 @@ mod tests {
     #[test]
     fn offset_addition_overflow_traps_instead_of_panicking() {
         let m = LinearMemory::with_byte_len(4);
+
         let mut buf = [0u8; 1];
+
         // usize::MAX + 1 would wrap; checked_add must turn this into a trap.
         let res = m.read(usize::MAX, &mut buf);
+
         assert!(is_oob(&res, usize::MAX, 4));
     }
 
     #[test]
     fn write_offset_addition_overflow_traps_instead_of_panicking() {
         let mut m = LinearMemory::with_byte_len(4);
+
         // The `write` counterpart of the `read` case above: the same wraparound,
         // reported against the write kind.
         assert!(is_oob(&m.write(usize::MAX, &[0u8; 1]), usize::MAX, 4));
@@ -732,6 +779,7 @@ mod tests {
     #[test]
     fn zero_length_access_at_end_is_ok() {
         let mut m = LinearMemory::with_byte_len(4);
+
         assert!(m.read(4, &mut []).is_ok()); // offset == size, len 0
         assert!(m.write(4, &[]).is_ok());
     }
@@ -739,12 +787,14 @@ mod tests {
     #[test]
     fn zero_length_access_past_end_traps() {
         let m = LinearMemory::with_byte_len(4);
+
         assert!(is_oob(&m.read(5, &mut []), 5, 4));
     }
 
     #[test]
     fn zero_sized_memory_allows_only_empty_access_at_zero() {
         let mut m = LinearMemory::with_byte_len(0);
+
         assert!(m.read(0, &mut []).is_ok());
         assert!(m.write(0, &[]).is_ok());
         assert!(is_oob(&m.read(0, &mut [0u8; 1]), 0, 0));
@@ -757,7 +807,9 @@ mod tests {
     #[test]
     fn write_u32_is_little_endian() {
         let mut m = LinearMemory::with_byte_len(4);
+
         m.write_u32(0, 0x0102_0304).unwrap();
+
         assert_eq!(m.inner, vec![0x04, 0x03, 0x02, 0x01]);
     }
 
@@ -766,15 +818,19 @@ mod tests {
         let mut m = LinearMemory::with_byte_len(8);
 
         m.write_u8(0, 0xAB).unwrap();
+
         assert_eq!(m.read_u8(0).unwrap(), 0xAB);
 
         m.write_u16(0, 0xABCD).unwrap();
+
         assert_eq!(m.read_u16(0).unwrap(), 0xABCD);
 
         m.write_u32(0, 0xDEAD_BEEF).unwrap();
+
         assert_eq!(m.read_u32(0).unwrap(), 0xDEAD_BEEF);
 
         m.write_u64(0, 0x0123_4567_89AB_CDEF).unwrap();
+
         assert_eq!(m.read_u64(0).unwrap(), 0x0123_4567_89AB_CDEF);
     }
 
@@ -800,9 +856,11 @@ mod tests {
         let mut m = LinearMemory::with_byte_len(8);
 
         m.write_f32(0, 3.5f32).unwrap();
+
         assert_eq!(m.read_f32(0).unwrap(), 3.5f32);
 
         m.write_f64(0, -2.25f64).unwrap();
+
         assert_eq!(m.read_f64(0).unwrap(), -2.25f64);
     }
 
@@ -812,11 +870,15 @@ mod tests {
 
         // a non-canonical NaN payload must survive the round-trip bit-for-bit.
         let nan = f32::from_bits(0x7FC0_0001);
+
         m.write_f32(0, nan).unwrap();
+
         assert_eq!(m.read_f32(0).unwrap().to_bits(), 0x7FC0_0001);
 
         let nan64 = f64::from_bits(0x7FF8_0000_0000_0001);
+
         m.write_f64(0, nan64).unwrap();
+
         assert_eq!(m.read_f64(0).unwrap().to_bits(), 0x7FF8_0000_0000_0001);
     }
 
@@ -824,6 +886,7 @@ mod tests {
     fn failed_read_leaves_destination_untouched() {
         let m = LinearMemory::with_byte_len(2);
         let mut buf = [7u8; 4];
+
         assert!(m.read(0, &mut buf).is_err()); // needs 4, only 2
         assert_eq!(buf, [7, 7, 7, 7]); // copy happens only after bounds checks pass
     }

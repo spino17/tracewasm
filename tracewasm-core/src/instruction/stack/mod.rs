@@ -79,6 +79,7 @@ use crate::{
         Block, BlockKind, Instruction, check_memory_index, params_and_results_from_blockty,
     },
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
+    runtime::{stack::Stack, value::Value},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -1198,7 +1199,7 @@ impl StackInstruction {
     /// sidecar and no `br_table` target array.
     pub(crate) fn emit_instruction_for_const_expr(
         mut operator_reader: OperatorsReader<'_>,
-    ) -> Result<Vec<StackInstruction>, TraceWasmError> {
+    ) -> Result<Vec<StackInstruction>, TraceWasmError<StackInstruction>> {
         let mut instructions = vec![];
 
         while !operator_reader.eof() {
@@ -1245,6 +1246,7 @@ impl StackInstruction {
 impl Instruction for StackInstruction {
     type BrTableTarget = StackBrTableTarget;
     type FrameLayout = StackFrameLayout;
+    type RuntimeFrame = Stack<Value>;
 
     fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
@@ -1254,7 +1256,7 @@ impl Instruction for StackInstruction {
         func_decls: &[FuncDecl],
         _locals_count: u32,
         _globals_count: u32,
-    ) -> Result<StackLoweredFuncBody, TraceWasmError> {
+    ) -> Result<StackLoweredFuncBody, TraceWasmError<StackInstruction>> {
         let mut instructions: Vec<StackInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();

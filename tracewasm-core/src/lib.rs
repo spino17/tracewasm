@@ -36,12 +36,19 @@
 //! The interpreter itself lives in a crate-internal `vm` module and is not part
 //! of the public API.
 
+/// Re-exported so implementors of
+/// [`ImportRegistry`](instance::traits::ImportRegistry) — and the code
+/// `#[imports]` generates for them — can name the error type its methods return
+/// without taking a direct dependency on `anyhow`. A public trait that requires
+/// naming a foreign type has to hand that type out.
+pub use anyhow;
+
 pub mod error;
 pub mod instance;
 pub mod instruction;
 pub mod memory;
 pub mod module;
-pub(crate) mod vm;
+pub(crate) mod runtime;
 
 /// The single place the crate diverges on a broken internal invariant.
 pub mod tracewasm_unreachable {

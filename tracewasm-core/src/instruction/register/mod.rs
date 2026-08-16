@@ -113,7 +113,7 @@ use crate::{
         },
     },
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    vm::stack::Stack,
+    runtime::{reg::RegFrame, stack::Stack},
 };
 use std::marker::PhantomData;
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -267,6 +267,7 @@ enum StackSlot {
 /// `T` is [`Slot`] for input runs and `u32` for output-register runs; the parameter
 /// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
 /// is, which is what lets instruction variants stay small.
+#[derive(Debug)]
 pub struct Registers<const L: usize, T> {
     /// Index of the run's first entry in its arena; it covers `L` from there.
     start: u32,
@@ -294,6 +295,7 @@ impl<const L: usize, T> Registers<L, T> {
 /// inputs are consumed, so an instruction's output frequently reuses the register one
 /// of its inputs occupied. An executor must read every operand before writing any
 /// destination.
+#[derive(Debug)]
 pub struct Signature<const I: usize, const O: usize> {
     /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
     pub input: Registers<I, Slot>,
@@ -308,6 +310,7 @@ pub struct Signature<const I: usize, const O: usize> {
 /// writes exactly as many destinations as it reads sources. Storing two lengths would
 /// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
 /// its size budget.
+#[derive(Debug)]
 pub struct DynSignature {
     /// Start of the source run in the input arena.
     input: u32,
@@ -1224,7 +1227,7 @@ type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 /// [`Kind`](tracewasm_macros::Kind) derives the fieldless [`RegInstructionKind`]
 /// alongside this, so a table keyed by kind is an exhaustive `match` *and* is
 /// visited in full — see the derive's docs for why both halves matter.
-#[derive(tracewasm_macros::Kind)]
+#[derive(Debug, tracewasm_macros::Kind)]
 pub enum RegInstruction {
     /// `global.set`: write the operand into a global.
     ///
@@ -2089,6 +2092,7 @@ impl RegInstruction {
 impl Instruction for RegInstruction {
     type BrTableTarget = RegBrTableTarget;
     type FrameLayout = RegFrameLayout;
+    type RuntimeFrame = RegFrame;
 
     /// Lowers one function body's operator stream into register form.
     ///
@@ -2111,7 +2115,7 @@ impl Instruction for RegInstruction {
         func_decls: &[FuncDecl],
         locals_count: u32,
         globals_count: u32,
-    ) -> Result<RegLoweredFuncBody, TraceWasmError> {
+    ) -> Result<RegLoweredFuncBody, TraceWasmError<RegInstruction>> {
         let mut instructions: Vec<RegInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);

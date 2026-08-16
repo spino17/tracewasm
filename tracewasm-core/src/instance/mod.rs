@@ -7,11 +7,12 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
+    instruction::{Instruction, stack::StackInstruction},
     memory::Memory,
     module::{FuncIndex, Module},
-    vm::{
+    runtime::{
         TraceVM,
-        stack::{DataVal, ElementVal, Stack, TableVal, Val, Value},
+        value::{DataVal, ElementVal, TableVal, Val},
     },
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -31,18 +32,18 @@ pub mod traits;
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
 /// import implementation. The module is shared via `Arc`, so one compiled module
 /// can back several instances.
-pub struct Instance<M, I> {
+pub struct Instance<M, I, Instr: Instruction> {
     /// The guest's linear memory.
     pub(crate) memory: M,
     /// The operand stack, shared by every frame: locals and operands of a call
     /// chain sit contiguously, and each frame addresses its own region by base
     /// offset. Reset at the start of each [`TypedFunc::call`], which is what
     /// leaves an instance usable after a trap.
-    pub(crate) stack: Stack<Value>,
+    pub(crate) frame: Instr::RuntimeFrame,
     /// Host functions backing the module's declared imports.
     pub(crate) import_registry: I,
     /// The compiled module this instance was created from.
-    pub(crate) module: Arc<Module>,
+    pub(crate) module: Arc<Module<Instr>>,
     /// The limits this instance was created under, already narrowed against what
     /// the module declares.
     pub(crate) config: Config,
@@ -60,7 +61,7 @@ pub struct Instance<M, I> {
     pub(crate) data_vals: Box<[DataVal]>,
 }
 
-impl<M: Memory, I: ImportRegistry> Instance<M, I> {
+impl<M: Memory, I: ImportRegistry, Instr: Instruction> Instance<M, I, Instr> {
     /// Internal constructor assembling an instance from its parts. Crate-private
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
@@ -71,7 +72,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     pub(crate) fn new(
         memory: M,
         import_registry: I,
-        module: Arc<Module>,
+        module: Arc<Module<Instr>>,
         config: Config,
         global_vals: Box<[Val]>,
         table_vals: Box<[TableVal]>,
@@ -80,7 +81,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     ) -> Self {
         Instance {
             memory,
-            stack: Stack::default(),
+            frame: Instr::RuntimeFrame::default(),
             import_registry,
             module,
             config,
@@ -151,8 +152,8 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     pub fn call<M: Memory, I: ImportRegistry>(
         &self,
         params: P,
-        instance: &mut Instance<M, I>,
-    ) -> Result<R, FuncCallError> {
+        instance: &mut Instance<M, I, StackInstruction>,
+    ) -> Result<R, FuncCallError<StackInstruction>> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();
         let module = instance.module.clone();

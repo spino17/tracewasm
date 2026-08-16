@@ -24,14 +24,11 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{
-        Instruction,
-        stack::{StackFrameLayout, StackInstruction},
-    },
+    instruction::{Instruction, stack::StackInstruction},
     memory::Memory,
-    vm::{
+    runtime::{
         TraceVM,
-        stack::{DataVal, ElementVal, TableVal, Val},
+        value::{DataVal, ElementVal, TableVal, Val},
     },
 };
 use core::fmt::{self, Debug};
@@ -432,7 +429,7 @@ impl EntityIndex for FieldIndex {}
 /// single list, imports first, matching how wasm numbers them; the
 /// `imported_*_count` fields record where the boundary falls. See the per-field
 /// docs.
-pub struct Module {
+pub struct Module<Instr: Instruction> {
     /// The type section. Only function types are kept — GC composite types
     /// (struct/array) are rejected during parsing.
     pub types: Box<[FuncType]>,
@@ -476,7 +473,7 @@ pub struct Module {
     /// (with [`GlobalKind::Imported`]), the rest are locally defined.
     pub imported_global_count: u32,
     /// Lowered bodies of the locally-defined functions, in definition order.
-    pub func_bodies: Box<[FuncBody]>,
+    pub func_bodies: Box<[FuncBody<Instr>]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
@@ -489,7 +486,7 @@ pub struct Module {
     dwarf: Option<ModuleDwarf>,
 }
 
-impl Module {
+impl<Instr: Instruction> Module<Instr> {
     /// The module's export map, keyed by export name.
     pub fn exports(&self) -> &FxHashMap<String, Export> {
         &self.exports
@@ -523,7 +520,7 @@ impl Module {
     pub fn get_typed_func<P: Params, R: Results>(
         &self,
         name: &str,
-    ) -> Result<TypedFunc<P, R>, TraceWasmError> {
+    ) -> Result<TypedFunc<P, R>, TraceWasmError<Instr>> {
         let Some(export) = self.export(name) else {
             return Err(TraceWasmError::ExportNotFound(name.to_string()));
         };
@@ -567,13 +564,13 @@ impl Module {
 }
 
 /// A locally-defined function's locals and lowered instruction list.
-pub struct FuncBody {
+pub struct FuncBody<Instr: Instruction> {
     /// All locals addressable in the body: the function's params first, then the
     /// declared locals, expanded from the run-length-encoded body header.
     pub locals: Box<[ValType]>,
     /// The body lowered by [`crate::instruction`] (control flow resolved to
     /// absolute indices).
-    pub instructions: Box<[StackInstruction]>,
+    pub instructions: Box<[Instr]>,
     /// Source positions for [`Self::instructions`], used to point diagnostics at
     /// the original binary.
     ///
@@ -582,7 +579,7 @@ pub struct FuncBody {
     /// `instructions[i]`, and both slices always have the same length. Lowering
     /// pushes the two together, which is what upholds this.
     pub instruction_offsets: Box<[u32]>,
-    pub(crate) frame_layout: StackFrameLayout,
+    pub(crate) frame_layout: Instr::FrameLayout,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -788,7 +785,7 @@ pub enum Export {
 impl Export {
     /// Returns the function index if this is a [`Export::Func`], otherwise
     /// [`TraceWasmError::ExportNotA`].
-    pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
+    pub fn to_func<Instr: Instruction>(&self) -> Result<FuncIndex, TraceWasmError<Instr>> {
         let Export::Func(func_index) = self else {
             return Err(TraceWasmError::ExportNotA("function".to_string()));
         };
@@ -863,10 +860,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex> Default for NameMap<T> {
 impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
     /// Converts a `wasmparser` name map into an owned [`NameMap`], turning each
     /// raw `u32` into the typed index `T`.
-    pub(crate) fn from_wasmparser_name_map(
+    pub(crate) fn from_wasmparser_name_map<Instr: Instruction>(
         map: wasmparser::NameMap<'_>,
         new_map: &mut NameMap<T>,
-    ) -> Result<(), TraceWasmError> {
+    ) -> Result<(), TraceWasmError<Instr>> {
         for name in map {
             let name = name?;
             let index = T::from(name.index);
@@ -903,10 +900,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIn
     IndirectNameMap<T, V>
 {
     /// Converts a `wasmparser` indirect name map into the owned two-level form.
-    pub(crate) fn from_wasmparser_indirect_map(
+    pub(crate) fn from_wasmparser_indirect_map<Instr: Instruction>(
         map: wasmparser::IndirectNameMap<'_>,
         new_map: &mut IndirectNameMap<T, V>,
-    ) -> Result<(), TraceWasmError> {
+    ) -> Result<(), TraceWasmError<Instr>> {
         for entry in map {
             let entry = entry?;
             let outer_index = T::from(entry.index);
@@ -954,7 +951,7 @@ static DEBUG_SECTION_NAMES: phf::Set<&'static str> = phf_set! {
     ".debug_types"
 };
 
-impl Module {
+impl Module<StackInstruction> {
     /// Validates `buf` as a core WebAssembly module and builds an owned
     /// [`Module`] from it, wrapped in an `Arc` so it can be shared across
     /// instances.
@@ -969,7 +966,9 @@ impl Module {
     /// TraceWasm does not model: components, imports other than functions and
     /// globals, 64-bit memory, more than one memory, tables of anything but
     /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
-    pub fn compile(buf: &[u8]) -> Result<Arc<Module>, TraceWasmError> {
+    pub fn compile(
+        buf: &[u8],
+    ) -> Result<Arc<Module<StackInstruction>>, TraceWasmError<StackInstruction>> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
         // that is known to be well-formed.
@@ -1561,7 +1560,9 @@ impl Module {
             dwarf: possible_dwarf,
         }))
     }
+}
 
+impl Module<StackInstruction> {
     /// Instantiates the module against an import registry, producing a runnable
     /// [`Instance`].
     ///
@@ -1592,10 +1593,10 @@ impl Module {
     /// - Anything the module's `start` function raises, since it runs before this
     ///   returns.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
-        self: &Arc<Module>,
+        self: &Arc<Module<StackInstruction>>,
         import_registry: I,
         config: Option<Config>,
-    ) -> Result<Instance<M, I>, TraceWasmError> {
+    ) -> Result<Instance<M, I, StackInstruction>, TraceWasmError<StackInstruction>> {
         let initial_pages = if !self.memories.is_empty() {
             self.memories[0].initial()
         } else {
@@ -1721,7 +1722,9 @@ impl Module {
             };
 
             let expected = ValType::from_wasmparser(global.ty.0.content_type);
-            let val = import_registry.get_global(module_name, global_name)?;
+            let val = import_registry
+                .get_global(module_name, global_name)
+                .unwrap(); // todo!
 
             if !val.has_ty(expected)? {
                 return Err(TraceWasmError::ImportGlobalTypeMismatch(

@@ -49,9 +49,10 @@
 
 use std::time::{Duration, Instant};
 
-use tracewasm_core::error::{FuncCallError, TraceWasmError};
+use tracewasm_core::error::FuncCallError;
 use tracewasm_core::instance::config::Config;
 use tracewasm_core::instance::traits::{ImportRegistry, ImportSignature, ResultVals, Results, Val};
+use tracewasm_core::instruction::stack::StackInstruction;
 use tracewasm_core::memory::{MemoryView, linear::LinearMemory};
 use tracewasm_core::module::Module;
 
@@ -72,7 +73,7 @@ impl ImportRegistry for NoImports {
         func_name: &str,
         _params: &[Val],
         _memory_view: &mut V,
-    ) -> Result<ResultVals, TraceWasmError> {
+    ) -> Result<ResultVals, tracewasm_core::anyhow::Error> {
         unreachable!("guest declares no imports, but called `{module_name}::{func_name}`")
     }
 
@@ -88,7 +89,11 @@ impl ImportRegistry for NoImports {
         0
     }
 
-    fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError> {
+    fn get_global(
+        &self,
+        module_name: &str,
+        global_name: &str,
+    ) -> Result<Val, tracewasm_core::anyhow::Error> {
         unreachable!("guest declares no globals, but read `{module_name}::{global_name}`")
     }
 }
@@ -118,7 +123,7 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // Returns `TypedFunc::call`'s own error type unchanged; boxing it here would
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
-pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
+pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError<StackInstruction>> {
     let module = Module::compile(wasm).expect("module should compile");
 
     let func = module
@@ -169,8 +174,8 @@ pub mod guests {
 /// is well over a megabyte of wasm — so a test file checking many exports should
 /// build one of these and reuse it.
 pub struct Guest {
-    module: std::sync::Arc<Module>,
-    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports>,
+    module: std::sync::Arc<Module<StackInstruction>>,
+    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, StackInstruction>,
 }
 
 impl Guest {
@@ -253,7 +258,11 @@ impl Guest {
 
     /// [`Self::i32_i32`], surfacing the trap instead of panicking.
     #[allow(clippy::result_large_err)]
-    pub fn try_i32_i32(&mut self, name: &str, arg: i32) -> Result<i32, FuncCallError> {
+    pub fn try_i32_i32(
+        &mut self,
+        name: &str,
+        arg: i32,
+    ) -> Result<i32, FuncCallError<StackInstruction>> {
         let f = self
             .module
             .get_typed_func::<(i32,), (i32,)>(name)
@@ -264,7 +273,11 @@ impl Guest {
 
     /// [`Self::i32_i64`], surfacing the trap instead of panicking.
     #[allow(clippy::result_large_err)]
-    pub fn try_i32_i64(&mut self, name: &str, arg: i32) -> Result<i64, FuncCallError> {
+    pub fn try_i32_i64(
+        &mut self,
+        name: &str,
+        arg: i32,
+    ) -> Result<i64, FuncCallError<StackInstruction>> {
         let f = self
             .module
             .get_typed_func::<(i32,), (i64,)>(name)

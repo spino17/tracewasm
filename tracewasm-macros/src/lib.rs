@@ -50,12 +50,12 @@
 //!
 //! A method may return `Result<T, E>` instead of `T` to signal a wasm trap. The
 //! wasm signature is taken from `T`, and the error is propagated with `?`, so any
-//! `E` convertible into a [`TraceWasmError`] works:
+//! `E` convertible into an `anyhow::Error` works:
 //!
 //! ```ignore
 //! #[module("env")]
 //! fn read_byte<V: MemoryView>(&mut self, addr: i32, mem: &mut V)
-//!     -> Result<(i32,), TraceWasmError>
+//!     -> Result<(i32,), anyhow::Error>
 //! {
 //!     Ok((mem.read_u8(addr as usize)? as i32,))   // OOB pointer → trap
 //! }
@@ -409,14 +409,15 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 memory_view: &mut V,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::ResultVals,
-                ::tracewasm_core::error::TraceWasmError,
+                ::tracewasm_core::anyhow::Error,
             > {
                 match (module_name, func_name) {
                     #(#execute_arms)*
                     _ => ::core::result::Result::Err(
-                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
-                            module_name.to_string(),
-                            func_name.to_string(),
+                        ::tracewasm_core::anyhow::anyhow!(
+                            "import not found: {}::{}",
+                            module_name,
+                            func_name
                         ),
                     ),
                 }
@@ -447,14 +448,15 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 global_name: &str,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::Val,
-                ::tracewasm_core::error::TraceWasmError
+                ::tracewasm_core::anyhow::Error
             > {
                 match (module_name, global_name) {
                     #(#get_global_arms)*
                     _ => ::core::result::Result::Err(
-                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
-                            module_name.to_string(),
-                            global_name.to_string(),
+                        ::tracewasm_core::anyhow::anyhow!(
+                            "import not found: {}::{}",
+                            module_name,
+                            global_name
                         ),
                     ),
                 }
