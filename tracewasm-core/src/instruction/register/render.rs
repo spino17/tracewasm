@@ -333,6 +333,14 @@ impl RegInstruction {
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
+            // Kept out of the value-op groups above: it has the shape of a unary
+            // operator but a side effect they do not, and the group comment there
+            // says "pure".
+            RegInstruction::MemoryGrow(sig) => value_op(
+                self.kind(),
+                sig.input.registers(ins),
+                sig.output.registers(outs),
+            ),
             // No operands to show: the only run it carries is its destination.
             RegInstruction::MemorySize(output) => {
                 format!(

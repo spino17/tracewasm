@@ -3358,6 +3358,9 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         //
         // `memory.size` takes no operands, so its case has nothing to push — only
         // the result to drop, which keeps the body to one instruction.
+        RegInstructionKind::MemoryGrow => {
+            Some("(module (memory 1) (func (param i32) local.get 0 memory.grow drop))".into())
+        }
         RegInstructionKind::MemorySize => {
             Some("(module (memory 1) (func memory.size drop))".into())
         }

@@ -1920,6 +1920,7 @@ pub enum RegInstruction {
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
     MemorySize(Registers<1, u32>),
+    MemoryGrow(Signature<1, 1>),
     /// Closes a label, one per `end` operator.
     ///
     /// This is where branches to a `block` or `if` label land — a `loop`'s
@@ -2233,7 +2234,7 @@ impl RegInstruction {
                 Operator::MemoryGrow { mem } => {
                     check_memory_index(mem)?;
 
-                    todo!()
+                    emit!(RegInstruction::MemoryGrow)
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
                     check_memory_index(dst_mem)?;
