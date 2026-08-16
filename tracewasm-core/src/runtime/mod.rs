@@ -905,17 +905,17 @@ impl TraceVM {
                 callee_params.as_ref(),
                 &mut instance.memory,
             )
-            .unwrap();
-        /*
-         todo!.map_err(|err| {
-            Box::new(match is_indirect {
-                Some(table_index) => InstructionExecutionError::CallIndirect(
-                    table_index,
-                    FunctionCall(callee_func_index, Box::new(err)),
-                ),
-                None => InstructionExecutionError::Call(callee_func_index, Box::new(err)),
-            })
-        })?;*/
+            .map_err(|err| {
+                Box::new(match is_indirect {
+                    Some(table_index) => InstructionExecutionError::CallIndirect(
+                        table_index,
+                        FunctionCall(callee_func_index, Box::new(err.into())),
+                    ),
+                    None => {
+                        InstructionExecutionError::Call(callee_func_index, Box::new(err.into()))
+                    }
+                })
+            })?;
 
         // push results to the stack
         for res in results {

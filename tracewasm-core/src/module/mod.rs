@@ -1722,9 +1722,7 @@ impl Module<StackInstruction> {
             };
 
             let expected = ValType::from_wasmparser(global.ty.0.content_type);
-            let val = import_registry
-                .get_global(module_name, global_name)
-                .unwrap(); // todo!
+            let val = import_registry.get_global(module_name, global_name)?;
 
             if !val.has_ty(expected)? {
                 return Err(TraceWasmError::ImportGlobalTypeMismatch(

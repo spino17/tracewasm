@@ -103,6 +103,12 @@ pub enum TraceWasmError<Instr: Instruction> {
     Parsing(String),
 }
 
+impl<Instr: Instruction> From<anyhow::Error> for TraceWasmError<Instr> {
+    fn from(value: anyhow::Error) -> Self {
+        todo!()
+    }
+}
+
 impl<Instr: Instruction> From<wasmparser::Error> for TraceWasmError<Instr> {
     fn from(value: wasmparser::Error) -> Self {
         TraceWasmError::Parsing(value.to_string())
