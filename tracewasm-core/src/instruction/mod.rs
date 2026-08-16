@@ -1,4 +1,4 @@
-use crate::module::FuncType;
+use crate::{error::TraceWasmError, module::FuncType};
 use wasmparser::BlockType;
 
 pub mod register;
@@ -106,4 +106,14 @@ fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (
             (ty.params.len() as u32, ty.results.len() as u32)
         }
     }
+}
+
+fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
+    if index != 0 {
+        return Err(TraceWasmError::Unsupported(
+            "more than one memory".to_string(),
+        ));
+    }
+
+    Ok(())
 }

@@ -333,6 +333,14 @@ impl RegInstruction {
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
+            // No operands to show: the only run it carries is its destination.
+            RegInstruction::MemorySize(output) => {
+                format!(
+                    "{:<12} -> {}",
+                    mnemonic(self.kind()),
+                    regs(output.registers(outs))
+                )
+            }
             RegInstruction::Select(sig) => format!(
                 "select       {} -> {}",
                 list(sig.input.registers(ins)),

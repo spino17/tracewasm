@@ -75,7 +75,7 @@
 
 use crate::{
     error::TraceWasmError,
-    instruction::{Block, BlockKind, params_and_results_from_blockty},
+    instruction::{Block, BlockKind, check_memory_index, params_and_results_from_blockty},
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -1179,16 +1179,6 @@ enum StackEffectResult {
 }
 
 impl Instruction {
-    fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
-        if index != 0 {
-            return Err(TraceWasmError::Unsupported(
-                "more than one memory".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Lowers one operator stream into a flat `Vec<Instruction>` with control
     /// flow resolved and stack heights precomputed.
     ///
@@ -1282,7 +1272,7 @@ impl Instruction {
                 Operator::RefIsNull => (Instruction::RefIsNull, StackEffectResult::UnaryOperator),
                 // memory
                 Operator::MemorySize { mem } => {
-                    Self::check_memory_index(mem)?;
+                    check_memory_index(mem)?;
 
                     (
                         Instruction::MemorySize,
@@ -1290,7 +1280,7 @@ impl Instruction {
                     )
                 }
                 Operator::MemoryGrow { mem } => {
-                    Self::check_memory_index(mem)?;
+                    check_memory_index(mem)?;
 
                     (
                         Instruction::MemoryGrow,
@@ -1298,8 +1288,8 @@ impl Instruction {
                     )
                 }
                 Operator::MemoryCopy { dst_mem, src_mem } => {
-                    Self::check_memory_index(dst_mem)?;
-                    Self::check_memory_index(src_mem)?;
+                    check_memory_index(dst_mem)?;
+                    check_memory_index(src_mem)?;
 
                     (
                         Instruction::MemoryCopy,
@@ -1307,7 +1297,7 @@ impl Instruction {
                     )
                 }
                 Operator::MemoryFill { mem } => {
-                    Self::check_memory_index(mem)?;
+                    check_memory_index(mem)?;
 
                     (
                         Instruction::MemoryFill,
@@ -1315,7 +1305,7 @@ impl Instruction {
                     )
                 }
                 Operator::MemoryInit { data_index, mem } => {
-                    Self::check_memory_index(mem)?;
+                    check_memory_index(mem)?;
 
                     (
                         Instruction::MemoryInit { data_index },

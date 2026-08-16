@@ -106,7 +106,7 @@
 use crate::{
     error::TraceWasmError,
     instruction::{
-        Block, BlockKind, params_and_results_from_blockty,
+        Block, BlockKind, check_memory_index, params_and_results_from_blockty,
         register::lazy::{
             Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
             LocalSlot, SpillArena, SpillIndex,
@@ -1275,7 +1275,9 @@ pub enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else { end_index: u32 },
+    Else {
+        end_index: u32,
+    },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -1917,6 +1919,7 @@ pub enum RegInstruction {
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
+    MemorySize(Registers<1, u32>),
     /// Closes a label, one per `end` operator.
     ///
     /// This is where branches to a `block` or `if` label land — a `loop`'s
@@ -2221,6 +2224,34 @@ impl RegInstruction {
                     simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
                 }
                 Operator::RefIsNull => emit!(RegInstruction::RefIsNull),
+
+                Operator::MemorySize { mem } => {
+                    check_memory_index(mem)?;
+
+                    emit!(|sig: Signature<0, 1>| { RegInstruction::MemorySize(sig.output) })
+                }
+                Operator::MemoryGrow { mem } => {
+                    check_memory_index(mem)?;
+
+                    todo!()
+                }
+                Operator::MemoryCopy { dst_mem, src_mem } => {
+                    check_memory_index(dst_mem)?;
+                    check_memory_index(src_mem)?;
+
+                    todo!()
+                }
+                Operator::MemoryFill { mem } => {
+                    check_memory_index(mem)?;
+
+                    todo!()
+                }
+                Operator::MemoryInit { data_index, mem } => {
+                    check_memory_index(mem)?;
+
+                    todo!()
+                }
+                Operator::DataDrop { data_index } => todo!(),
 
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value));
