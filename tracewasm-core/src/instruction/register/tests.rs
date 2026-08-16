@@ -29,30 +29,9 @@ use wasmparser::Parser;
 // values, which also keeps assertions reading like the emitted code.
 // ---------------------------------------------------------------------------
 
-/// Renders one operand: `5`, `local1`, `global0`, `spill0`, `r2`, `(0)ref`.
-fn slot_str(s: &Slot) -> String {
-    match s {
-        Slot::Const(Const::I32(v)) => format!("{v}"),
-        Slot::Const(Const::I64(v)) => format!("{v}i64"),
-        Slot::Const(Const::F32(v)) => format!("{v}f32"),
-        Slot::Const(Const::F64(v)) => format!("{v}f64"),
-        Slot::Const(Const::Ref(v)) => {
-            if let Some(func_index) = v {
-                format!("({})ref", func_index.0)
-            } else {
-                "(null)ref".to_string()
-            }
-        }
-        Slot::Local(n) => format!("local{n}"),
-        Slot::Global(n) => format!("global{n}"),
-        Slot::Spilled(i) => format!("spill{i}"),
-        Slot::Register(r) => format!("r{r}"),
-    }
-}
-
 /// Renders a run of operands.
 fn slots(xs: &[Slot]) -> Vec<String> {
-    xs.iter().map(slot_str).collect()
+    xs.iter().map(|x| x.render()).collect()
 }
 
 /// Renders what `set_lazy` returned: `Some("spill0")` when it rescued a borrow.
@@ -175,458 +154,6 @@ fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncTy
     (body, types)
 }
 
-/// Renders a lowered body as one line per instruction, operands resolved against
-/// the arenas.
-///
-/// Assertions compare against this rather than against the enum, so a failure shows
-/// the whole program and a reader can see what changed.
-fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
-    let (instructions, frame) = body;
-    let ins = &frame.input_registers_arena;
-    let outs = &frame.output_registers_arena;
-
-    let slot = slot_str;
-    let sig1 = |i: &Registers<1, Slot>| slot(&i.registers(ins)[0]);
-    let list = |xs: &[Slot]| xs.iter().map(slot).collect::<Vec<_>>().join(", ");
-
-    let regs = |xs: &[u32]| {
-        xs.iter()
-            .map(|r| format!("r{r}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    // Every pure value operator renders alike, so the arms below carry no body of
-    // their own. They are split by arity because an or-pattern binds one type, and
-    // then by family, so they scan in the order the enum declares them.
-    let load_op = |kind, offset: u32, inputs: &[Slot], outputs: &[u32]| {
-        format!(
-            "{:<12} [{}]+{offset} -> {}",
-            mnemonic(kind),
-            slot(&inputs[0]),
-            regs(outputs)
-        )
-    };
-
-    let store_op = |kind, offset: u32, inputs: &[Slot]| {
-        format!(
-            "{:<12} [{}]+{offset} <- {}",
-            mnemonic(kind),
-            slot(&inputs[0]),
-            slot(&inputs[1])
-        )
-    };
-
-    let value_op = |kind, inputs: &[Slot], outputs: &[u32]| {
-        format!(
-            "{:<12} {} -> {}",
-            mnemonic(kind),
-            list(inputs),
-            regs(outputs)
-        )
-    };
-
-    let mut out = String::new();
-
-    for (pc, i) in instructions.iter().enumerate() {
-        let line = match i {
-            // Numeric instructions, in the order the enum declares them.
-            //
-            // Split by shape because an or-pattern binds one type, and the three
-            // shapes bind different ones — but each body is a single call, so the
-            // arms stay one line and the families stay in step with the enum.
-            // i32 — loads
-            RegInstruction::I32Load { offset, sig }
-            | RegInstruction::I32Load8S { offset, sig }
-            | RegInstruction::I32Load8U { offset, sig }
-            | RegInstruction::I32Load16S { offset, sig }
-            | RegInstruction::I32Load16U { offset, sig } => load_op(
-                i.kind(),
-                *offset,
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // i32 — stores
-            RegInstruction::I32Store { offset, sig }
-            | RegInstruction::I32Store8 { offset, sig }
-            | RegInstruction::I32Store16 { offset, sig } => {
-                store_op(i.kind(), *offset, sig.input.registers(ins))
-            }
-
-            // i32 — unary
-            RegInstruction::I32Clz(sig)
-            | RegInstruction::I32Ctz(sig)
-            | RegInstruction::I32Eqz(sig)
-            | RegInstruction::I32Extend16S(sig)
-            | RegInstruction::I32Extend8S(sig)
-            | RegInstruction::I32Popcnt(sig)
-            | RegInstruction::I32ReinterpretF32(sig)
-            | RegInstruction::I32TruncF32S(sig)
-            | RegInstruction::I32TruncF32U(sig)
-            | RegInstruction::I32TruncF64S(sig)
-            | RegInstruction::I32TruncF64U(sig)
-            | RegInstruction::I32TruncSatF32S(sig)
-            | RegInstruction::I32TruncSatF32U(sig)
-            | RegInstruction::I32TruncSatF64S(sig)
-            | RegInstruction::I32TruncSatF64U(sig)
-            | RegInstruction::I32WrapI64(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // i32 — binary
-            RegInstruction::I32Add(sig)
-            | RegInstruction::I32And(sig)
-            | RegInstruction::I32DivS(sig)
-            | RegInstruction::I32DivU(sig)
-            | RegInstruction::I32Eq(sig)
-            | RegInstruction::I32GeS(sig)
-            | RegInstruction::I32GeU(sig)
-            | RegInstruction::I32GtS(sig)
-            | RegInstruction::I32GtU(sig)
-            | RegInstruction::I32LeS(sig)
-            | RegInstruction::I32LeU(sig)
-            | RegInstruction::I32LtS(sig)
-            | RegInstruction::I32LtU(sig)
-            | RegInstruction::I32Mul(sig)
-            | RegInstruction::I32Ne(sig)
-            | RegInstruction::I32Or(sig)
-            | RegInstruction::I32RemS(sig)
-            | RegInstruction::I32RemU(sig)
-            | RegInstruction::I32Rotl(sig)
-            | RegInstruction::I32Rotr(sig)
-            | RegInstruction::I32Shl(sig)
-            | RegInstruction::I32ShrS(sig)
-            | RegInstruction::I32ShrU(sig)
-            | RegInstruction::I32Sub(sig)
-            | RegInstruction::I32Xor(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // i64 — loads
-            RegInstruction::I64Load { offset, sig }
-            | RegInstruction::I64Load8S { offset, sig }
-            | RegInstruction::I64Load8U { offset, sig }
-            | RegInstruction::I64Load16S { offset, sig }
-            | RegInstruction::I64Load16U { offset, sig }
-            | RegInstruction::I64Load32S { offset, sig }
-            | RegInstruction::I64Load32U { offset, sig } => load_op(
-                i.kind(),
-                *offset,
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // i64 — stores
-            RegInstruction::I64Store { offset, sig }
-            | RegInstruction::I64Store8 { offset, sig }
-            | RegInstruction::I64Store16 { offset, sig }
-            | RegInstruction::I64Store32 { offset, sig } => {
-                store_op(i.kind(), *offset, sig.input.registers(ins))
-            }
-
-            // i64 — unary
-            RegInstruction::I64Clz(sig)
-            | RegInstruction::I64Ctz(sig)
-            | RegInstruction::I64Eqz(sig)
-            | RegInstruction::I64Extend16S(sig)
-            | RegInstruction::I64Extend32S(sig)
-            | RegInstruction::I64Extend8S(sig)
-            | RegInstruction::I64ExtendI32S(sig)
-            | RegInstruction::I64ExtendI32U(sig)
-            | RegInstruction::I64Popcnt(sig)
-            | RegInstruction::I64ReinterpretF64(sig)
-            | RegInstruction::I64TruncF32S(sig)
-            | RegInstruction::I64TruncF32U(sig)
-            | RegInstruction::I64TruncF64S(sig)
-            | RegInstruction::I64TruncF64U(sig)
-            | RegInstruction::I64TruncSatF32S(sig)
-            | RegInstruction::I64TruncSatF32U(sig)
-            | RegInstruction::I64TruncSatF64S(sig)
-            | RegInstruction::I64TruncSatF64U(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // i64 — binary
-            RegInstruction::I64Add(sig)
-            | RegInstruction::I64And(sig)
-            | RegInstruction::I64DivS(sig)
-            | RegInstruction::I64DivU(sig)
-            | RegInstruction::I64Eq(sig)
-            | RegInstruction::I64GeS(sig)
-            | RegInstruction::I64GeU(sig)
-            | RegInstruction::I64GtS(sig)
-            | RegInstruction::I64GtU(sig)
-            | RegInstruction::I64LeS(sig)
-            | RegInstruction::I64LeU(sig)
-            | RegInstruction::I64LtS(sig)
-            | RegInstruction::I64LtU(sig)
-            | RegInstruction::I64Mul(sig)
-            | RegInstruction::I64Ne(sig)
-            | RegInstruction::I64Or(sig)
-            | RegInstruction::I64RemS(sig)
-            | RegInstruction::I64RemU(sig)
-            | RegInstruction::I64Rotl(sig)
-            | RegInstruction::I64Rotr(sig)
-            | RegInstruction::I64Shl(sig)
-            | RegInstruction::I64ShrS(sig)
-            | RegInstruction::I64ShrU(sig)
-            | RegInstruction::I64Sub(sig)
-            | RegInstruction::I64Xor(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f32 — loads
-            RegInstruction::F32Load { offset, sig } => load_op(
-                i.kind(),
-                *offset,
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f32 — stores
-            RegInstruction::F32Store { offset, sig } => {
-                store_op(i.kind(), *offset, sig.input.registers(ins))
-            }
-
-            // f32 — unary
-            RegInstruction::F32Abs(sig)
-            | RegInstruction::F32Ceil(sig)
-            | RegInstruction::F32ConvertI32S(sig)
-            | RegInstruction::F32ConvertI32U(sig)
-            | RegInstruction::F32ConvertI64S(sig)
-            | RegInstruction::F32ConvertI64U(sig)
-            | RegInstruction::F32DemoteF64(sig)
-            | RegInstruction::F32Floor(sig)
-            | RegInstruction::F32Nearest(sig)
-            | RegInstruction::F32Neg(sig)
-            | RegInstruction::F32ReinterpretI32(sig)
-            | RegInstruction::F32Sqrt(sig)
-            | RegInstruction::F32Trunc(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f32 — binary
-            RegInstruction::F32Add(sig)
-            | RegInstruction::F32Copysign(sig)
-            | RegInstruction::F32Div(sig)
-            | RegInstruction::F32Eq(sig)
-            | RegInstruction::F32Ge(sig)
-            | RegInstruction::F32Gt(sig)
-            | RegInstruction::F32Le(sig)
-            | RegInstruction::F32Lt(sig)
-            | RegInstruction::F32Max(sig)
-            | RegInstruction::F32Min(sig)
-            | RegInstruction::F32Mul(sig)
-            | RegInstruction::F32Ne(sig)
-            | RegInstruction::F32Sub(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f64 — loads
-            RegInstruction::F64Load { offset, sig } => load_op(
-                i.kind(),
-                *offset,
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f64 — stores
-            RegInstruction::F64Store { offset, sig } => {
-                store_op(i.kind(), *offset, sig.input.registers(ins))
-            }
-
-            // f64 — unary
-            RegInstruction::F64Abs(sig)
-            | RegInstruction::F64Ceil(sig)
-            | RegInstruction::F64ConvertI32S(sig)
-            | RegInstruction::F64ConvertI32U(sig)
-            | RegInstruction::F64ConvertI64S(sig)
-            | RegInstruction::F64ConvertI64U(sig)
-            | RegInstruction::F64Floor(sig)
-            | RegInstruction::F64Nearest(sig)
-            | RegInstruction::F64Neg(sig)
-            | RegInstruction::F64PromoteF32(sig)
-            | RegInstruction::F64ReinterpretI64(sig)
-            | RegInstruction::F64Sqrt(sig)
-            | RegInstruction::F64Trunc(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            // f64 — binary
-            RegInstruction::F64Add(sig)
-            | RegInstruction::F64Copysign(sig)
-            | RegInstruction::F64Div(sig)
-            | RegInstruction::F64Eq(sig)
-            | RegInstruction::F64Ge(sig)
-            | RegInstruction::F64Gt(sig)
-            | RegInstruction::F64Le(sig)
-            | RegInstruction::F64Lt(sig)
-            | RegInstruction::F64Max(sig)
-            | RegInstruction::F64Min(sig)
-            | RegInstruction::F64Mul(sig)
-            | RegInstruction::F64Ne(sig)
-            | RegInstruction::F64Sub(sig) => value_op(
-                i.kind(),
-                sig.input.registers(ins),
-                sig.output.registers(outs),
-            ),
-
-            RegInstruction::LocalSet { index, sig } => format!(
-                "local.set    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalTee { index, sig } => format!(
-                "local.tee    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::GlobalSet { index, sig } => format!(
-                "global.set   global{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalSpill { index, spill_index } => {
-                format!("local.spill  local{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                format!("global.spill global{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::RefIsNull(sig) => format!(
-                "ref.is_null  {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::Select(sig) => format!(
-                "select       {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::Move(sig) => format!(
-                "move         {} -> {}",
-                list(sig.input_registers(ins)),
-                regs(sig.output_registers(outs))
-            ),
-            RegInstruction::If {
-                cond,
-                else_index,
-                end_index,
-            } => format!(
-                "if           {} else={} end={}",
-                sig1(&cond.input),
-                else_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "-".into()),
-                end_index
-            ),
-            RegInstruction::Else { end_index } => format!("else         end={end_index}"),
-            RegInstruction::Br { target_index } => format!("br           -> {target_index}"),
-            RegInstruction::BrIf {
-                cond,
-                mov,
-                target_index,
-            } => format!(
-                "br_if        {} -> {target_index}{}",
-                sig1(cond),
-                if mov.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "  move {} -> {}",
-                        list(mov.input_registers(ins)),
-                        regs(mov.output_registers(outs))
-                    )
-                }
-            ),
-            RegInstruction::BrTable {
-                index,
-                targets_start,
-                targets_len,
-            } => {
-                let arms = &frame.br_targets_arena
-                    [*targets_start as usize..(targets_start + targets_len) as usize];
-
-                let rendered: Vec<String> = arms
-                    .iter()
-                    .map(|a| {
-                        if a.mov.is_empty() {
-                            format!("->{}", a.target_index)
-                        } else {
-                            format!(
-                                "->{} [{} -> {}]",
-                                a.target_index,
-                                list(a.mov.input_registers(ins)),
-                                regs(a.mov.output_registers(outs))
-                            )
-                        }
-                    })
-                    .collect();
-
-                format!("br_table     {} {}", sig1(index), rendered.join(" "))
-            }
-            RegInstruction::Return { target_index } => format!("return       -> {target_index}"),
-            RegInstruction::Call {
-                func_index,
-                caller_base,
-            } => format!("call         f{} caller_base={caller_base}", func_index.0),
-            RegInstruction::CallIndirect {
-                ty_index,
-                table_index,
-                slot,
-                operands,
-                caller_base,
-            } => {
-                // Both runs are implicit: the arguments are the `params` operands
-                // starting at `operands`, and their destinations are the same many
-                // registers based at `caller_base`. Rendering them the way the
-                // executor has to reconstruct them is the point — a test that read
-                // them any other way would not notice the two disagreeing.
-                let params = types[ty_index.0 as usize].params.len();
-                let args = &ins[*operands as usize..*operands as usize + params];
-                let dsts: Vec<u32> = (0..params as u32).map(|i| caller_base + i).collect();
-
-                format!(
-                    "call_indirect [{}] ty{} table{} caller_base={caller_base}{}",
-                    sig1(slot),
-                    ty_index.0,
-                    table_index.0,
-                    if params == 0 {
-                        String::new()
-                    } else {
-                        format!("  move {} -> {}", list(args), regs(&dsts))
-                    }
-                )
-            }
-            RegInstruction::Unreachable => "unreachable".to_string(),
-            RegInstruction::End => "end".to_string(),
-        };
-
-        out.push_str(&format!("{pc:>3}  {line}\n"));
-    }
-
-    out.push_str(&format!(
-        "     frame: {} registers, {} spills\n",
-        frame.registers, frame.spills
-    ));
-
-    out
-}
-
 /// Asserts a lowered body renders exactly as `expected`, ignoring leading
 /// indentation so the expectation can be written inline.
 fn assert_lowers_to(wat: &str, expected: &str) {
@@ -636,7 +163,7 @@ fn assert_lowers_to(wat: &str, expected: &str) {
 /// [`assert_lowers_to`] for a body that is not function 0 — a caller, typically.
 fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
     let (body, types) = lower_func_with_types(wat, n);
-    let got = render(&body, &types);
+    let got = RegInstruction::render_body(&body, &types);
 
     let norm = |s: &str| {
         s.lines()
@@ -806,11 +333,7 @@ fn tee_spills_before_reading_the_top() {
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
-    assert_eq!(
-        slot_str(&operand),
-        "spill0",
-        "tee must observe the redirect"
-    );
+    assert_eq!(operand.render(), "spill0", "tee must observe the redirect");
 
     assert_eq!(s.stack.height(), 1, "tee peeks, it does not consume");
 }
@@ -889,11 +412,11 @@ fn a_reference_is_stored_in_place() {
 /// `funcref` from a null `externref`, so nothing needs to.
 #[test]
 fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
-    let funcref = render(
+    let funcref = RegInstruction::render_body(
         &lower("(module (func (result funcref) ref.null func))"),
         &[],
     );
-    let externref = render(
+    let externref = RegInstruction::render_body(
         &lower("(module (func (result externref) ref.null extern))"),
         &[],
     );
@@ -1390,7 +913,7 @@ fn a_conditional_arm_cannot_own_the_spill() {
             frame.read(&consumer),
             42,
             "{tag}: <use> reads {}, which that path never wrote",
-            slot_str(&consumer)
+            consumer.render()
         );
     }
 }
@@ -1657,8 +1180,8 @@ fn a_local_and_a_global_of_the_same_index_are_independent() {
         "local 0's borrow must survive a write to global 0"
     );
 
-    assert_eq!(slot_str(&s.pop()), "spill0", "the global was rescued");
-    assert_eq!(slot_str(&s.pop()), "local0", "the local still forwards");
+    assert_eq!(s.pop().render(), "spill0", "the global was rescued");
+    assert_eq!(s.pop().render(), "local0", "the local still forwards");
 }
 
 #[test]
@@ -1691,9 +1214,9 @@ fn writing_one_local_leaves_other_borrows_alone() {
     let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(slot_str(&s.pop()), "local2", "untouched above");
-    assert_eq!(slot_str(&s.pop()), "spill0", "rescued");
-    assert_eq!(slot_str(&s.pop()), "local0", "untouched below");
+    assert_eq!(s.pop().render(), "local2", "untouched above");
+    assert_eq!(s.pop().render(), "spill0", "rescued");
+    assert_eq!(s.pop().render(), "local0", "untouched below");
 }
 
 #[test]
@@ -1724,7 +1247,7 @@ fn three_borrows_share_one_entry() {
     );
 
     for _ in 0..3 {
-        assert_eq!(slot_str(&s.pop()), "spill0", "all three redirect");
+        assert_eq!(s.pop().render(), "spill0", "all three redirect");
     }
 
     // the pool only reclaims once the last of them is gone
@@ -1743,7 +1266,7 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
     // `local.tee 0` on a value read from local 0: correct, if redundant
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(slot_str(&operand), "spill0");
+    assert_eq!(operand.render(), "spill0");
 }
 
 // ---------------------------------------------------------------------------
@@ -2661,7 +2184,7 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
     assert!(
         spill < branch,
         "spill at {spill} must precede the branch at {branch}:\n{}",
-        render(&body, &[])
+        RegInstruction::render_body(&body, &[])
     );
 }
 
@@ -3443,7 +2966,7 @@ fn code_after_an_unreachable_is_dropped() {
     assert!(
         index_of(&body.0, |i| i.kind() == RegInstructionKind::I32Add).is_none(),
         "the operators after the trap cannot execute:\n{}",
-        render(&body, &[]),
+        RegInstruction::render_body(&body, &[]),
     );
 }
 
@@ -3562,34 +3085,6 @@ fn a_trapping_block_still_reserves_its_results() {
 // results, or as a missing one — so a case cannot quietly encode the wrong arity
 // either.
 // ---------------------------------------------------------------------------
-
-/// The wasm mnemonic for a value-op kind: `I32TruncSatF32U` → `i32.trunc_sat_f32_u`.
-///
-/// Derived rather than tabulated, because 136 hand-written strings is 136 chances
-/// to write `i32.extend_8_s` for `i32.extend8_s`. The rule is one line: start a
-/// word at each capital, so digits stay attached to the word they follow, and the
-/// first word is the type prefix.
-///
-/// It is not taken on trust — [`arity_case`] builds each operator's `.wat` from
-/// this, and that `.wat` has to assemble, validate, and contain the operator the
-/// kind is named after. A wrong mnemonic fails those rather than quietly
-/// rendering an instruction under a name that does not exist.
-fn mnemonic(kind: RegInstructionKind) -> String {
-    let mut words: Vec<String> = vec![];
-
-    for character in format!("{kind:?}").chars() {
-        if character.is_ascii_uppercase() || words.is_empty() {
-            words.push(String::new());
-        }
-
-        words
-            .last_mut()
-            .expect("just pushed")
-            .push(character.to_ascii_lowercase());
-    }
-
-    format!("{}.{}", words[0], words[1..].join("_"))
-}
 
 /// The type a value op's operands have, which its `.wat` case has to declare.
 ///
@@ -3961,7 +3456,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             prog.len(),
             2,
             "{operator}: case must lower to one instruction and `end`:\n{}",
-            render(&body, &[])
+            RegInstruction::render_body(&body, &[])
         );
 
         let pops = frame.input_registers_arena.len() as i64;

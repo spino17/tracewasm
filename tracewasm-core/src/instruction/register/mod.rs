@@ -119,6 +119,7 @@ use std::marker::PhantomData;
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
+pub mod render;
 
 #[cfg(test)]
 mod tests;
@@ -204,6 +205,26 @@ impl Slot {
     /// the simulated stack's two heights. See the module docs.
     fn is_register(&self) -> bool {
         matches!(self, Slot::Register(_))
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Slot::Const(Const::I32(v)) => format!("{v}"),
+            Slot::Const(Const::I64(v)) => format!("{v}i64"),
+            Slot::Const(Const::F32(v)) => format!("{v}f32"),
+            Slot::Const(Const::F64(v)) => format!("{v}f64"),
+            Slot::Const(Const::Ref(v)) => {
+                if let Some(func_index) = v {
+                    format!("({})ref", func_index.0)
+                } else {
+                    "(null)ref".to_string()
+                }
+            }
+            Slot::Local(n) => format!("local{n}"),
+            Slot::Global(n) => format!("global{n}"),
+            Slot::Spilled(i) => format!("spill{i}"),
+            Slot::Register(r) => format!("r{r}"),
+        }
     }
 }
 
@@ -2918,4 +2939,32 @@ impl RegInstruction {
 
         Ok((instructions, frame))
     }
+}
+
+/// The wasm mnemonic for a value-op kind: `I32TruncSatF32U` → `i32.trunc_sat_f32_u`.
+///
+/// Derived rather than tabulated, because 136 hand-written strings is 136 chances
+/// to write `i32.extend_8_s` for `i32.extend8_s`. The rule is one line: start a
+/// word at each capital, so digits stay attached to the word they follow, and the
+/// first word is the type prefix.
+///
+/// It is not taken on trust — `arity_case` in the tests builds each operator's
+/// `.wat` from this, and that `.wat` has to assemble, validate, and contain the
+/// operator the kind is named after. A wrong mnemonic fails those rather than
+/// quietly rendering an instruction under a name that does not exist.
+pub(crate) fn mnemonic(kind: RegInstructionKind) -> String {
+    let mut words: Vec<String> = vec![];
+
+    for character in format!("{kind:?}").chars() {
+        if character.is_ascii_uppercase() || words.is_empty() {
+            words.push(String::new());
+        }
+
+        words
+            .last_mut()
+            .expect("just pushed")
+            .push(character.to_ascii_lowercase());
+    }
+
+    format!("{}.{}", words[0], words[1..].join("_"))
 }
