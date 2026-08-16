@@ -1,12 +1,12 @@
 use crate::{
     instruction::register::{
-        FrameLayout, LoweredRegFuncBody, RegInstruction, Registers, Slot, mnemonic,
+        RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot, mnemonic,
     },
     module::FuncType,
 };
 
 impl RegInstruction {
-    pub fn render(&self, frame: &FrameLayout, types: &[FuncType]) -> String {
+    pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
         let ins = &frame.input_registers_arena;
         let outs = &frame.output_registers_arena;
 
@@ -486,7 +486,7 @@ impl RegInstruction {
     ///
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.
-    pub fn render_body(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
+    pub fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
         let (instructions, _, frame) = body;
         let mut out = String::new();
 

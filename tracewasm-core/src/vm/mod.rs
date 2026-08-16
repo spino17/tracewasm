@@ -80,7 +80,7 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
-    instruction::stack::{BrTableTarget, Instruction},
+    instruction::stack::{StackBrTableTarget, StackInstruction},
     memory::Memory,
     module::{FuncIndex, FuncKind, LocalIndex, Module, TableIndex, ValType, formatted_val_types},
     vm::stack::{DataVal, Stack, Val, Value},
@@ -144,13 +144,13 @@ enum Step {
 /// [`Module`], so saving a frame copies pointers rather than instructions.
 struct Frame<'a> {
     func_index: FuncIndex,
-    instructions: &'a [Instruction],
+    instructions: &'a [StackInstruction],
     /// Index of the `call` itself, not the instruction after it; resuming adds
     /// one, and a trace records the call site.
     pc: u32,
     caller_base_height: u32,
     frame_base_height: u32,
-    br_table_targets: &'a [BrTableTarget],
+    br_table_targets: &'a [StackBrTableTarget],
     instruction_offsets: &'a [u32],
     /// Result count of the callee, needed on return to know how much of its
     /// region to keep when truncating back to `caller_base_height`.
@@ -271,7 +271,7 @@ impl TraceVM {
         // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
         // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
         // loads for a pair that is fixed for the whole frame.
-        let br_table_targets: &[BrTableTarget] = &func_body.frame_layout.br_targets_arena;
+        let br_table_targets: &[StackBrTableTarget] = &func_body.frame_layout.br_targets_arena;
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -814,16 +814,16 @@ impl TraceVM {
     /// the driver adds where.
     #[inline(always)]
     fn execute_instruction<M: Memory, I: ImportRegistry>(
-        instr: &Instruction,
+        instr: &StackInstruction,
         caller_base_height: u32,
         frame_base_height: u32,
         module: &Module,
         instance: &mut Instance<M, I>,
-        br_table_targets: &[BrTableTarget],
+        br_table_targets: &[StackBrTableTarget],
         imported_func_count: u32,
     ) -> Result<Step, Box<InstructionExecutionError>> {
         let res = match instr {
-            Instruction::Call {
+            StackInstruction::Call {
                 func_index: callee_func_index,
                 params_count: callee_params_count,
             } => {
@@ -848,7 +848,7 @@ impl TraceVM {
                     Step::Next
                 }
             }
-            Instruction::CallIndirect {
+            StackInstruction::CallIndirect {
                 ty_index,
                 table_index,
             } => {
@@ -917,41 +917,41 @@ impl TraceVM {
                     Step::Next
                 }
             }
-            Instruction::Unreachable => {
+            StackInstruction::Unreachable => {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
             }
-            Instruction::Nop => Step::Next,
-            Instruction::I32Const { value } => {
+            StackInstruction::Nop => Step::Next,
+            StackInstruction::I32Const { value } => {
                 instance.stack.push(Value::from_i32(*value));
 
                 Step::Next
             }
-            Instruction::I64Const { value } => {
+            StackInstruction::I64Const { value } => {
                 instance.stack.push(Value::from_i64(*value));
 
                 Step::Next
             }
-            Instruction::F32Const { value } => {
+            StackInstruction::F32Const { value } => {
                 instance.stack.push(Value::from_f32(*value));
 
                 Step::Next
             }
-            Instruction::F64Const { value } => {
+            StackInstruction::F64Const { value } => {
                 instance.stack.push(Value::from_f64(*value));
 
                 Step::Next
             }
-            Instruction::RefNull => {
+            StackInstruction::RefNull => {
                 instance.stack.push(Value::from_ref(None));
 
                 Step::Next
             }
-            Instruction::RefFunc { function_index } => {
+            StackInstruction::RefFunc { function_index } => {
                 instance.stack.push(Value::from_ref(Some(*function_index)));
 
                 Step::Next
             }
-            Instruction::RefIsNull => {
+            StackInstruction::RefIsNull => {
                 let func_ref = instance.stack.pop().as_ref();
 
                 if func_ref.is_none() {
@@ -962,14 +962,14 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::MemorySize => {
+            StackInstruction::MemorySize => {
                 instance
                     .stack
                     .push(Value::from_i32(instance.memory.size_in_pages() as i32));
 
                 Step::Next
             }
-            Instruction::MemoryGrow => {
+            StackInstruction::MemoryGrow => {
                 // The delta is an unsigned i32; going through `u32` keeps a
                 // high-bit-set value from sign-extending into a different number.
                 let delta_in_pages = instance.stack.pop().as_i32() as u32 as u64;
@@ -986,7 +986,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::MemoryCopy => {
+            StackInstruction::MemoryCopy => {
                 let len = instance.stack.pop().as_i32() as usize;
                 let src = instance.stack.pop().as_i32() as usize;
                 let dest = instance.stack.pop().as_i32() as usize;
@@ -995,7 +995,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::MemoryFill => {
+            StackInstruction::MemoryFill => {
                 let len = instance.stack.pop().as_i32() as usize;
                 let val = instance.stack.pop().as_i32() as u32;
                 let dest = instance.stack.pop().as_i32() as usize;
@@ -1004,7 +1004,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::MemoryInit { data_index } => {
+            StackInstruction::MemoryInit { data_index } => {
                 let len = instance.stack.pop().as_i32() as usize;
                 let src = instance.stack.pop().as_i32() as usize;
                 let dest = instance.stack.pop().as_i32() as usize;
@@ -1036,12 +1036,12 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::DataDrop { data_index } => {
+            StackInstruction::DataDrop { data_index } => {
                 instance.data_vals[*data_index as usize] = DataVal::Dropped;
 
                 Step::Next
             }
-            Instruction::I32Load { offset, align: _ } => {
+            StackInstruction::I32Load { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)?;
 
@@ -1049,7 +1049,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Load8U { offset, align: _ } => {
+            StackInstruction::I32Load8U { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i32;
 
@@ -1057,7 +1057,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Load8S { offset, align: _ } => {
+            StackInstruction::I32Load8S { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i32;
 
@@ -1065,7 +1065,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Load16U { offset, align: _ } => {
+            StackInstruction::I32Load16U { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i32;
 
@@ -1073,7 +1073,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Load16S { offset, align: _ } => {
+            StackInstruction::I32Load16S { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i32;
 
@@ -1081,7 +1081,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load { offset, align: _ } => {
+            StackInstruction::I64Load { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i64(effective_offset)?;
 
@@ -1089,7 +1089,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load8U { offset, align: _ } => {
+            StackInstruction::I64Load8U { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i64;
 
@@ -1097,7 +1097,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load8S { offset, align: _ } => {
+            StackInstruction::I64Load8S { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i64;
 
@@ -1105,7 +1105,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load16U { offset, align: _ } => {
+            StackInstruction::I64Load16U { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i64;
 
@@ -1113,7 +1113,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load16S { offset, align: _ } => {
+            StackInstruction::I64Load16S { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i64;
 
@@ -1121,7 +1121,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load32U { offset, align: _ } => {
+            StackInstruction::I64Load32U { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u32(effective_offset)? as i64;
 
@@ -1129,7 +1129,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Load32S { offset, align: _ } => {
+            StackInstruction::I64Load32S { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)? as i64;
 
@@ -1137,7 +1137,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Load { offset, align: _ } => {
+            StackInstruction::F32Load { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f32(effective_offset)?;
 
@@ -1145,7 +1145,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Load { offset, align: _ } => {
+            StackInstruction::F64Load { offset, align: _ } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f64(effective_offset)?;
 
@@ -1153,7 +1153,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Store { offset, align: _ } => {
+            StackInstruction::I32Store { offset, align: _ } => {
                 let val = instance.stack.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1161,7 +1161,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Store8 { offset, align: _ } => {
+            StackInstruction::I32Store8 { offset, align: _ } => {
                 let val = instance.stack.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1169,7 +1169,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Store16 { offset, align: _ } => {
+            StackInstruction::I32Store16 { offset, align: _ } => {
                 let val = instance.stack.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1177,7 +1177,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Store { offset, align: _ } => {
+            StackInstruction::I64Store { offset, align: _ } => {
                 let val = instance.stack.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1185,7 +1185,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Store8 { offset, align: _ } => {
+            StackInstruction::I64Store8 { offset, align: _ } => {
                 let val = instance.stack.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1193,7 +1193,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Store16 { offset, align: _ } => {
+            StackInstruction::I64Store16 { offset, align: _ } => {
                 let val = instance.stack.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1201,7 +1201,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Store32 { offset, align: _ } => {
+            StackInstruction::I64Store32 { offset, align: _ } => {
                 let val = instance.stack.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1209,7 +1209,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Store { offset, align: _ } => {
+            StackInstruction::F32Store { offset, align: _ } => {
                 let val = instance.stack.pop().as_f32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1217,7 +1217,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Store { offset, align: _ } => {
+            StackInstruction::F64Store { offset, align: _ } => {
                 let val = instance.stack.pop().as_f64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -1225,7 +1225,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Clz => {
+            StackInstruction::I32Clz => {
                 let a = instance.stack.pop().as_i32();
 
                 instance
@@ -1234,7 +1234,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Ctz => {
+            StackInstruction::I32Ctz => {
                 let a = instance.stack.pop().as_i32();
 
                 instance
@@ -1243,7 +1243,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Popcnt => {
+            StackInstruction::I32Popcnt => {
                 let a = instance.stack.pop().as_i32();
 
                 // Counts set bits in the two's-complement representation, so a
@@ -1253,7 +1253,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Eqz => {
+            StackInstruction::I32Eqz => {
                 let a = instance.stack.pop().as_i32();
 
                 instance
@@ -1262,28 +1262,28 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Extend8S => {
+            StackInstruction::I32Extend8S => {
                 let a = instance.stack.pop().as_i32();
 
                 instance.stack.push(Value::from_i32(a as i8 as i32));
 
                 Step::Next
             }
-            Instruction::I32Extend16S => {
+            StackInstruction::I32Extend16S => {
                 let a = instance.stack.pop().as_i32();
 
                 instance.stack.push(Value::from_i32(a as i16 as i32));
 
                 Step::Next
             }
-            Instruction::I32WrapI64 => {
+            StackInstruction::I32WrapI64 => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
-            Instruction::I32TruncF32U => {
+            StackInstruction::I32TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
@@ -1296,7 +1296,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32TruncF32S => {
+            StackInstruction::I32TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
@@ -1305,7 +1305,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32TruncF64U => {
+            StackInstruction::I32TruncF64U => {
                 let a = instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
@@ -1315,7 +1315,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32TruncF64S => {
+            StackInstruction::I32TruncF64S => {
                 let a = instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
@@ -1323,21 +1323,21 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32TruncSatF32U => {
+            StackInstruction::I32TruncSatF32U => {
                 let a = instance.stack.pop().as_f32() as u32;
 
                 instance.stack.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
-            Instruction::I32TruncSatF32S => {
+            StackInstruction::I32TruncSatF32S => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
-            Instruction::I32TruncSatF64U => {
+            StackInstruction::I32TruncSatF64U => {
                 // Saturate to `u32`, the *target* width — going through `u64` here
                 // would clamp at the wrong bound and then wrap on the way down.
                 let a = instance.stack.pop().as_f64() as u32;
@@ -1346,21 +1346,21 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32TruncSatF64S => {
+            StackInstruction::I32TruncSatF64S => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_i32(a as i32));
 
                 Step::Next
             }
-            Instruction::I32ReinterpretF32 => {
+            StackInstruction::I32ReinterpretF32 => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_i32(a.to_bits() as i32));
 
                 Step::Next
             }
-            Instruction::I32Add => {
+            StackInstruction::I32Add => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1368,7 +1368,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Sub => {
+            StackInstruction::I32Sub => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1376,7 +1376,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Mul => {
+            StackInstruction::I32Mul => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1384,7 +1384,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32DivU => {
+            StackInstruction::I32DivU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1397,7 +1397,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32DivS => {
+            StackInstruction::I32DivS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1410,7 +1410,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32RemU => {
+            StackInstruction::I32RemU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1423,7 +1423,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32RemS => {
+            StackInstruction::I32RemS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1442,7 +1442,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32And => {
+            StackInstruction::I32And => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1450,7 +1450,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Or => {
+            StackInstruction::I32Or => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1458,7 +1458,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Xor => {
+            StackInstruction::I32Xor => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1470,7 +1470,7 @@ impl TraceVM {
             // count of 32 or more is well defined rather than a trap or UB. The
             // `wrapping_*`/`rotate_*` methods apply exactly that masking; the plain
             // `<<`/`>>` operators would instead panic in debug builds.
-            Instruction::I32Shl => {
+            StackInstruction::I32Shl => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1480,7 +1480,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32ShrU => {
+            StackInstruction::I32ShrU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1491,7 +1491,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32ShrS => {
+            StackInstruction::I32ShrS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1502,7 +1502,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Rotl => {
+            StackInstruction::I32Rotl => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1512,7 +1512,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Rotr => {
+            StackInstruction::I32Rotr => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1522,7 +1522,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Eq => {
+            StackInstruction::I32Eq => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1530,7 +1530,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32Ne => {
+            StackInstruction::I32Ne => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1538,7 +1538,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32LtU => {
+            StackInstruction::I32LtU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1546,7 +1546,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32LtS => {
+            StackInstruction::I32LtS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1554,7 +1554,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32GtU => {
+            StackInstruction::I32GtU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1562,7 +1562,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32GtS => {
+            StackInstruction::I32GtS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1570,7 +1570,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32LeU => {
+            StackInstruction::I32LeU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1578,7 +1578,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32LeS => {
+            StackInstruction::I32LeS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1586,7 +1586,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32GeU => {
+            StackInstruction::I32GeU => {
                 let b = instance.stack.pop().as_i32() as u32;
                 let a = instance.stack.pop().as_i32() as u32;
 
@@ -1594,7 +1594,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I32GeS => {
+            StackInstruction::I32GeS => {
                 let b = instance.stack.pop().as_i32();
                 let a = instance.stack.pop().as_i32();
 
@@ -1602,7 +1602,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Clz => {
+            StackInstruction::I64Clz => {
                 let a = instance.stack.pop().as_i64();
 
                 instance
@@ -1611,7 +1611,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Ctz => {
+            StackInstruction::I64Ctz => {
                 let a = instance.stack.pop().as_i64();
 
                 instance
@@ -1620,7 +1620,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Popcnt => {
+            StackInstruction::I64Popcnt => {
                 let a = instance.stack.pop().as_i64();
 
                 // See `I32Popcnt`. The count is at most 64, but the result type is
@@ -1630,7 +1630,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Eqz => {
+            StackInstruction::I64Eqz => {
                 let a = instance.stack.pop().as_i64();
 
                 instance
@@ -1639,42 +1639,42 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Extend8S => {
+            StackInstruction::I64Extend8S => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_i64(a as i8 as i64));
 
                 Step::Next
             }
-            Instruction::I64Extend16S => {
+            StackInstruction::I64Extend16S => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_i64(a as i16 as i64));
 
                 Step::Next
             }
-            Instruction::I64Extend32S => {
+            StackInstruction::I64Extend32S => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_i64(a as i32 as i64));
 
                 Step::Next
             }
-            Instruction::I64ExtendI32U => {
+            StackInstruction::I64ExtendI32U => {
                 let a = instance.stack.pop().as_i32() as u32;
 
                 instance.stack.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
-            Instruction::I64ExtendI32S => {
+            StackInstruction::I64ExtendI32S => {
                 let a = instance.stack.pop().as_i32();
 
                 instance.stack.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
-            Instruction::I64TruncF32U => {
+            StackInstruction::I64TruncF32U => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
@@ -1687,7 +1687,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64TruncF32S => {
+            StackInstruction::I64TruncF32S => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
                 let a = instance.stack.pop().as_f32() as f64;
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
@@ -1696,7 +1696,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64TruncF64U => {
+            StackInstruction::I64TruncF64U => {
                 let a = instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
@@ -1706,7 +1706,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64TruncF64S => {
+            StackInstruction::I64TruncF64S => {
                 let a = instance.stack.pop().as_f64();
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
@@ -1714,7 +1714,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64TruncSatF32U => {
+            StackInstruction::I64TruncSatF32U => {
                 // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
                 // first would lose every value an `i64` can still represent.
                 let a = instance.stack.pop().as_f32() as u64;
@@ -1723,35 +1723,35 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64TruncSatF32S => {
+            StackInstruction::I64TruncSatF32S => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
-            Instruction::I64TruncSatF64U => {
+            StackInstruction::I64TruncSatF64U => {
                 let a = instance.stack.pop().as_f64() as u64;
 
                 instance.stack.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
-            Instruction::I64TruncSatF64S => {
+            StackInstruction::I64TruncSatF64S => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_i64(a as i64));
 
                 Step::Next
             }
-            Instruction::I64ReinterpretF64 => {
+            StackInstruction::I64ReinterpretF64 => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_i64(a.to_bits() as i64));
 
                 Step::Next
             }
-            Instruction::I64Add => {
+            StackInstruction::I64Add => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1759,7 +1759,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Sub => {
+            StackInstruction::I64Sub => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1767,7 +1767,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Mul => {
+            StackInstruction::I64Mul => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1775,7 +1775,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64DivU => {
+            StackInstruction::I64DivU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1788,7 +1788,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64DivS => {
+            StackInstruction::I64DivS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1801,7 +1801,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64RemU => {
+            StackInstruction::I64RemU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1814,7 +1814,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64RemS => {
+            StackInstruction::I64RemS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1830,7 +1830,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64And => {
+            StackInstruction::I64And => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1838,7 +1838,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Or => {
+            StackInstruction::I64Or => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1846,7 +1846,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Xor => {
+            StackInstruction::I64Xor => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1857,7 +1857,7 @@ impl TraceVM {
             // As for `i32`, but masked modulo 64. The count arrives as an `i64` and
             // the shift methods take `u32`, so it is narrowed first — harmless,
             // since only the low 6 bits survive the masking anyway.
-            Instruction::I64Shl => {
+            StackInstruction::I64Shl => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1867,7 +1867,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64ShrU => {
+            StackInstruction::I64ShrU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1878,7 +1878,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64ShrS => {
+            StackInstruction::I64ShrS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1889,7 +1889,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Rotl => {
+            StackInstruction::I64Rotl => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1899,7 +1899,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Rotr => {
+            StackInstruction::I64Rotr => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1909,7 +1909,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Eq => {
+            StackInstruction::I64Eq => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1917,7 +1917,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64Ne => {
+            StackInstruction::I64Ne => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1925,7 +1925,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64LtU => {
+            StackInstruction::I64LtU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1933,7 +1933,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64LtS => {
+            StackInstruction::I64LtS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1941,7 +1941,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64GtU => {
+            StackInstruction::I64GtU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1949,7 +1949,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64GtS => {
+            StackInstruction::I64GtS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1957,7 +1957,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64LeU => {
+            StackInstruction::I64LeU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1965,7 +1965,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64LeS => {
+            StackInstruction::I64LeS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1973,7 +1973,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64GeU => {
+            StackInstruction::I64GeU => {
                 let b = instance.stack.pop().as_i64() as u64;
                 let a = instance.stack.pop().as_i64() as u64;
 
@@ -1981,7 +1981,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::I64GeS => {
+            StackInstruction::I64GeS => {
                 let b = instance.stack.pop().as_i64();
                 let a = instance.stack.pop().as_i64();
 
@@ -1989,98 +1989,98 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Abs => {
+            StackInstruction::F32Abs => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.abs()));
 
                 Step::Next
             }
-            Instruction::F32Neg => {
+            StackInstruction::F32Neg => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.neg()));
 
                 Step::Next
             }
-            Instruction::F32Ceil => {
+            StackInstruction::F32Ceil => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.ceil()));
 
                 Step::Next
             }
-            Instruction::F32Floor => {
+            StackInstruction::F32Floor => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.floor()));
 
                 Step::Next
             }
-            Instruction::F32Trunc => {
+            StackInstruction::F32Trunc => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.trunc()));
 
                 Step::Next
             }
-            Instruction::F32Sqrt => {
+            StackInstruction::F32Sqrt => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.sqrt()));
 
                 Step::Next
             }
-            Instruction::F32Nearest => {
+            StackInstruction::F32Nearest => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f32(a.round_ties_even()));
 
                 Step::Next
             }
-            Instruction::F32ConvertI32U => {
+            StackInstruction::F32ConvertI32U => {
                 let a = instance.stack.pop().as_i32() as u32;
 
                 instance.stack.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
-            Instruction::F32ConvertI32S => {
+            StackInstruction::F32ConvertI32S => {
                 let a = instance.stack.pop().as_i32();
 
                 instance.stack.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
-            Instruction::F32ConvertI64U => {
+            StackInstruction::F32ConvertI64U => {
                 let a = instance.stack.pop().as_i64() as u64;
 
                 instance.stack.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
-            Instruction::F32ConvertI64S => {
+            StackInstruction::F32ConvertI64S => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
-            Instruction::F32DemoteF64 => {
+            StackInstruction::F32DemoteF64 => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f32(a as f32));
 
                 Step::Next
             }
-            Instruction::F32ReinterpretI32 => {
+            StackInstruction::F32ReinterpretI32 => {
                 let a = instance.stack.pop().as_i32() as u32;
 
                 instance.stack.push(Value::from_f32(f32::from_bits(a)));
 
                 Step::Next
             }
-            Instruction::F32Add => {
+            StackInstruction::F32Add => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2088,7 +2088,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Sub => {
+            StackInstruction::F32Sub => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2096,7 +2096,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Mul => {
+            StackInstruction::F32Mul => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2104,7 +2104,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Div => {
+            StackInstruction::F32Div => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2114,7 +2114,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Eq => {
+            StackInstruction::F32Eq => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2122,7 +2122,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Ne => {
+            StackInstruction::F32Ne => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2130,7 +2130,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Lt => {
+            StackInstruction::F32Lt => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2138,7 +2138,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Gt => {
+            StackInstruction::F32Gt => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2146,7 +2146,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Le => {
+            StackInstruction::F32Le => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2154,7 +2154,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Ge => {
+            StackInstruction::F32Ge => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2162,7 +2162,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Min => {
+            StackInstruction::F32Min => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2181,7 +2181,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Max => {
+            StackInstruction::F32Max => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2200,7 +2200,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F32Copysign => {
+            StackInstruction::F32Copysign => {
                 let b = instance.stack.pop().as_f32();
                 let a = instance.stack.pop().as_f32();
 
@@ -2212,98 +2212,98 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Abs => {
+            StackInstruction::F64Abs => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.abs()));
 
                 Step::Next
             }
-            Instruction::F64Neg => {
+            StackInstruction::F64Neg => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.neg()));
 
                 Step::Next
             }
-            Instruction::F64Ceil => {
+            StackInstruction::F64Ceil => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.ceil()));
 
                 Step::Next
             }
-            Instruction::F64Floor => {
+            StackInstruction::F64Floor => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.floor()));
 
                 Step::Next
             }
-            Instruction::F64Trunc => {
+            StackInstruction::F64Trunc => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.trunc()));
 
                 Step::Next
             }
-            Instruction::F64Sqrt => {
+            StackInstruction::F64Sqrt => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.sqrt()));
 
                 Step::Next
             }
-            Instruction::F64Nearest => {
+            StackInstruction::F64Nearest => {
                 let a = instance.stack.pop().as_f64();
 
                 instance.stack.push(Value::from_f64(a.round_ties_even()));
 
                 Step::Next
             }
-            Instruction::F64ConvertI32U => {
+            StackInstruction::F64ConvertI32U => {
                 let a = instance.stack.pop().as_i32() as u32;
 
                 instance.stack.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
-            Instruction::F64ConvertI32S => {
+            StackInstruction::F64ConvertI32S => {
                 let a = instance.stack.pop().as_i32();
 
                 instance.stack.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
-            Instruction::F64ConvertI64U => {
+            StackInstruction::F64ConvertI64U => {
                 let a = instance.stack.pop().as_i64() as u64;
 
                 instance.stack.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
-            Instruction::F64ConvertI64S => {
+            StackInstruction::F64ConvertI64S => {
                 let a = instance.stack.pop().as_i64();
 
                 instance.stack.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
-            Instruction::F64PromoteF32 => {
+            StackInstruction::F64PromoteF32 => {
                 let a = instance.stack.pop().as_f32();
 
                 instance.stack.push(Value::from_f64(a as f64));
 
                 Step::Next
             }
-            Instruction::F64ReinterpretI64 => {
+            StackInstruction::F64ReinterpretI64 => {
                 let a = instance.stack.pop().as_i64() as u64;
 
                 instance.stack.push(Value::from_f64(f64::from_bits(a)));
 
                 Step::Next
             }
-            Instruction::F64Add => {
+            StackInstruction::F64Add => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2311,7 +2311,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Sub => {
+            StackInstruction::F64Sub => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2319,7 +2319,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Mul => {
+            StackInstruction::F64Mul => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2327,7 +2327,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Div => {
+            StackInstruction::F64Div => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2337,7 +2337,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Eq => {
+            StackInstruction::F64Eq => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2345,7 +2345,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Ne => {
+            StackInstruction::F64Ne => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2353,7 +2353,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Lt => {
+            StackInstruction::F64Lt => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2361,7 +2361,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Gt => {
+            StackInstruction::F64Gt => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2369,7 +2369,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Le => {
+            StackInstruction::F64Le => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2377,7 +2377,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Ge => {
+            StackInstruction::F64Ge => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2385,7 +2385,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Min => {
+            StackInstruction::F64Min => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2404,7 +2404,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Max => {
+            StackInstruction::F64Max => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2423,7 +2423,7 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::F64Copysign => {
+            StackInstruction::F64Copysign => {
                 let b = instance.stack.pop().as_f64();
                 let a = instance.stack.pop().as_f64();
 
@@ -2432,35 +2432,35 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::LocalGet { index } => {
+            StackInstruction::LocalGet { index } => {
                 instance
                     .stack
                     .push(Self::get_local(*index, caller_base_height, instance));
 
                 Step::Next
             }
-            Instruction::LocalSet { index } => {
+            StackInstruction::LocalSet { index } => {
                 let val = instance.stack.pop();
 
                 Self::set_local(*index, val, caller_base_height, instance);
 
                 Step::Next
             }
-            Instruction::LocalTee { index } => {
+            StackInstruction::LocalTee { index } => {
                 let val = instance.stack.tee();
 
                 Self::set_local(*index, val, caller_base_height, instance);
 
                 Step::Next
             }
-            Instruction::GlobalGet { index } => {
+            StackInstruction::GlobalGet { index } => {
                 instance
                     .stack
                     .push(instance.global_vals[index.0 as usize].into());
 
                 Step::Next
             }
-            Instruction::GlobalSet { index } => {
+            StackInstruction::GlobalSet { index } => {
                 let val = instance.stack.pop();
                 let ty = module.globals[index.0 as usize].ty.content_type();
 
@@ -2468,12 +2468,12 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::Drop => {
+            StackInstruction::Drop => {
                 let _ = instance.stack.pop();
 
                 Step::Next
             }
-            Instruction::Select => {
+            StackInstruction::Select => {
                 let cond = instance.stack.pop().as_i32();
                 let b = instance.stack.pop();
                 let a = instance.stack.pop();
@@ -2487,9 +2487,9 @@ impl TraceVM {
 
                 Step::Next
             }
-            Instruction::Block => Step::Next,
-            Instruction::Loop => Step::Next,
-            Instruction::If {
+            StackInstruction::Block => Step::Next,
+            StackInstruction::Loop => Step::Next,
+            StackInstruction::If {
                 else_index,
                 end_index,
             } => {
@@ -2508,8 +2508,8 @@ impl TraceVM {
             // this instruction would be encountered only when control flow is coming after completing `if` branch
             // because if the condition was `false` and the control went to `else` branch, it jumps to the first
             // instruction of `else` branch and not the `else` instruction.
-            Instruction::Else { if_end_index } => Step::JumpTo(*if_end_index),
-            Instruction::Br {
+            StackInstruction::Else { if_end_index } => Step::JumpTo(*if_end_index),
+            StackInstruction::Br {
                 target_index,
                 arity,
                 recorded_height,
@@ -2522,7 +2522,7 @@ impl TraceVM {
 
                 Step::JumpTo(*target_index)
             }
-            Instruction::BrIf {
+            StackInstruction::BrIf {
                 target_index,
                 arity,
                 recorded_height,
@@ -2539,7 +2539,7 @@ impl TraceVM {
                     Step::Next
                 }
             }
-            Instruction::BrTable { start_index, len } => {
+            StackInstruction::BrTable { start_index, len } => {
                 // Widen before adding: the sum is bounded by the function's target
                 // count, but doing it in `u32` would make an overflow a debug panic
                 // rather than a wider add.
@@ -2565,7 +2565,7 @@ impl TraceVM {
 
                 Step::JumpTo(branch.target_index)
             }
-            Instruction::Return {
+            StackInstruction::Return {
                 target_index,
                 arity,
                 recorded_height,
@@ -2576,7 +2576,7 @@ impl TraceVM {
 
                 Step::JumpTo(*target_index)
             }
-            Instruction::End {
+            StackInstruction::End {
                 arity,
                 recorded_height,
             } => {
@@ -2604,67 +2604,67 @@ impl TraceVM {
     /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
     /// instruction not permitted in a constant expression.
     pub(crate) fn const_expr_evaluator(
-        instructions: &[Instruction],
+        instructions: &[StackInstruction],
         globals: &[Val],
     ) -> Result<Val, TraceWasmError> {
         let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
 
         for instr in instructions {
             match instr {
-                Instruction::I32Const { value } => {
+                StackInstruction::I32Const { value } => {
                     stack.push(Val::I32(*value));
                 }
-                Instruction::I64Const { value } => {
+                StackInstruction::I64Const { value } => {
                     stack.push(Val::I64(*value));
                 }
-                Instruction::F32Const { value } => {
+                StackInstruction::F32Const { value } => {
                     stack.push(Val::F32(*value));
                 }
-                Instruction::F64Const { value } => stack.push(Val::F64(*value)),
-                Instruction::GlobalGet { index } => {
+                StackInstruction::F64Const { value } => stack.push(Val::F64(*value)),
+                StackInstruction::GlobalGet { index } => {
                     stack.push(globals[index.0 as usize]);
                 }
-                Instruction::RefNull => stack.push(Val::Ref(None)),
-                Instruction::RefFunc { function_index } => {
+                StackInstruction::RefNull => stack.push(Val::Ref(None)),
+                StackInstruction::RefFunc { function_index } => {
                     stack.push(Val::Ref(Some(*function_index)));
                 }
-                Instruction::I32Add => {
+                StackInstruction::I32Add => {
                     let b = stack.pop().as_i32();
                     let a = stack.pop().as_i32();
 
                     stack.push(Val::I32(a.wrapping_add(b)));
                 }
-                Instruction::I32Sub => {
+                StackInstruction::I32Sub => {
                     let b = stack.pop().as_i32();
                     let a = stack.pop().as_i32();
 
                     stack.push(Val::I32(a.wrapping_sub(b)));
                 }
-                Instruction::I32Mul => {
+                StackInstruction::I32Mul => {
                     let b = stack.pop().as_i32();
                     let a = stack.pop().as_i32();
 
                     stack.push(Val::I32(a.wrapping_mul(b)));
                 }
-                Instruction::I64Add => {
+                StackInstruction::I64Add => {
                     let b = stack.pop().as_i64();
                     let a = stack.pop().as_i64();
 
                     stack.push(Val::I64(a.wrapping_add(b)));
                 }
-                Instruction::I64Sub => {
+                StackInstruction::I64Sub => {
                     let b = stack.pop().as_i64();
                     let a = stack.pop().as_i64();
 
                     stack.push(Val::I64(a.wrapping_sub(b)));
                 }
-                Instruction::I64Mul => {
+                StackInstruction::I64Mul => {
                     let b = stack.pop().as_i64();
                     let a = stack.pop().as_i64();
 
                     stack.push(Val::I64(a.wrapping_mul(b)));
                 }
-                Instruction::End { .. } => {}
+                StackInstruction::End { .. } => {}
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
                         "instruction `{:?}` in const expression evaluator",

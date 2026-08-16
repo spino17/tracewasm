@@ -1,11 +1,25 @@
-use crate::{error::TraceWasmError, module::FuncType};
-use wasmparser::BlockType;
+use crate::{
+    error::TraceWasmError,
+    module::{FuncDecl, FuncType},
+};
+use wasmparser::{BlockType, OperatorsReader};
 
 pub mod register;
 pub mod stack;
 
-pub trait Instruction {
+pub trait Instruction: Sized {
     type BrTableTarget;
+    type FrameLayout;
+
+    fn emit_instruction_for_func(
+        operator_reader: OperatorsReader<'_>,
+        params: u32,
+        results: u32,
+        types: &[FuncType],
+        func_decls: &[FuncDecl],
+        _locals_count: u32,
+        _globals_count: u32,
+    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to

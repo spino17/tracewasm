@@ -75,7 +75,9 @@
 
 use crate::{
     error::TraceWasmError,
-    instruction::{Block, BlockKind, check_memory_index, params_and_results_from_blockty},
+    instruction::{
+        Block, BlockKind, Instruction, check_memory_index, params_and_results_from_blockty,
+    },
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -90,7 +92,7 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// positions into the containing `Vec<Instruction>`, i.e. runtime program
 /// counters.
 #[derive(Debug, Clone)]
-pub enum Instruction {
+pub enum StackInstruction {
     /// Traps unconditionally.
     Unreachable,
     /// Does nothing.
@@ -916,7 +918,7 @@ pub enum Instruction {
 // docs for the three narrowings that hold it here, and why widening any one of them
 // costs 8 bytes on *every* instruction rather than just the variant touched.
 const _: () = assert!(
-    size_of::<Instruction>() <= 16,
+    size_of::<StackInstruction>() <= 16,
     "Instruction grew past 16 bytes. Need to keep it compact."
 );
 
@@ -927,7 +929,7 @@ const _: () = assert!(
 /// requires the label *types* to match); their unwind targets and heights
 /// differ even though the value counts agree.
 #[derive(Debug, Clone)]
-pub struct BrTableTarget {
+pub struct StackBrTableTarget {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
     pub target_index: u32,
@@ -937,8 +939,8 @@ pub struct BrTableTarget {
     pub recorded_height: u32,
 }
 
-pub struct FrameLayout {
-    pub br_targets_arena: Box<[BrTableTarget]>,
+pub struct StackFrameLayout {
+    pub br_targets_arena: Box<[StackBrTableTarget]>,
 }
 
 /// The three parallel outputs of lowering one function body: the instruction list,
@@ -947,7 +949,7 @@ pub struct FrameLayout {
 ///
 /// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
 /// three together.
-type LoweredFuncBody = (Vec<Instruction>, Vec<u32>, FrameLayout);
+type StackLoweredFuncBody = (Vec<StackInstruction>, Vec<u32>, StackFrameLayout);
 
 /// The stack of currently-open control-flow labels, plus the running
 /// operand-stack height.
@@ -1182,34 +1184,69 @@ enum StackEffectResult {
     UnaryOperator,
 }
 
-impl Instruction {
-    /// Lowers one operator stream into a flat `Vec<Instruction>` with control
-    /// flow resolved and stack heights precomputed.
+impl StackInstruction {
+    /// Lowers a constant expression — a global, element, or data initializer.
     ///
-    /// `params` and `results` are the body's own arity. They seed an implicit
-    /// [`BlockKind::Func`] frame at the root of the control stack, which is what
-    /// catches top-level branches and the trailing `end`.
+    /// Accepts only the const-expr subset: the four `*.const` operators,
+    /// `global.get`, `ref.null`, `ref.func`, and `i32`/`i64` add/sub/mul. Anything
+    /// else is [`TraceWasmError::Unsupported`]. The terminating `end` closes the
+    /// expression and is consumed rather than emitted.
     ///
-    /// Constant expressions have no such frame and go through
-    /// [`Self::emit_instruction_for_const_expr`] instead: their terminating `end`
-    /// has nothing to pop and simply ends the pass.
-    ///
-    /// `types` is the module's type section, used to resolve `BlockType::FuncType`
-    /// arities. `func_decls` is the module's function declarations, used by
-    /// `Call` to resolve a callee's parameter count.
-    ///
-    /// Returns the lowered instructions alongside a parallel vector of source
-    /// offsets: element `i` is the byte offset in the module binary of the
-    /// operator that produced instruction `i`. The two are pushed together on
-    /// every iteration, so they always have the same length and indexing.
-    ///
-    /// The third element is the function's flat `br_table` target array, holding
-    /// every table's arms concatenated in lowering order. Each
-    /// [`Instruction::BrTable`] owns the contiguous run named by its
-    /// `(start_index, len)`, which is why the targets are not stored in the variant
-    /// (see "Keeping [`Instruction`] small" in the module docs). Functions with no
-    /// `br_table` get an empty slice, which does not allocate.
-    pub(crate) fn emit_instruction_for_func(
+    /// Unlike [`Self::emit_instruction_for_func`] there is no control stack, no
+    /// height tracking, and no backpatching, because the subset contains no
+    /// branches — so this returns the instruction list alone, with no source-offset
+    /// sidecar and no `br_table` target array.
+    pub(crate) fn emit_instruction_for_const_expr(
+        mut operator_reader: OperatorsReader<'_>,
+    ) -> Result<Vec<StackInstruction>, TraceWasmError> {
+        let mut instructions = vec![];
+
+        while !operator_reader.eof() {
+            let operator = operator_reader.read()?;
+
+            let instr = match operator {
+                Operator::I32Const { value } => StackInstruction::I32Const { value },
+                Operator::I64Const { value } => StackInstruction::I64Const { value },
+                Operator::F32Const { value } => StackInstruction::F32Const {
+                    value: f32::from_bits(value.bits()),
+                },
+                Operator::F64Const { value } => StackInstruction::F64Const {
+                    value: f64::from_bits(value.bits()),
+                },
+                Operator::GlobalGet { global_index } => StackInstruction::GlobalGet {
+                    index: GlobalIndex(global_index),
+                },
+                Operator::RefNull { hty: _hty } => StackInstruction::RefNull,
+                Operator::RefFunc { function_index } => StackInstruction::RefFunc {
+                    function_index: FuncIndex(function_index),
+                },
+                Operator::I32Add => StackInstruction::I32Add,
+                Operator::I32Sub => StackInstruction::I32Sub,
+                Operator::I32Mul => StackInstruction::I32Mul,
+                Operator::I64Add => StackInstruction::I64Add,
+                Operator::I64Sub => StackInstruction::I64Sub,
+                Operator::I64Mul => StackInstruction::I64Mul,
+                Operator::End => break,
+                _ => {
+                    return Err(TraceWasmError::Unsupported(format!(
+                        "operator `{:?}` in const expression stream",
+                        operator
+                    )));
+                }
+            };
+
+            instructions.push(instr);
+        }
+
+        Ok(instructions)
+    }
+}
+
+impl Instruction for StackInstruction {
+    type BrTableTarget = StackBrTableTarget;
+    type FrameLayout = StackFrameLayout;
+
+    fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
@@ -1217,8 +1254,8 @@ impl Instruction {
         func_decls: &[FuncDecl],
         _locals_count: u32,
         _globals_count: u32,
-    ) -> Result<LoweredFuncBody, TraceWasmError> {
-        let mut instructions: Vec<Instruction> = vec![];
+    ) -> Result<StackLoweredFuncBody, TraceWasmError> {
+        let mut instructions: Vec<StackInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
         let mut br_table_target_branches = vec![];
@@ -1236,52 +1273,56 @@ impl Instruction {
         while !operator_reader.eof() {
             let (operator, offset) = operator_reader.read_with_offset()?;
 
-            let (instruction, stack_effect): (Instruction, StackEffectResult) = match operator {
+            let (instruction, stack_effect): (StackInstruction, StackEffectResult) = match operator
+            {
                 Operator::Unreachable => {
                     // all instructions after this is unreachable until the end of the current block
                     control_stack.set_unreachable_traversing();
 
-                    (Instruction::Unreachable, StackEffectResult::NoEffect)
+                    (StackInstruction::Unreachable, StackEffectResult::NoEffect)
                 }
-                Operator::Nop => (Instruction::Nop, StackEffectResult::NoEffect),
+                Operator::Nop => (StackInstruction::Nop, StackEffectResult::NoEffect),
                 // constants
                 Operator::I32Const { value } => (
-                    Instruction::I32Const { value },
+                    StackInstruction::I32Const { value },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::I64Const { value } => (
-                    Instruction::I64Const { value },
+                    StackInstruction::I64Const { value },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::F32Const { value } => (
-                    Instruction::F32Const {
+                    StackInstruction::F32Const {
                         value: f32::from_bits(value.bits()),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::F64Const { value } => (
-                    Instruction::F64Const {
+                    StackInstruction::F64Const {
                         value: f64::from_bits(value.bits()),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::RefNull { hty: _hty } => (
-                    Instruction::RefNull,
+                    StackInstruction::RefNull,
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::RefFunc { function_index } => (
-                    Instruction::RefFunc {
+                    StackInstruction::RefFunc {
                         function_index: FuncIndex(function_index),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
-                Operator::RefIsNull => (Instruction::RefIsNull, StackEffectResult::UnaryOperator),
+                Operator::RefIsNull => (
+                    StackInstruction::RefIsNull,
+                    StackEffectResult::UnaryOperator,
+                ),
                 // memory
                 Operator::MemorySize { mem } => {
                     check_memory_index(mem)?;
 
                     (
-                        Instruction::MemorySize,
+                        StackInstruction::MemorySize,
                         StackEffectResult::PopPush { pops: 0, pushes: 1 },
                     )
                 }
@@ -1289,7 +1330,7 @@ impl Instruction {
                     check_memory_index(mem)?;
 
                     (
-                        Instruction::MemoryGrow,
+                        StackInstruction::MemoryGrow,
                         StackEffectResult::PopPush { pops: 1, pushes: 1 },
                     )
                 }
@@ -1298,7 +1339,7 @@ impl Instruction {
                     check_memory_index(src_mem)?;
 
                     (
-                        Instruction::MemoryCopy,
+                        StackInstruction::MemoryCopy,
                         StackEffectResult::PopPush { pops: 3, pushes: 0 },
                     )
                 }
@@ -1306,7 +1347,7 @@ impl Instruction {
                     check_memory_index(mem)?;
 
                     (
-                        Instruction::MemoryFill,
+                        StackInstruction::MemoryFill,
                         StackEffectResult::PopPush { pops: 3, pushes: 0 },
                     )
                 }
@@ -1314,108 +1355,108 @@ impl Instruction {
                     check_memory_index(mem)?;
 
                     (
-                        Instruction::MemoryInit { data_index },
+                        StackInstruction::MemoryInit { data_index },
                         StackEffectResult::PopPush { pops: 3, pushes: 0 },
                     )
                 }
                 Operator::DataDrop { data_index } => (
-                    Instruction::DataDrop { data_index },
+                    StackInstruction::DataDrop { data_index },
                     StackEffectResult::NoEffect,
                 ),
                 // loads
                 Operator::I32Load { memarg } => (
-                    Instruction::I32Load {
+                    StackInstruction::I32Load {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8U { memarg } => (
-                    Instruction::I32Load8U {
+                    StackInstruction::I32Load8U {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8S { memarg } => (
-                    Instruction::I32Load8S {
+                    StackInstruction::I32Load8S {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16U { memarg } => (
-                    Instruction::I32Load16U {
+                    StackInstruction::I32Load16U {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16S { memarg } => (
-                    Instruction::I32Load16S {
+                    StackInstruction::I32Load16S {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load { memarg } => (
-                    Instruction::I64Load {
+                    StackInstruction::I64Load {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8U { memarg } => (
-                    Instruction::I64Load8U {
+                    StackInstruction::I64Load8U {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8S { memarg } => (
-                    Instruction::I64Load8S {
+                    StackInstruction::I64Load8S {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16U { memarg } => (
-                    Instruction::I64Load16U {
+                    StackInstruction::I64Load16U {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16S { memarg } => (
-                    Instruction::I64Load16S {
+                    StackInstruction::I64Load16S {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32U { memarg } => (
-                    Instruction::I64Load32U {
+                    StackInstruction::I64Load32U {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32S { memarg } => (
-                    Instruction::I64Load32S {
+                    StackInstruction::I64Load32S {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F32Load { memarg } => (
-                    Instruction::F32Load {
+                    StackInstruction::F32Load {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F64Load { memarg } => (
-                    Instruction::F64Load {
+                    StackInstruction::F64Load {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
@@ -1423,338 +1464,380 @@ impl Instruction {
                 ),
                 // stores
                 Operator::I32Store { memarg } => (
-                    Instruction::I32Store {
+                    StackInstruction::I32Store {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store8 { memarg } => (
-                    Instruction::I32Store8 {
+                    StackInstruction::I32Store8 {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store16 { memarg } => (
-                    Instruction::I32Store16 {
+                    StackInstruction::I32Store16 {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store { memarg } => (
-                    Instruction::I64Store {
+                    StackInstruction::I64Store {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store8 { memarg } => (
-                    Instruction::I64Store8 {
+                    StackInstruction::I64Store8 {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store16 { memarg } => (
-                    Instruction::I64Store16 {
+                    StackInstruction::I64Store16 {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store32 { memarg } => (
-                    Instruction::I64Store32 {
+                    StackInstruction::I64Store32 {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F32Store { memarg } => (
-                    Instruction::F32Store {
+                    StackInstruction::F32Store {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F64Store { memarg } => (
-                    Instruction::F64Store {
+                    StackInstruction::F64Store {
                         offset: memarg.offset as u32,
                         align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 // i32 unary operations
-                Operator::I32Clz => (Instruction::I32Clz, StackEffectResult::UnaryOperator),
-                Operator::I32Ctz => (Instruction::I32Ctz, StackEffectResult::UnaryOperator),
-                Operator::I32Popcnt => (Instruction::I32Popcnt, StackEffectResult::UnaryOperator),
-                Operator::I32Eqz => (Instruction::I32Eqz, StackEffectResult::UnaryOperator),
-                Operator::I32Extend8S => {
-                    (Instruction::I32Extend8S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I32Extend16S => {
-                    (Instruction::I32Extend16S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I32WrapI64 => (Instruction::I32WrapI64, StackEffectResult::UnaryOperator),
-                Operator::I32TruncF32U => {
-                    (Instruction::I32TruncF32U, StackEffectResult::UnaryOperator)
-                }
-                Operator::I32TruncF32S => {
-                    (Instruction::I32TruncF32S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I32TruncF64U => {
-                    (Instruction::I32TruncF64U, StackEffectResult::UnaryOperator)
-                }
-                Operator::I32TruncF64S => {
-                    (Instruction::I32TruncF64S, StackEffectResult::UnaryOperator)
-                }
+                Operator::I32Clz => (StackInstruction::I32Clz, StackEffectResult::UnaryOperator),
+                Operator::I32Ctz => (StackInstruction::I32Ctz, StackEffectResult::UnaryOperator),
+                Operator::I32Popcnt => (
+                    StackInstruction::I32Popcnt,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32Eqz => (StackInstruction::I32Eqz, StackEffectResult::UnaryOperator),
+                Operator::I32Extend8S => (
+                    StackInstruction::I32Extend8S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32Extend16S => (
+                    StackInstruction::I32Extend16S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32WrapI64 => (
+                    StackInstruction::I32WrapI64,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncF32U => (
+                    StackInstruction::I32TruncF32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncF32S => (
+                    StackInstruction::I32TruncF32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncF64U => (
+                    StackInstruction::I32TruncF64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I32TruncF64S => (
+                    StackInstruction::I32TruncF64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::I32TruncSatF32U => (
-                    Instruction::I32TruncSatF32U,
+                    StackInstruction::I32TruncSatF32U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I32TruncSatF32S => (
-                    Instruction::I32TruncSatF32S,
+                    StackInstruction::I32TruncSatF32S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I32TruncSatF64U => (
-                    Instruction::I32TruncSatF64U,
+                    StackInstruction::I32TruncSatF64U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I32TruncSatF64S => (
-                    Instruction::I32TruncSatF64S,
+                    StackInstruction::I32TruncSatF64S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I32ReinterpretF32 => (
-                    Instruction::I32ReinterpretF32,
+                    StackInstruction::I32ReinterpretF32,
                     StackEffectResult::UnaryOperator,
                 ),
                 // i32 binary operations
-                Operator::I32Add => (Instruction::I32Add, StackEffectResult::BinaryOperator),
-                Operator::I32Sub => (Instruction::I32Sub, StackEffectResult::BinaryOperator),
-                Operator::I32Mul => (Instruction::I32Mul, StackEffectResult::BinaryOperator),
-                Operator::I32DivU => (Instruction::I32DivU, StackEffectResult::BinaryOperator),
-                Operator::I32DivS => (Instruction::I32DivS, StackEffectResult::BinaryOperator),
-                Operator::I32RemU => (Instruction::I32RemU, StackEffectResult::BinaryOperator),
-                Operator::I32RemS => (Instruction::I32RemS, StackEffectResult::BinaryOperator),
-                Operator::I32And => (Instruction::I32And, StackEffectResult::BinaryOperator),
-                Operator::I32Or => (Instruction::I32Or, StackEffectResult::BinaryOperator),
-                Operator::I32Xor => (Instruction::I32Xor, StackEffectResult::BinaryOperator),
-                Operator::I32Shl => (Instruction::I32Shl, StackEffectResult::BinaryOperator),
-                Operator::I32ShrU => (Instruction::I32ShrU, StackEffectResult::BinaryOperator),
-                Operator::I32ShrS => (Instruction::I32ShrS, StackEffectResult::BinaryOperator),
-                Operator::I32Rotl => (Instruction::I32Rotl, StackEffectResult::BinaryOperator),
-                Operator::I32Rotr => (Instruction::I32Rotr, StackEffectResult::BinaryOperator),
-                Operator::I32Eq => (Instruction::I32Eq, StackEffectResult::BinaryOperator),
-                Operator::I32Ne => (Instruction::I32Ne, StackEffectResult::BinaryOperator),
-                Operator::I32LtU => (Instruction::I32LtU, StackEffectResult::BinaryOperator),
-                Operator::I32LtS => (Instruction::I32LtS, StackEffectResult::BinaryOperator),
-                Operator::I32GtU => (Instruction::I32GtU, StackEffectResult::BinaryOperator),
-                Operator::I32GtS => (Instruction::I32GtS, StackEffectResult::BinaryOperator),
-                Operator::I32LeU => (Instruction::I32LeU, StackEffectResult::BinaryOperator),
-                Operator::I32LeS => (Instruction::I32LeS, StackEffectResult::BinaryOperator),
-                Operator::I32GeU => (Instruction::I32GeU, StackEffectResult::BinaryOperator),
-                Operator::I32GeS => (Instruction::I32GeS, StackEffectResult::BinaryOperator),
+                Operator::I32Add => (StackInstruction::I32Add, StackEffectResult::BinaryOperator),
+                Operator::I32Sub => (StackInstruction::I32Sub, StackEffectResult::BinaryOperator),
+                Operator::I32Mul => (StackInstruction::I32Mul, StackEffectResult::BinaryOperator),
+                Operator::I32DivU => (StackInstruction::I32DivU, StackEffectResult::BinaryOperator),
+                Operator::I32DivS => (StackInstruction::I32DivS, StackEffectResult::BinaryOperator),
+                Operator::I32RemU => (StackInstruction::I32RemU, StackEffectResult::BinaryOperator),
+                Operator::I32RemS => (StackInstruction::I32RemS, StackEffectResult::BinaryOperator),
+                Operator::I32And => (StackInstruction::I32And, StackEffectResult::BinaryOperator),
+                Operator::I32Or => (StackInstruction::I32Or, StackEffectResult::BinaryOperator),
+                Operator::I32Xor => (StackInstruction::I32Xor, StackEffectResult::BinaryOperator),
+                Operator::I32Shl => (StackInstruction::I32Shl, StackEffectResult::BinaryOperator),
+                Operator::I32ShrU => (StackInstruction::I32ShrU, StackEffectResult::BinaryOperator),
+                Operator::I32ShrS => (StackInstruction::I32ShrS, StackEffectResult::BinaryOperator),
+                Operator::I32Rotl => (StackInstruction::I32Rotl, StackEffectResult::BinaryOperator),
+                Operator::I32Rotr => (StackInstruction::I32Rotr, StackEffectResult::BinaryOperator),
+                Operator::I32Eq => (StackInstruction::I32Eq, StackEffectResult::BinaryOperator),
+                Operator::I32Ne => (StackInstruction::I32Ne, StackEffectResult::BinaryOperator),
+                Operator::I32LtU => (StackInstruction::I32LtU, StackEffectResult::BinaryOperator),
+                Operator::I32LtS => (StackInstruction::I32LtS, StackEffectResult::BinaryOperator),
+                Operator::I32GtU => (StackInstruction::I32GtU, StackEffectResult::BinaryOperator),
+                Operator::I32GtS => (StackInstruction::I32GtS, StackEffectResult::BinaryOperator),
+                Operator::I32LeU => (StackInstruction::I32LeU, StackEffectResult::BinaryOperator),
+                Operator::I32LeS => (StackInstruction::I32LeS, StackEffectResult::BinaryOperator),
+                Operator::I32GeU => (StackInstruction::I32GeU, StackEffectResult::BinaryOperator),
+                Operator::I32GeS => (StackInstruction::I32GeS, StackEffectResult::BinaryOperator),
                 // i64 unary operations
-                Operator::I64Clz => (Instruction::I64Clz, StackEffectResult::UnaryOperator),
-                Operator::I64Ctz => (Instruction::I64Ctz, StackEffectResult::UnaryOperator),
-                Operator::I64Popcnt => (Instruction::I64Popcnt, StackEffectResult::UnaryOperator),
-                Operator::I64Eqz => (Instruction::I64Eqz, StackEffectResult::UnaryOperator),
-                Operator::I64Extend8S => {
-                    (Instruction::I64Extend8S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64Extend16S => {
-                    (Instruction::I64Extend16S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64Extend32S => {
-                    (Instruction::I64Extend32S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64ExtendI32U => {
-                    (Instruction::I64ExtendI32U, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64ExtendI32S => {
-                    (Instruction::I64ExtendI32S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64TruncF32U => {
-                    (Instruction::I64TruncF32U, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64TruncF32S => {
-                    (Instruction::I64TruncF32S, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64TruncF64U => {
-                    (Instruction::I64TruncF64U, StackEffectResult::UnaryOperator)
-                }
-                Operator::I64TruncF64S => {
-                    (Instruction::I64TruncF64S, StackEffectResult::UnaryOperator)
-                }
+                Operator::I64Clz => (StackInstruction::I64Clz, StackEffectResult::UnaryOperator),
+                Operator::I64Ctz => (StackInstruction::I64Ctz, StackEffectResult::UnaryOperator),
+                Operator::I64Popcnt => (
+                    StackInstruction::I64Popcnt,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64Eqz => (StackInstruction::I64Eqz, StackEffectResult::UnaryOperator),
+                Operator::I64Extend8S => (
+                    StackInstruction::I64Extend8S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64Extend16S => (
+                    StackInstruction::I64Extend16S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64Extend32S => (
+                    StackInstruction::I64Extend32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64ExtendI32U => (
+                    StackInstruction::I64ExtendI32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64ExtendI32S => (
+                    StackInstruction::I64ExtendI32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncF32U => (
+                    StackInstruction::I64TruncF32U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncF32S => (
+                    StackInstruction::I64TruncF32S,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncF64U => (
+                    StackInstruction::I64TruncF64U,
+                    StackEffectResult::UnaryOperator,
+                ),
+                Operator::I64TruncF64S => (
+                    StackInstruction::I64TruncF64S,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::I64TruncSatF32U => (
-                    Instruction::I64TruncSatF32U,
+                    StackInstruction::I64TruncSatF32U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I64TruncSatF32S => (
-                    Instruction::I64TruncSatF32S,
+                    StackInstruction::I64TruncSatF32S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I64TruncSatF64U => (
-                    Instruction::I64TruncSatF64U,
+                    StackInstruction::I64TruncSatF64U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I64TruncSatF64S => (
-                    Instruction::I64TruncSatF64S,
+                    StackInstruction::I64TruncSatF64S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::I64ReinterpretF64 => (
-                    Instruction::I64ReinterpretF64,
+                    StackInstruction::I64ReinterpretF64,
                     StackEffectResult::UnaryOperator,
                 ),
                 // i64 binary operations
-                Operator::I64Add => (Instruction::I64Add, StackEffectResult::BinaryOperator),
-                Operator::I64Sub => (Instruction::I64Sub, StackEffectResult::BinaryOperator),
-                Operator::I64Mul => (Instruction::I64Mul, StackEffectResult::BinaryOperator),
-                Operator::I64DivU => (Instruction::I64DivU, StackEffectResult::BinaryOperator),
-                Operator::I64DivS => (Instruction::I64DivS, StackEffectResult::BinaryOperator),
-                Operator::I64RemU => (Instruction::I64RemU, StackEffectResult::BinaryOperator),
-                Operator::I64RemS => (Instruction::I64RemS, StackEffectResult::BinaryOperator),
-                Operator::I64And => (Instruction::I64And, StackEffectResult::BinaryOperator),
-                Operator::I64Or => (Instruction::I64Or, StackEffectResult::BinaryOperator),
-                Operator::I64Xor => (Instruction::I64Xor, StackEffectResult::BinaryOperator),
-                Operator::I64Shl => (Instruction::I64Shl, StackEffectResult::BinaryOperator),
-                Operator::I64ShrU => (Instruction::I64ShrU, StackEffectResult::BinaryOperator),
-                Operator::I64ShrS => (Instruction::I64ShrS, StackEffectResult::BinaryOperator),
-                Operator::I64Rotl => (Instruction::I64Rotl, StackEffectResult::BinaryOperator),
-                Operator::I64Rotr => (Instruction::I64Rotr, StackEffectResult::BinaryOperator),
-                Operator::I64Eq => (Instruction::I64Eq, StackEffectResult::BinaryOperator),
-                Operator::I64Ne => (Instruction::I64Ne, StackEffectResult::BinaryOperator),
-                Operator::I64LtU => (Instruction::I64LtU, StackEffectResult::BinaryOperator),
-                Operator::I64LtS => (Instruction::I64LtS, StackEffectResult::BinaryOperator),
-                Operator::I64GtU => (Instruction::I64GtU, StackEffectResult::BinaryOperator),
-                Operator::I64GtS => (Instruction::I64GtS, StackEffectResult::BinaryOperator),
-                Operator::I64LeU => (Instruction::I64LeU, StackEffectResult::BinaryOperator),
-                Operator::I64LeS => (Instruction::I64LeS, StackEffectResult::BinaryOperator),
-                Operator::I64GeU => (Instruction::I64GeU, StackEffectResult::BinaryOperator),
-                Operator::I64GeS => (Instruction::I64GeS, StackEffectResult::BinaryOperator),
+                Operator::I64Add => (StackInstruction::I64Add, StackEffectResult::BinaryOperator),
+                Operator::I64Sub => (StackInstruction::I64Sub, StackEffectResult::BinaryOperator),
+                Operator::I64Mul => (StackInstruction::I64Mul, StackEffectResult::BinaryOperator),
+                Operator::I64DivU => (StackInstruction::I64DivU, StackEffectResult::BinaryOperator),
+                Operator::I64DivS => (StackInstruction::I64DivS, StackEffectResult::BinaryOperator),
+                Operator::I64RemU => (StackInstruction::I64RemU, StackEffectResult::BinaryOperator),
+                Operator::I64RemS => (StackInstruction::I64RemS, StackEffectResult::BinaryOperator),
+                Operator::I64And => (StackInstruction::I64And, StackEffectResult::BinaryOperator),
+                Operator::I64Or => (StackInstruction::I64Or, StackEffectResult::BinaryOperator),
+                Operator::I64Xor => (StackInstruction::I64Xor, StackEffectResult::BinaryOperator),
+                Operator::I64Shl => (StackInstruction::I64Shl, StackEffectResult::BinaryOperator),
+                Operator::I64ShrU => (StackInstruction::I64ShrU, StackEffectResult::BinaryOperator),
+                Operator::I64ShrS => (StackInstruction::I64ShrS, StackEffectResult::BinaryOperator),
+                Operator::I64Rotl => (StackInstruction::I64Rotl, StackEffectResult::BinaryOperator),
+                Operator::I64Rotr => (StackInstruction::I64Rotr, StackEffectResult::BinaryOperator),
+                Operator::I64Eq => (StackInstruction::I64Eq, StackEffectResult::BinaryOperator),
+                Operator::I64Ne => (StackInstruction::I64Ne, StackEffectResult::BinaryOperator),
+                Operator::I64LtU => (StackInstruction::I64LtU, StackEffectResult::BinaryOperator),
+                Operator::I64LtS => (StackInstruction::I64LtS, StackEffectResult::BinaryOperator),
+                Operator::I64GtU => (StackInstruction::I64GtU, StackEffectResult::BinaryOperator),
+                Operator::I64GtS => (StackInstruction::I64GtS, StackEffectResult::BinaryOperator),
+                Operator::I64LeU => (StackInstruction::I64LeU, StackEffectResult::BinaryOperator),
+                Operator::I64LeS => (StackInstruction::I64LeS, StackEffectResult::BinaryOperator),
+                Operator::I64GeU => (StackInstruction::I64GeU, StackEffectResult::BinaryOperator),
+                Operator::I64GeS => (StackInstruction::I64GeS, StackEffectResult::BinaryOperator),
                 // f32 unary operations
-                Operator::F32Abs => (Instruction::F32Abs, StackEffectResult::UnaryOperator),
-                Operator::F32Neg => (Instruction::F32Neg, StackEffectResult::UnaryOperator),
-                Operator::F32Ceil => (Instruction::F32Ceil, StackEffectResult::UnaryOperator),
-                Operator::F32Floor => (Instruction::F32Floor, StackEffectResult::UnaryOperator),
-                Operator::F32Trunc => (Instruction::F32Trunc, StackEffectResult::UnaryOperator),
-                Operator::F32Sqrt => (Instruction::F32Sqrt, StackEffectResult::UnaryOperator),
-                Operator::F32Nearest => (Instruction::F32Nearest, StackEffectResult::UnaryOperator),
+                Operator::F32Abs => (StackInstruction::F32Abs, StackEffectResult::UnaryOperator),
+                Operator::F32Neg => (StackInstruction::F32Neg, StackEffectResult::UnaryOperator),
+                Operator::F32Ceil => (StackInstruction::F32Ceil, StackEffectResult::UnaryOperator),
+                Operator::F32Floor => {
+                    (StackInstruction::F32Floor, StackEffectResult::UnaryOperator)
+                }
+                Operator::F32Trunc => {
+                    (StackInstruction::F32Trunc, StackEffectResult::UnaryOperator)
+                }
+                Operator::F32Sqrt => (StackInstruction::F32Sqrt, StackEffectResult::UnaryOperator),
+                Operator::F32Nearest => (
+                    StackInstruction::F32Nearest,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::F32ConvertI32U => (
-                    Instruction::F32ConvertI32U,
+                    StackInstruction::F32ConvertI32U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F32ConvertI32S => (
-                    Instruction::F32ConvertI32S,
+                    StackInstruction::F32ConvertI32S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F32ConvertI64U => (
-                    Instruction::F32ConvertI64U,
+                    StackInstruction::F32ConvertI64U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F32ConvertI64S => (
-                    Instruction::F32ConvertI64S,
+                    StackInstruction::F32ConvertI64S,
                     StackEffectResult::UnaryOperator,
                 ),
-                Operator::F32DemoteF64 => {
-                    (Instruction::F32DemoteF64, StackEffectResult::UnaryOperator)
-                }
+                Operator::F32DemoteF64 => (
+                    StackInstruction::F32DemoteF64,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::F32ReinterpretI32 => (
-                    Instruction::F32ReinterpretI32,
+                    StackInstruction::F32ReinterpretI32,
                     StackEffectResult::UnaryOperator,
                 ),
                 // f32 binary operations
-                Operator::F32Add => (Instruction::F32Add, StackEffectResult::BinaryOperator),
-                Operator::F32Sub => (Instruction::F32Sub, StackEffectResult::BinaryOperator),
-                Operator::F32Mul => (Instruction::F32Mul, StackEffectResult::BinaryOperator),
-                Operator::F32Div => (Instruction::F32Div, StackEffectResult::BinaryOperator),
-                Operator::F32Eq => (Instruction::F32Eq, StackEffectResult::BinaryOperator),
-                Operator::F32Ne => (Instruction::F32Ne, StackEffectResult::BinaryOperator),
-                Operator::F32Lt => (Instruction::F32Lt, StackEffectResult::BinaryOperator),
-                Operator::F32Gt => (Instruction::F32Gt, StackEffectResult::BinaryOperator),
-                Operator::F32Le => (Instruction::F32Le, StackEffectResult::BinaryOperator),
-                Operator::F32Ge => (Instruction::F32Ge, StackEffectResult::BinaryOperator),
-                Operator::F32Min => (Instruction::F32Min, StackEffectResult::BinaryOperator),
-                Operator::F32Max => (Instruction::F32Max, StackEffectResult::BinaryOperator),
-                Operator::F32Copysign => {
-                    (Instruction::F32Copysign, StackEffectResult::BinaryOperator)
-                }
+                Operator::F32Add => (StackInstruction::F32Add, StackEffectResult::BinaryOperator),
+                Operator::F32Sub => (StackInstruction::F32Sub, StackEffectResult::BinaryOperator),
+                Operator::F32Mul => (StackInstruction::F32Mul, StackEffectResult::BinaryOperator),
+                Operator::F32Div => (StackInstruction::F32Div, StackEffectResult::BinaryOperator),
+                Operator::F32Eq => (StackInstruction::F32Eq, StackEffectResult::BinaryOperator),
+                Operator::F32Ne => (StackInstruction::F32Ne, StackEffectResult::BinaryOperator),
+                Operator::F32Lt => (StackInstruction::F32Lt, StackEffectResult::BinaryOperator),
+                Operator::F32Gt => (StackInstruction::F32Gt, StackEffectResult::BinaryOperator),
+                Operator::F32Le => (StackInstruction::F32Le, StackEffectResult::BinaryOperator),
+                Operator::F32Ge => (StackInstruction::F32Ge, StackEffectResult::BinaryOperator),
+                Operator::F32Min => (StackInstruction::F32Min, StackEffectResult::BinaryOperator),
+                Operator::F32Max => (StackInstruction::F32Max, StackEffectResult::BinaryOperator),
+                Operator::F32Copysign => (
+                    StackInstruction::F32Copysign,
+                    StackEffectResult::BinaryOperator,
+                ),
                 // f64 unary operations
-                Operator::F64Abs => (Instruction::F64Abs, StackEffectResult::UnaryOperator),
-                Operator::F64Neg => (Instruction::F64Neg, StackEffectResult::UnaryOperator),
-                Operator::F64Ceil => (Instruction::F64Ceil, StackEffectResult::UnaryOperator),
-                Operator::F64Floor => (Instruction::F64Floor, StackEffectResult::UnaryOperator),
-                Operator::F64Trunc => (Instruction::F64Trunc, StackEffectResult::UnaryOperator),
-                Operator::F64Sqrt => (Instruction::F64Sqrt, StackEffectResult::UnaryOperator),
-                Operator::F64Nearest => (Instruction::F64Nearest, StackEffectResult::UnaryOperator),
+                Operator::F64Abs => (StackInstruction::F64Abs, StackEffectResult::UnaryOperator),
+                Operator::F64Neg => (StackInstruction::F64Neg, StackEffectResult::UnaryOperator),
+                Operator::F64Ceil => (StackInstruction::F64Ceil, StackEffectResult::UnaryOperator),
+                Operator::F64Floor => {
+                    (StackInstruction::F64Floor, StackEffectResult::UnaryOperator)
+                }
+                Operator::F64Trunc => {
+                    (StackInstruction::F64Trunc, StackEffectResult::UnaryOperator)
+                }
+                Operator::F64Sqrt => (StackInstruction::F64Sqrt, StackEffectResult::UnaryOperator),
+                Operator::F64Nearest => (
+                    StackInstruction::F64Nearest,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::F64ConvertI32U => (
-                    Instruction::F64ConvertI32U,
+                    StackInstruction::F64ConvertI32U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F64ConvertI32S => (
-                    Instruction::F64ConvertI32S,
+                    StackInstruction::F64ConvertI32S,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F64ConvertI64U => (
-                    Instruction::F64ConvertI64U,
+                    StackInstruction::F64ConvertI64U,
                     StackEffectResult::UnaryOperator,
                 ),
                 Operator::F64ConvertI64S => (
-                    Instruction::F64ConvertI64S,
+                    StackInstruction::F64ConvertI64S,
                     StackEffectResult::UnaryOperator,
                 ),
-                Operator::F64PromoteF32 => {
-                    (Instruction::F64PromoteF32, StackEffectResult::UnaryOperator)
-                }
+                Operator::F64PromoteF32 => (
+                    StackInstruction::F64PromoteF32,
+                    StackEffectResult::UnaryOperator,
+                ),
                 Operator::F64ReinterpretI64 => (
-                    Instruction::F64ReinterpretI64,
+                    StackInstruction::F64ReinterpretI64,
                     StackEffectResult::UnaryOperator,
                 ),
                 // f64 binary operations
-                Operator::F64Add => (Instruction::F64Add, StackEffectResult::BinaryOperator),
-                Operator::F64Sub => (Instruction::F64Sub, StackEffectResult::BinaryOperator),
-                Operator::F64Mul => (Instruction::F64Mul, StackEffectResult::BinaryOperator),
-                Operator::F64Div => (Instruction::F64Div, StackEffectResult::BinaryOperator),
-                Operator::F64Eq => (Instruction::F64Eq, StackEffectResult::BinaryOperator),
-                Operator::F64Ne => (Instruction::F64Ne, StackEffectResult::BinaryOperator),
-                Operator::F64Lt => (Instruction::F64Lt, StackEffectResult::BinaryOperator),
-                Operator::F64Gt => (Instruction::F64Gt, StackEffectResult::BinaryOperator),
-                Operator::F64Le => (Instruction::F64Le, StackEffectResult::BinaryOperator),
-                Operator::F64Ge => (Instruction::F64Ge, StackEffectResult::BinaryOperator),
-                Operator::F64Min => (Instruction::F64Min, StackEffectResult::BinaryOperator),
-                Operator::F64Max => (Instruction::F64Max, StackEffectResult::BinaryOperator),
-                Operator::F64Copysign => {
-                    (Instruction::F64Copysign, StackEffectResult::BinaryOperator)
-                }
+                Operator::F64Add => (StackInstruction::F64Add, StackEffectResult::BinaryOperator),
+                Operator::F64Sub => (StackInstruction::F64Sub, StackEffectResult::BinaryOperator),
+                Operator::F64Mul => (StackInstruction::F64Mul, StackEffectResult::BinaryOperator),
+                Operator::F64Div => (StackInstruction::F64Div, StackEffectResult::BinaryOperator),
+                Operator::F64Eq => (StackInstruction::F64Eq, StackEffectResult::BinaryOperator),
+                Operator::F64Ne => (StackInstruction::F64Ne, StackEffectResult::BinaryOperator),
+                Operator::F64Lt => (StackInstruction::F64Lt, StackEffectResult::BinaryOperator),
+                Operator::F64Gt => (StackInstruction::F64Gt, StackEffectResult::BinaryOperator),
+                Operator::F64Le => (StackInstruction::F64Le, StackEffectResult::BinaryOperator),
+                Operator::F64Ge => (StackInstruction::F64Ge, StackEffectResult::BinaryOperator),
+                Operator::F64Min => (StackInstruction::F64Min, StackEffectResult::BinaryOperator),
+                Operator::F64Max => (StackInstruction::F64Max, StackEffectResult::BinaryOperator),
+                Operator::F64Copysign => (
+                    StackInstruction::F64Copysign,
+                    StackEffectResult::BinaryOperator,
+                ),
                 // locals
                 Operator::LocalGet { local_index } => (
-                    Instruction::LocalGet {
+                    StackInstruction::LocalGet {
                         index: LocalIndex(local_index),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::LocalSet { local_index } => (
-                    Instruction::LocalSet {
+                    StackInstruction::LocalSet {
                         index: LocalIndex(local_index),
                     },
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
                 Operator::LocalTee { local_index } => (
-                    Instruction::LocalTee {
+                    StackInstruction::LocalTee {
                         index: LocalIndex(local_index),
                     },
                     StackEffectResult::PopPush { pops: 1, pushes: 1 },
                 ),
                 // globals
                 Operator::GlobalGet { global_index } => (
-                    Instruction::GlobalGet {
+                    StackInstruction::GlobalGet {
                         index: GlobalIndex(global_index),
                     },
                     StackEffectResult::PopPush { pops: 0, pushes: 1 },
                 ),
                 Operator::GlobalSet { global_index } => (
-                    Instruction::GlobalSet {
+                    StackInstruction::GlobalSet {
                         index: GlobalIndex(global_index),
                     },
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
@@ -1767,7 +1850,7 @@ impl Instruction {
                     let results = &ty.results;
 
                     (
-                        Instruction::Call {
+                        StackInstruction::Call {
                             func_index: FuncIndex(function_index),
                             params_count: params.len() as u32,
                         },
@@ -1793,7 +1876,7 @@ impl Instruction {
                     };
 
                     (
-                        Instruction::CallIndirect {
+                        StackInstruction::CallIndirect {
                             ty_index: TyIndex(type_index),
                             table_index: TableIndex(table_index),
                         },
@@ -1801,18 +1884,18 @@ impl Instruction {
                     )
                 }
                 Operator::Select => (
-                    Instruction::Select,
+                    StackInstruction::Select,
                     StackEffectResult::PopPush { pops: 3, pushes: 1 },
                 ),
                 Operator::Drop => (
-                    Instruction::Drop,
+                    StackInstruction::Drop,
                     StackEffectResult::PopPush { pops: 1, pushes: 0 },
                 ),
                 // blocks
                 Operator::Block { blockty } => {
                     control_stack.add_block(BlockKind::Block, &blockty, types);
 
-                    (Instruction::Block, StackEffectResult::NoEffect)
+                    (StackInstruction::Block, StackEffectResult::NoEffect)
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
@@ -1823,7 +1906,7 @@ impl Instruction {
                         types,
                     );
 
-                    (Instruction::Loop, StackEffectResult::NoEffect)
+                    (StackInstruction::Loop, StackEffectResult::NoEffect)
                 }
                 Operator::If { blockty } => {
                     control_stack.add_block(
@@ -1836,7 +1919,7 @@ impl Instruction {
                     );
 
                     (
-                        Instruction::If {
+                        StackInstruction::If {
                             else_index: None,
                             end_index: u32::MAX, // dummy value! will backpath when we see END for this `if`
                         },
@@ -1871,7 +1954,7 @@ impl Instruction {
                     control_stack.end_unreachable_traversing();
 
                     (
-                        Instruction::Else {
+                        StackInstruction::Else {
                             if_end_index: u32::MAX,
                         }, // dummy value! will backpatch when we see END for the `if` of this `else`
                         StackEffectResult::SetHeight(recorded_height + params),
@@ -1894,7 +1977,7 @@ impl Instruction {
                     // brs with a depth resolved to a "loop" block targets the loop start and so the arity
                     // will be params of the loop. For other blocks, the br targets the end of that block
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
-                        Instruction::Br {
+                        StackInstruction::Br {
                             target_index: loop_index, // correct target index,
                             arity: params,
                             recorded_height,
@@ -1902,7 +1985,7 @@ impl Instruction {
                     } else {
                         block.attached_breaks.push((index, u32::MAX));
 
-                        Instruction::Br {
+                        StackInstruction::Br {
                             target_index: u32::MAX, // dummy value! will backpatch when we see END for the block this `br` is attached to
                             arity: results,
                             recorded_height,
@@ -1932,7 +2015,7 @@ impl Instruction {
                     let index = instructions.len() as u32;
 
                     let instr = if let Some(loop_index) = block.kind.is_loop() {
-                        Instruction::BrIf {
+                        StackInstruction::BrIf {
                             target_index: loop_index, // correct target index,
                             arity: params,
                             recorded_height,
@@ -1940,7 +2023,7 @@ impl Instruction {
                     } else {
                         block.attached_breaks.push((index, u32::MAX));
 
-                        Instruction::BrIf {
+                        StackInstruction::BrIf {
                             target_index: u32::MAX,
                             arity: results,
                             recorded_height,
@@ -1973,7 +2056,7 @@ impl Instruction {
                         let recorded_height = block.recorded_height;
 
                         if let Some(loop_index) = block.kind.is_loop() {
-                            br_table_target_branches.push(BrTableTarget {
+                            br_table_target_branches.push(StackBrTableTarget {
                                 target_index: loop_index,
                                 arity: params,
                                 recorded_height,
@@ -1986,7 +2069,7 @@ impl Instruction {
                                 .push((index, br_targets_start + i as u32));
 
                             // dummy value! will backpatch when we see END for the block this `br` is attached to
-                            br_table_target_branches.push(BrTableTarget {
+                            br_table_target_branches.push(StackBrTableTarget {
                                 target_index: u32::MAX,
                                 arity: results,
                                 recorded_height,
@@ -1999,7 +2082,7 @@ impl Instruction {
                     control_stack.set_unreachable_traversing();
 
                     (
-                        Instruction::BrTable {
+                        StackInstruction::BrTable {
                             start_index: br_targets_start,
                             len: br_targets_len,
                         },
@@ -2020,7 +2103,7 @@ impl Instruction {
                     control_stack.set_unreachable_traversing();
 
                     (
-                        Instruction::Return {
+                        StackInstruction::Return {
                             target_index: u32::MAX,
                             arity: results,
                             recorded_height,
@@ -2048,27 +2131,27 @@ impl Instruction {
                     // because a branch to a loop resolves to the loop start immediately and is not attached.
                     for (br_index, br_targets_index) in attached_breaks {
                         match &mut instructions[*br_index as usize] {
-                            Instruction::Br {
+                            StackInstruction::Br {
                                 target_index,
                                 arity: _arity,
                                 recorded_height: _recorded_height,
                             } => {
                                 *target_index = index;
                             }
-                            Instruction::BrIf {
+                            StackInstruction::BrIf {
                                 target_index,
                                 arity: _arity,
                                 recorded_height: _recorded_height,
                             } => {
                                 *target_index = index;
                             }
-                            Instruction::BrTable { .. } => {
+                            StackInstruction::BrTable { .. } => {
                                 // `br_targets_index` is already absolute, so the table's own
                                 // range is not needed here.
                                 br_table_target_branches[*br_targets_index as usize].target_index =
                                     index;
                             }
-                            Instruction::Return {
+                            StackInstruction::Return {
                                 target_index,
                                 arity: _arity,
                                 recorded_height: _recorded_height,
@@ -2091,7 +2174,7 @@ impl Instruction {
                             else_index: ei,
                         } => {
                             // Fill the `if`'s `else_index` and `end_index` ...
-                            let Instruction::If {
+                            let StackInstruction::If {
                                 else_index,
                                 end_index,
                             } = &mut instructions[if_index as usize]
@@ -2107,7 +2190,7 @@ impl Instruction {
                             // ... and point the `else` (if present) at this same `end`, so a then-branch
                             // that falls through into `else` knows where the construct closes.
                             if let Some(else_index) = ei {
-                                let Instruction::Else { if_end_index } =
+                                let StackInstruction::Else { if_end_index } =
                                     &mut instructions[else_index as usize]
                                 else {
                                     unreachable!(
@@ -2121,7 +2204,7 @@ impl Instruction {
                     }
 
                     (
-                        Instruction::End {
+                        StackInstruction::End {
                             arity: results,
                             recorded_height,
                         },
@@ -2167,65 +2250,9 @@ impl Instruction {
         Ok((
             instructions,
             instruction_offsets,
-            FrameLayout {
+            StackFrameLayout {
                 br_targets_arena: br_table_target_branches.into_boxed_slice(),
             },
         ))
-    }
-
-    /// Lowers a constant expression — a global, element, or data initializer.
-    ///
-    /// Accepts only the const-expr subset: the four `*.const` operators,
-    /// `global.get`, `ref.null`, `ref.func`, and `i32`/`i64` add/sub/mul. Anything
-    /// else is [`TraceWasmError::Unsupported`]. The terminating `end` closes the
-    /// expression and is consumed rather than emitted.
-    ///
-    /// Unlike [`Self::emit_instruction_for_func`] there is no control stack, no
-    /// height tracking, and no backpatching, because the subset contains no
-    /// branches — so this returns the instruction list alone, with no source-offset
-    /// sidecar and no `br_table` target array.
-    pub(crate) fn emit_instruction_for_const_expr(
-        mut operator_reader: OperatorsReader<'_>,
-    ) -> Result<Vec<Instruction>, TraceWasmError> {
-        let mut instructions = vec![];
-
-        while !operator_reader.eof() {
-            let operator = operator_reader.read()?;
-
-            let instr = match operator {
-                Operator::I32Const { value } => Instruction::I32Const { value },
-                Operator::I64Const { value } => Instruction::I64Const { value },
-                Operator::F32Const { value } => Instruction::F32Const {
-                    value: f32::from_bits(value.bits()),
-                },
-                Operator::F64Const { value } => Instruction::F64Const {
-                    value: f64::from_bits(value.bits()),
-                },
-                Operator::GlobalGet { global_index } => Instruction::GlobalGet {
-                    index: GlobalIndex(global_index),
-                },
-                Operator::RefNull { hty: _hty } => Instruction::RefNull,
-                Operator::RefFunc { function_index } => Instruction::RefFunc {
-                    function_index: FuncIndex(function_index),
-                },
-                Operator::I32Add => Instruction::I32Add,
-                Operator::I32Sub => Instruction::I32Sub,
-                Operator::I32Mul => Instruction::I32Mul,
-                Operator::I64Add => Instruction::I64Add,
-                Operator::I64Sub => Instruction::I64Sub,
-                Operator::I64Mul => Instruction::I64Mul,
-                Operator::End => break,
-                _ => {
-                    return Err(TraceWasmError::Unsupported(format!(
-                        "operator `{:?}` in const expression stream",
-                        operator
-                    )));
-                }
-            };
-
-            instructions.push(instr);
-        }
-
-        Ok(instructions)
     }
 }

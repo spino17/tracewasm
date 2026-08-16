@@ -106,7 +106,7 @@
 use crate::{
     error::TraceWasmError,
     instruction::{
-        Block, BlockKind, check_memory_index, params_and_results_from_blockty,
+        Block, BlockKind, Instruction, check_memory_index, params_and_results_from_blockty,
         register::lazy::{
             Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
             LocalSlot, SpillArena, SpillIndex,
@@ -524,7 +524,7 @@ impl UnreachableTrackingControlStack {
 /// loop and non-loop labels: validation only requires the label *types* to match, so
 /// the arities agree but the unwind heights — and therefore the destination registers
 /// — differ per arm.
-pub struct BrTableTarget {
+pub struct RegBrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
     pub mov: DynSignature,
@@ -561,7 +561,7 @@ struct SimulatedStack {
     control_stack: ControlStack,
     /// Flat arena of `br_table` arms, indexed by
     /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
-    br_targets: Vec<BrTableTarget>,
+    br_targets: Vec<RegBrTableTarget>,
 }
 
 impl SimulatedStack {
@@ -1184,7 +1184,7 @@ impl SimulatedStack {
 /// [`max_height`](crate::instruction::stack), these are measured from the frame's
 /// operand base, so a consumer laying out storage needs
 /// `locals_len + registers + spills`.
-pub struct FrameLayout {
+pub struct RegFrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
@@ -1207,12 +1207,12 @@ pub struct FrameLayout {
     /// A [`RegInstruction::BrTable`] owns the contiguous run named by its
     /// `(targets_start, targets_len)`, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
-    pub br_targets_arena: Box<[BrTableTarget]>,
+    pub br_targets_arena: Box<[RegBrTableTarget]>,
 }
 
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
-pub type LoweredRegFuncBody = (Vec<RegInstruction>, Vec<u32>, FrameLayout);
+type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 
 /// One lowered instruction.
 ///
@@ -2084,6 +2084,11 @@ impl RegInstruction {
 
         instructions.push(emitter(registers));
     }
+}
+
+impl Instruction for RegInstruction {
+    type BrTableTarget = RegBrTableTarget;
+    type FrameLayout = RegFrameLayout;
 
     /// Lowers one function body's operator stream into register form.
     ///
@@ -2098,7 +2103,7 @@ impl RegInstruction {
     ///
     /// Rejects any operator the pass does not model as
     /// [`TraceWasmError::Unsupported`].
-    pub fn emit_instruction_for_func(
+    fn emit_instruction_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
@@ -2106,7 +2111,7 @@ impl RegInstruction {
         func_decls: &[FuncDecl],
         locals_count: u32,
         globals_count: u32,
-    ) -> Result<LoweredRegFuncBody, TraceWasmError> {
+    ) -> Result<RegLoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<RegInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
@@ -2763,7 +2768,7 @@ impl RegInstruction {
                             (move_registers, u32::MAX)
                         };
 
-                        let br_target = BrTableTarget {
+                        let br_target = RegBrTableTarget {
                             mov: move_registers,
                             target_index,
                         };
@@ -2966,7 +2971,7 @@ impl RegInstruction {
         // by `advanced_register_index` and `allocation_len` only grows when no
         // freed spill slot can be reused — so they are read off directly here
         // rather than recomputed from the instruction list.
-        let frame = FrameLayout {
+        let frame = RegFrameLayout {
             registers: simulated_stack.max_registers,
             spills: simulated_stack.spills.allocation_len(),
             input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),

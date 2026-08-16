@@ -43,7 +43,7 @@
 use std::time::Instant;
 
 use tracewasm_core::{
-    instance::config::Config, instruction::stack::Instruction, memory::linear::LinearMemory,
+    instance::config::Config, instruction::stack::StackInstruction, memory::linear::LinearMemory,
     module::Module,
 };
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, NoImports, guests, with_large_stack};
@@ -333,7 +333,7 @@ fn report() {
     };
     println!(
         " profile: {profile}    size_of::<Instruction>(): {} B",
-        size_of::<Instruction>()
+        size_of::<StackInstruction>()
     );
 
     let timer = timer_floor();
@@ -538,7 +538,7 @@ fn memory(rss: &RssMilestones) {
         "guest", "instrs", "stream KB", "offsets KB", "locals KB"
     );
 
-    let isz = size_of::<Instruction>();
+    let isz = size_of::<StackInstruction>();
     let (mut ti, mut ts, mut to) = (0usize, 0usize, 0usize);
 
     for w in GUESTS {

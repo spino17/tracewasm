@@ -47,7 +47,7 @@ fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
 ///
 /// Panics on malformed input, which in a test is what you want: the `.wat` is part
 /// of the test, so a mistake in it is a test bug and should be loud.
-fn lower(wat: &str) -> LoweredRegFuncBody {
+fn lower(wat: &str) -> RegLoweredFuncBody {
     lower_func(wat, 0)
 }
 
@@ -56,7 +56,7 @@ fn lower(wat: &str) -> LoweredRegFuncBody {
 ///
 /// Imported functions are not modelled: the index space here is the code section's,
 /// so `call n` inside the wat must name a defined function.
-fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
+fn lower_func(wat: &str, n: usize) -> RegLoweredFuncBody {
     lower_func_with_types(wat, n).0
 }
 
@@ -65,7 +65,7 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
 /// A `call_indirect` stores only a `ty_index`, so how many of the operands in its
 /// arena run are arguments is recoverable only through the types. Rendering one
 /// therefore needs exactly what executing one will need.
-fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncType>) {
+fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncType>) {
     let bytes = wat::parse_str(wat).expect("invalid wat");
 
     // `wat::parse_str` assembles without type-checking, so an ill-typed body
@@ -1717,13 +1717,13 @@ fn br_table_arms_survive_lowering() {
     for base in [inner, outer, inner] {
         let mov = s.br_truncation_registers(base, 1);
 
-        s.br_targets.push(BrTableTarget {
+        s.br_targets.push(RegBrTableTarget {
             mov,
             target_index: u32::MAX,
         });
     }
 
-    let frame = FrameLayout {
+    let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
@@ -1755,7 +1755,7 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
 
     let _ = s.registers_for::<1, 1>();
 
-    let frame = FrameLayout {
+    let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         input_registers_arena: s.input_registers.into_boxed_slice(),

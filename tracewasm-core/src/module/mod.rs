@@ -24,7 +24,10 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::stack::{FrameLayout, Instruction},
+    instruction::{
+        Instruction,
+        stack::{StackFrameLayout, StackInstruction},
+    },
     memory::Memory,
     vm::{
         TraceVM,
@@ -570,7 +573,7 @@ pub struct FuncBody {
     pub locals: Box<[ValType]>,
     /// The body lowered by [`crate::instruction`] (control flow resolved to
     /// absolute indices).
-    pub instructions: Box<[Instruction]>,
+    pub instructions: Box<[StackInstruction]>,
     /// Source positions for [`Self::instructions`], used to point diagnostics at
     /// the original binary.
     ///
@@ -579,7 +582,7 @@ pub struct FuncBody {
     /// `instructions[i]`, and both slices always have the same length. Lowering
     /// pushes the two together, which is what upholds this.
     pub instruction_offsets: Box<[u32]>,
-    pub(crate) frame_layout: FrameLayout,
+    pub(crate) frame_layout: StackFrameLayout,
 }
 
 /// The module's custom-section data, flattened for direct lookup: the decoded
@@ -708,7 +711,7 @@ pub enum DataKind {
         /// Target memory index.
         memory_index: MemoryIndex,
         /// Constant expression computing the destination offset.
-        offset_expr: Box<[Instruction]>,
+        offset_expr: Box<[StackInstruction]>,
     },
 }
 
@@ -722,7 +725,7 @@ pub enum ElementKind {
         /// Target table index (`None` means table 0).
         table_index: Option<TableIndex>,
         /// Constant expression computing the destination offset.
-        offset_expr: Box<[Instruction]>,
+        offset_expr: Box<[StackInstruction]>,
     },
     /// Forward-declares references (for `ref.func`); contributes no table data.
     Declared,
@@ -733,7 +736,7 @@ pub enum ElementItems {
     /// A list of function indices (the legacy form).
     Functions(Box<[FuncIndex]>),
     /// Constant expressions of the given reference type (each yields one element).
-    Expressions(RefType, Box<[Box<[Instruction]>]>),
+    Expressions(RefType, Box<[Box<[StackInstruction]>]>),
 }
 
 /// An element segment.
@@ -749,7 +752,7 @@ pub enum TableInit {
     /// Every slot starts as a null reference.
     RefNull,
     /// Every slot is initialized from this constant expression.
-    Expr(Box<[Instruction]>),
+    Expr(Box<[StackInstruction]>),
 }
 
 /// A table definition: its type plus initialization.
@@ -804,7 +807,7 @@ pub enum GlobalKind {
         name: String,
     },
     /// Locally defined; the constant expression computes its initial value.
-    Local(Box<[Instruction]>),
+    Local(Box<[StackInstruction]>),
 }
 
 /// A global definition: its type plus the constant expression for its initial
@@ -1115,7 +1118,7 @@ impl Module {
                         let table_init = match init {
                             wasmparser::TableInit::RefNull => TableInit::RefNull,
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
-                                Instruction::emit_instruction_for_const_expr(
+                                StackInstruction::emit_instruction_for_const_expr(
                                     const_expr.get_operators_reader(),
                                 )?
                                 .into_boxed_slice(),
@@ -1168,7 +1171,7 @@ impl Module {
                         globals.push(Global {
                             ty: GlobalType::from_wasmparser(global_ty),
                             kind: GlobalKind::Local(
-                                Instruction::emit_instruction_for_const_expr(
+                                StackInstruction::emit_instruction_for_const_expr(
                                     global.init_expr.get_operators_reader(),
                                 )?
                                 .into_boxed_slice(),
@@ -1221,7 +1224,7 @@ impl Module {
                                     offset_expr,
                                 } => ElementKind::Active {
                                     table_index: table_index.map(TableIndex),
-                                    offset_expr: Instruction::emit_instruction_for_const_expr(
+                                    offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
                                     )?
                                     .into_boxed_slice(),
@@ -1247,7 +1250,7 @@ impl Module {
                                         let expr = expr?;
 
                                         exprs.push(
-                                            Instruction::emit_instruction_for_const_expr(
+                                            StackInstruction::emit_instruction_for_const_expr(
                                                 expr.get_operators_reader(),
                                             )?
                                             .into_boxed_slice(),
@@ -1283,7 +1286,7 @@ impl Module {
                                     offset_expr,
                                 } => DataKind::Active {
                                     memory_index: MemoryIndex(memory_index),
-                                    offset_expr: Instruction::emit_instruction_for_const_expr(
+                                    offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
                                     )?
                                     .into_boxed_slice(),
@@ -1338,7 +1341,7 @@ impl Module {
                     }
 
                     let (instructions, instruction_offsets, frame_layout) =
-                        Instruction::emit_instruction_for_func(
+                        StackInstruction::emit_instruction_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
                             results.len() as u32,
