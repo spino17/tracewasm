@@ -49,10 +49,10 @@
 
 use std::time::{Duration, Instant};
 
+use tracewasm_core::Stack;
 use tracewasm_core::error::FuncCallError;
 use tracewasm_core::instance::config::Config;
 use tracewasm_core::instance::traits::{ImportRegistry, ImportSignature, ResultVals, Results, Val};
-use tracewasm_core::instruction::stack::StackInstruction;
 use tracewasm_core::memory::{MemoryView, linear::LinearMemory};
 use tracewasm_core::module::Module;
 
@@ -124,7 +124,7 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
 pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
-    let module = Module::<StackInstruction>::compile(wasm).expect("module should compile");
+    let module = Module::<Stack>::compile(wasm).expect("module should compile");
 
     let func = module
         .get_typed_func::<(), R>(name)
@@ -174,8 +174,8 @@ pub mod guests {
 /// is well over a megabyte of wasm — so a test file checking many exports should
 /// build one of these and reuse it.
 pub struct Guest {
-    module: std::sync::Arc<Module<StackInstruction>>,
-    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, StackInstruction>,
+    module: std::sync::Arc<Module<Stack>>,
+    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, Stack>,
 }
 
 impl Guest {
@@ -191,7 +191,7 @@ impl Guest {
     /// stack is the binding constraint, and a "how deep can we go" measurement
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
-        let module = Module::<StackInstruction>::compile(wasm).expect("guest should compile");
+        let module = Module::<Stack>::compile(wasm).expect("guest should compile");
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");

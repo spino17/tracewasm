@@ -1,5 +1,6 @@
 //! The crate-wide error type for parsing, lowering, instantiation, and execution.
 use crate::{
+    Stack, VirtualMachine,
     instruction::Instruction,
     module::{CustomSection, FuncIndex, Module, ModuleDwarf, TableIndex},
     tracewasm_unreachable,
@@ -140,8 +141,7 @@ impl From<wasmparser::Error> for TraceWasmError {
 /// holding them costs two pointer bumps and lets the error outlive the call it
 /// came from; a backtrace can be rendered long afterwards. Keeping the module
 /// instead would mean naming its lowering, which is what forced this whole error
-/// hierarchy to be generic over
-/// [`Instruction`](crate::instruction::Instruction) before.
+/// hierarchy to be generic over the machine before.
 pub struct FuncCallError {
     /// The entry function the failed call was made through.
     func_name: String,
@@ -172,10 +172,10 @@ impl FuncCallError {
     /// The interpreter satisfies this by construction: a trap seeds the trace
     /// with its own `NonCall` record before any caller appends a
     /// [`TraceRecordKind::Call`] on top.
-    pub(crate) fn new<Instr: Instruction>(
+    pub(crate) fn new<V: VirtualMachine>(
         func_name: String,
         trace: Box<[TraceRecord]>,
-        module: &Module<Instr>,
+        module: &Module<V>,
     ) -> Self {
         FuncCallError {
             func_name,
@@ -850,10 +850,10 @@ mod stack_trace_tests {
     /// The smallest valid module: `(module)`. Only needed because a
     /// `FuncCallError` carries one for name and DWARF lookup; these tests never
     /// read through it.
-    fn empty_module() -> std::sync::Arc<Module<StackInstruction>> {
+    fn empty_module() -> std::sync::Arc<Module<Stack>> {
         let bytes = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
 
-        crate::module::Module::<StackInstruction>::compile(&bytes).expect("`(module)` compiles")
+        crate::module::Module::<Stack>::compile(&bytes).expect("`(module)` compiles")
     }
 
     fn err_with(trace: Vec<TraceRecord>) -> FuncCallError {
@@ -954,8 +954,8 @@ mod func_call_error_tests {
     fn implements_std_error_with_display_and_source() {
         fn assert_is_error<E: std::error::Error + 'static>(_: &E) {}
 
-        let module: Arc<Module<StackInstruction>> =
-            crate::module::Module::<StackInstruction>::compile(&wat_min()).unwrap();
+        let module: Arc<Module<Stack>> =
+            crate::module::Module::<Stack>::compile(&wat_min()).unwrap();
 
         let e = FuncCallError::new("entry".to_string(), trace(), &module);
 
@@ -974,7 +974,7 @@ mod func_call_error_tests {
     // A release module has no `.debug_*` sections; that must be an error, not a panic.
     #[test]
     fn source_trace_without_debug_info_errors_instead_of_panicking() {
-        let module = crate::module::Module::<StackInstruction>::compile(&wat_min()).unwrap();
+        let module = crate::module::Module::<Stack>::compile(&wat_min()).unwrap();
         let e = FuncCallError::new("entry".to_string(), trace(), &module);
 
         assert!(matches!(

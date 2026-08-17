@@ -2,6 +2,7 @@
 //! type-safe [`TypedFunc`] handle for calling its functions.
 
 use crate::{
+    InstrOf, VirtualMachine,
     error::FuncCallError,
     instance::{
         config::Config,
@@ -30,10 +31,10 @@ pub mod traits;
 /// nested call costs no allocation.
 ///
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
-/// import implementation, and over `Instr` so the frame store matches the
-/// lowering — see [`Instruction`](crate::instruction::Instruction). The module is shared via `Arc`, so one compiled module
+/// import implementation, and over `V` so the frame store matches the
+/// machine — see [`VirtualMachine`](crate::VirtualMachine). The module is shared via `Arc`, so one compiled module
 /// can back several instances.
-pub struct Instance<M, I, Instr: Instruction> {
+pub struct Instance<M, I, V: VirtualMachine> {
     /// The guest's linear memory.
     pub(crate) memory: M,
     /// Live values for every frame in the call chain, laid out however the
@@ -45,11 +46,11 @@ pub struct Instance<M, I, Instr: Instruction> {
     ///
     /// Reset at the start of each [`TypedFunc::call`], which is what leaves an
     /// instance usable after a trap.
-    pub(crate) frame: Instr::RuntimeFrame,
+    pub(crate) frame: <InstrOf<V> as Instruction>::RuntimeFrame,
     /// Host functions backing the module's declared imports.
     pub(crate) import_registry: I,
     /// The compiled module this instance was created from.
-    pub(crate) module: Arc<Module<Instr>>,
+    pub(crate) module: Arc<Module<V>>,
     /// The limits this instance was created under, already narrowed against what
     /// the module declares.
     pub(crate) config: Config,
@@ -68,7 +69,7 @@ pub struct Instance<M, I, Instr: Instruction> {
     pub(crate) data_vals: Box<[DataVal]>,
 }
 
-impl<M: Memory, I: ImportRegistry, Instr: Instruction> Instance<M, I, Instr> {
+impl<M: Memory, I: ImportRegistry, V: VirtualMachine> Instance<M, I, V> {
     /// Internal constructor assembling an instance from its parts. Crate-private
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
@@ -79,7 +80,7 @@ impl<M: Memory, I: ImportRegistry, Instr: Instruction> Instance<M, I, Instr> {
     pub(crate) fn new(
         memory: M,
         import_registry: I,
-        module: Arc<Module<Instr>>,
+        module: Arc<Module<V>>,
         config: Config,
         global_vals: Box<[Val]>,
         table_vals: Box<[TableVal]>,
@@ -88,7 +89,7 @@ impl<M: Memory, I: ImportRegistry, Instr: Instruction> Instance<M, I, Instr> {
     ) -> Self {
         Instance {
             memory,
-            frame: Instr::RuntimeFrame::default(),
+            frame: <InstrOf<V> as Instruction>::RuntimeFrame::default(),
             import_registry,
             module,
             config,
@@ -159,7 +160,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     pub fn call<M: Memory, I: ImportRegistry>(
         &self,
         params: P,
-        instance: &mut Instance<M, I, StackInstruction>,
+        instance: &mut Instance<M, I, crate::Stack>,
     ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();

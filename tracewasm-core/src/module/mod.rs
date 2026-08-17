@@ -18,6 +18,7 @@
 //! (see [`Module::func_decls`] and [`Module::imported_func_count`]).
 
 use crate::{
+    InstrOf, VirtualMachine,
     error::TraceWasmError,
     instance::{
         Instance, TypedFunc,
@@ -429,7 +430,7 @@ impl EntityIndex for FieldIndex {}
 /// single list, imports first, matching how wasm numbers them; the
 /// `imported_*_count` fields record where the boundary falls. See the per-field
 /// docs.
-pub struct Module<Instr: Instruction> {
+pub struct Module<V: VirtualMachine> {
     /// The type section. Only function types are kept — GC composite types
     /// (struct/array) are rejected during parsing.
     pub types: Box<[FuncType]>,
@@ -473,7 +474,11 @@ pub struct Module<Instr: Instruction> {
     /// (with [`GlobalKind::Imported`]), the rest are locally defined.
     pub imported_global_count: u32,
     /// Lowered bodies of the locally-defined functions, in definition order.
-    pub func_bodies: Box<[FuncBody<Instr>]>,
+    ///
+    /// Crate-private: a body holds instructions of whichever machine `V` names, and
+    /// those are internal. [`Self::instruction_count`] and its siblings expose the
+    /// sizes, which is all a consumer outside the crate has asked for.
+    pub(crate) func_bodies: Box<[FuncBody<InstrOf<V>>]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
@@ -486,7 +491,7 @@ pub struct Module<Instr: Instruction> {
     dwarf: Option<ModuleDwarf>,
 }
 
-impl<Instr: Instruction> Module<Instr> {
+impl<V: VirtualMachine> Module<V> {
     /// The module's export map, keyed by export name.
     pub fn exports(&self) -> &FxHashMap<String, Export> {
         &self.exports
@@ -500,8 +505,52 @@ impl<Instr: Instruction> Module<Instr> {
     /// The module's DWARF debug info, or `None` if it was built without any.
     ///
     /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
-    /// instruction's byte offset (see [`FuncBody::instruction_offsets`]) back to a
+    /// instruction's byte offset back to a
     /// source location.
+    /// How many locally-defined functions this module has lowered bodies for.
+    pub fn func_body_count(&self) -> usize {
+        self.func_bodies.len()
+    }
+
+    /// Total lowered instructions across every body.
+    ///
+    /// The bodies themselves are crate-private — an instruction belongs to whichever
+    /// machine `V` names, and those types are internal — so the sizes are exposed
+    /// here for the benefit of anything measuring how a module lowered.
+    pub fn instruction_count(&self) -> usize {
+        self.func_bodies.iter().map(|b| b.instructions.len()).sum()
+    }
+
+    /// Total source-offset entries across every body.
+    ///
+    /// Equal to [`Self::instruction_count`] whenever the lowering upholds its
+    /// parallel-slices invariant, which is exactly why it is worth being able to
+    /// compare the two from outside.
+    pub fn instruction_offset_count(&self) -> usize {
+        self.func_bodies
+            .iter()
+            .map(|b| b.instruction_offsets.len())
+            .sum()
+    }
+
+    /// Total addressable locals across every body, params included.
+    pub fn locals_count(&self) -> usize {
+        self.func_bodies.iter().map(|b| b.locals.len()).sum()
+    }
+
+    /// Bytes one lowered instruction of this machine occupies.
+    ///
+    /// The instruction types are crate-private, so this is how a caller measures
+    /// what a lowered module costs: `instruction_count() * instruction_size()` is
+    /// the size of the instruction stream. Both machines assert a ceiling on this
+    /// at compile time, since a body holds one per operator.
+    ///
+    /// An associated function rather than a method — the answer depends only on the
+    /// machine, so `Module::<Stack>::instruction_size()` needs no module.
+    pub fn instruction_size() -> usize {
+        size_of::<InstrOf<V>>()
+    }
+
     pub fn dwarf(&self) -> Option<ModuleDwarf> {
         self.dwarf.clone()
     }
@@ -564,7 +613,7 @@ impl<Instr: Instruction> Module<Instr> {
 }
 
 /// A locally-defined function's locals and lowered instruction list.
-pub struct FuncBody<Instr: Instruction> {
+pub(crate) struct FuncBody<Instr: Instruction> {
     /// All locals addressable in the body: the function's params first, then the
     /// declared locals, expanded from the run-length-encoded body header.
     pub locals: Box<[ValType]>,
@@ -704,6 +753,23 @@ pub struct Data {
     pub data: Box<[u8]>,
 }
 
+/// One lowered constant expression — a global's initialiser, a segment's offset,
+/// an element's value.
+///
+/// Opaque on purpose. A module's shape is worth exposing, but the instructions a
+/// const expression lowered to are not: they are always the stack machine's
+/// whatever the module's own machine is, and that machine's instruction set is
+/// crate-private. Wrapping them keeps the enums below public without leaking what
+/// they hold.
+pub struct ConstExpr(Box<[StackInstruction]>);
+
+impl ConstExpr {
+    /// The lowered instructions, for the instantiation-time evaluator.
+    pub(crate) fn instructions(&self) -> &[StackInstruction] {
+        &self.0
+    }
+}
+
 /// Whether a data segment is passive or actively initializes memory.
 pub enum DataKind {
     /// Copied into memory only via `memory.init`.
@@ -714,7 +780,7 @@ pub enum DataKind {
         /// Target memory index.
         memory_index: MemoryIndex,
         /// Constant expression computing the destination offset.
-        offset_expr: Box<[StackInstruction]>,
+        offset_expr: ConstExpr,
     },
 }
 
@@ -728,7 +794,7 @@ pub enum ElementKind {
         /// Target table index (`None` means table 0).
         table_index: Option<TableIndex>,
         /// Constant expression computing the destination offset.
-        offset_expr: Box<[StackInstruction]>,
+        offset_expr: ConstExpr,
     },
     /// Forward-declares references (for `ref.func`); contributes no table data.
     Declared,
@@ -739,7 +805,7 @@ pub enum ElementItems {
     /// A list of function indices (the legacy form).
     Functions(Box<[FuncIndex]>),
     /// Constant expressions of the given reference type (each yields one element).
-    Expressions(RefType, Box<[Box<[StackInstruction]>]>),
+    Expressions(RefType, Box<[ConstExpr]>),
 }
 
 /// An element segment.
@@ -755,7 +821,7 @@ pub enum TableInit {
     /// Every slot starts as a null reference.
     RefNull,
     /// Every slot is initialized from this constant expression.
-    Expr(Box<[StackInstruction]>),
+    Expr(ConstExpr),
 }
 
 /// A table definition: its type plus initialization.
@@ -810,7 +876,7 @@ pub enum GlobalKind {
         name: String,
     },
     /// Locally defined; the constant expression computes its initial value.
-    Local(Box<[StackInstruction]>),
+    Local(ConstExpr),
 }
 
 /// A global definition: its type plus the constant expression for its initial
@@ -832,7 +898,7 @@ pub struct FuncType {
 
 /// Whether a function is defined locally or imported.
 pub enum FuncKind {
-    /// Defined locally, with a body in [`Module::func_bodies`].
+    /// Defined locally, so the module carries a lowered body for it.
     Local,
     /// Imported from `module_name`::`imported_func_name`.
     Imported {
@@ -957,7 +1023,7 @@ static DEBUG_SECTION_NAMES: phf::Set<&'static str> = phf_set! {
     ".debug_types"
 };
 
-impl<Instr: Instruction> Module<Instr> {
+impl<V: VirtualMachine> Module<V> {
     /// Validates `buf` as a core WebAssembly module and builds an owned
     /// [`Module`] from it, wrapped in an `Arc` so it can be shared across
     /// instances.
@@ -972,7 +1038,7 @@ impl<Instr: Instruction> Module<Instr> {
     /// TraceWasm does not model: components, imports other than functions and
     /// globals, 64-bit memory, more than one memory, tables of anything but
     /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
-    pub fn compile(buf: &[u8]) -> Result<Arc<Module<Instr>>, TraceWasmError> {
+    pub fn compile(buf: &[u8]) -> Result<Arc<Module<V>>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
         // that is known to be well-formed.
@@ -1120,12 +1186,12 @@ impl<Instr: Instruction> Module<Instr> {
 
                         let table_init = match init {
                             wasmparser::TableInit::RefNull => TableInit::RefNull,
-                            wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
+                            wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(ConstExpr(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     const_expr.get_operators_reader(),
                                 )?
                                 .into_boxed_slice(),
-                            ),
+                            )),
                         };
 
                         tables.push(Table {
@@ -1173,12 +1239,12 @@ impl<Instr: Instruction> Module<Instr> {
 
                         globals.push(Global {
                             ty: GlobalType::from_wasmparser(global_ty),
-                            kind: GlobalKind::Local(
+                            kind: GlobalKind::Local(ConstExpr(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     global.init_expr.get_operators_reader(),
                                 )?
                                 .into_boxed_slice(),
-                            ),
+                            )),
                         });
                     }
                 }
@@ -1227,10 +1293,12 @@ impl<Instr: Instruction> Module<Instr> {
                                     offset_expr,
                                 } => ElementKind::Active {
                                     table_index: table_index.map(TableIndex),
-                                    offset_expr: StackInstruction::emit_instruction_for_const_expr(
-                                        offset_expr.get_operators_reader(),
-                                    )?
-                                    .into_boxed_slice(),
+                                    offset_expr: ConstExpr(
+                                        StackInstruction::emit_instruction_for_const_expr(
+                                            offset_expr.get_operators_reader(),
+                                        )?
+                                        .into_boxed_slice(),
+                                    ),
                                 },
                             },
                             items: match elem.items {
@@ -1252,12 +1320,12 @@ impl<Instr: Instruction> Module<Instr> {
                                     for expr in iter {
                                         let expr = expr?;
 
-                                        exprs.push(
+                                        exprs.push(ConstExpr(
                                             StackInstruction::emit_instruction_for_const_expr(
                                                 expr.get_operators_reader(),
                                             )?
                                             .into_boxed_slice(),
-                                        );
+                                        ));
                                     }
 
                                     ElementItems::Expressions(
@@ -1289,10 +1357,12 @@ impl<Instr: Instruction> Module<Instr> {
                                     offset_expr,
                                 } => DataKind::Active {
                                     memory_index: MemoryIndex(memory_index),
-                                    offset_expr: StackInstruction::emit_instruction_for_const_expr(
-                                        offset_expr.get_operators_reader(),
-                                    )?
-                                    .into_boxed_slice(),
+                                    offset_expr: ConstExpr(
+                                        StackInstruction::emit_instruction_for_const_expr(
+                                            offset_expr.get_operators_reader(),
+                                        )?
+                                        .into_boxed_slice(),
+                                    ),
                                 },
                             },
                             data: data.data.to_vec().into_boxed_slice(),
@@ -1344,7 +1414,7 @@ impl<Instr: Instruction> Module<Instr> {
                     }
 
                     let (instructions, instruction_offsets, frame_layout) =
-                        Instr::emit_instructions_for_func(
+                        InstrOf::<V>::emit_instructions_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
                             results.len() as u32,
@@ -1598,10 +1668,10 @@ impl<Instr: Instruction> Module<Instr> {
     ///   segments — is already in place when it does. A failure here means no
     ///   instance is returned at all.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
-        self: &Arc<Module<Instr>>,
+        self: &Arc<Module<V>>,
         import_registry: I,
         config: Option<Config>,
-    ) -> Result<Instance<M, I, Instr>, TraceWasmError> {
+    ) -> Result<Instance<M, I, V>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
             self.memories[0].initial()
         } else {
@@ -1748,7 +1818,8 @@ impl<Instr: Instruction> Module<Instr> {
                 )
             };
 
-            let val = TraceVM::const_expr_evaluator(const_expr_instructions, &global_vals);
+            let val =
+                TraceVM::const_expr_evaluator(const_expr_instructions.instructions(), &global_vals);
 
             global_vals.push(val);
         }
@@ -1781,7 +1852,9 @@ impl<Instr: Instruction> Module<Instr> {
                 TableInit::Expr(const_expr) => {
                     // The element type is validated to be funcref, so the const
                     // expr yields a `Val::Ref` and `as_ref` cannot panic.
-                    let val = TraceVM::const_expr_evaluator(const_expr, &global_vals).as_ref();
+                    let val =
+                        TraceVM::const_expr_evaluator(const_expr.instructions(), &global_vals)
+                            .as_ref();
 
                     vec![val; initial_size]
                 }
@@ -1815,7 +1888,10 @@ impl<Instr: Instruction> Module<Instr> {
                     for const_expr in exprs {
                         // The element type is validated to be funcref, so the const
                         // expr yields a `Val::Ref` and `as_ref` cannot panic.
-                        v.push(TraceVM::const_expr_evaluator(const_expr, &global_vals).as_ref());
+                        v.push(
+                            TraceVM::const_expr_evaluator(const_expr.instructions(), &global_vals)
+                                .as_ref(),
+                        );
                     }
 
                     v
@@ -1837,7 +1913,8 @@ impl<Instr: Instruction> Module<Instr> {
                     // `table64` offset would be an `i64` and `as_i32` would panic.
                     // TraceWasm does not support table64 yet, so this is fine.
                     let offset =
-                        TraceVM::const_expr_evaluator(offset_expr, &global_vals).as_i32() as usize;
+                        TraceVM::const_expr_evaluator(offset_expr.instructions(), &global_vals)
+                            .as_i32() as usize;
 
                     let table = &mut table_vals[table_index].table;
 
@@ -1895,7 +1972,8 @@ impl<Instr: Instruction> Module<Instr> {
                     // `memory64` offset would be an `i64` and `as_i32` would panic.
                     // TraceWasm does not support memory64 yet, so this is fine.
                     let offset =
-                        TraceVM::const_expr_evaluator(offset_expr, &global_vals).as_i32() as usize;
+                        TraceVM::const_expr_evaluator(offset_expr.instructions(), &global_vals)
+                            .as_i32() as usize;
 
                     // `write` bounds-checks (with `checked_add`) and traps on an
                     // out-of-bounds segment, so no manual bounds check is needed.

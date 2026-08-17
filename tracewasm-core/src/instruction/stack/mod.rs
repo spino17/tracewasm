@@ -115,7 +115,7 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// positions into the containing `Vec<StackInstruction>`, i.e. runtime program
 /// counters.
 #[derive(Debug, Clone)]
-pub enum StackInstruction {
+pub(crate) enum StackInstruction {
     /// Traps unconditionally.
     Unreachable,
     /// Does nothing.
@@ -952,7 +952,7 @@ const _: () = assert!(
 /// requires the label *types* to match); their unwind targets and heights
 /// differ even though the value counts agree.
 #[derive(Debug, Clone)]
-pub struct StackBrTableTarget {
+pub(crate) struct StackBrTableTarget {
     /// Absolute jump target (loop start or label `End`). Backpatched for
     /// non-loop targets.
     pub target_index: u32,
@@ -967,7 +967,7 @@ pub struct StackBrTableTarget {
 /// Small by comparison with the register machine's, because wasm's own operand
 /// stack is the storage plan: the only thing lowering has to hand execution is
 /// where each `br_table`'s arms live.
-pub struct StackFrameLayout {
+pub(crate) struct StackFrameLayout {
     /// Every `br_table` arm in this body, concatenated in lowering order.
     ///
     /// A [`StackInstruction::BrTable`] owns the contiguous `(start_index, len)`
@@ -1296,7 +1296,7 @@ impl StackInstruction {
 /// Local access indexes from the first; branch and `end` unwinding truncates to
 /// the second. The pre-trait driver passed them as two arguments named
 /// `caller_base_height` and `frame_base_height` respectively.
-pub struct StackCallerBaseData {
+pub(crate) struct StackCallerBaseData {
     /// Stack height at which this frame's locals begin. See the type docs.
     pub base_height: u32,
     /// Stack height at which this frame's operands begin — `base_height` plus the
@@ -2373,10 +2373,14 @@ impl Instruction for StackInstruction {
     /// The trap the instruction raised, untagged: it says what went wrong, and
     /// the driver adds where.
     #[inline(always)]
-    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
+    fn execute<
+        M: crate::memory::Memory,
+        I: crate::instance::traits::ImportRegistry,
+        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
+    >(
         &self,
-        module: &crate::module::Module<Self>,
-        instance: &mut crate::instance::Instance<M, I, Self>,
+        module: &crate::module::Module<V>,
+        instance: &mut crate::instance::Instance<M, I, V>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
@@ -2401,7 +2405,7 @@ impl Instruction for StackInstruction {
                         is_indirect: None,
                     }
                 } else {
-                    crate::runtime::TraceVM::call_imported::<M, I, StackInstruction>(
+                    crate::runtime::TraceVM::call_imported::<M, I, V>(
                         *callee_func_index,
                         *callee_params_count,
                         module,
@@ -2476,7 +2480,7 @@ impl Instruction for StackInstruction {
                         is_indirect: Some(*table_index),
                     }
                 } else {
-                    crate::runtime::TraceVM::call_imported::<M, I, StackInstruction>(
+                    crate::runtime::TraceVM::call_imported::<M, I, V>(
                         callee_func_index,
                         declared_params.len() as u32,
                         module,
@@ -4175,10 +4179,14 @@ impl Instruction for StackInstruction {
 
 impl StackInstruction {
     #[inline(always)]
-    fn get_local<M: Memory, I: ImportRegistry>(
+    fn get_local<
+        M: Memory,
+        I: ImportRegistry,
+        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
+    >(
         index: LocalIndex,
         caller_base_height: u32,
-        instance: &Instance<M, I, StackInstruction>,
+        instance: &Instance<M, I, V>,
     ) -> Value {
         let slot = (index.0 + caller_base_height) as usize;
 
@@ -4222,11 +4230,15 @@ impl StackInstruction {
     /// The mirror of [`Self::get_local`], and it rests on the same four
     /// invariants; see the SAFETY comment there.
     #[inline(always)]
-    fn set_local<M: Memory, I: ImportRegistry>(
+    fn set_local<
+        M: Memory,
+        I: ImportRegistry,
+        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
+    >(
         index: LocalIndex,
         val: Value,
         caller_base_height: u32,
-        instance: &mut Instance<M, I, StackInstruction>,
+        instance: &mut Instance<M, I, V>,
     ) {
         let slot = (index.0 + caller_base_height) as usize;
 
@@ -4261,9 +4273,13 @@ impl StackInstruction {
     /// the access that follows is bounds-checked anyway — but the addition must
     /// not lose that fact.
     #[inline(always)]
-    fn pop_effective_address<M: Memory, I: ImportRegistry>(
+    fn pop_effective_address<
+        M: Memory,
+        I: ImportRegistry,
+        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
+    >(
         memarg_offset: u32,
-        instance: &mut Instance<M, I, StackInstruction>,
+        instance: &mut Instance<M, I, V>,
     ) -> Result<usize, MemoryError> {
         let addr = instance.frame.pop().as_i32() as u32;
 

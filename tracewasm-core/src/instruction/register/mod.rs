@@ -154,7 +154,7 @@ enum BlockVariant {
 
 /// An immediate operand, carried inline because it has no home to be read from.
 #[derive(Debug, Clone, Copy)]
-pub enum Const {
+pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
     /// A 64-bit integer immediate.
@@ -187,7 +187,7 @@ pub enum Const {
 /// values were produced by a preceding instruction; the rest are read straight out of
 /// the frame's constants, locals, globals, or spill area.
 #[derive(Debug, Clone, Copy)]
-pub enum Slot {
+pub(crate) enum Slot {
     /// An immediate, needing no load at all.
     Const(Const),
     /// Read local `n` in place. Valid because nothing writes that local between the
@@ -269,7 +269,7 @@ enum StackSlot {
 /// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
 /// is, which is what lets instruction variants stay small.
 #[derive(Debug)]
-pub struct Registers<const L: usize, T> {
+pub(crate) struct Registers<const L: usize, T> {
     /// Index of the run's first entry in its arena; it covers `L` from there.
     start: u32,
     phantom: PhantomData<T>,
@@ -297,7 +297,7 @@ impl<const L: usize, T> Registers<L, T> {
 /// of its inputs occupied. An executor must read every operand before writing any
 /// destination.
 #[derive(Debug)]
-pub struct Signature<const I: usize, const O: usize> {
+pub(crate) struct Signature<const I: usize, const O: usize> {
     /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
     pub input: Registers<I, Slot>,
     /// Destination registers, in the order results are pushed.
@@ -312,7 +312,7 @@ pub struct Signature<const I: usize, const O: usize> {
 /// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
 /// its size budget.
 #[derive(Debug)]
-pub struct DynSignature {
+pub(crate) struct DynSignature {
     /// Start of the source run in the input arena.
     input: u32,
     /// Start of the destination run in the output arena.
@@ -528,7 +528,7 @@ impl UnreachableTrackingControlStack {
 /// loop and non-loop labels: validation only requires the label *types* to match, so
 /// the arities agree but the unwind heights — and therefore the destination registers
 /// — differ per arm.
-pub struct RegBrTableTarget {
+pub(crate) struct RegBrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
     pub mov: DynSignature,
@@ -1194,7 +1194,7 @@ impl SimulatedStack {
 /// **Operands only.** Locals are not counted in either field: like the stack pass's
 /// [`max_height`](crate::instruction::stack), `registers` is measured from the
 /// frame's operand base, which sits above the locals.
-pub struct RegFrameLayout {
+pub(crate) struct RegFrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
     ///
     /// Numbered from the frame's operand base, so register `r` of a frame whose
@@ -1247,7 +1247,7 @@ type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 /// alongside this, so a table keyed by kind is an exhaustive `match` *and* is
 /// visited in full — see the derive's docs for why both halves matter.
 #[derive(Debug, tracewasm_macros::Kind)]
-pub enum RegInstruction {
+pub(crate) enum RegInstruction {
     /// `global.set`: write the operand into a global.
     ///
     /// Any operand still forwarding to this global was rescued by a preceding
@@ -2108,7 +2108,7 @@ impl RegInstruction {
     }
 }
 
-pub struct RegCallerBaseData {
+pub(crate) struct RegCallerBaseData {
     pub base_register_index: u32,
     pub callee_frame_base_register_index: u32,
     pub spills_base_index: u32,
@@ -3037,10 +3037,14 @@ impl Instruction for RegInstruction {
     }
 
     #[inline(always)]
-    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
+    fn execute<
+        M: crate::memory::Memory,
+        I: crate::instance::traits::ImportRegistry,
+        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
+    >(
         &self,
-        module: &crate::module::Module<Self>,
-        instance: &mut crate::instance::Instance<M, I, Self>,
+        module: &crate::module::Module<V>,
+        instance: &mut crate::instance::Instance<M, I, V>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,

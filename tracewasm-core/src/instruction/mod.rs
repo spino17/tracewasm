@@ -25,7 +25,9 @@
 //! helpers around block types and memory indices. The passes themselves are in
 //! [`stack`] and [`register`].
 
+use crate::sealed::Internals;
 use crate::{
+    VirtualMachine,
     error::{InstructionExecutionError, TraceWasmError},
     instance::{Instance, traits::ImportRegistry},
     memory::Memory,
@@ -46,7 +48,7 @@ pub mod stack;
 /// The two machines measure that base in different units — the stack machine in
 /// operand-stack slots, the register machine in registers — so the driver holds
 /// it behind this trait rather than as a `u32` it would have to interpret.
-pub trait CallerBaseData {
+pub(crate) trait CallerBaseData {
     /// The base data for an outermost activation, where there is no caller.
     ///
     /// Both machines start at offset 0 with the callee-locals boundary unset;
@@ -87,7 +89,7 @@ pub trait CallerBaseData {
 /// for the host boundary — and each is called from exactly one place in the
 /// driver. Read the name as part of the contract: it is why "call it once" needs
 /// no enforcing.
-pub trait RuntimeFrame {
+pub(crate) trait RuntimeFrame {
     /// How this machine names a callee's frame base. See [`CallerBaseData`].
     type CallerBaseData: CallerBaseData;
     type BrTableTarget;
@@ -172,7 +174,7 @@ pub trait RuntimeFrame {
 /// What a layout holds differs sharply — the stack machine needs little beyond a
 /// peak height, the register machine carries operand arenas and register counts —
 /// so only the part the driver reads uniformly is named here.
-pub trait FrameLayout {
+pub(crate) trait FrameLayout {
     /// This machine's resolved `br_table` arm.
     type BrTableTarget;
 
@@ -204,7 +206,7 @@ pub trait FrameLayout {
 /// mismatched halves: a body's [`FrameLayout`] must yield the same
 /// `BrTableTarget` the instructions index, and its [`RuntimeFrame`] must speak
 /// the same [`CallerBaseData`] the instructions are executed against.
-pub trait Instruction: Sized {
+pub(crate) trait Instruction: Sized {
     /// A resolved `br_table` arm, as stored in the body's flat target array.
     type BrTableTarget;
     /// The storage plan lowering produces for one body.
@@ -247,10 +249,10 @@ pub trait Instruction: Sized {
     ///
     /// `caller_base_data` locates this activation's frame; `br_table_targets` is
     /// the body's arm array, which a branch table indexes by its own range.
-    fn execute<M: Memory, I: ImportRegistry>(
+    fn execute<M: Memory, I: ImportRegistry, V: VirtualMachine + Internals<Instr = Self>>(
         &self,
-        module: &Module<Self>,
-        instance: &mut Instance<M, I, Self>,
+        module: &Module<V>,
+        instance: &mut Instance<M, I, V>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,

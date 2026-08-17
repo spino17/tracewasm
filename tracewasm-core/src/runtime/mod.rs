@@ -76,6 +76,7 @@
 //! slice and `pc`.
 
 use crate::{
+    InstrOf, VirtualMachine,
     error::{
         CallIndirectError::{self, FunctionCall},
         FuncCallError, InstructionExecutionError, TraceRecord, TraceRecordKind,
@@ -178,8 +179,8 @@ impl TraceVM {
     /*pub(crate) fn run_<M: Memory, I: ImportRegistry, Instr: Instruction>(
         func_index: FuncIndex,
         params: &[Val],
-        instance: &mut Instance<M, I, Instr>,
-        module: &Arc<Module<Instr>>,
+        instance: &mut Instance<M, I, V>,
+        module: &Arc<Module<V>>,
     ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
 
@@ -218,15 +219,15 @@ impl TraceVM {
 
     fn func_body<Instr: Instruction>(
         func_index: FuncIndex,
-        module: &Module<Instr>,
+        module: &Module<V>,
     ) -> &FuncBody<Instr> {
         todo!()
     }
 
     pub(crate) fn execute_on_native_stack_<M: Memory, I: ImportRegistry, Instr: Instruction>(
         func_index: FuncIndex,
-        instance: &mut Instance<M, I, Instr>,
-        module: &Arc<Module<Instr>>,
+        instance: &mut Instance<M, I, V>,
+        module: &Arc<Module<V>>,
         call_stack_depth: &mut u32,
     ) -> Result<(), Unwind> {
         // `func_bodies` holds only locally-defined functions, so shift the global
@@ -421,17 +422,17 @@ impl TraceVM {
     /// interpreter's [`Unwind`] is turned into an error the caller sees, because
     /// it is the only frame that knows the entry function the call was made
     /// through.
-    pub(crate) fn run<M: Memory, I: ImportRegistry, Instr: Instruction>(
+    pub(crate) fn run<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         func_index: FuncIndex,
         params: &[Val],
-        instance: &mut Instance<M, I, Instr>,
-        module: &Arc<Module<Instr>>,
+        instance: &mut Instance<M, I, V>,
+        module: &Arc<Module<V>>,
     ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
 
         instance.frame.reset();
 
-        let caller_base_data = Instr::CallerBaseData::initial_data();
+        let caller_base_data = <InstrOf<V> as Instruction>::CallerBaseData::initial_data();
 
         instance.frame.set_initial_params(params);
 
@@ -488,12 +489,12 @@ impl TraceVM {
     /// native unwind visits exactly the frames the trace needs, in the order it
     /// needs them. [`Self::run`] turns it into a [`FuncCallError`] once, where the
     /// entry function's name and the module are in reach.
-    fn execute_on_native_stack<M: Memory, I: ImportRegistry, Instr: Instruction>(
+    fn execute_on_native_stack<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         func_index: FuncIndex,
-        instance: &mut Instance<M, I, Instr>,
-        module: &Arc<Module<Instr>>,
+        instance: &mut Instance<M, I, V>,
+        module: &Arc<Module<V>>,
         call_stack_depth: &mut u32,
-        mut caller_base_data: Instr::CallerBaseData,
+        mut caller_base_data: <InstrOf<V> as Instruction>::CallerBaseData,
     ) -> Result<(), Unwind> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
@@ -513,7 +514,8 @@ impl TraceVM {
         // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
         // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
         // loads for a pair that is fixed for the whole frame.
-        let br_table_targets: &[Instr::BrTableTarget] = &func_body.frame_layout.br_table_targets();
+        let br_table_targets: &[<InstrOf<V> as Instruction>::BrTableTarget] =
+            func_body.frame_layout.br_table_targets();
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
@@ -859,13 +861,13 @@ impl TraceVM {
     /// # Errors
     ///
     /// Whatever the imported callee returned, wrapped to name the callee.
-    pub(crate) fn call_imported<M: Memory, I: ImportRegistry, Instr: Instruction>(
+    pub(crate) fn call_imported<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         callee_func_index: FuncIndex,
         callee_params_count: u32,
-        module: &Module<Instr>,
-        instance: &mut Instance<M, I, Instr>,
+        module: &Module<V>,
+        instance: &mut Instance<M, I, V>,
         is_indirect: Option<TableIndex>,
-        caller_base_data: &Instr::CallerBaseData,
+        caller_base_data: &<InstrOf<V> as Instruction>::CallerBaseData,
     ) -> Result<(), Box<InstructionExecutionError>> {
         let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
         let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
@@ -1117,10 +1119,10 @@ fn trap_here(
 /// Closes a completed [`Unwind`] into the error the caller sees, naming the entry
 /// function the call was made through.
 #[inline(never)]
-fn func_call_err_from_unwind<Instr: Instruction>(
+fn func_call_err_from_unwind<V: VirtualMachine>(
     func_index: FuncIndex,
     trace: Unwind,
-    module: &Arc<Module<Instr>>,
+    module: &Arc<Module<V>>,
 ) -> FuncCallError {
     // A `TypedFunc` is only handed out for an export, so the lookup resolves;
     // falling back rather than unwrapping keeps a failure while *reporting* a
@@ -1147,13 +1149,13 @@ fn func_call_err_from_unwind<Instr: Instruction>(
 ///
 /// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
-fn func_call_err<Instr: Instruction>(
+fn func_call_err<V: VirtualMachine>(
     func_index: FuncIndex,
     frames: Vec<Frame>,
     err: InstructionExecutionError,
     instr_index: usize,
     instr_offset: u32,
-    module: &Arc<Module<Instr>>,
+    module: &Arc<Module<V>>,
 ) -> FuncCallError {
     let func_name = module
         .exported_func_name(func_index)

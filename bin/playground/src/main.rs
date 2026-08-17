@@ -1,6 +1,6 @@
 use std::fs;
 use tracewasm_core::{
-    instruction::stack::StackInstruction,
+    Stack,
     memory::{MemoryView, linear::LinearMemory},
     module::Module,
 };
@@ -36,7 +36,7 @@ fn main() -> Result<(), anyhow::Error> {
         "/Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/debug/tracewasm_scratch.wasm",
     )?;
 
-    let module = Module::<StackInstruction>::compile(&buf)?;
+    let module = Module::<Stack>::compile(&buf)?;
     let registry = ImportedFunctions { count: 0 };
     let func = module.get_typed_func::<(i32, i64), (i64,)>("bench_bits")?;
     let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
