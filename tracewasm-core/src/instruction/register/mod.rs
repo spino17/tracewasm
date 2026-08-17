@@ -2139,6 +2139,7 @@ impl CallerBaseData for RegCallerBaseData {
 }
 
 impl Instruction for RegInstruction {
+    type Vm = crate::Register;
     type BrTableTarget = RegBrTableTarget;
     type FrameLayout = RegFrameLayout;
     type RuntimeFrame = RegFrame;
@@ -3037,14 +3038,10 @@ impl Instruction for RegInstruction {
     }
 
     #[inline(always)]
-    fn execute<
-        M: crate::memory::Memory,
-        I: crate::instance::traits::ImportRegistry,
-        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
-    >(
+    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
         &self,
-        module: &crate::module::Module<V>,
-        instance: &mut crate::instance::Instance<M, I, V>,
+        module: &crate::module::Module<Self::Vm>,
+        instance: &mut crate::instance::Instance<M, I, Self::Vm>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,

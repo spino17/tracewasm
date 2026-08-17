@@ -1331,6 +1331,7 @@ impl CallerBaseData for StackCallerBaseData {
 }
 
 impl Instruction for StackInstruction {
+    type Vm = crate::Stack;
     type BrTableTarget = StackBrTableTarget;
     type FrameLayout = StackFrameLayout;
     type RuntimeFrame = Stack<Value>;
@@ -2373,14 +2374,10 @@ impl Instruction for StackInstruction {
     /// The trap the instruction raised, untagged: it says what went wrong, and
     /// the driver adds where.
     #[inline(always)]
-    fn execute<
-        M: crate::memory::Memory,
-        I: crate::instance::traits::ImportRegistry,
-        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
-    >(
+    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
         &self,
-        module: &crate::module::Module<V>,
-        instance: &mut crate::instance::Instance<M, I, V>,
+        module: &crate::module::Module<Self::Vm>,
+        instance: &mut crate::instance::Instance<M, I, crate::Stack>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
@@ -2405,7 +2402,7 @@ impl Instruction for StackInstruction {
                         is_indirect: None,
                     }
                 } else {
-                    crate::runtime::TraceVM::call_imported::<M, I, V>(
+                    crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
                         *callee_func_index,
                         *callee_params_count,
                         module,
@@ -2480,7 +2477,7 @@ impl Instruction for StackInstruction {
                         is_indirect: Some(*table_index),
                     }
                 } else {
-                    crate::runtime::TraceVM::call_imported::<M, I, V>(
+                    crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
                         callee_func_index,
                         declared_params.len() as u32,
                         module,
@@ -4179,14 +4176,10 @@ impl Instruction for StackInstruction {
 
 impl StackInstruction {
     #[inline(always)]
-    fn get_local<
-        M: Memory,
-        I: ImportRegistry,
-        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
-    >(
+    fn get_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
         caller_base_height: u32,
-        instance: &Instance<M, I, V>,
+        instance: &Instance<M, I, crate::Stack>,
     ) -> Value {
         let slot = (index.0 + caller_base_height) as usize;
 
@@ -4230,15 +4223,11 @@ impl StackInstruction {
     /// The mirror of [`Self::get_local`], and it rests on the same four
     /// invariants; see the SAFETY comment there.
     #[inline(always)]
-    fn set_local<
-        M: Memory,
-        I: ImportRegistry,
-        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
-    >(
+    fn set_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
         val: Value,
         caller_base_height: u32,
-        instance: &mut Instance<M, I, V>,
+        instance: &mut Instance<M, I, crate::Stack>,
     ) {
         let slot = (index.0 + caller_base_height) as usize;
 
@@ -4273,13 +4262,9 @@ impl StackInstruction {
     /// the access that follows is bounds-checked anyway — but the addition must
     /// not lose that fact.
     #[inline(always)]
-    fn pop_effective_address<
-        M: Memory,
-        I: ImportRegistry,
-        V: crate::VirtualMachine + crate::sealed::Internals<Instr = Self>,
-    >(
+    fn pop_effective_address<M: Memory, I: ImportRegistry>(
         memarg_offset: u32,
-        instance: &mut Instance<M, I, V>,
+        instance: &mut Instance<M, I, crate::Stack>,
     ) -> Result<usize, MemoryError> {
         let addr = instance.frame.pop().as_i32() as u32;
 

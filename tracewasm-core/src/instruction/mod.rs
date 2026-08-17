@@ -207,6 +207,14 @@ pub(crate) trait FrameLayout {
 /// `BrTableTarget` the instructions index, and its [`RuntimeFrame`] must speak
 /// the same [`CallerBaseData`] the instructions are executed against.
 pub(crate) trait Instruction: Sized {
+    /// The machine this instruction set belongs to.
+    ///
+    /// The other half of the bijection with [`Internals::Instr`]: `Internals<Instr =
+    /// Self>` says this machine's instruction set is this very type, so `Stack` and
+    /// `RegInstruction` cannot be paired by mistake. Together the two directions let
+    /// [`Self::execute`] name the `Module` and `Instance` it runs against without a
+    /// machine parameter of its own.
+    type Vm: VirtualMachine + Internals<Instr = Self>;
     /// A resolved `br_table` arm, as stored in the body's flat target array.
     type BrTableTarget;
     /// The storage plan lowering produces for one body.
@@ -249,10 +257,10 @@ pub(crate) trait Instruction: Sized {
     ///
     /// `caller_base_data` locates this activation's frame; `br_table_targets` is
     /// the body's arm array, which a branch table indexes by its own range.
-    fn execute<M: Memory, I: ImportRegistry, V: VirtualMachine + Internals<Instr = Self>>(
+    fn execute<M: Memory, I: ImportRegistry>(
         &self,
-        module: &Module<V>,
-        instance: &mut Instance<M, I, V>,
+        module: &Module<Self::Vm>,
+        instance: &mut Instance<M, I, Self::Vm>,
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,

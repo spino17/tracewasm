@@ -141,7 +141,14 @@ mod sealed {
     /// a private type may not satisfy one.
     pub(crate) trait Internals {
         /// What one lowered instruction of this machine is.
-        type Instr: crate::instruction::Instruction;
+        ///
+        /// The `Vm = Self` half of a bijection with
+        /// [`Instruction::Vm`](crate::instruction::Instruction::Vm): a machine names
+        /// its instruction set, and that instruction set names this machine back.
+        /// Stating both directions is what lets an instruction's `execute` say
+        /// `Module<Self::Vm>` and have the driver — which holds a `Module<V>` —
+        /// accept it, with no machine parameter threaded through the signature.
+        type Instr: crate::instruction::Instruction<Vm = Self>;
     }
 }
 
