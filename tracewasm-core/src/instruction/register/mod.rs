@@ -154,7 +154,7 @@ enum BlockVariant {
 
 /// An immediate operand, carried inline because it has no home to be read from.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Const {
+enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
     /// A 64-bit integer immediate.

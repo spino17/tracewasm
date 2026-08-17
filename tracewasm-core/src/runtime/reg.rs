@@ -286,6 +286,7 @@ mod tests {
         };
 
         let mut frame_layout = layout(registers);
+
         frame_layout.spills = spills;
 
         frame.enter_frame(
@@ -294,6 +295,7 @@ mod tests {
             &mut caller_base_data,
             &frame_layout,
         );
+
         caller_base_data.set_callee_locals_count(locals_ty.len() as u32);
 
         caller_base_data
@@ -302,7 +304,6 @@ mod tests {
     #[test]
     fn a_frames_spill_region_is_appended_and_its_base_recorded() {
         let mut frame = RegFrame::default();
-
         let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
 
         assert_eq!(
@@ -315,15 +316,16 @@ mod tests {
     #[test]
     fn a_nested_frames_spills_sit_above_its_callers() {
         let mut frame = RegFrame::default();
-
         let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
         let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
 
         assert_eq!(caller.spills_base_index, 0);
+
         assert_eq!(
             callee.spills_base_index, 2,
             "the callee's region starts where the caller's ended"
         );
+
         assert_eq!(frame.spills.len(), 5, "2 + 3 slots are live at this depth");
     }
 
@@ -334,7 +336,6 @@ mod tests {
     #[test]
     fn exiting_a_frame_releases_its_spill_region() {
         let mut frame = RegFrame::default();
-
         let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
         let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
 
@@ -357,9 +358,7 @@ mod tests {
     #[test]
     fn repeated_calls_at_the_same_depth_reuse_the_same_spill_base() {
         let mut frame = RegFrame::default();
-
         let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 1);
-
         let mut bases = vec![];
 
         for _ in 0..4 {
@@ -373,6 +372,7 @@ mod tests {
             bases.windows(2).all(|w| w[0] == w[1]),
             "every call at this depth must get the same base, not a fresh one: {bases:?}"
         );
+
         assert_eq!(frame.spills.len(), 1, "only the caller's region is left");
 
         let _ = caller;
@@ -381,7 +381,6 @@ mod tests {
     #[test]
     fn a_frame_with_no_spills_still_records_a_base() {
         let mut frame = RegFrame::default();
-
         let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 0);
 
         assert_eq!(
@@ -389,6 +388,7 @@ mod tests {
             "the base must be recorded even when the region is empty, since \
              `exit_frame` truncates to it"
         );
+
         assert_eq!(frame.spills.len(), 0);
     }
 
@@ -464,7 +464,6 @@ mod tests {
         // a callee based at 4 needs the file to reach 4 + locals + registers, not
         // just its own span — the caller's frame below it stays live
         let mut frame = RegFrame::default();
-
         let len = enter(&mut frame, 4, &[ValType::I32], &[ValType::I32], 2);
 
         assert_eq!(len, 8, "base 4 + 1 param + 1 local + 2 registers");
@@ -477,7 +476,6 @@ mod tests {
         // in `enter_frame` is what prevents that, and this is the case that would
         // catch its removal.
         let mut frame = RegFrame::default();
-
         let deep = enter(&mut frame, 16, &[ValType::I32], &[ValType::I32], 4);
 
         assert_eq!(deep, 22);
@@ -499,6 +497,7 @@ mod tests {
         let mut frame = RegFrame::default();
 
         frame.set_initial_params(&[Val::I32(7)]);
+
         enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
 
         assert_eq!(frame.inner[0].as_i32(), 7, "first call's param lands at 0");
