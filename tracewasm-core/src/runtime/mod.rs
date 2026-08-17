@@ -94,8 +94,7 @@ use crate::{
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
     instruction::{
-        CallerBaseData, FrameLayout, Instruction, RuntimeFrame,
-        stack::{StackBrTableTarget, StackInstruction},
+        CallerBaseData, FrameLayout, Instruction, RuntimeFrame, stack::StackInstruction,
     },
     memory::Memory,
     module::{FuncIndex, FuncKind, Module, TableIndex, ValType, formatted_val_types},
@@ -168,24 +167,20 @@ pub enum Step<Instr: Instruction> {
 /// describe the call if the callee traps. The slice references borrow from the
 /// [`Module`], so saving a frame copies pointers rather than instructions.
 ///
-/// **Dead**, like [`func_call_err`]: the only driver that builds these is the
-/// commented-out `_execute_on_frame_stack` below, so nothing constructs it. Note
-/// that it is also hard-wired to [`StackInstruction`] and [`StackBrTableTarget`]
-/// rather than being generic over the machine, so reviving that driver means
-/// reworking this first.
-struct Frame<'a> {
+/// Built only by [`TraceVM::execute_on_frame_stack`], which [`TraceVM::run`] does
+/// not currently use — so nothing constructs one.
+struct Frame<'a, Instr: Instruction> {
     func_index: FuncIndex,
-    instructions: &'a [StackInstruction],
+    instructions: &'a [Instr],
     /// Index of the `call` itself, not the instruction after it; resuming adds
     /// one, and a trace records the call site.
     pc: u32,
-    caller_base_height: u32,
-    frame_base_height: u32,
-    br_table_targets: &'a [StackBrTableTarget],
+    caller_base_data: Instr::CallerBaseData,
+    br_table_targets: &'a [Instr::BrTableTarget],
     instruction_offsets: &'a [u32],
     /// Result count of the callee, needed on return to know how much of its
     /// region to keep when truncating back to `caller_base_height`.
-    callee_results_len: u32,
+    callee_results_count: u32,
     /// Who this frame called, and through which table if indirect. Only the trace
     /// reads these.
     callee_func_index: FuncIndex,
@@ -252,9 +247,9 @@ impl TraceVM {
         // How many result values the function leaves on the stack.
         let func_decl = &module.func_decls[func_index.0 as usize];
         let results_ty = &module.types[func_decl.ty.0 as usize].results;
-        let results_len = results_ty.len() as u32;
+        let results_count = results_ty.len() as u32;
 
-        let results = instance.frame.get_final_results(results_len);
+        let results = instance.frame.get_final_results(results_count);
 
         let mut s: SmallVec<[Val; 3]> = smallvec![];
 
@@ -275,7 +270,7 @@ impl TraceVM {
     /// **Arguments are passed on the stack, not as a slice.** The caller leaves
     /// them as the topmost values and this function adopts them in place as the
     /// leading local slots; it derives its own base as
-    /// `stack.height() - params_len`. Results are likewise left on `stack` for
+    /// `stack.height() - params_count`. Results are likewise left on `stack` for
     /// the caller to consume, which is why this returns `()` rather than the
     /// results. See the module docs for the full frame layout.
     ///
@@ -328,7 +323,7 @@ impl TraceVM {
 
         // `locals` in the body is laid out params-first, then declared locals,
         // and `locals_ty[i]` is the declared type of local slot `i`. So
-        // `locals_len >= params_len` always, and the subtraction below cannot
+        // `locals_count >= params_count` always, and the subtraction below cannot
         // underflow.
         let locals_ty = &func_body.locals;
         let locals_count = locals_ty.len() as u32;
@@ -460,80 +455,103 @@ impl TraceVM {
         Ok(())
     }
 
-    // The same interpreter, driving its call stack from a `Vec<Frame>` instead
-    // of recursing.
-    //
-    // **Not wired up** — [`Self::run`] uses [`Self::execute_on_native_stack`].
-    // It is kept because it is the only shape that decouples guest call depth
-    // from the host stack: nothing here grows the native frame per wasm call, so
-    // depth would be bounded by memory rather than by
-    // [`Config::max_call_stack_depth`](crate::instance::config::Config).
+    /// The same interpreter, driving its call stack from a `Vec<Frame>` instead of
+    /// recursing.
+    ///
+    /// **Not wired up** — [`Self::run`] uses [`Self::execute_on_native_stack`]. It is
+    /// kept because it is the only shape that decouples guest call depth from the
+    /// host stack: nothing here grows the native frame per wasm call, so depth is
+    /// bounded by memory rather than by the native stack, and
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config) becomes a
+    /// policy limit rather than a guard against an uncatchable abort.
+    ///
+    /// It passes the whole suite in both profiles when swapped in for
+    /// [`Self::execute_on_native_stack`], including the differential tests and the
+    /// multi-frame backtrace and depth-limit cases.
     //
     // It is measurably slower, and for a reason that is structural rather than
     // incidental. The frame state it must carry across the dispatch loop —
-    // instruction slice, offsets, branch targets, both base heights — occupies
-    // registers that the recursive driver leaves free, because there they are
-    // fixed for the life of the call and here they change on every call and
-    // return. The opcode arms lose that contention: the operand-stack pointer
-    // stops living in a register, so a push no longer folds into the pop before
-    // it, and the arms' shared tail becomes a general push instead.
-    //
-    // Restructuring around an inner per-frame loop, and outlining the
-    // call/return transitions, were both tried and moved it very little; the
-    // contention is not in how those are written.
-    //
-    // Its depth check tests `frames.len()` rather than a separate counter, since
-    // the `Vec` length *is* the depth.
-    /*fn _execute_on_frame_stack<M: Memory, I: ImportRegistry>(
+    /// It is measurably slower, and for a reason that is structural rather than
+    /// incidental. The frame state it must carry across the dispatch loop —
+    /// instruction slice, offsets, branch targets, the base data — occupies registers
+    /// that the recursive driver leaves free, because there they are fixed for the
+    /// life of the call and here they change on every call and return. The opcode arms
+    /// lose that contention: the operand-stack pointer stops living in a register, so
+    /// a push no longer folds into the pop before it, and the arms' shared tail
+    /// becomes a general push instead.
+    ///
+    /// Restructuring around an inner per-frame loop, and outlining the call/return
+    /// transitions, were both tried and moved it very little; the contention is not in
+    /// how those are written.
+    ///
+    /// Its depth counter is `frames.len() + 1`, not `frames.len()`: `frames` holds the
+    /// *suspended* callers, so the frame running now is not among them.
+    ///
+    /// # Errors
+    ///
+    /// A [`FuncCallError`] directly, rather than the [`Unwind`] the recursive driver
+    /// returns. There is no native unwind to hang a per-frame record on, so
+    /// [`func_call_err`] reconstructs the whole trace from `frames` in one pass.
+    fn execute_on_frame_stack<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         mut func_index: FuncIndex,
-        instance: &mut Instance<M, I, StackInstruction>,
-        module: &Arc<Module<StackInstruction>>,
-    ) -> Result<(), FuncCallError<StackInstruction>> {
-        let mut frames: Vec<Frame> = Vec::with_capacity(10);
+        instance: &mut Instance<M, I, V>,
+        module: &Arc<Module<V>>,
+    ) -> Result<(), FuncCallError> {
+        let mut frames: Vec<Frame<InstrOf<V>>> = Vec::with_capacity(10);
         let imported_func_count = module.imported_func_count;
 
         debug_assert!(func_index.0 >= imported_func_count);
 
-        let top_enclosing_func_index = func_index;
         let func_decl = &module.func_decls[func_index.0 as usize];
         let ty = &module.types[func_decl.ty.0 as usize];
-        let params_len = ty.params.len();
-        let results_len = ty.results.len();
+        let params_count = ty.params.len() as u32;
+        let results_count = ty.results.len() as u32;
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let mut instructions = func_body.instructions.as_ref();
         let mut instruction_offsets = func_body.instruction_offsets.as_ref();
-        let mut br_table_targets = func_body.frame_layout.br_targets_arena.as_ref();
+        let mut br_table_targets = func_body.frame_layout.br_table_targets().as_ref();
 
         let locals_ty = &func_body.locals;
-        let locals_len = locals_ty.len();
-        let mut caller_base_height: u32 = 0;
-        let mut frame_base_height: u32 = locals_len as u32;
         let mut pc = 0;
+        let mut caller_base_data = <InstrOf<V> as Instruction>::CallerBaseData::initial_data();
 
-        for i in 0..(locals_len - params_len) {
-            let ty = locals_ty[i + params_len];
+        // The entry function is named in every trace this driver raises, and
+        // `func_index` below tracks whichever function is *currently* running, so the
+        // two cannot be the same variable.
+        let entry_func_index = func_index;
 
-            instance.frame.push(Value::zero_of_ty(ty));
-        }
+        instance.frame.enter_frame(
+            params_count,
+            locals_ty,
+            &mut caller_base_data,
+            &func_body.frame_layout,
+        );
+
+        // Fixes the boundary between this frame's locals and its operands, which
+        // every height-sensitive control operation resolves its target against.
+        // Until this runs the boundary is a sentinel, so it has to happen before the
+        // first instruction — as it does after each `enter_frame` below.
+        caller_base_data.set_callee_locals_count(locals_ty.len() as u32);
 
         loop {
             let instr = &instructions[pc];
 
-            let step = Self::execute_instruction(
-                instr,
-                caller_base_height,
-                frame_base_height,
+            let step = instr.execute(
                 module,
                 instance,
                 br_table_targets,
+                &caller_base_data,
                 imported_func_count,
             );
 
             let step = match step {
                 Ok(step) => step,
+                // Unlike the recursive driver, there is no native unwind to append a
+                // record per frame on the way out — the whole call stack is still
+                // here in `frames`, so the trace is built in one pass.
                 Err(err) => {
                     return Err(func_call_err(
-                        top_enclosing_func_index,
+                        entry_func_index,
                         frames,
                         *err,
                         pc,
@@ -552,14 +570,21 @@ impl TraceVM {
                 }
                 Step::Call {
                     func_index: callee_func_index,
-                    params_count: callee_params_count,
+                    caller_base_data: callee_caller_base_data,
                     is_indirect,
                 } => {
                     let max_depth = instance.config().get_max_call_stack_depth();
 
-                    if frames.len() as u32 >= max_depth {
+                    // `frames` holds the *suspended* callers, so the frame running
+                    // now is not among them — the current depth is one more than its
+                    // length. Testing the length alone would admit `max_depth + 1`
+                    // frames and disagree with the recursive driver, whose counter is
+                    // incremented on entry.
+                    let depth = frames.len() as u32 + 1;
+
+                    if depth >= max_depth {
                         return Err(func_call_err(
-                            top_enclosing_func_index,
+                            entry_func_index,
                             frames,
                             InstructionExecutionError::CallStackExhausted(max_depth),
                             pc,
@@ -572,12 +597,15 @@ impl TraceVM {
                     debug_assert!(callee_func_index.0 >= imported_func_count);
 
                     let callee_func_ty = module.func_decls[callee_func_index.0 as usize].ty;
-                    let callee_results_len = module.types[callee_func_ty.0 as usize].results.len();
+                    let callee_params_count =
+                        module.types[callee_func_ty.0 as usize].params.len() as u32;
+                    let callee_results_count =
+                        module.types[callee_func_ty.0 as usize].results.len() as u32;
                     let callee_func_body =
                         &module.func_bodies[(callee_func_index.0 - imported_func_count) as usize];
                     let callee_instructions = &callee_func_body.instructions;
                     let callee_locals_ty = &callee_func_body.locals;
-                    let callee_br_table_targets = &callee_func_body.frame_layout.br_targets_arena;
+                    let callee_br_table_targets = &callee_func_body.frame_layout.br_table_targets();
                     let callee_instruction_offsets = &callee_func_body.instruction_offsets;
 
                     // save current frame's state
@@ -585,33 +613,30 @@ impl TraceVM {
                         func_index,
                         instructions,
                         pc: pc as u32,
-                        caller_base_height,
-                        frame_base_height,
+                        caller_base_data,
                         br_table_targets,
                         instruction_offsets,
-                        callee_results_len: callee_results_len as u32,
+                        callee_results_count,
                         callee_func_index,
                         callee_is_indirect: is_indirect,
                     });
-
-                    let callee_locals_len = callee_locals_ty.len();
-                    let callee_params_len = callee_params_count as usize;
 
                     // override the current state with callee
                     func_index = callee_func_index;
                     instructions = callee_instructions;
                     pc = 0;
-                    caller_base_height = instance.frame.height() - callee_params_count;
-                    frame_base_height = caller_base_height + callee_locals_len as u32;
+                    caller_base_data = callee_caller_base_data;
                     br_table_targets = callee_br_table_targets;
                     instruction_offsets = callee_instruction_offsets;
 
-                    // setup the callee frame
-                    for i in 0..(callee_locals_len - callee_params_len) {
-                        let ty = callee_locals_ty[i + callee_params_len];
+                    instance.frame.enter_frame(
+                        callee_params_count,
+                        callee_locals_ty,
+                        &mut caller_base_data,
+                        &callee_func_body.frame_layout,
+                    );
 
-                        instance.frame.push(Value::zero_of_ty(ty));
-                    }
+                    caller_base_data.set_callee_locals_count(callee_locals_ty.len() as u32);
 
                     continue;
                 }
@@ -625,29 +650,24 @@ impl TraceVM {
                 // pop the frame!
                 let frame = frames.pop().unwrap(); // safe to unwrap as checked above!
 
-                // tear down the locals and operands of the frame to just retain the results on top of the
-                // old frame's height
                 instance
                     .frame
-                    .truncate_by_preserving_arity(caller_base_height, frame.callee_results_len);
+                    .exit_frame(frame.callee_results_count, &caller_base_data);
 
                 // reset the state of the frame which executed call instruction
                 func_index = frame.func_index;
                 instructions = frame.instructions;
                 pc = frame.pc as usize + 1; // next instruction past the call
-                caller_base_height = frame.caller_base_height;
-                frame_base_height = frame.frame_base_height;
+                caller_base_data = frame.caller_base_data;
                 br_table_targets = frame.br_table_targets;
                 instruction_offsets = frame.instruction_offsets;
             }
         }
 
-        instance
-            .frame
-            .truncate_by_preserving_arity(caller_base_height, results_len as u32);
+        instance.frame.exit_frame(results_count, &caller_base_data);
 
         Ok(())
-    }*/
+    }
 
     /// Runs an imported callee to completion: pops its parameters, re-tags them
     /// from its declared types, invokes the host function, pushes its results.
@@ -944,11 +964,9 @@ fn func_call_err_from_unwind<V: VirtualMachine>(
     FuncCallError::new(func_name.to_string(), trace.into_boxed_slice(), module)
 }
 
-/// Builds the caller-visible error for the explicit-frame-stack driver,
-/// reconstructing the trace from its saved frames.
-///
-/// **Dead**: that driver is the commented-out `_execute_on_frame_stack` below,
-/// so nothing calls this.
+/// Builds the caller-visible error for [`TraceVM::execute_on_frame_stack`],
+/// reconstructing the trace from its saved frames. Unused while [`TraceVM::run`]
+/// drives on the native stack.
 ///
 /// The counterpart to [`func_call_err_from_unwind`]. That driver keeps its call
 /// stack in a `Vec` and unwinds in one step, so it has no per-frame moment at
@@ -956,18 +974,23 @@ fn func_call_err_from_unwind<V: VirtualMachine>(
 /// `err` at `instr_index` as the innermost record, then `frames` in reverse, so
 /// the result is innermost-first either way.
 ///
+/// `entry_func_index` names the call the caller made, which is what
+/// [`FuncCallError`] reports. The *trapping* function is not that one but the
+/// callee of the last saved frame — or `entry_func_index` itself when nothing is
+/// saved, which is the same function.
+///
 /// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
 fn func_call_err<V: VirtualMachine>(
-    func_index: FuncIndex,
-    frames: Vec<Frame>,
+    entry_func_index: FuncIndex,
+    frames: Vec<Frame<InstrOf<V>>>,
     err: InstructionExecutionError,
     instr_index: usize,
     instr_offset: u32,
     module: &Arc<Module<V>>,
 ) -> FuncCallError {
     let func_name = module
-        .exported_func_name(func_index)
+        .exported_func_name(entry_func_index)
         .map(String::as_str)
         .unwrap_or("<unknown>");
 
@@ -975,7 +998,7 @@ fn func_call_err<V: VirtualMachine>(
 
     trace.push(TraceRecord {
         func_index: if frames.is_empty() {
-            func_index
+            entry_func_index
         } else {
             frames.last().unwrap().callee_func_index
         },

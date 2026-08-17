@@ -396,16 +396,16 @@ impl RuntimeFrame for Stack<Value> {
         _caller_base_data: &mut StackCallerBaseData,
         _frame_layout: &StackFrameLayout,
     ) {
-        let locals_len = locals_ty.len();
+        let locals_count = locals_ty.len();
         let params_count = params_count as usize;
 
         debug_assert!(
-            locals_len >= params_count,
-            "locals_ty ({locals_len}) must cover the {params_count} params as well as the \
+            locals_count >= params_count,
+            "locals_ty ({locals_count}) must cover the {params_count} params as well as the \
              declared locals"
         );
 
-        for i in 0..(locals_len - params_count) {
+        for i in 0..(locals_count - params_count) {
             let ty = locals_ty[i + params_count];
 
             self.push(Value::zero_of_ty(ty));

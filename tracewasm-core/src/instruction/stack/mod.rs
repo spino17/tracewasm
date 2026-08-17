@@ -1009,7 +1009,7 @@ struct ControlStack {
     ///
     /// **Operands only.** Heights are relative to the frame's operand base, so a
     /// consumer sizing storage for a call would need
-    /// `base_height + locals_len + max_height`, not `max_height` alone.
+    /// `base_height + locals_count + max_height`, not `max_height` alone.
     ///
     /// Maintained by [`Self::note_height`], which every write to `curr_height` goes
     /// through — that is what makes this an upper bound rather than merely a
@@ -4246,9 +4246,9 @@ impl StackInstruction {
         // first belongs to `wasmparser`; the other three are this crate's own and
         // are the ones that can rot:
         //
-        // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
+        // 1. `index.0 < locals_count` — guaranteed by validation, which runs over the
         //    whole module in `Module::compile` before any lowering.
-        // 2. `stack_pointer >= caller_base_height + locals_len`. Frame setup is split
+        // 2. `stack_pointer >= caller_base_height + locals_count`. Frame setup is split
         //    across two places, and both have to keep it: `caller_base_height` is
         //    derived by the call instruction (`Self::Call`/`Self::CallIndirect`, by
         //    subtracting the arguments already on the stack) or by
@@ -4263,8 +4263,8 @@ impl StackInstruction {
         //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
         //    any such call would break this.
         //
-        // Together, with (1) giving `index.0 < locals_len`:
-        // `caller_base_height + index.0 < caller_base_height + locals_len <=
+        // Together, with (1) giving `index.0 < locals_count`:
+        // `caller_base_height + index.0 < caller_base_height + locals_count <=
         // stack_pointer <= inner.len()`.
         //
         // Constant expressions cannot reach here at all — they run on the much

@@ -140,16 +140,16 @@ impl RuntimeFrame for RegFrame {
     ) {
         // base_register_index, base_register_index+1...base_register_index + params_count - 1 is filled with params
         let base_register_index = caller_base_data.base_offset() as usize;
-        let locals_len = locals_ty.len();
+        let locals_count = locals_ty.len();
         let params_count = params_count as usize;
         let total_register_capacity =
-            base_register_index + locals_len + frame_layout.registers as usize;
+            base_register_index + locals_count + frame_layout.registers as usize;
 
         if self.inner.len() < total_register_capacity {
             self.inner.resize(total_register_capacity, Value::default());
         }
 
-        for i in 0..(locals_len - params_count) {
+        for i in 0..(locals_count - params_count) {
             let ty = locals_ty[i + params_count];
 
             self.inner[base_register_index + params_count + i] = Value::zero_of_ty(ty);
@@ -210,7 +210,7 @@ impl RuntimeFrame for RegFrame {
 
 /// Tests for the register file's sizing.
 ///
-/// A frame spans `[base, base + locals_len + registers)` — params, then declared
+/// A frame spans `[base, base + locals_count + registers)` — params, then declared
 /// locals, then the operand registers numbered from the operand base. Getting that
 /// span wrong is not caught by anything else: the lowering never sees the file, and
 /// the fault surfaces as an out-of-bounds index deep in an unrelated instruction,
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn params_alone_still_need_room_for_registers() {
-        // no declared locals: `locals_len - params_count` is zero, which must not
+        // no declared locals: `locals_count - params_count` is zero, which must not
         // underflow and must not shorten the frame
         let mut frame = RegFrame::default();
 
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn declared_locals_are_zeroed_and_params_are_left_alone() {
-        // the sibling arithmetic: the zeroing loop runs over `locals_len -
+        // the sibling arithmetic: the zeroing loop runs over `locals_count -
         // params_count` slots starting *after* the params, so a param must survive
         // frame entry while a declared local must come out zero
         let mut frame = RegFrame::default();
