@@ -11,7 +11,7 @@
 //! one operand pair, where a compiled Rust guest necessarily drags in a lot of
 //! surrounding code. Keep both.
 
-use tracewasm_core::instance::traits::Results;
+use tracewasm_core::{error::InstructionExecutionError, instance::traits::Results};
 use tracewasm_test::{call_i32, call_typed, try_call};
 
 /// Calls a `() -> i32` export of the integer-comparison fixture.
@@ -804,4 +804,111 @@ fn ref_is_null_result_is_an_i32_usable_as_a_branch_condition() {
 #[test]
 fn ref_is_null_consumes_the_reference() {
     assert_eq!(ref_null("consumes_the_ref"), 555);
+}
+
+// ---------------------------------------------------------------------------
+// Integer division and remainder traps
+// ---------------------------------------------------------------------------
+//
+// These are the fixtures `traps.rs` defers to. rustc emits its own zero and
+// overflow checks ahead of every integer division, so a compiled guest panics
+// before the wasm instruction runs and the interpreter's own trap is unreachable
+// from Rust. Assembled from `wat` to emit the bare instruction.
+
+/// Wraps `body` — a sequence of operators leaving one `i32` — in a `() -> i32`
+/// export named `f`, and calls it.
+fn call_i32_body(body: &str) -> Result<i32, tracewasm_core::error::FuncCallError> {
+    let wat = format!("(module (func (export \"f\") (result i32) {body}))");
+    let bytes = wat::parse_str(&wat).expect("invalid wat");
+
+    try_call::<(i32,)>(&bytes, "f").map(|(v,)| v)
+}
+
+/// As [`call_i32_body`], for a body leaving one `i64`.
+fn call_i64_body(body: &str) -> Result<i64, tracewasm_core::error::FuncCallError> {
+    let wat = format!("(module (func (export \"f\") (result i64) {body}))");
+    let bytes = wat::parse_str(&wat).expect("invalid wat");
+
+    try_call::<(i64,)>(&bytes, "f").map(|(v,)| v)
+}
+
+#[test]
+fn integer_division_by_zero_traps() {
+    for op in ["i32.div_s", "i32.div_u", "i32.rem_s", "i32.rem_u"] {
+        let err = call_i32_body(&format!("i32.const 1 i32.const 0 {op}"))
+            .expect_err(&format!("{op} by zero must trap"));
+
+        assert!(
+            matches!(
+                err.cause(),
+                InstructionExecutionError::Division { .. }
+                    | InstructionExecutionError::Remainder { .. }
+            ),
+            "{op} gave {:?}",
+            err.cause()
+        );
+    }
+
+    for op in ["i64.div_s", "i64.div_u", "i64.rem_s", "i64.rem_u"] {
+        assert!(
+            call_i64_body(&format!("i64.const 1 i64.const 0 {op}")).is_err(),
+            "{op} by zero must trap"
+        );
+    }
+}
+
+// `MIN / -1` has no representable result, so `div_s` traps — while `div_u` reads
+// the same bits as a large positive number and is perfectly well defined. Sharing
+// one division for both signednesses would show up right here.
+#[test]
+fn signed_division_overflow_traps_but_unsigned_does_not() {
+    let err = call_i32_body("i32.const -2147483648 i32.const -1 i32.div_s")
+        .expect_err("i32::MIN / -1 must trap");
+
+    assert!(
+        matches!(err.cause(), InstructionExecutionError::Division { .. }),
+        "got {:?}",
+        err.cause()
+    );
+
+    assert!(
+        call_i64_body("i64.const -9223372036854775808 i64.const -1 i64.div_s").is_err(),
+        "i64::MIN / -1 must trap too"
+    );
+
+    // 0x8000_0000 /u 0xFFFF_FFFF is 0, not a trap.
+    assert_eq!(
+        call_i32_body("i32.const -2147483648 i32.const -1 i32.div_u").unwrap(),
+        0,
+        "the unsigned form of the same bits is defined"
+    );
+}
+
+// `MIN % -1` is `0` by definition, *not* the overflow trap its division sibling
+// takes — the one asymmetry between the two operators.
+#[test]
+fn signed_remainder_of_min_by_minus_one_is_zero_not_a_trap() {
+    assert_eq!(
+        call_i32_body("i32.const -2147483648 i32.const -1 i32.rem_s").unwrap(),
+        0
+    );
+    assert_eq!(
+        call_i64_body("i64.const -9223372036854775808 i64.const -1 i64.rem_s").unwrap(),
+        0
+    );
+}
+
+// Truncation is toward zero, so a negative signed quotient rounds *up*. Rust's
+// `/` already does this; the guard is against someone reaching for a flooring
+// division, which would give -3 here.
+#[test]
+fn signed_division_truncates_toward_zero() {
+    assert_eq!(
+        call_i32_body("i32.const -7 i32.const 3 i32.div_s").unwrap(),
+        -2
+    );
+    assert_eq!(
+        call_i32_body("i32.const -7 i32.const 3 i32.rem_s").unwrap(),
+        -1
+    );
 }

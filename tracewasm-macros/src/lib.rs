@@ -183,6 +183,12 @@ pub fn imports(_attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = impl_block.self_ty.clone();
 
+    // The generated `ImportRegistry` impl repeats the annotated block's generics and
+    // where-clause, so a registry with type parameters — `impl<T> Host<T>` — is
+    // implemented for the same parameters rather than for an unbound `Host<T>`.
+    let generics = impl_block.generics.clone();
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+
     // Collect the tagged methods, stripping the `#[module(...)]` attribute from
     // each so the impl block can be re-emitted with the user's bodies intact.
     let mut entries: Vec<ImportEntry> = Vec::new();
@@ -337,13 +343,24 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             >>
         };
 
-        // Forwarded after the wasm arguments, and only to methods that asked for
-        // it — a host function that ignores guest memory need not declare it.
-        let memory_arg = if entry.takes_memory_view {
-            quote! { , memory_view }
-        } else {
-            quote! {}
-        };
+        // The call's arguments: each wasm parameter decoded from the value slice,
+        // then the memory view for the methods that declared one. Collected into one
+        // list so the commas come from a single repetition — a method taking the view
+        // and no wasm parameters has `memory_view` as its only argument.
+        let mut call_args: Vec<proc_macro2::TokenStream> = param_types
+            .iter()
+            .zip(&indices)
+            .map(|(ty, index)| {
+                quote! {
+                    <#ty as ::tracewasm_core::instance::traits::WasmTy>::from_val(params[#index])
+                        .expect("import argument type mismatch (validated at instantiation)")
+                }
+            })
+            .collect();
+
+        if entry.takes_memory_view {
+            call_args.push(quote! { memory_view });
+        }
 
         // Propagated with `?`, so any error type the host uses is converted into a
         // `TraceWasmError` through the usual `From` impl.
@@ -357,13 +374,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         // call the method, then marshal the result tuple into `ResultVals`.
         execute_arms.push(quote! {
             (#module, #fn_name) => {
-                let __res = self.#fn_ident(
-                    #(
-                        <#param_types as ::tracewasm_core::instance::traits::WasmTy>::from_val(params[#indices])
-                            .expect("import argument type mismatch (validated at instantiation)")
-                    ),*
-                    #memory_arg
-                ) #propagate;
+                let __res = self.#fn_ident( #(#call_args),* ) #propagate;
 
                 ::core::result::Result::Ok(#result_entity::to_vals(&__res))
             }
@@ -400,7 +411,9 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #impl_block
 
-        impl ::tracewasm_core::instance::traits::ImportRegistry for #self_ty {
+        impl #impl_generics ::tracewasm_core::instance::traits::ImportRegistry
+            for #self_ty #where_clause
+        {
             fn execute<V: ::tracewasm_core::memory::MemoryView>(
                 &mut self,
                 module_name: &str,

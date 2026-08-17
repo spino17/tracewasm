@@ -19,24 +19,31 @@ use thiserror::Error;
 /// through `?` in the parser and lowering code.
 #[derive(Error, Debug)]
 pub enum TraceWasmError {
-    /// A call into the guest failed. The [`FuncCallError`] carries the trapping
-    /// [`InstructionExecutionError`] together with the frames that led to it, so
-    /// it can render a backtrace without the caller supplying context.
-    #[error("{0:?}")]
-    FuncCall(FuncCallError),
     /// The module's `start` function trapped during
     /// [`Module::instantiate`](crate::module::Module::instantiate), so the
     /// instance was never handed back.
     ///
-    /// Carries the rendered failure rather than the [`FuncCallError`] it came
-    /// from, so the backtrace that error assembled is not reachable from here —
-    /// only its `Display` form.
+    /// Carries the [`FuncCallError`] itself, so the backtrace it assembled stays
+    /// reachable through [`FuncCallError::stack_trace`]. That matters more here
+    /// than for a normal call: a failed `start` has no user frame to inspect
+    /// afterwards, since instantiation never returned an instance.
     #[error("error occured while executing start function: {0}")]
-    StartFunctionError(String),
+    StartFunctionError(#[source] FuncCallError),
+    /// A function index names an *imported* function where a locally-defined one
+    /// is required — as a `start` function, or behind a
+    /// [`TypedFunc`](crate::instance::TypedFunc). Field: the function index.
+    ///
+    /// The interpreter can only drive a body it holds, and imports have none. Both
+    /// are reachable from valid wasm: `(start $f)` on an import validates, and a
+    /// module may re-export an import under its own name.
+    #[error(
+        "function `{0}` is imported, not defined by this module; only a locally-defined function can be called or used as `start`"
+    )]
+    ImportedFunctionNotCallable(u32),
     /// A linear-memory failure raised outside instruction execution — for example
     /// a data-segment write during instantiation. Field: the specific
     /// [`MemoryError`].
-    #[error("{0:?}")]
+    #[error(transparent)]
     MemoryError(MemoryError),
     /// A well-formed construct that TraceWasm deliberately does not handle
     /// (e.g. the component model, GC types, imports other than functions and

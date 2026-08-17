@@ -3,10 +3,10 @@
 //!
 //! A flat register file rather than a stack: every access is an index relative to
 //! the activation's base, taken from
-//! [`CallerBaseData::base_offset`](crate::instruction::CallerBaseData::base_offset),
+//! [`CallerBaseData::base_offset`],
 //! and nothing is consumed by reading it. That is the opposite of the stack
 //! machine's convention on both counts, which the
-//! [`RuntimeFrame`](crate::instruction::RuntimeFrame) trait docs spell out.
+//! [`RuntimeFrame`] trait docs spell out.
 //!
 //! Two regions, each a stack of per-frame slices with its own base:
 //!
@@ -171,7 +171,7 @@ impl RuntimeFrame for RegFrame {
     /// The two bases bracket the frame. Results are produced in the callee's
     /// *operand* region, which begins at `callee_frame_base_register_index`
     /// (`base + locals`), because
-    /// [`RegFrameLayout`](crate::instruction::register::RegFrameLayout) numbers
+    /// [`RegFrameLayout`] numbers
     /// registers from the operand base — register `r` is `inner[operand_base + r]`,
     /// and a body's `end` materialises its results into registers `0..results`.
     /// They are copied to `base_register_index`, which is the absolute position of

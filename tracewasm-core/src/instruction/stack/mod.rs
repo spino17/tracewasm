@@ -1008,17 +1008,32 @@ struct ControlStack {
     /// the deepest the operand stack can get while executing it.
     ///
     /// **Operands only.** Heights are relative to the frame's operand base, so a
-    /// consumer sizing storage for a call needs
-    /// `caller_base_height + locals_len + max_height`, not `max_height` alone.
+    /// consumer sizing storage for a call would need
+    /// `base_height + locals_len + max_height`, not `max_height` alone.
     ///
     /// Maintained by [`Self::note_height`], which every write to `curr_height` goes
     /// through — that is what makes this an upper bound rather than merely a
     /// recently-seen value. Dead code is excluded, which is correct: unreachable
     /// instructions never execute, so they cannot deepen the stack at runtime.
+    ///
+    /// **Not consumed yet.** Nothing reads it, and [`StackFrameLayout`] does not
+    /// carry it: the stack machine pushes operands as the body runs and grows its
+    /// shared [`Stack`](crate::runtime::stack) on demand, so it never has to know a
+    /// frame's peak in advance. The register machine does — its
+    /// [`RegFrameLayout`](crate::instruction::register::RegFrameLayout) records a
+    /// register count for exactly that reason. This is the same measurement, kept
+    /// because it is what a pre-reserving `enter_frame` here would need.
+    #[allow(
+        dead_code,
+        reason = "the measurement a pre-reserving enter_frame would need; \
+                  `note_height`'s invariant exists to keep it a true bound"
+    )]
     max_height: u32,
 }
 
 impl ControlStack {
+    /// How many blocks are open, counting the implicit `Func` block at the bottom.
+    /// A relative branch depth is converted to an absolute index against this.
     fn len(&self) -> usize {
         self.inner.len()
     }
@@ -1103,21 +1118,39 @@ impl ControlStack {
         curr_block.is_unreachable_traversing = false;
     }
 
+    /// The block at an absolute index into the control stack, for recording a
+    /// branch target on it.
+    ///
+    /// `index` is absolute, while wasm branches name a *relative* depth, so every
+    /// caller converts with `len() - 1 - relative_depth`. That subtraction underflows
+    /// for a depth past the enclosing blocks — which validation has already ruled
+    /// out, as [`ControlStack`]'s own docs record. This is where that guarantee is
+    /// spent.
     fn get_block_mut(&mut self, index: usize) -> &mut Block {
         &mut self.inner[index]
     }
 
+    /// The innermost open block.
+    ///
+    /// Precondition: at least one block is open. The `Func` block makes that true for
+    /// the whole of a body's traversal, so this is only reachable empty after the
+    /// final `end` has popped it.
     fn get_curr_block(&self) -> &Block {
         debug_assert!(!self.inner.is_empty());
         &self.inner[self.inner.len() - 1]
     }
 
+    /// The innermost open block, mutably. Same precondition as
+    /// [`Self::get_curr_block`].
     fn get_curr_block_mut(&mut self) -> &mut Block {
         debug_assert!(!self.inner.is_empty());
         let len = self.inner.len();
         &mut self.inner[len - 1]
     }
 
+    /// Closes the innermost block and returns it, or `None` once the `Func` block
+    /// has been popped — which is how the `End` arm tells a block's end from the
+    /// body's.
     fn pop(&mut self) -> Option<Block> {
         self.inner.pop()
     }
@@ -2558,28 +2591,36 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
+            // The three bulk-memory operators below take unsigned `i32` offsets and
+            // lengths, so each goes through `u32` before widening — as
+            // `pop_effective_address` and `MemoryGrow` do. That keeps a high-bit-set
+            // operand from sign-extending: `-1` must reach `Memory` as `4294967295`,
+            // the offset wasm semantics describe, and not as
+            // `0xFFFF_FFFF_FFFF_FFFF`. `Memory` is an embedder trait, so the value it
+            // is handed has to be one a guest can actually produce.
             StackInstruction::MemoryCopy => {
-                let len = instance.frame.pop().as_i32() as usize;
-                let src = instance.frame.pop().as_i32() as usize;
-                let dest = instance.frame.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as u32 as usize;
+                let src = instance.frame.pop().as_i32() as u32 as usize;
+                let dest = instance.frame.pop().as_i32() as u32 as usize;
 
                 instance.memory.copy_within(dest, src, len)?;
 
                 Step::Next
             }
             StackInstruction::MemoryFill => {
-                let len = instance.frame.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as u32 as usize;
+                // Only the low byte is used, so this one needs no widening.
                 let val = instance.frame.pop().as_i32() as u32;
-                let dest = instance.frame.pop().as_i32() as usize;
+                let dest = instance.frame.pop().as_i32() as u32 as usize;
 
                 instance.memory.fill(dest, val, len)?;
 
                 Step::Next
             }
             StackInstruction::MemoryInit { data_index } => {
-                let len = instance.frame.pop().as_i32() as usize;
-                let src = instance.frame.pop().as_i32() as usize;
-                let dest = instance.frame.pop().as_i32() as usize;
+                let len = instance.frame.pop().as_i32() as u32 as usize;
+                let src = instance.frame.pop().as_i32() as u32 as usize;
+                let dest = instance.frame.pop().as_i32() as u32 as usize;
 
                 // A dropped segment reads as *empty*, not as an outright trap: the
                 // spec replaces its bytes with the empty sequence, so a
@@ -4175,6 +4216,15 @@ impl Instruction for StackInstruction {
 }
 
 impl StackInstruction {
+    /// Reads local slot `index` of the frame based at `caller_base_height`.
+    ///
+    /// A frame's locals occupy the operand stack from `caller_base_height` upward —
+    /// its parameters, adopted in place from the caller, then its declared locals —
+    /// so slot `index` is the absolute height `caller_base_height + index`.
+    ///
+    /// `index` is **not** bounds-checked: the read is unchecked, resting on the four
+    /// invariants in the SAFETY comment below. The first is wasm validation's; the
+    /// other three are this crate's, and are what a change here has to preserve.
     #[inline(always)]
     fn get_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
@@ -4198,18 +4248,24 @@ impl StackInstruction {
         //
         // 1. `index.0 < locals_len` — guaranteed by validation, which runs over the
         //    whole module in `Module::compile` before any lowering.
-        // 2. `stack_pointer == caller_base_height + locals_len` once the frame is
-        //    set up: whichever driver entered the frame derives
-        //    `caller_base_height` by subtracting the arguments already on the
-        //    stack, then pushes the remaining declared locals. Changing that setup
-        //    invalidates this.
+        // 2. `stack_pointer >= caller_base_height + locals_len`. Frame setup is split
+        //    across two places, and both have to keep it: `caller_base_height` is
+        //    derived by the call instruction (`Self::Call`/`Self::CallIndirect`, by
+        //    subtracting the arguments already on the stack) or by
+        //    `StackCallerBaseData::initial_data` for the entry frame, and the
+        //    remaining declared locals are pushed by
+        //    `<Stack<Value> as RuntimeFrame>::enter_frame`. Equality holds the instant
+        //    setup finishes; operands pushed during the body only raise
+        //    `stack_pointer`, which is why the bound below needs `>=` and not `==`.
         // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
         //    in `runtime::stack`.
         // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
         //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
         //    any such call would break this.
         //
-        // Together: `caller_base_height + index.0 < stack_pointer <= inner.len()`.
+        // Together, with (1) giving `index.0 < locals_len`:
+        // `caller_base_height + index.0 < caller_base_height + locals_len <=
+        // stack_pointer <= inner.len()`.
         //
         // Constant expressions cannot reach here at all — they run on the much
         // smaller `Stack::for_const_expr_evaluation`, and
@@ -4252,6 +4308,12 @@ impl StackInstruction {
     /// `memarg` offset, giving the byte offset to access.
     ///
     /// Shared by every memory instruction, which differ only in width.
+    ///
+    /// **For a store, pop the value first.** A store pushes its address and then its
+    /// value, so the value is on top; calling this before taking it reads the value
+    /// as the address. Nothing in the signature enforces the order — the store arms
+    /// all pop `val` on the line above their call, and that is the whole of the
+    /// guarantee.
     ///
     /// # Errors
     ///

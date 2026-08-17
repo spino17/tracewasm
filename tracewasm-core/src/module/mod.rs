@@ -562,9 +562,11 @@ impl<V: VirtualMachine> Module<V> {
     ///
     /// Returns [`TraceWasmError::ExportNotFound`] if no export has that name,
     /// [`TraceWasmError::ExportNotA`] if the export exists but is not a function,
-    /// and [`TraceWasmError::IncorrectParamsResultsStructure`] if the parameter
-    /// or result types of `P`/`R` disagree with the function's signature (in
-    /// count or in the type at any position).
+    /// [`TraceWasmError::ImportedFunctionNotCallable`] if the export is a
+    /// re-exported import, and
+    /// [`TraceWasmError::IncorrectParamsResultsStructure`] if the parameter or
+    /// result types of `P`/`R` disagree with the function's signature (in count or
+    /// in the type at any position).
     pub fn get_typed_func<P: Params, R: Results>(
         &self,
         name: &str,
@@ -574,6 +576,16 @@ impl<V: VirtualMachine> Module<V> {
         };
 
         let func_index = export.to_func()?;
+
+        // Rejected while the handle is being made, not when it is called: a module
+        // may re-export an import under its own name, and the interpreter has no
+        // body to drive for one. Returning a handle here would defer the failure to
+        // `TypedFunc::call`, which cannot report it — it would panic in the driver
+        // instead.
+        if func_index.0 < self.imported_func_count {
+            return Err(TraceWasmError::ImportedFunctionNotCallable(func_index.0));
+        }
+
         let func_decl = &self.func_decls[func_index.0 as usize];
         let ty_index = func_decl.ty;
         let ty = &self.types[ty_index.0 as usize];
@@ -620,7 +632,7 @@ pub(crate) struct FuncBody<Instr: Instruction> {
     /// absolute instruction indices.
     ///
     /// Which instruction set that is comes from the module's `Instr` parameter —
-    /// see [`Instruction`](crate::instruction::Instruction).
+    /// see [`Instruction`].
     pub instructions: Box<[Instr]>,
     /// Source positions for [`Self::instructions`], used to point diagnostics at
     /// the original binary.
@@ -1684,7 +1696,11 @@ impl<V: VirtualMachine> Module<V> {
     ///   function and it traps. It runs at the end of instantiation, on the
     ///   instance being built, so everything else — memory, globals, tables,
     ///   segments — is already in place when it does. A failure here means no
-    ///   instance is returned at all.
+    ///   instance is returned at all. The error carries the
+    ///   [`FuncCallError`](crate::error::FuncCallError) whole, so its backtrace
+    ///   survives — the only record of a failure with no instance to inspect.
+    /// - [`TraceWasmError::ImportedFunctionNotCallable`] if the `start` function is
+    ///   an imported one, which validates but has no body to run.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: &Arc<Module<V>>,
         import_registry: I,
@@ -2016,8 +2032,19 @@ impl<V: VirtualMachine> Module<V> {
 
         // execute start function
         if let Some(func_index) = self.start_section {
+            // `(start $f)` naming an import is valid core wasm and `wasmparser`
+            // validates it, but there is no body to drive — without this the index
+            // would reach `func_bodies`, where the shift by `imported_func_count`
+            // wraps and the slice index panics out through `instantiate`.
+            if func_index.0 < self.imported_func_count {
+                return Err(TraceWasmError::ImportedFunctionNotCallable(func_index.0));
+            }
+
+            // The error is carried whole so its backtrace stays reachable:
+            // `FuncCallError::Display` is a one-liner because the trace is opt-in,
+            // and a failed `start` leaves the caller no instance to inspect instead.
             TraceVM::run(func_index, &[], &mut instance, self)
-                .map_err(|err| TraceWasmError::StartFunctionError(err.to_string()))?;
+                .map_err(TraceWasmError::StartFunctionError)?;
         }
 
         Ok(instance)
@@ -2080,5 +2107,134 @@ mod tests {
     #[test]
     fn thirty_two_bit_memories_and_tables_still_compile() {
         compile("(module (memory 1) (table 1 funcref))").expect("32-bit memory and table");
+    }
+
+    // -----------------------------------------------------------------------
+    // Imported function indices
+    // -----------------------------------------------------------------------
+
+    /// Compiles and instantiates, discarding the instance.
+    fn instantiate(wat: &str) -> Result<(), TraceWasmError> {
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+        Validator::new()
+            .validate_all(&bytes)
+            .expect("wat does not validate — the test would prove nothing");
+
+        Module::<Stack>::compile(&bytes)?
+            .instantiate::<crate::memory::linear::LinearMemory, _>(OneImport, None)
+            .map(|_| ())
+    }
+
+    /// A registry providing exactly one `() -> ()` import, and no globals. Written by
+    /// hand rather than via `#[imports]`, whose output names `::tracewasm_core` and so
+    /// cannot expand inside this crate.
+    struct OneImport;
+
+    impl crate::instance::traits::ImportRegistry for OneImport {
+        fn execute<V: crate::memory::MemoryView>(
+            &mut self,
+            _module_name: &str,
+            _func_name: &str,
+            _params: &[crate::instance::traits::Val],
+            _memory_view: &mut V,
+        ) -> Result<crate::instance::traits::ResultVals, anyhow::Error> {
+            Ok(crate::instance::traits::ResultVals::new(
+                smallvec::SmallVec::new(),
+            ))
+        }
+
+        fn signature(
+            &self,
+            _module_name: &str,
+            _func_name: &str,
+        ) -> Option<crate::instance::traits::ImportSignature> {
+            // `()` is the empty param/result list, taken through the same
+            // `FuncSignatureEntity` instantiations the macro pins.
+            Some((
+                <() as crate::instance::traits::FuncSignatureEntity<
+                    [crate::instance::traits::Val; 5],
+                    [ValType; 5],
+                    crate::instance::traits::ParamVals,
+                    crate::instance::traits::ParamValTypes,
+                >>::types(),
+                <() as crate::instance::traits::FuncSignatureEntity<
+                    [crate::instance::traits::Val; 3],
+                    [ValType; 3],
+                    crate::instance::traits::ResultVals,
+                    crate::instance::traits::ResultValTypes,
+                >>::types(),
+            ))
+        }
+
+        fn func_count(&self) -> u32 {
+            1
+        }
+
+        fn global_count(&self) -> u32 {
+            0
+        }
+
+        fn get_global(
+            &self,
+            module_name: &str,
+            global_name: &str,
+        ) -> Result<crate::instance::traits::Val, anyhow::Error> {
+            Err(anyhow::anyhow!("no globals: {module_name}::{global_name}"))
+        }
+    }
+
+    /// `(start $f)` on an import is valid core wasm and `wasmparser` validates it, but
+    /// there is no body to drive. It has to come back as an error: the index would
+    /// otherwise be shifted below zero and panic on the `func_bodies` slice, escaping
+    /// `instantiate`, which is documented to return.
+    #[test]
+    fn a_start_function_that_is_imported_is_an_error_not_a_panic() {
+        let err = instantiate(r#"(module (import "env" "f" (func $f)) (start $f))"#)
+            .expect_err("an imported start function must be rejected");
+
+        assert!(
+            matches!(err, TraceWasmError::ImportedFunctionNotCallable(0)),
+            "got {err:?}, want ImportedFunctionNotCallable(0)"
+        );
+    }
+
+    /// A module may re-export an import under its own name, so an exported function
+    /// index is not necessarily local. Rejected while the handle is made rather than
+    /// when it is called, since `TypedFunc::call` has no way to report it.
+    #[test]
+    fn a_typed_handle_to_a_re_exported_import_is_refused() {
+        let wat = r#"(module (import "env" "f" (func $f)) (export "f" (func $f)))"#;
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+        let module = Module::<Stack>::compile(&bytes).expect("should compile");
+
+        let err = module
+            .get_typed_func::<(), ()>("f")
+            .err()
+            .expect("a handle to an imported function must be refused");
+
+        assert!(
+            matches!(err, TraceWasmError::ImportedFunctionNotCallable(0)),
+            "got {err:?}, want ImportedFunctionNotCallable(0)"
+        );
+    }
+
+    /// The guard keys on the index being imported, not on there being imports: a local
+    /// function in a module that also imports one is still callable, and its `start`
+    /// still runs.
+    #[test]
+    fn a_local_function_alongside_an_import_is_still_callable() {
+        let wat = r#"(module
+            (import "env" "f" (func $f))
+            (func $g (export "g"))
+            (start $g))"#;
+
+        instantiate(wat).expect("a local start function must run");
+
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+        let module = Module::<Stack>::compile(&bytes).expect("should compile");
+
+        module
+            .get_typed_func::<(), ()>("g")
+            .expect("a local export must still be callable");
     }
 }

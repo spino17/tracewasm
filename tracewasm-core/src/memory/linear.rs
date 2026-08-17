@@ -30,10 +30,9 @@ impl LinearMemory {
     /// If the byte length exceeds `usize`, which on a 32-bit host is any page
     /// count from 65536 up.
     pub fn new(size_in_pages: u32) -> Self {
-        // Widened to `usize` *before* multiplying: the maximum a wasm32 memory may
-        // reach is 65536 pages, and 65536 * 65536 is 2^32 — one past the top of the
-        // `u32` both operands are. Multiplying at `u32` would wrap that to a 0-byte
-        // allocation on release and abort on debug.
+        // Both operands widen to `usize` before multiplying, because the product does
+        // not fit their `u32`: the largest a wasm32 memory may reach is 65536 pages,
+        // and 65536 * 65536 is 2^32.
         Self::with_byte_len(size_in_pages as usize * WASM_MEMORY_PAGE_SIZE as usize)
     }
 
@@ -78,10 +77,9 @@ impl Memory for LinearMemory {
             ));
         }
 
-        // Widened before multiplying, for the reason given in `LinearMemory::new`:
-        // a grow to the wasm32 maximum of 65536 pages is exactly the case that
-        // overflows `u32`, and `new_size` has just been checked against the cap, so
-        // it is a size this memory is entitled to reach.
+        // Widened before multiplying, as in `LinearMemory::new`: `new_size` has
+        // passed the cap check, so it may legitimately be the wasm32 maximum of
+        // 65536 pages, whose byte length is 2^32.
         self.inner
             .resize(new_size as usize * WASM_MEMORY_PAGE_SIZE as usize, 0);
 

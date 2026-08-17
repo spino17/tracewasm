@@ -1,6 +1,6 @@
 //! The stack machine's operand stack.
 //!
-//! Just [`Stack<T>`] and its [`RuntimeFrame`](crate::instruction::RuntimeFrame)
+//! Just [`Stack<T>`] and its [`RuntimeFrame`]
 //! implementation. The value representations this once also held — `Val`,
 //! `Value` and the table/element/data stores — now live in
 //! [`value`](crate::runtime::value).
@@ -41,8 +41,9 @@
 //! `pops` returns top-first (the former top at `v[0]`), `pops_and_reverse`
 //! returns push order (deepest-first). Both are currently test-only utilities;
 //! execution instead uses `truncate_by_preserving_arity` for branch unwinding
-//! and the [`RuntimeFrame`](crate::instruction::RuntimeFrame) methods
-//! `get_params`/`results` for call arguments and results.
+//! and the [`RuntimeFrame`] methods
+//! `get_params_for_import_call`, `set_results_from_import_call` and
+//! `get_final_results` for call arguments and results.
 //!
 //! ## Preconditions
 //!
@@ -95,6 +96,13 @@ impl<T> Default for Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
+    /// Creates an empty stack reserving exactly `cap` slots, for a caller whose
+    /// working height it knows better than [`Default`]'s 4 MiB guess.
+    ///
+    /// The register lowering passes `0`: its simulated compile-time stack grows to
+    /// whatever the operator stream needs, which is not known before walking it, and
+    /// reserving the runtime default for a per-function compile-time structure would
+    /// be far worse than a few reallocations.
     pub fn new_with_capacity(cap: u32) -> Self {
         Stack {
             inner: Vec::with_capacity(cap as usize),
@@ -288,6 +296,16 @@ impl<T: Clone> Stack<T> {
         self.inner[self.stack_pointer - 1].clone()
     }
 
+    /// Borrows the value `depth` places below the top without removing it, so
+    /// `peek_from_top(0)` is the top itself.
+    ///
+    /// Precondition: `depth < height()`. A larger `depth` underflows the `u32`
+    /// before the index and panics there rather than at the bounds check, so the
+    /// message names a nonsensical index — the caller is expected to have derived
+    /// `depth` from an arity the lowering pass already knows.
+    ///
+    /// Bounded by `stack_pointer` rather than `inner.len()`, for the reason
+    /// [`Self::top`] gives.
     pub fn peek_from_top(&self, depth: u32) -> &T {
         &self.inner[(self.height() - 1 - depth) as usize]
     }
@@ -298,6 +316,13 @@ impl RuntimeFrame for Stack<Value> {
     type BrTableTarget = StackBrTableTarget;
     type FrameLayout = StackFrameLayout;
 
+    /// Forwards to the inherent [`Stack::reset`], which moves `stack_pointer` back
+    /// to 0 and keeps the allocation.
+    ///
+    /// Not infinite recursion: an inherent method wins name resolution over a trait
+    /// method of the same name. Removing the inherent `reset`, or narrowing the
+    /// `impl<T: Clone>` block it lives in so it no longer applies here, would turn
+    /// this into a silent stack overflow rather than a compile error.
     fn reset(&mut self) {
         self.reset();
     }
@@ -339,7 +364,7 @@ impl RuntimeFrame for Stack<Value> {
     /// push order (`result0..resultN-1`).
     ///
     /// **Consuming**, unlike the register machine's implementation — see the
-    /// [`RuntimeFrame`](crate::instruction::RuntimeFrame) trait docs.
+    /// [`RuntimeFrame`] trait docs.
     ///
     /// Precondition: at least `results_count` values are present.
     fn get_final_results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
@@ -354,6 +379,16 @@ impl RuntimeFrame for Stack<Value> {
         s
     }
 
+    /// Pushes a zero for each *declared* local, skipping the leading
+    /// `params_count` — the arguments are already on the stack, left there by the
+    /// caller, and become slots `0..params_count` in place.
+    ///
+    /// Needs no `frame_layout`: operands are pushed as the body runs, so there is no
+    /// storage to size up front the way the register machine's file is.
+    ///
+    /// Precondition: `locals_ty.len() >= params_count`, which
+    /// [`RuntimeFrame`]'s contract states — `locals_ty` covers the params *and* the
+    /// declared locals. A shorter slice underflows the subtraction below.
     fn enter_frame(
         &mut self,
         params_count: u32,
@@ -364,6 +399,12 @@ impl RuntimeFrame for Stack<Value> {
         let locals_len = locals_ty.len();
         let params_count = params_count as usize;
 
+        debug_assert!(
+            locals_len >= params_count,
+            "locals_ty ({locals_len}) must cover the {params_count} params as well as the \
+             declared locals"
+        );
+
         for i in 0..(locals_len - params_count) {
             let ty = locals_ty[i + params_count];
 
@@ -371,6 +412,14 @@ impl RuntimeFrame for Stack<Value> {
         }
     }
 
+    /// Drops the frame, leaving its `results_count` results where the caller's
+    /// arguments were — so the caller needs to do nothing once a call returns.
+    ///
+    /// Truncates to `base_height`, the bottom of the *locals* region, and **not** to
+    /// `callee_frame_base_height`: the locals have to go too, and the results have to
+    /// land at the height the arguments occupied. Using the operand base instead
+    /// would strand this frame's locals on the stack under the caller's next push,
+    /// which is the confusion the two names exist to prevent.
     fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData) {
         self.truncate_by_preserving_arity(caller_base_data.base_height, results_count as u32);
     }

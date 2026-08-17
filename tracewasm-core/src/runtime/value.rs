@@ -16,8 +16,8 @@
 //! (`Value::into_val`), which is why so many signatures thread a [`ValType`]
 //! through.
 //!
-//! Carved out of the old `vm::stack` module, which held the stack and these
-//! types together.
+//! Kept separate from [`stack`](crate::runtime::stack), which holds only the
+//! operand stack itself.
 
 use crate::{
     error::TraceWasmError,

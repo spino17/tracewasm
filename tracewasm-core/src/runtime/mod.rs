@@ -5,7 +5,7 @@
 //!
 //! Each function body is a `Vec<Instr>` with control flow already resolved to
 //! absolute instruction indices. Execution is a simple `pc` loop:
-//! [`Instruction::execute`](crate::instruction::Instruction::execute) runs one
+//! [`Instruction::execute`] runs one
 //! instruction and reports what the driver should do next via [`Step`]
 //! — advance (`Next`), jump (`JumpTo`), enter a callee (`Call`), or (implicitly,
 //! by advancing past the final `End`) return from the function.
@@ -16,31 +16,38 @@
 //! rather than by the host stack, since overflowing the latter aborts the process
 //! instead of unwinding.
 //!
-//! ## One shared stack across all frames — locals included
+//! ## Where a frame's values live
 //!
-//! Rather than giving every call its own operand stack, the whole call tree
-//! shares a single `Stack`. A call does not allocate a new stack; the callee
-//! simply builds its operands on top of the caller's. Recursion still uses the
-//! native Rust call stack (one [`TraceVM::execute_on_native_stack`] frame per
-//! active wasm call), but the potentially-large value stack is allocated exactly
-//! once.
+//! The driver itself owns no value storage. Each machine supplies its own through
+//! [`RuntimeFrame`], reached as
+//! [`Instruction::RuntimeFrame`](crate::instruction::Instruction), and the driver
+//! only asks it to enter a frame, exit one, and hand back results. What follows
+//! describes the stack machine's layout, since that is the one whose base
+//! arithmetic the lowered instructions encode; the register machine sizes a
+//! register file from its [`FrameLayout`] instead.
+//!
+//! Rather than giving every call its own operand stack, the whole call tree shares
+//! a single [`Stack`]. A call does not allocate a new stack; the callee builds its
+//! operands on top of the caller's. Recursion still uses the native Rust call
+//! stack — one [`TraceVM::execute_on_native_stack`] frame per active wasm call —
+//! but the potentially-large value stack is allocated exactly once.
 //!
 //! A frame's **locals live on that same shared stack**, not in a per-activation
 //! vector. The layout of one frame, from its base upwards, is:
 //!
 //! ```text
-//!   caller_base_height ─┐
-//!                       ▼
+//!   base_height ─┐
+//!                ▼
 //!   ... caller's stack | p0 p1 … | l0 l1 … | operands … →
 //!                        └ params ┘└ decl. ┘▲
-//!                        └──── locals ─────┘└─ frame_base_height
+//!                        └──── locals ─────┘└─ callee_frame_base_height
 //! ```
 //!
 //! The arguments are *already* on the stack when the callee is entered, so they
 //! are left in place and become local slots `0..params_len` rather than being
-//! popped and copied. Frame setup then pushes zero values for the declared
-//! locals (`params_len..locals_len`), so `local.get`/`local.set` for slot `i`
-//! is a direct index at `caller_base_height + i`.
+//! popped and copied. Frame setup then pushes zero values for the declared locals
+//! (`params_len..locals_len`), so `local.get`/`local.set` for slot `i` is a direct
+//! index at `base_height + i`.
 //!
 //! ## The two base heights
 //!
@@ -55,25 +62,26 @@
 //!   operation.
 //!
 //! Both are fields of
-//! [`StackCallerBaseData`](crate::instruction::stack::StackCallerBaseData); they
-//! were loose driver locals before the frame model moved behind
-//! [`CallerBaseData`](crate::instruction::CallerBaseData).
+//! [`StackCallerBaseData`](crate::instruction::stack::StackCallerBaseData), the
+//! stack machine's
+//! [`CallerBaseData`] — the trait through which
+//! the driver carries a callee's base without knowing what it consists of.
 //!
 //! The lowered instructions store **frame-relative** operand heights
-//! (`recorded_height`), computed as if the function ran on an empty operand
-//! stack with its locals held separately. The interpreter converts
-//! relative → absolute with a single rule:
+//! (`recorded_height`), computed as if the function ran on an empty operand stack
+//! with its locals held separately. The interpreter converts relative → absolute
+//! with a single rule:
 //!
 //! ```text
-//! absolute_height = frame_base_height + recorded_height (+ arity)
+//! absolute_height = callee_frame_base_height + recorded_height (+ arity)
 //! ```
 //!
-//! On frame exit the stack is truncated to `caller_base_height` preserving the
-//! result arity, which drops the locals and leaves the results exactly where the
-//! caller's arguments were — so the caller does nothing after the call returns.
-//! Instruction indices, by contrast, are per-function: each
-//! [`TraceVM::execute_on_native_stack`] invocation has its own `instructions`
-//! slice and `pc`.
+//! On frame exit — [`RuntimeFrame::exit_frame`] — the stack is truncated to
+//! `base_height` preserving the result arity, which drops the locals and leaves
+//! the results exactly where the caller's arguments were, so the caller does
+//! nothing after the call returns. Instruction indices, by contrast, are
+//! per-function: each [`TraceVM::execute_on_native_stack`] invocation has its own
+//! `instructions` slice and `pc`.
 
 use crate::{
     InstrOf, VirtualMachine,
@@ -99,6 +107,9 @@ use crate::{
 use smallvec::{SmallVec, smallvec};
 use std::{sync::Arc, u32};
 
+// No outer doc comments on these: each module carries its own `//!` docs, and an
+// outer `///` at the declaration site re-scopes the intra-doc links inside it to
+// this module, silently breaking every one that resolved in its own scope.
 pub(crate) mod reg;
 pub(crate) mod stack;
 pub mod value;
@@ -123,7 +134,7 @@ pub(crate) const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854
 pub(crate) const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 pub(crate) const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
-/// What [`Instruction::execute`](crate::instruction::Instruction::execute) tells
+/// What [`Instruction::execute`] tells
 /// its driver to do next.
 ///
 /// Everything an instruction can do to the operand stack, memory, globals and
@@ -135,7 +146,12 @@ pub enum Step<Instr: Instruction> {
     /// Enter a locally-defined callee. An imported callee never produces this:
     /// it runs to completion inside the dispatch and yields [`Self::Next`].
     Call {
+        /// The callee, as a module-wide function index — so it counts imports, and
+        /// the driver shifts it down by `imported_func_count` to reach a body.
         func_index: FuncIndex,
+        /// Where the **callee's** frame begins inside the caller's storage, computed
+        /// by the call instruction because only it knows how many arguments it left
+        /// behind. The driver passes it straight through as the callee's own base.
         caller_base_data: Instr::CallerBaseData,
         /// `Some(table)` when the call came from `call_indirect`, recorded so a
         /// trap can say which table it went through.
@@ -151,6 +167,12 @@ pub enum Step<Instr: Instruction> {
 /// Holds everything needed to resume the caller, plus what the trace needs to
 /// describe the call if the callee traps. The slice references borrow from the
 /// [`Module`], so saving a frame copies pointers rather than instructions.
+///
+/// **Dead**, like [`func_call_err`]: the only driver that builds these is the
+/// commented-out `_execute_on_frame_stack` below, so nothing constructs it. Note
+/// that it is also hard-wired to [`StackInstruction`] and [`StackBrTableTarget`]
+/// rather than being generic over the machine, so reviving that driver means
+/// reworking this first.
 struct Frame<'a> {
     func_index: FuncIndex,
     instructions: &'a [StackInstruction],
@@ -403,11 +425,11 @@ impl TraceVM {
     /// leaves the results in the frame for this function to take.
     ///
     /// Generic over the lowering, so the driver itself is machine-agnostic: the
-    /// frame comes from [`RuntimeFrame`](crate::instruction::RuntimeFrame) and its
+    /// frame comes from [`RuntimeFrame`] and its
     /// base from
-    /// [`CallerBaseData::initial_data`](crate::instruction::CallerBaseData::initial_data).
+    /// [`CallerBaseData::initial_data`].
     /// Whether a given lowering can actually be driven is
-    /// [`Instruction::execute`](crate::instruction::Instruction::execute)'s
+    /// [`Instruction::execute`]'s
     /// business — the register machine's is still unimplemented, so driving one
     /// panics rather than failing to compile.
     ///
@@ -500,6 +522,12 @@ impl TraceVM {
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
 
+        // Only an assertion because every way in already rejects an imported index:
+        // `Module::get_typed_func` when it hands out the handle,
+        // `Module::instantiate` before it runs a `start` function, and the driver's
+        // `Step::Call` arm, which routes an import to `Self::call_imported`. If that
+        // ever stops holding, the subtraction below wraps and the `func_bodies` index
+        // panics rather than reporting anything.
         debug_assert!(func_index.0 >= imported_func_count);
 
         let func_decl = &module.func_decls[func_index.0 as usize];
@@ -511,9 +539,9 @@ impl TraceVM {
         let instruction_offsets = &func_body.instruction_offsets;
 
         // Annotated as a slice so the `Box` is dereferenced here rather than at the
-        // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
-        // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
-        // loads for a pair that is fixed for the whole frame.
+        // call in the loop. The dispatch takes `&[Instruction::BrTableTarget]`, and
+        // coercing a `&Box<[_]>` to it re-reads the pointer and length out of the
+        // `Box` — two loads for a pair that is fixed for the whole frame.
         let br_table_targets: &[<InstrOf<V> as Instruction>::BrTableTarget] =
             func_body.frame_layout.br_table_targets();
 
@@ -538,7 +566,7 @@ impl TraceVM {
         // error paths out of the loop deliberately skip it, because an error always
         // propagates to the top-level `run` (nothing in the interpreter catches
         // one) and the counter is a fresh local per `run`. The depth *limit* is
-        // enforced at the call site in `call_func`, not here, so that the top-level
+        // enforced by the driver loop's `Step::Call` arm below, not here, so that the
         // frame is always admitted — an error raised during frame setup would
         // otherwise escape without the enclosing-instruction tag that
         // `FuncCallError` requires.
@@ -651,30 +679,30 @@ impl TraceVM {
         Ok(())
     }
 
-    /// The same interpreter, driving its call stack from a `Vec<Frame>` instead
-    /// of recursing.
-    ///
-    /// **Not wired up** — [`Self::run`] uses [`Self::execute_on_native_stack`].
-    /// It is kept because it is the only shape that decouples guest call depth
-    /// from the host stack: nothing here grows the native frame per wasm call, so
-    /// depth would be bounded by memory rather than by
-    /// [`Config::max_call_stack_depth`](crate::instance::config::Config).
-    ///
-    /// It is measurably slower, and for a reason that is structural rather than
-    /// incidental. The frame state it must carry across the dispatch loop —
-    /// instruction slice, offsets, branch targets, both base heights — occupies
-    /// registers that the recursive driver leaves free, because there they are
-    /// fixed for the life of the call and here they change on every call and
-    /// return. The opcode arms lose that contention: the operand-stack pointer
-    /// stops living in a register, so a push no longer folds into the pop before
-    /// it, and the arms' shared tail becomes a general push instead.
-    ///
-    /// Restructuring around an inner per-frame loop, and outlining the
-    /// call/return transitions, were both tried and moved it very little; the
-    /// contention is not in how those are written.
-    ///
-    /// Its depth check tests `frames.len()` rather than a separate counter, since
-    /// the `Vec` length *is* the depth.
+    // The same interpreter, driving its call stack from a `Vec<Frame>` instead
+    // of recursing.
+    //
+    // **Not wired up** — [`Self::run`] uses [`Self::execute_on_native_stack`].
+    // It is kept because it is the only shape that decouples guest call depth
+    // from the host stack: nothing here grows the native frame per wasm call, so
+    // depth would be bounded by memory rather than by
+    // [`Config::max_call_stack_depth`](crate::instance::config::Config).
+    //
+    // It is measurably slower, and for a reason that is structural rather than
+    // incidental. The frame state it must carry across the dispatch loop —
+    // instruction slice, offsets, branch targets, both base heights — occupies
+    // registers that the recursive driver leaves free, because there they are
+    // fixed for the life of the call and here they change on every call and
+    // return. The opcode arms lose that contention: the operand-stack pointer
+    // stops living in a register, so a push no longer folds into the pop before
+    // it, and the arms' shared tail becomes a general push instead.
+    //
+    // Restructuring around an inner per-frame loop, and outlining the
+    // call/return transitions, were both tried and moved it very little; the
+    // contention is not in how those are written.
+    //
+    // Its depth check tests `frames.len()` rather than a separate counter, since
+    // the `Vec` length *is* the depth.
     /*fn _execute_on_frame_stack<M: Memory, I: ImportRegistry>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I, StackInstruction>,
@@ -932,7 +960,7 @@ impl TraceVM {
     ///
     /// If the sequence contains an instruction not permitted in a constant
     /// expression. This used to be a `TraceWasmError::Unsupported`, and the
-    /// callers in [`Module`](crate::module::Module) propagated it with `?`; the
+    /// callers in [`Module`] propagated it with `?`; the
     /// panic is a placeholder from the refactor, not a deliberate contract.
     pub(crate) fn const_expr_evaluator(instructions: &[StackInstruction], globals: &[Val]) -> Val {
         let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();

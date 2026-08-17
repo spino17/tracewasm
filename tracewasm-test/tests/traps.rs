@@ -26,8 +26,10 @@ use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 /// rustc emits its own zero and overflow checks ahead of an integer division and
 /// panics on failure, so `a / b` in safe Rust never reaches a raw wasm
 /// `i64.div_s` trap. The interpreter's division-trap path is therefore
-/// unreachable from compiled Rust and is covered instead by the hand-written
-/// fixtures in `tests/numeric.rs`, which can emit the bare instruction.
+/// unreachable from compiled Rust, and is covered instead by
+/// `integer_division_by_zero_traps` and its neighbours in `tests/numeric.rs`, which
+/// assemble the bare instruction from `wat`. What the two rows below pin is that
+/// rustc's *guard* traps catchably — not the division operators themselves.
 ///
 /// That split is the reason both kinds of test are worth keeping: guests cover
 /// what rustc really emits, fixtures reach the instructions rustc guards away.

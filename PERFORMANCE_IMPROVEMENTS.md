@@ -59,7 +59,10 @@ regression that a single blended number would hide.
 
 Recursion cost is flat in depth (53 → 66 ns/op from depth 100 to 3000), so frame setup is
 not super-linear — though these three rows carry the widest spread in the table, so read the
-trend rather than the numbers. Frame cost: **1,311 B/frame, 6,396 frames** on an 8 MiB stack.
+trend rather than the numbers. Frame cost: **688 B/frame** on aarch64 release (remeasured
+after the `Step` and `Value` changes below; see `instance/config.rs`), so a full 2000-deep
+chain is ~1.3 MiB. The 1,311 B/frame figure quoted in the sections below is the older
+measurement those sections were written against.
 
 The two invocation rows are separate exports on separate guests, so the gap between them is
 not the cost of extra parameters.
@@ -308,7 +311,7 @@ The same treatment is worth trying on `Stack::pop` (242 call sites) and `Val::as
 bounds check and `panic!` are the equivalent hidden calls. Untested.
 
 **Locals: done.** `get_local`/`set_local` now use `get_unchecked` behind a `debug_assert!`,
-justified by the frame-layout invariants enumerated in `vm/mod.rs`. Worth ~3% on arithmetic,
+justified by the frame-layout invariants enumerated in `runtime/mod.rs`. Worth ~3% on arithmetic,
 inside noise elsewhere.
 
 ### D. Hoist loop invariants
@@ -340,7 +343,9 @@ a logic error the type checker will not catch. The differential suite is the net
 
 ### F. The 8 MiB operand-stack reservation (done)
 
-`VM_STACK_INITIAL_ALLOCATION_SIZE = 512 * 1024` **elements** × 16 B = **8 MiB**. (The comment
+`VM_STACK_INITIAL_ALLOCATION_SIZE = 512 * 1024` **elements** × 16 B = **8 MiB** as measured
+here. `Value` was later narrowed to a `u64`, so the same element count now reserves **4 MiB**.
+(The comment
 saying `// 512Kib` is wrong by 16×.)
 
 The stack is now a field on `Instance`, allocated once at instantiation and reset at each
@@ -381,8 +386,9 @@ depth from ~6,400 to ~1,650. Outlining the cold arms does **not** recover it —
 32 bytes, 0.6%. The bloat is spill slots the allocator cannot overlap across arms, not cold
 code.
 
-The mitigation is instead on the other side: `Config::max_call_stack_depth` defaults to 1200,
-sized so a full chain stays inside a typical 8 MiB stack. The real fix is to stop nesting
+The mitigation is instead on the other side: `Config::max_call_stack_depth`, which was 1200
+when this was written and is now 2000 against the remeasured 688 B/frame — sized so a full
+chain stays inside the 2 MiB stack Rust gives a spawned thread. The real fix is to stop nesting
 native frames per wasm call at all.
 
 A `&mut pc` refactor to remove the `ExecutionResult` round-trip gave **zero throughput

@@ -142,7 +142,27 @@ pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError>
 // ---------------------------------------------------------------------------
 
 /// Whether the guest programs were built. `false` when the wasm target is absent.
+///
+/// Read by [`guests_were_built`], whose whole job is to make a `false` here visible
+/// in the test output.
 pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
+
+/// Reports whether the guest-backed suites ran at all.
+///
+/// Four test files compile away entirely without the wasm target, so a machine
+/// missing it gets a green run with roughly 35 fewer tests and nothing in the output
+/// to say so. This test is always compiled, and `ignore`s itself with a reason when
+/// the guests are absent — turning that silence into a named `ignored` line in the
+/// summary, next to a `cargo::warning` from `build.rs` that scrolls past.
+#[cfg_attr(
+    no_guest_wasm,
+    ignore = "wasm32-unknown-unknown is not installed, so every guest-backed test was skipped: \
+              rustup target add wasm32-unknown-unknown"
+)]
+#[test]
+fn guests_were_built() {
+    assert!(GUESTS_AVAILABLE);
+}
 
 /// The `.wasm` blobs built from `guests/*.rs`.
 ///

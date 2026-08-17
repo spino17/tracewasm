@@ -14,3 +14,9 @@ publish = false
 [dependencies]
 tracewasm-core = { path = "../tracewasm-core" }
 tracewasm-macros = { path = "../tracewasm-macros" }
+
+# Lets a test assemble a fixture from `wat` source inline, for instructions rustc
+# never emits and so no guest can reach. The `fixtures/*.wasm` blobs predate this
+# and have no checked-in source; new fixtures should be written as `wat`.
+[dev-dependencies]
+wat = "1.254.0"

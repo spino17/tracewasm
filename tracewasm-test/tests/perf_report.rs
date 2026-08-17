@@ -40,6 +40,10 @@
 //! loaded machine is worse than no test at all. The only assertions are that the
 //! trap workloads in §6 really trap — timing a silent success would be meaningless.
 
+// Every workload here is a compiled guest, so the whole file compiles away when the
+// wasm target is missing and `tracewasm_test::guests` does not exist.
+#![cfg(not(no_guest_wasm))]
+
 use std::time::Instant;
 
 use tracewasm_core::{

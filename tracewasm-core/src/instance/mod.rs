@@ -9,7 +9,7 @@ use crate::{
         traits::{ImportRegistry, Params, Results},
     },
     instruction::Instruction,
-    memory::Memory,
+    memory::{Memory, MemoryView},
     module::{FuncIndex, Module},
     runtime::{
         TraceVM,
@@ -63,6 +63,17 @@ pub struct Instance<M, I, V: VirtualMachine> {
     pub(crate) table_vals: Box<[TableVal]>,
     /// Element segments, retained so a passive segment can still be applied by a
     /// later `table.init`, and dropped by `elem.drop`.
+    ///
+    /// **Not read yet:** neither machine lowers a table bulk operator, so
+    /// instantiation currently builds this and nothing consumes it — unlike
+    /// [`Self::data_vals`], which `memory.init` and `data.drop` do read. Kept
+    /// because it is what those operators will need, at the cost of the segment
+    /// walk in `instantiate` on every instance.
+    #[allow(
+        dead_code,
+        reason = "groundwork for table.init/elem.drop; an unsilenced warning here \
+                  masks the ones that mean something"
+    )]
     pub(crate) element_vals: Box<[ElementVal]>,
     /// Data segments, retained for `memory.init` and dropped by `data.drop`, for
     /// the same reason as [`Self::element_vals`].
@@ -109,13 +120,23 @@ impl<M: Memory, I: ImportRegistry, V: VirtualMachine> Instance<M, I, V> {
         &self.config
     }
 
-    /// Shared access to the instance's linear [`Memory`].
-    pub fn memory_view(&self) -> &M {
+    /// Read access to the instance's linear memory.
+    ///
+    /// Returned as an opaque [`MemoryView`] rather than as `&M`: that trait is the
+    /// read/write half, so an embedder gets every bounds-checked accessor and none
+    /// of [`Memory`]'s resizing.
+    pub fn memory_view(&self) -> &impl MemoryView {
         &self.memory
     }
 
-    /// Mutable access to the instance's linear [`Memory`].
-    pub fn memory_view_mut(&mut self) -> &mut M {
+    /// Read/write access to the instance's linear memory.
+    ///
+    /// Also an opaque [`MemoryView`], for the reason [`MemoryView`] itself gives:
+    /// growth is reserved to the interpreter, because the limits it must respect —
+    /// the module's declared maximum, narrowed by the instance [`Config`] — live on
+    /// this `Instance` and not on the memory. Handing out `&mut M` would let a host
+    /// call [`Memory::grow`] straight past both.
+    pub fn memory_view_mut(&mut self) -> &mut impl MemoryView {
         &mut self.memory
     }
 }

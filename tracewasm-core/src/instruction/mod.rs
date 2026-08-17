@@ -5,8 +5,11 @@
 //! convention that connects them. Two implement it — [`stack::StackInstruction`],
 //! which keeps wasm's own operand stack, and [`register::RegInstruction`], which
 //! lowers the same operators into a register machine. [`Module`] and [`Instance`]
-//! are generic over the trait, so a module is compiled for one machine or the
-//! other and the rest of the crate does not care which.
+//! are generic over [`VirtualMachine`], which names the
+//! machine and reaches its instruction set as
+//! [`InstrOf<V>`](crate::InstrOf) — so a module is compiled for one machine or the
+//! other and the rest of the crate does not care which, while none of the four
+//! traits below appears in a public signature.
 //!
 //! Four traits, because a machine is four decisions that have to agree:
 //!
@@ -40,6 +43,9 @@ use crate::{
 use smallvec::SmallVec;
 use wasmparser::{BlockType, OperatorsReader};
 
+// No outer doc comments on these: each module carries its own `//!` docs, and an
+// outer `///` at the declaration site re-scopes the intra-doc links inside it to
+// this module, silently breaking every one that resolved in its own scope.
 pub mod register;
 pub mod stack;
 
@@ -92,7 +98,14 @@ pub(crate) trait CallerBaseData {
 pub(crate) trait RuntimeFrame {
     /// How this machine names a callee's frame base. See [`CallerBaseData`].
     type CallerBaseData: CallerBaseData;
+    /// One resolved `br_table` arm, in whatever form this machine's branches
+    /// consume. Named here as well as on [`Instruction`] so the two can be
+    /// constrained equal — see [`Instruction::BrTableTarget`].
     type BrTableTarget;
+    /// What lowering hands this frame to size itself from: the branch-target arena,
+    /// plus whatever else the machine's storage needs (a register count, say). The
+    /// `BrTableTarget` bound is what ties the arena's element type to the branches
+    /// that will index it, so the two cannot drift apart.
     type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
 
     /// Seeds the *entry* function's params, before the driver runs a single
@@ -155,6 +168,15 @@ pub(crate) trait RuntimeFrame {
     /// `frame_layout` is what a positional machine sizes its storage from — the
     /// frame spans the params, the declared locals, and then the layout's operand
     /// registers. A stack machine grows as it pushes and ignores it.
+    ///
+    /// **`caller_base_data`'s locals boundary is not set yet.** The driver calls
+    /// [`CallerBaseData::set_callee_locals_count`] *after* this returns, so
+    /// [`CallerBaseData::base_offset`] is readable here but the boundary between the
+    /// callee's locals and its operands is still whatever
+    /// [`CallerBaseData::initial_data`] left. Size the frame from `params_count` and
+    /// `locals_ty` — which are complete — rather than from the base data. The
+    /// argument is `&mut` so an implementation can *record* into it, not so it can
+    /// read a boundary this early.
     fn enter_frame(
         &mut self,
         params_count: u32,
@@ -193,8 +215,10 @@ pub(crate) trait FrameLayout {
 /// keeps wasm's own operand stack and is the reference for tracing fidelity;
 /// [`RegInstruction`](register::RegInstruction) lowers the same operators into a
 /// register machine that moves values only when it must. [`Module`] and
-/// [`Instance`] are generic over this trait rather than over the two concrete
-/// sets.
+/// [`Instance`] are generic over [`VirtualMachine`], which
+/// selects one of these two through [`Self::Vm`] — the bijection that lets an
+/// instruction name its own machine and the machine name it back, so `execute`
+/// needs no machine parameter of its own.
 ///
 /// The error types deliberately are **not**. A trap carries a rendered backtrace
 /// and the sections needed to resolve it, none of which name an instruction, so
@@ -380,7 +404,8 @@ fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (
 /// TraceWasm allows at most one memory, which [`Module::compile`](crate::module::Module::compile)
 /// already enforces at the section level; this catches the same thing at the
 /// instruction level, where the multi-memory proposal puts an index on every
-/// memory operator. Generic only so it can name the caller's error type.
+/// memory operator. Shared as a free function because both lowering passes need the
+/// same check.
 fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
     if index != 0 {
         return Err(TraceWasmError::Unsupported(

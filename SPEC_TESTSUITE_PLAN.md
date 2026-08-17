@@ -9,7 +9,7 @@ All file references are `tracewasm-core/src/...` unless otherwise noted.
 
 ## 1. What exists today
 
-**17.6k LOC**, 6-crate workspace; `tracewasm-core` is the engine (10.4k of it).
+**43k LOC**, 5-crate workspace; `tracewasm-core` is the engine.
 
 Pipeline:
 
@@ -30,12 +30,12 @@ bytes
 These were checked against the spec rather than assumed:
 
 - Integer div/rem trap conditions, including the subtle `INT_MIN % -1 == 0` non-trap
-  (`vm/mod.rs:796-814`).
+  (`runtime/mod.rs`).
 - `f32`/`f64` `min`/`max` written longhand with the correct NaN and `±0` tie rules;
   `nearest` uses `round_ties_even`; `copysign` is a real sign transplant
-  (`vm/mod.rs:1505-1551`).
+  (`runtime/mod.rs`).
 - Non-saturating `trunc` uses a half-open range with `f32→f64` promotion so bounds stay
-  exact (`vm/mod.rs:168-191`); `trunc_sat` maps NaN→0.
+  exact (`runtime/mod.rs`); `trunc_sat` maps NaN→0.
 - Memory bounds checks `checked_add` *before* any byte movement, so a trapping
   `fill`/`copy` leaves memory untouched (`memory/linear.rs:82-171`); `copy_within` gives
   correct overlap semantics for `memory.copy`.
@@ -49,8 +49,9 @@ These were checked against the spec rather than assumed:
 
 ### Immediate friction
 
-`cargo build` fails at the workspace root: `tracewasm-scratch` is a `cdylib` guest crate
-that will not link for the host target. Any CI harness needs it excluded first.
+None outstanding. `cargo build` at the workspace root succeeds: `tracewasm-scratch` is a
+`cdylib` guest crate that will not link for the host target, and it is not a workspace
+member, so nothing tries to.
 
 ---
 
@@ -95,9 +96,9 @@ problem. It is the largest single change on the list, and `linking.wast`, `impor
 
 ### 2.3 Reference types are half-present; tables are read-only
 
-- `Val::Ref(Option<FuncIndex>)` (`vm/stack.rs:63`) is **funcref-only — there is no
+- `Val::Ref(Option<FuncIndex>)` (`runtime/value.rs`) is **funcref-only — there is no
   externref payload**. Worse, `Val::has_ty` matches any `ValType::Ref(_)` against any
-  `Val::Ref` (`vm/stack.rs:174`), so funcref and externref are indistinguishable at
+  `Val::Ref` (`runtime/value.rs`), so funcref and externref are indistinguishable at
   runtime.
 - **Zero table instructions exist.** `table.get`, `table.set`, `table.size`, `table.grow`,
   `table.fill`, `table.copy`, `table.init` and `elem.drop` have no `Instruction` variant
@@ -113,9 +114,9 @@ problem. It is the largest single change on the list, and `linking.wast`, `impor
 
 ### 2.4 Call-depth guard — **done**
 
-Calls are still recursive native Rust calls (`vm/mod.rs:172`), but the local-callee branch
+Calls are still recursive native Rust calls (`runtime/mod.rs`), but the local-callee branch
 of `call_func` now tests the running depth against `Config::max_call_stack_depth` before
-recursing and returns `TraceWasmError::CallStackExhausted` (`vm/mod.rs:604-607`). The
+recursing and returns `TraceWasmError::CallStackExhausted` (`runtime/mod.rs`). The
 default limit is **2000** frames (`instance/config.rs:30`), and the error's `Display` text
 deliberately contains the substring `call stack exhausted` so `assert_exhaustion` matches
 it verbatim (`error.rs:59`). Imported callees run on the host's own stack and are
@@ -174,7 +175,7 @@ must stay distinct from `Invalid`.
   multi-memory variants of the same-named core tests, not fragments — *including* the only
   `memory_grow.wast`.
 - `memory64` / `table64` will **panic, not error**: `.as_i32()` on an `i64` const-expr
-  result (`module/mod.rs:1776`, panic at `vm/stack.rs:95`).
+  result (`module/mod.rs`, panic at `runtime/stack.rs`).
 - `data_count` and `code_sec_count` are recorded but never cross-checked against the
   actual section lengths (`module/mod.rs:446`). wasmparser covers this today, but the
   second pass does not.
@@ -255,8 +256,8 @@ purpose.
 
 ### Phase 0 — Build and runner skeleton
 
-- Exclude `tracewasm-scratch` from workspace default members (or gate it on
-  `target_arch = "wasm32"`) so `cargo build`/`cargo test` work at the root.
+- ~~Exclude `tracewasm-scratch` from workspace default members~~ — done; it is not a
+  member, and `cargo build`/`cargo test` work at the root.
 - Add `wast = { version = "254", default-features = false, features = ["wasm-module"] }`
   as a dev-dependency.
 - Vendor `WebAssembly/testsuite` as a git submodule.

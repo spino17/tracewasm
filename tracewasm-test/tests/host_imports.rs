@@ -132,3 +132,49 @@ fn signature_excludes_the_memory_view() {
     assert_eq!(results.as_ref().len(), 1);
     assert_eq!(host.func_count(), 3);
 }
+
+/// A registry with a type parameter: the generated `ImportRegistry` impl has to
+/// carry the annotated block's generics and where-clause, or `T` is unbound in it.
+struct GenericHost<T> {
+    tag: T,
+}
+
+#[imports]
+impl<T: Copy + Into<i64>> GenericHost<T> {
+    /// The whole point of this one: it takes the memory view and *no* wasm
+    /// parameters, so `memory_view` is the only argument in the generated call.
+    #[module("env")]
+    fn size<V: MemoryView>(&mut self, mem: &mut V) -> (i32,) {
+        (mem.size_in_pages() as i32,)
+    }
+
+    /// Neither a memory view nor parameters — the generated call takes no arguments
+    /// at all, and the body reads the generic field.
+    #[module("env")]
+    fn tag(&mut self) -> (i64,) {
+        (self.tag.into(),)
+    }
+}
+
+#[test]
+fn a_host_fn_taking_only_the_memory_view_dispatches() {
+    let mut host = GenericHost { tag: 7i32 };
+    let mut mem = LinearMemory::new(3);
+
+    let out = host.execute("env", "size", &[], &mut mem).unwrap();
+    assert!(matches!(out.as_ref()[0], Val::I32(3)));
+
+    // Declared as taking nothing, since the view is not a wasm parameter.
+    let (params, results) = host.signature("env", "size").unwrap();
+    assert_eq!(params.as_ref().len(), 0);
+    assert_eq!(results.as_ref().len(), 1);
+}
+
+#[test]
+fn a_host_fn_taking_nothing_dispatches() {
+    let mut host = GenericHost { tag: 7i32 };
+    let mut mem = LinearMemory::new(1);
+
+    let out = host.execute("env", "tag", &[], &mut mem).unwrap();
+    assert!(matches!(out.as_ref()[0], Val::I64(7)));
+}
