@@ -1,5 +1,9 @@
-//! The VM's operand stack, its value representation (`Val`), and function
-//! locals.
+//! The stack machine's operand stack.
+//!
+//! Just [`Stack<T>`] and its [`RuntimeFrame`](crate::instruction::RuntimeFrame)
+//! implementation. The value representations this once also held — `Val`,
+//! `Value` and the table/element/data stores — now live in
+//! [`value`](crate::runtime::value).
 //!
 //! ## Operand stack design
 //!
@@ -20,7 +24,11 @@
 //! One `Stack` is held per [`Instance`](crate::instance::Instance) and shared by
 //! every frame of a call tree; [`Stack::reset`] empties it at each top-level entry
 //! without releasing the storage. Locals live below the operand region — see the
-//! frame layout in [`crate::vm`].
+//! frame layout in [`crate::runtime`].
+//!
+//! It is no longer purely a runtime structure: the register lowering uses the
+//! same `Stack<T>` at *compile* time, as the simulated operand stack it walks the
+//! operator stream with.
 //!
 //! Constant expressions are the exception: they run on their own short-lived
 //! stack from [`Stack::for_const_expr_evaluation`], because they are evaluated
@@ -33,7 +41,8 @@
 //! `pops` returns top-first (the former top at `v[0]`), `pops_and_reverse`
 //! returns push order (deepest-first). Both are currently test-only utilities;
 //! execution instead uses `truncate_by_preserving_arity` for branch unwinding
-//! and `pop_params`/`pop_results` for call arguments and results.
+//! and the [`RuntimeFrame`](crate::instruction::RuntimeFrame) methods
+//! `get_params`/`results` for call arguments and results.
 //!
 //! ## Preconditions
 //!
@@ -43,8 +52,9 @@
 //! truncate downward). Violations panic via index or underflow rather than
 //! returning an error, so the bounds check remains as a backstop.
 //!
-//! [`Instance::stack`](crate::instance::Instance)'s backing storage is also read
-//! directly, bypassing these methods, by the locals accessors in [`crate::vm`]:
+//! [`Instance::frame`](crate::instance::Instance)'s backing storage is also read
+//! directly, bypassing these methods, by the locals accessors in
+//! [`stack`](crate::instruction::stack):
 //! locals sit below `stack_pointer` for the whole life of a frame, so the operand
 //! discipline never touches them. Those accessors index unchecked and carry the
 //! safety argument for it.
@@ -319,10 +329,14 @@ impl RuntimeFrame for Stack<Value> {
         }
     }
 
-    /// Removes the top `num` values and returns them as a function's results, in
+    /// Removes the top `results_count` values and returns them as a function's
+    /// results, in
     /// push order (`result0..resultN-1`).
     ///
-    /// Precondition: at least `num` values are present.
+    /// **Consuming**, unlike the register machine's implementation — see the
+    /// [`RuntimeFrame`](crate::instruction::RuntimeFrame) trait docs.
+    ///
+    /// Precondition: at least `results_count` values are present.
     fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
@@ -380,7 +394,7 @@ fn pop_underflow() -> ! {
 /// Reports a read of the top of an empty stack.
 ///
 /// A sibling of [`pop_underflow`] rather than a shared helper, for the same
-/// reason [`wrong_ty`] has one function per type: each carries an accurate
+/// reason [`wrong_ty`](crate::runtime::value) has one function per type: each carries an accurate
 /// message while still taking no arguments, so neither costs the caller
 /// anything to keep live.
 #[inline(never)]

@@ -568,17 +568,23 @@ pub struct FuncBody<Instr: Instruction> {
     /// All locals addressable in the body: the function's params first, then the
     /// declared locals, expanded from the run-length-encoded body header.
     pub locals: Box<[ValType]>,
-    /// The body lowered by [`crate::instruction`] (control flow resolved to
-    /// absolute indices).
+    /// The body lowered into `Instr`, with structured control flow resolved to
+    /// absolute instruction indices.
+    ///
+    /// Which instruction set that is comes from the module's `Instr` parameter —
+    /// see [`Instruction`](crate::instruction::Instruction).
     pub instructions: Box<[Instr]>,
     /// Source positions for [`Self::instructions`], used to point diagnostics at
     /// the original binary.
     ///
     /// **Invariant:** parallel to `instructions` — `instruction_offsets[i]` is the
     /// byte offset in the module binary of the operator that produced
-    /// `instructions[i]`, and both slices always have the same length. Lowering
-    /// pushes the two together, which is what upholds this.
+    /// `instructions[i]`, and both slices always have the same length. It is the
+    /// lowering's job to uphold it — see
+    /// [`emit_instruction_for_func`](crate::instruction::Instruction::emit_instruction_for_func).
     pub instruction_offsets: Box<[u32]>,
+    /// Whatever else this lowering needs to run the body: `br_table` arms for
+    /// both machines, plus register and spill counts for the register machine.
     pub(crate) frame_layout: Instr::FrameLayout,
 }
 

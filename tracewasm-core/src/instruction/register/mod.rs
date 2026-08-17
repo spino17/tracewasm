@@ -38,8 +38,8 @@
 //! ## Operands live in flat side tables
 //!
 //! A [`RegInstruction`] never stores its operands inline. Inputs go into
-//! [`FrameLayout::input_registers_arena`] and destination registers into
-//! [`FrameLayout::output_registers_arena`]; the variant holds only a start index and
+//! [`RegFrameLayout::input_registers_arena`] and destination registers into
+//! [`RegFrameLayout::output_registers_arena`]; the variant holds only a start index and
 //! (for the variable-arity forms) a length. That is what keeps the enum at 24 bytes
 //! — inline operands would put `Select` alone at 56 — and it means resolving an
 //! operand at execution is a slice index rather than a pointer chase.
@@ -170,9 +170,9 @@ pub enum Const {
     /// place by whatever consumes it.
     ///
     /// The heap type `ref.null` names is deliberately not carried, matching
-    /// [`Instruction::RefNull`](crate::instruction::stack::Instruction::RefNull) in
+    /// [`StackInstruction::RefNull`](crate::instruction::stack::StackInstruction::RefNull) in
     /// the stack pass and
-    /// [`Val::Ref`](crate::vm::stack::Val::Ref) at execution: a null is a null,
+    /// [`Val::Ref`](crate::runtime::value::Val::Ref) at execution: a null is a null,
     /// validation has already established that each one reached a slot willing to
     /// hold it, and nothing downstream can distinguish a null `funcref` from a null
     /// `externref`. A *non-null* `externref` would not fit here — none can exist

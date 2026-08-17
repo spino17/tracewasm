@@ -1,7 +1,14 @@
-//! Lowering of a WebAssembly operator stream into TraceWasm's flat instruction list.
+//! The stack machine: lowering a WebAssembly operator stream into TraceWasm's
+//! flat instruction list, and executing it.
 //!
-//! `Instruction::emit_instruction_for_func` (function bodies) and
-//! `Instruction::emit_instruction_for_const_expr` (constant expressions) each
+//! Both halves live here on purpose. Lowering writes an operand-height model into
+//! every branch and block, and execution is the only consumer of it; splitting
+//! them would put the producer and the sole reader of that invariant in different
+//! files. [`StackInstruction::execute`] — the interpreter's whole dispatch — is
+//! the second half, below the enum.
+//!
+//! [`StackInstruction::emit_instruction_for_func`] (function bodies) and
+//! `StackInstruction::emit_instruction_for_const_expr` (constant expressions) each
 //! consume a [`wasmparser::OperatorsReader`] and produce a flat instruction list
 //! in which **structured control
 //! flow has been resolved into absolute indices** and **operand-stack heights
@@ -39,9 +46,9 @@
 //! placed in unreachable code are safely dropped rather than underflowing the
 //! `u32` height on a stack-polymorphic operand.
 //!
-//! ## Keeping [`Instruction`] small (load-bearing)
+//! ## Keeping [`StackInstruction`] small (load-bearing)
 //!
-//! One `Instruction` is **at most 16 bytes** — asserted just below the enum, so
+//! One `StackInstruction` is **at most 16 bytes** — asserted just below the enum, so
 //! a regression is a compile error rather than a silent cost. A function body holds
 //! one per operator, so the widest variant sets the memory cost of every compiled
 //! module, and at 16 bytes four of them share a cache line.
@@ -64,12 +71,12 @@
 //!
 //! * **Variable-length payloads live in side tables, not in the variant.** A
 //!   `Box<[T]>` is a 16-byte fat pointer at align 8, which by itself would hold the
-//!   enum at 24. [`Instruction::BrTable`] therefore stores an
-//!   `(start_index, len)` range into the function's flat
-//!   [`FuncBody::br_table_targets`](crate::module::FuncBody) array — 8 bytes, and a
+//!   enum at 24. [`StackInstruction::BrTable`] therefore stores an
+//!   `(start_index, len)` range into the body's flat
+//!   [`StackFrameLayout::br_targets_arena`] array — 8 bytes, and a
 //!   plain slice index at execution rather than a pointer chase.
 //!
-//! Signatures are the same idea: [`Instruction::CallIndirect`] keeps a [`TyIndex`]
+//! Signatures are the same idea: [`StackInstruction::CallIndirect`] keeps a [`TyIndex`]
 //! and resolves the type at execution instead of carrying the parameter and result
 //! slices inline, which would make that variant 40 bytes on its own.
 
@@ -102,7 +109,7 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// `emit_instruction_for_const_expr` for constant expressions; any operator
 /// TraceWasm does not model is rejected as unsupported at lowering time.
 /// Index fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
-/// positions into the containing `Vec<Instruction>`, i.e. runtime program
+/// positions into the containing `Vec<StackInstruction>`, i.e. runtime program
 /// counters.
 #[derive(Debug, Clone)]
 pub enum StackInstruction {
@@ -419,7 +426,7 @@ pub enum StackInstruction {
     /// Not a conversion at all — the bit pattern is unchanged and only its
     /// interpretation differs, so `1.5` becomes `1069547520`, not `1`. Nothing
     /// rounds, nothing traps, and NaN payloads survive verbatim rather than being
-    /// canonicalised. [`Instruction::F32ReinterpretI32`] is the exact inverse.
+    /// canonicalised. [`StackInstruction::F32ReinterpretI32`] is the exact inverse.
     I32ReinterpretF32,
     /// `i32.add`.
     I32Add,
@@ -535,7 +542,7 @@ pub enum StackInstruction {
     I64TruncSatF64S,
     /// `i64.reinterpret_f64`: read an `f64`'s 64 bits as an `i64`.
     ///
-    /// The 64-bit counterpart of [`Instruction::I32ReinterpretF32`]; see that
+    /// The 64-bit counterpart of [`StackInstruction::I32ReinterpretF32`]; see that
     /// variant for why this is a bit move rather than a conversion.
     I64ReinterpretF64,
     /// `i64.add`.
@@ -633,7 +640,7 @@ pub enum StackInstruction {
     /// `f32.demote_f64`: narrow an `f64` to an `f32`, rounding to nearest with ties
     /// to even.
     ///
-    /// The lossy half of the float-width pair; [`Instruction::F64PromoteF32`] is
+    /// The lossy half of the float-width pair; [`StackInstruction::F64PromoteF32`] is
     /// the exact inverse direction. It does not trap, and it does not clamp:
     /// a magnitude past what `f32` can hold becomes an **infinity**, not
     /// `f32::MAX`. Note the overflow threshold is the halfway point between
@@ -643,7 +650,7 @@ pub enum StackInstruction {
     F32DemoteF64,
     /// `f32.reinterpret_i32`: read an `i32`'s 32 bits as an `f32`.
     ///
-    /// The inverse of [`Instruction::I32ReinterpretF32`], and total in both
+    /// The inverse of [`StackInstruction::I32ReinterpretF32`], and total in both
     /// directions: every bit pattern is a valid `f32`, including the NaNs, so this
     /// cannot fail. Round-tripping through either order is the identity.
     F32ReinterpretI32,
@@ -733,11 +740,11 @@ pub enum StackInstruction {
     /// Always exact — every `f32` is representable in `f64`, so this never rounds
     /// and never overflows. It widens the *value the `f32` actually held*, which is
     /// not the decimal that produced it: `0.1f32` promotes to `0.10000000149…`,
-    /// not to `0.1f64`. [`Instruction::F32DemoteF64`] is the lossy direction back.
+    /// not to `0.1f64`. [`StackInstruction::F32DemoteF64`] is the lossy direction back.
     F64PromoteF32,
     /// `f64.reinterpret_i64`: read an `i64`'s 64 bits as an `f64`.
     ///
-    /// The inverse of [`Instruction::I64ReinterpretF64`], and likewise total.
+    /// The inverse of [`StackInstruction::I64ReinterpretF64`], and likewise total.
     F64ReinterpretI64,
     /// `f64.add`.
     F64Add,
@@ -888,13 +895,13 @@ pub enum StackInstruction {
     /// The index is unsigned, so a negative value selects the default rather than
     /// wrapping to a valid arm.
     ///
-    /// The targets are *not* stored inline: a `Box<[TargetBranch]>` here would be a
+    /// The targets are *not* stored inline: a `Box<[StackBrTableTarget]>` here would be a
     /// 16-byte fat pointer and would hold the whole enum at 24 bytes (see the module
     /// docs). Instead this is a range into the flat per-function array, which keeps
     /// the variant at 8 bytes and makes resolution a slice index.
     BrTable {
-        /// Offset of this table's first [`TargetBranch`] in the owning function's
-        /// [`FuncBody::br_table_targets`](crate::module::FuncBody).
+        /// Offset of this table's first [`StackBrTableTarget`] in the owning
+        /// body's [`StackFrameLayout::br_targets_arena`].
         start_index: u32,
         /// Number of targets in this table: one per explicit label, in order,
         /// followed by the default label as the final element. So `len` is always
@@ -926,13 +933,13 @@ pub enum StackInstruction {
     },
 }
 
-// A function body holds one `Instruction` per operator, so this size is multiplied
-// across every compiled module — see "Keeping `Instruction` small" in the module
+// A function body holds one `StackInstruction` per operator, so this size is
+// multiplied across every compiled module — see "Keeping `StackInstruction` small" in the module
 // docs for the three narrowings that hold it here, and why widening any one of them
 // costs 8 bytes on *every* instruction rather than just the variant touched.
 const _: () = assert!(
     size_of::<StackInstruction>() <= 16,
-    "Instruction grew past 16 bytes. Need to keep it compact."
+    "StackInstruction grew past 16 bytes. Need to keep it compact."
 );
 
 /// One resolved arm of a `br_table`: where to jump and how to reshape the stack.
@@ -952,7 +959,17 @@ pub struct StackBrTableTarget {
     pub recorded_height: u32,
 }
 
+/// Everything the stack machine needs to run one body beyond its instructions.
+///
+/// Small by comparison with the register machine's, because wasm's own operand
+/// stack is the storage plan: the only thing lowering has to hand execution is
+/// where each `br_table`'s arms live.
 pub struct StackFrameLayout {
+    /// Every `br_table` arm in this body, concatenated in lowering order.
+    ///
+    /// A [`StackInstruction::BrTable`] owns the contiguous `(start_index, len)`
+    /// run naming its own arms, with the default arm last. Empty, and
+    /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[StackBrTableTarget]>,
 }
 
@@ -966,9 +983,9 @@ impl FrameLayout for StackFrameLayout {
 
 /// The three parallel outputs of lowering one function body: the instruction list,
 /// the source-offset sidecar indexed alongside it, and the flat `br_table` target
-/// array the [`Instruction::BrTable`] ranges point into.
+/// array the [`StackInstruction::BrTable`] ranges point into.
 ///
-/// See [`Instruction::emit_instruction_for_func`] for the invariants that tie the
+/// See [`StackInstruction::emit_instruction_for_func`] for the invariants that tie the
 /// three together.
 type StackLoweredFuncBody = (Vec<StackInstruction>, Vec<u32>, StackFrameLayout);
 
@@ -1263,9 +1280,34 @@ impl StackInstruction {
     }
 }
 
+/// The two operand-stack heights that locate one activation's frame.
+///
+/// **The names invert the intuition, and mixing them up is the likeliest way to
+/// break branch unwinding**, so read this before using either:
+///
+/// * [`Self::base_height`] is where the frame's *locals* start — the stack height
+///   at entry, below the params the caller pushed.
+/// * [`Self::callee_frame_base_height`] is where its *operands* start, i.e.
+///   `base_height + locals`.
+///
+/// Local access indexes from the first; branch and `end` unwinding truncates to
+/// the second. The pre-trait driver passed them as two arguments named
+/// `caller_base_height` and `frame_base_height` respectively.
 pub struct StackCallerBaseData {
+    /// Stack height at which this frame's locals begin. See the type docs.
     pub base_height: u32,
-    pub callee_frame_base_height: u32, // base_height + locals
+    /// Stack height at which this frame's operands begin — `base_height` plus the
+    /// callee's locals count.
+    ///
+    /// **`u32::MAX` until
+    /// [`set_callee_locals_count`](crate::instruction::CallerBaseData::set_callee_locals_count)
+    /// fills it
+    /// in**, which the driver does once the callee's body is known and before its
+    /// first instruction runs. An imported callee never runs instructions, so its
+    /// sentinel is never replaced — safe only because this machine's
+    /// [`RuntimeFrame`](crate::instruction::RuntimeFrame) ignores the argument
+    /// entirely.
+    pub callee_frame_base_height: u32,
 }
 
 impl CallerBaseData for StackCallerBaseData {
@@ -2294,6 +2336,32 @@ impl Instruction for StackInstruction {
         ))
     }
 
+    /// Executes one instruction against `instance` and reports what the driver
+    /// should do next.
+    ///
+    /// The core dispatch: one arm per [`StackInstruction`] variant. Effects on the
+    /// operand stack, memory, globals and tables happen here; only the program
+    /// counter and the call stack are handed back, as a `Step`.
+    ///
+    /// The frame's context arrives as `&self` plus a [`StackCallerBaseData`],
+    /// which is what the [`Instruction`] trait can express — the pre-trait version
+    /// took the same values as loose arguments so the driver could hold them in
+    /// registers across the loop. They are still constant for the life of a frame
+    /// and still computed once on entry, so what changed is the spelling rather
+    /// than the number of times anything is evaluated.
+    ///
+    /// `#[inline(always)]` because the call boundary is not worth its price here:
+    /// inlined, the arms share the driver's registers and the whole dispatch
+    /// becomes a jump table inside one function. The cost is frame size — every
+    /// arm's spill slots land in the driver's frame, which is why
+    /// [`Config::max_call_stack_depth`](crate::instance::config::Config) is tied
+    /// to the size of that frame. That coupling is the reason to think twice
+    /// before removing the attribute.
+    ///
+    /// # Errors
+    ///
+    /// The trap the instruction raised, untagged: it says what went wrong, and
+    /// the driver adds where.
     #[inline(always)]
     fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
         &self,
@@ -4126,7 +4194,7 @@ impl StackInstruction {
         //    stack, then pushes the remaining declared locals. Changing that setup
         //    invalidates this.
         // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
-        //    in `vm::stack`.
+        //    in `runtime::stack`.
         // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
         //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
         //    any such call would break this.

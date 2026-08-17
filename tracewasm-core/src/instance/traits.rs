@@ -10,7 +10,7 @@
 use crate::{memory::MemoryView, module::ValType};
 use smallvec::{Array, SmallVec, smallvec};
 
-// The runtime value type lives in the crate-internal `vm` module; re-export it
+// The runtime value type lives in the crate-internal `runtime` module; re-export it
 // here so it has a public path (`instance::traits::Val`) for the `ImportRegistry`
 // signatures and the `#[imports]`-generated code, without exposing the VM.
 pub use crate::runtime::value::Val;
@@ -383,7 +383,8 @@ pub trait ImportRegistry {
     fn global_count(&self) -> u32;
 
     /// Returns the value of the imported global `module_name::global_name`, or
-    /// [`TraceWasmError::ImportNotFound`] if the registry has no such global.
+    /// an error if the registry has no such global — the `#[imports]` macro
+    /// generates `anyhow!("import not found: …")` for that case.
     /// The value's type is cross-checked against the module's declared global
     /// type at instantiation.
     ///

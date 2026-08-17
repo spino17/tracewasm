@@ -7,11 +7,26 @@
 //!
 //! [`module::Module::compile`] is the entry point. It first runs `wasmparser`'s
 //! full validator over the bytes, then walks the module a second time to build
-//! an owned [`module::Module`]. Function bodies and constant expressions are
-//! lowered by [`instruction`] into a flat instruction list where structured
-//! control flow is resolved to absolute indices and operand-stack heights are
-//! precomputed. An [`instance::Instance`] then pairs a compiled module with a
-//! [`memory::Memory`] and runs its functions via [`instance::TypedFunc`].
+//! an owned [`module::Module`]. Function bodies are lowered by [`instruction`]
+//! into a flat instruction list where structured control flow is resolved to
+//! absolute indices. An [`instance::Instance`] then pairs a compiled module with
+//! a [`memory::Memory`] and runs its functions via [`instance::TypedFunc`].
+//!
+//! ## Two lowerings
+//!
+//! [`instruction::Instruction`] is the seam: a lowering strategy plus the frame
+//! and calling convention that go with it. [`instruction::stack::StackInstruction`]
+//! keeps wasm's own operand stack and precomputes operand heights — it is the
+//! reference for tracing fidelity. [`instruction::register::RegInstruction`]
+//! lowers the same operators into a register machine that moves values only when
+//! it has to.
+//!
+//! [`module::Module`], [`instance::Instance`] and the error types are all generic
+//! over that trait. Two things are not, and deliberately so: **constant
+//! expressions are always lowered as `StackInstruction`** whatever the module's
+//! lowering, since they run once at instantiation and never on a hot path; and
+//! execution currently accepts only a `StackInstruction` instance, because the
+//! register machine's `execute` is still being written.
 //!
 //! ## Scope
 //!
@@ -33,8 +48,8 @@
 //! - [`tracewasm_unreachable`] — the crate's divergence helper for broken
 //!   internal invariants.
 //!
-//! The interpreter itself lives in a crate-internal `vm` module and is not part
-//! of the public API.
+//! The interpreter itself lives in a crate-internal `runtime` module and is not
+//! part of the public API.
 
 /// Re-exported so implementors of
 /// [`ImportRegistry`](instance::traits::ImportRegistry) — and the code

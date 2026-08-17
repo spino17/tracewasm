@@ -3,10 +3,10 @@
 //!
 //! ## Execution model
 //!
-//! Each function body is a `Vec<Instruction>` with control flow already
-//! resolved to absolute instruction indices and operand-stack heights
-//! precomputed. Execution is a simple `pc` loop: [`TraceVM::execute_instruction`]
-//! runs one instruction and reports what the driver should do next via [`Step`]
+//! Each function body is a `Vec<Instr>` with control flow already resolved to
+//! absolute instruction indices. Execution is a simple `pc` loop:
+//! [`Instruction::execute`](crate::instruction::Instruction::execute) runs one
+//! instruction and reports what the driver should do next via [`Step`]
 //! — advance (`Next`), jump (`JumpTo`), enter a callee (`Call`), or (implicitly,
 //! by advancing past the final `End`) return from the function.
 //!
@@ -47,12 +47,17 @@
 //! Because both locals and operands share the stack, a frame needs *two* bases,
 //! and conflating them corrupts memory:
 //!
-//! - **`caller_base_height`** — the bottom of the locals region, i.e. the height
-//!   the stack had on entry minus the arguments. Used only by
+//! - **`base_height`** — the bottom of the locals region, i.e. the height the
+//!   stack had on entry minus the arguments. Used only by
 //!   `get_local`/`set_local`, and as the truncation target on frame exit.
-//! - **`frame_base_height`** — the bottom of the *operand* region, i.e.
-//!   `caller_base_height + locals_len`. Used by every height-sensitive control
+//! - **`callee_frame_base_height`** — the bottom of the *operand* region, i.e.
+//!   `base_height + locals_len`. Used by every height-sensitive control
 //!   operation.
+//!
+//! Both are fields of
+//! [`StackCallerBaseData`](crate::instruction::stack::StackCallerBaseData); they
+//! were loose driver locals before the frame model moved behind
+//! [`CallerBaseData`](crate::instruction::CallerBaseData).
 //!
 //! The lowered instructions store **frame-relative** operand heights
 //! (`recorded_height`), computed as if the function ran on an empty operand
@@ -117,7 +122,8 @@ pub(crate) const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854
 pub(crate) const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
 pub(crate) const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
-/// What [`TraceVM::execute_instruction`] tells its driver to do next.
+/// What [`Instruction::execute`](crate::instruction::Instruction::execute) tells
+/// its driver to do next.
 ///
 /// Everything an instruction can do to the operand stack, memory, globals and
 /// tables it does itself, against the [`Instance`]. Only the things the *driver*
@@ -391,9 +397,13 @@ impl TraceVM {
     /// Top-level entry point: runs a locally-defined function and returns its
     /// result values (in declaration order).
     ///
-    /// Resets [`Instance::stack`] to empty, pushes `params`, and delegates to
-    /// [`Self::execute_on_native_stack`], which leaves the results on that stack
-    /// for this function to pop.
+    /// Resets [`Instance::frame`](crate::instance::Instance) to empty, places
+    /// `params` in it, and delegates to [`Self::execute_on_native_stack`], which
+    /// leaves the results in the frame for this function to take.
+    ///
+    /// Fixed to the stack machine for now: the register backend's `execute` is
+    /// still unimplemented, so there is nothing for a generic entry point to
+    /// drive.
     ///
     /// Resetting on entry rather than on exit is what makes an instance reusable
     /// after a trap: a failing call returns early with values still on the stack,
@@ -912,10 +922,12 @@ impl TraceVM {
     /// resulting [`Val`], on a small dedicated stack. Used to compute
     /// global/table/data/element initializers at instantiation.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`TraceWasmError::Unsupported`] if the sequence contains an
-    /// instruction not permitted in a constant expression.
+    /// If the sequence contains an instruction not permitted in a constant
+    /// expression. This used to be a `TraceWasmError::Unsupported`, and the
+    /// callers in [`Module`](crate::module::Module) propagated it with `?`; the
+    /// panic is a placeholder from the refactor, not a deliberate contract.
     pub(crate) fn const_expr_evaluator(instructions: &[StackInstruction], globals: &[Val]) -> Val {
         let mut stack: Stack<Val> = Stack::for_const_expr_evaluation();
 
@@ -1121,8 +1133,11 @@ fn func_call_err_from_unwind<Instr: Instruction>(
     )
 }
 
-/// Builds the caller-visible error for [`TraceVM::_execute_on_frame_stack`],
+/// Builds the caller-visible error for the explicit-frame-stack driver,
 /// reconstructing the trace from its saved frames.
+///
+/// **Dead**: that driver is the commented-out `_execute_on_frame_stack` below,
+/// so nothing calls this.
 ///
 /// The counterpart to [`func_call_err_from_unwind`]. That driver keeps its call
 /// stack in a `Vec` and unwinds in one step, so it has no per-frame moment at

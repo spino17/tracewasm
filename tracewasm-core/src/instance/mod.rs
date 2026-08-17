@@ -22,7 +22,7 @@ pub mod config;
 pub mod traits;
 
 /// A compiled module paired with everything mutable that running it touches: the
-/// operand stack, linear memory, globals, tables, and the [`ImportRegistry`]
+/// frame store, linear memory, globals, tables, and the [`ImportRegistry`]
 /// resolving its imported functions.
 ///
 /// All interpreter state lives here rather than in the driver, so a frame is
@@ -30,15 +30,21 @@ pub mod traits;
 /// nested call costs no allocation.
 ///
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
-/// import implementation. The module is shared via `Arc`, so one compiled module
+/// import implementation, and over `Instr` so the frame store matches the
+/// lowering — see [`Instruction`](crate::instruction::Instruction). The module is shared via `Arc`, so one compiled module
 /// can back several instances.
 pub struct Instance<M, I, Instr: Instruction> {
     /// The guest's linear memory.
     pub(crate) memory: M,
-    /// The operand stack, shared by every frame: locals and operands of a call
-    /// chain sit contiguously, and each frame addresses its own region by base
-    /// offset. Reset at the start of each [`TypedFunc::call`], which is what
-    /// leaves an instance usable after a trap.
+    /// Live values for every frame in the call chain, laid out however the
+    /// lowering's [`RuntimeFrame`](crate::instruction::RuntimeFrame) chooses —
+    /// an operand stack for the stack machine, a register file for the register
+    /// machine. Either way one store is shared by the whole chain and each frame
+    /// addresses its own region by base offset, so a nested call allocates
+    /// nothing.
+    ///
+    /// Reset at the start of each [`TypedFunc::call`], which is what leaves an
+    /// instance usable after a trap.
     pub(crate) frame: Instr::RuntimeFrame,
     /// Host functions backing the module's declared imports.
     pub(crate) import_registry: I,
@@ -48,7 +54,8 @@ pub struct Instance<M, I, Instr: Instruction> {
     /// the module declares.
     pub(crate) config: Config,
     /// Global values, imported ones first, indexed by the module's global index
-    /// space. Tagged [`Val`] rather than untagged [`Value`] because a global's
+    /// space. Tagged [`Val`] rather than untagged
+    /// [`Value`](crate::runtime::value::Value) because a global's
     /// type is read at runtime when the host asks for it.
     pub(crate) global_vals: Box<[Val]>,
     /// Materialized tables, indexed by table index.

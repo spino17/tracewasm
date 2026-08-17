@@ -1,3 +1,24 @@
+//! The interpreter's value representations, and the table/element/data stores
+//! that hold them.
+//!
+//! Two representations, deliberately:
+//!
+//! * [`Val`] is **tagged** — it knows its own wasm type. It is what crosses the
+//!   API boundary, where a host hands over arguments or reads a global back and
+//!   the type has to be checked at runtime.
+//! * [`Value`] is **untagged**: eight bytes, no discriminant. It is what a frame
+//!   holds during execution, where validation has already established every
+//!   operand's type and carrying a tag would cost space and a branch on every
+//!   access.
+//!
+//! Converting between them therefore goes one way for free (`Val -> Value`
+//! discards the tag) and needs the expected type supplied the other way
+//! (`Value::into_val`), which is why so many signatures thread a [`ValType`]
+//! through.
+//!
+//! Carved out of the old `vm::stack` module, which held the stack and these
+//! types together.
+
 use crate::{
     error::TraceWasmError,
     instruction::Instruction,
