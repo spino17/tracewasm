@@ -21,7 +21,6 @@
 
 use crate::{
     error::TraceWasmError,
-    instruction::Instruction,
     module::{FuncIndex, ValType},
     tracewasm_unreachable,
 };
@@ -257,7 +256,7 @@ const TAG_SOME: u64 = 1 << TAG_SHIFT;
 /// Floats are stored as raw bits rather than converted, so NaN payloads and
 /// signed zeroes survive a round trip unchanged, as wasm requires.
 #[derive(Default, Clone, Copy)]
-pub struct Value(u64);
+pub(crate) struct Value(u64);
 
 impl Value {
     /// Stores an `i32` in the low half, zero-extended.
@@ -391,7 +390,7 @@ pub(crate) struct TableVal {
     /// The table's slots, each a nullable function reference.
     pub table: Vec<Option<FuncIndex>>,
     /// The maximum element count the table may grow to.
-    pub maximum: u64,
+    pub maximum: u32,
 }
 
 /// A passive element segment's runtime state: its remaining function references,

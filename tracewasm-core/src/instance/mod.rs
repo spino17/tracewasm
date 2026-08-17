@@ -8,7 +8,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{Instruction, stack::StackInstruction},
+    instruction::Instruction,
     memory::Memory,
     module::{FuncIndex, Module},
     runtime::{
@@ -32,7 +32,7 @@ pub mod traits;
 ///
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
 /// import implementation, and over `V` so the frame store matches the
-/// machine — see [`VirtualMachine`](crate::VirtualMachine). The module is shared via `Arc`, so one compiled module
+/// machine — see [`VirtualMachine`]. The module is shared via `Arc`, so one compiled module
 /// can back several instances.
 pub struct Instance<M, I, V: VirtualMachine> {
     /// The guest's linear memory.

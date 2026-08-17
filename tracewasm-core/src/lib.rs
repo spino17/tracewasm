@@ -42,9 +42,10 @@
 //! ## Scope
 //!
 //! The parser targets core WebAssembly. It rejects the component model, imports
-//! other than functions and globals, and 64-bit memory as
-//! [`error::TraceWasmError::Unsupported`]; anything the second pass cannot
-//! represent surfaces as the same error rather than a panic.
+//! other than functions and globals, and 64-bit memories and tables as
+//! [`error::TraceWasmError::Unsupported`] — the interpreter is 32-bit throughout,
+//! so an `i64`-indexed memory or table is refused rather than truncated. Anything
+//! the second pass cannot represent surfaces as the same error rather than a panic.
 //!
 //! GC types are refused a step earlier, by `wasmparser` while reading the type
 //! section, and so arrive as [`error::TraceWasmError::Parsing`].
@@ -73,12 +74,9 @@ pub mod instance;
 pub mod memory;
 pub mod module;
 
-/// Lowering, and the machines it lowers for.
-///
-/// Crate-private: an instruction set, the frame it runs in and the calling
-/// convention between them are implementation detail, and nothing in here is
-/// usable from outside. [`VirtualMachine`] is the public face of the choice
-/// between them.
+// Both crate-private. An instruction set, the frame it runs in and the calling
+// convention between them are implementation detail; `VirtualMachine` above is the
+// public face of the choice between them, and the interpreter is not public at all.
 pub(crate) mod instruction;
 pub(crate) mod runtime;
 

@@ -87,7 +87,7 @@ use crate::{
     },
     instruction::{
         CallerBaseData, FrameLayout, Instruction, RuntimeFrame,
-        stack::{StackBrTableTarget, StackCallerBaseData, StackInstruction},
+        stack::{StackBrTableTarget, StackInstruction},
     },
     memory::Memory,
     module::{FuncIndex, FuncKind, Module, TableIndex, ValType, formatted_val_types},

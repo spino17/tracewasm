@@ -2544,7 +2544,7 @@ impl Instruction for StackInstruction {
             StackInstruction::MemoryGrow => {
                 // The delta is an unsigned i32; going through `u32` keeps a
                 // high-bit-set value from sign-extending into a different number.
-                let delta_in_pages = instance.frame.pop().as_i32() as u32 as u64;
+                let delta_in_pages = instance.frame.pop().as_i32() as u32;
                 let max_pages = instance.config.get_max_memory_size_in_pages();
 
                 // `instantiate` already narrowed this to the module's declared

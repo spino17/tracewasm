@@ -74,7 +74,7 @@ use smallvec::{SmallVec, smallvec};
 ///
 /// Generic over the element type so the same machinery can hold runtime `Val`s
 /// during execution and be unit-tested with simpler types.
-pub struct Stack<T> {
+pub(crate) struct Stack<T> {
     /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
     pub(crate) inner: Vec<T>,

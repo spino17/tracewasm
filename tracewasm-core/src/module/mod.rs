@@ -46,7 +46,7 @@ use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator}
 /// [`Module::instantiate`]).
 ///
 /// TODO: honor the custom-page-sizes proposal instead of assuming 64 KiB.
-pub const WASM_MEMORY_PAGE_SIZE: u64 = 64 * 1024; // 64 KiB (one wasm page)
+pub const WASM_MEMORY_PAGE_SIZE: u32 = 64 * 1024; // 64 KiB (one wasm page)
 
 /// The module's parsed DWARF, as loaded from its `.debug_*` custom sections.
 ///
@@ -502,11 +502,6 @@ impl<V: VirtualMachine> Module<V> {
         self.exports.get(name).cloned()
     }
 
-    /// The module's DWARF debug info, or `None` if it was built without any.
-    ///
-    /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
-    /// instruction's byte offset back to a
-    /// source location.
     /// How many locally-defined functions this module has lowered bodies for.
     pub fn func_body_count(&self) -> usize {
         self.func_bodies.len()
@@ -551,6 +546,10 @@ impl<V: VirtualMachine> Module<V> {
         size_of::<InstrOf<V>>()
     }
 
+    /// The module's DWARF debug info, or `None` if it was built without any.
+    ///
+    /// Cheap to call: clones an `Arc`, not the sections. Use it to map an
+    /// instruction's byte offset back to a source location.
     pub fn dwarf(&self) -> Option<ModuleDwarf> {
         self.dwarf.clone()
     }
@@ -831,9 +830,9 @@ pub struct Table {
     /// How the table's slots are initialized.
     pub init: TableInit,
     /// Initial size, in elements.
-    pub initial: u64,
+    pub initial: u32,
     /// Optional maximum size, in elements.
-    pub maximum: Option<u64>,
+    pub maximum: Option<u32>,
 }
 
 /// A named export and the entity it exposes.
@@ -1036,8 +1035,9 @@ impl<V: VirtualMachine> Module<V> {
     ///
     /// Returns [`TraceWasmError::Unsupported`] for valid modules using features
     /// TraceWasm does not model: components, imports other than functions and
-    /// globals, 64-bit memory, more than one memory, tables of anything but
-    /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
+    /// globals, 64-bit memory, 64-bit tables, more than one memory, tables of
+    /// anything but `funcref`, `v128` locals, or any operator the lowering pass
+    /// rejects.
     pub fn compile(buf: &[u8]) -> Result<Arc<Module<V>>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
@@ -1182,6 +1182,22 @@ impl<V: VirtualMachine> Module<V> {
                             ));
                         }
 
+                        // Rejected up front for the same reason as a 64-bit memory,
+                        // and reachable the same way: `wasmparser` gates 64-bit
+                        // tables behind the memory64 proposal, which it enables by
+                        // default. A `table64`'s limits are `u64` and validation
+                        // allows them up to `u64::MAX`, while `Table` stores them as
+                        // `u32` — so letting one past here would truncate the
+                        // declared size and hand the module a table orders of
+                        // magnitude smaller than it asked for, instead of failing.
+                        //
+                        // Imported tables need no equivalent check: the import
+                        // section arm rejects every non-function, non-global import,
+                        // so the table section is the only way a table gets in.
+                        if ty.table64 {
+                            return Err(TraceWasmError::Unsupported("64-bit table".to_string()));
+                        }
+
                         let init = table.init;
 
                         let table_init = match init {
@@ -1194,11 +1210,13 @@ impl<V: VirtualMachine> Module<V> {
                             )),
                         };
 
+                        // Lossless: `table64` is rejected above, and for a 32-bit
+                        // table validation caps both limits at `u32::MAX`.
                         tables.push(Table {
                             element_ty: RefType::from_wasmparser(ty.element_type),
                             init: table_init,
-                            initial: ty.initial,
-                            maximum: ty.maximum,
+                            initial: ty.initial as u32,
+                            maximum: ty.maximum.map(|t| t as u32),
                         });
                     }
                 }
@@ -1673,7 +1691,7 @@ impl<V: VirtualMachine> Module<V> {
         config: Option<Config>,
     ) -> Result<Instance<M, I, V>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
-            self.memories[0].initial()
+            self.memories[0].initial() as u32
         } else {
             0
         };
@@ -1751,7 +1769,7 @@ impl<V: VirtualMachine> Module<V> {
         let max_memory_pages = self
             .memories
             .first()
-            .and_then(|memory| memory.maximum())
+            .and_then(|memory| memory.maximum().map(|m| m as u32))
             .unwrap_or(config_max_pages)
             .min(config_max_pages);
 
@@ -1911,7 +1929,8 @@ impl<V: VirtualMachine> Module<V> {
 
                     // The offset expr yields an `i32` for a 32-bit table; a
                     // `table64` offset would be an `i64` and `as_i32` would panic.
-                    // TraceWasm does not support table64 yet, so this is fine.
+                    // The table section arm rejects `table64` as `Unsupported`, so
+                    // only 32-bit tables reach here.
                     let offset =
                         TraceVM::const_expr_evaluator(offset_expr.instructions(), &global_vals)
                             .as_i32() as usize;
@@ -2002,5 +2021,64 @@ impl<V: VirtualMachine> Module<V> {
         }
 
         Ok(instance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Stack;
+
+    /// Compiles `wat`, asserting first that it is a module `wasmparser` accepts —
+    /// otherwise a rejection here could be proving nothing but a typo. Discards the
+    /// module, which is not `Debug` and so cannot be asserted against directly.
+    fn compile(wat: &str) -> Result<(), TraceWasmError> {
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+
+        Validator::new()
+            .validate_all(&bytes)
+            .expect("wat does not validate — the test would prove nothing");
+
+        Module::<Stack>::compile(&bytes).map(|_| ())
+    }
+
+    /// A 64-bit index type is refused for both memories and tables, because the
+    /// interpreter is 32-bit throughout: addresses are popped with `as_i32`, and
+    /// `Table`'s limits are `u32`. `wasmparser` enables the memory64 proposal by
+    /// default and validates a `table64`'s limits all the way to `u64::MAX`, so
+    /// without these checks the declared size would be silently truncated.
+    #[test]
+    fn sixty_four_bit_memories_and_tables_are_unsupported() {
+        for wat in ["(module (memory i64 1))", "(module (table i64 1 funcref))"] {
+            let err = compile(wat).expect_err(wat);
+
+            assert!(
+                matches!(err, TraceWasmError::Unsupported(_)),
+                "{wat} gave {err:?}, want Unsupported"
+            );
+        }
+    }
+
+    /// The truncation this guards against, spelled out: `2^32 + 10` slots would
+    /// become 10 in a `u32`, slipping under `max_table_elements` and handing the
+    /// module a table four billion entries short of what it declared. Rejecting the
+    /// table is the only correct answer, since clamping would corrupt every access
+    /// the module believes is in bounds.
+    #[test]
+    fn an_oversized_table64_is_rejected_rather_than_truncated() {
+        let initial = (1u64 << 32) + 10;
+        let err = compile(&format!("(module (table i64 {initial} funcref))")).expect_err("table64");
+
+        assert!(
+            matches!(err, TraceWasmError::Unsupported(_)),
+            "got {err:?}, want Unsupported"
+        );
+    }
+
+    /// The 32-bit forms of both still compile, so the checks above reject on the
+    /// index type and nothing else.
+    #[test]
+    fn thirty_two_bit_memories_and_tables_still_compile() {
+        compile("(module (memory 1) (table 1 funcref))").expect("32-bit memory and table");
     }
 }

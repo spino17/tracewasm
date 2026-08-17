@@ -37,7 +37,7 @@ use smallvec::{SmallVec, smallvec};
 /// [`RegFrameLayout`], and both are emptied by [`RuntimeFrame::reset`] at the start
 /// of every call — which is what makes an instance reusable after a trap, since a
 /// trap unwinds without reaching [`RuntimeFrame::exit_frame`].
-pub struct RegFrame {
+pub(crate) struct RegFrame {
     /// The register file. Register `n` of an activation based at `b` is
     /// `inner[b + n]`, where the frame spans its params, its declared locals, and
     /// then the layout's operand registers.
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(len, 4, "1 param + 1 local + 2 registers");
 
         // the operand base is above the locals, so the last register is the last slot
-        let operand_base = 0 + 2;
+        let operand_base = 2;
 
         assert!(
             operand_base + 2 <= len,

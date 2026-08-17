@@ -24,8 +24,17 @@ impl LinearMemory {
     /// clamps it against the instance
     /// [`Config`](crate::instance::config::Config) — since the page count is
     /// converted to a byte length with no failure path.
-    pub fn new(size_in_pages: u64) -> Self {
-        Self::with_byte_len((size_in_pages * WASM_MEMORY_PAGE_SIZE) as usize)
+    ///
+    /// # Panics
+    ///
+    /// If the byte length exceeds `usize`, which on a 32-bit host is any page
+    /// count from 65536 up.
+    pub fn new(size_in_pages: u32) -> Self {
+        // Widened to `usize` *before* multiplying: the maximum a wasm32 memory may
+        // reach is 65536 pages, and 65536 * 65536 is 2^32 — one past the top of the
+        // `u32` both operands are. Multiplying at `u32` would wrap that to a 0-byte
+        // allocation on release and abort on debug.
+        Self::with_byte_len(size_in_pages as usize * WASM_MEMORY_PAGE_SIZE as usize)
     }
 
     /// Creates a memory of exactly `len` bytes, zero-initialized.
@@ -41,16 +50,18 @@ impl LinearMemory {
 }
 
 impl Memory for LinearMemory {
-    fn allocate_initial_memory(size_in_pages: u64) -> Self {
+    fn allocate_initial_memory(size_in_pages: u32) -> Self {
         Self::new(size_in_pages)
     }
 
-    fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError> {
+    fn grow(&mut self, delta_in_pages: u32, max_size_in_pages: u32) -> Result<u32, MemoryError> {
         let old_size = self.size_in_pages();
 
-        // A `u64` overflow here is only reachable for an absurd delta, and is a
-        // failed grow just like exceeding the cap — report it the same way rather
-        // than wrapping to a small (and wrongly acceptable) new size.
+        // The delta is an unsigned `i32` reinterpreted as `u32`, so a guest running
+        // `memory.grow (i32.const -1)` gets here with `0xFFFF_FFFF` — the overflow
+        // is an ordinary input, not an absurd one. It is a failed grow just like
+        // exceeding the cap, so report it the same way rather than wrapping to a
+        // small (and wrongly acceptable) new size.
         let new_size = delta_in_pages
             .checked_add(old_size)
             .ok_or(MemoryError::GrowFailed(
@@ -67,8 +78,12 @@ impl Memory for LinearMemory {
             ));
         }
 
+        // Widened before multiplying, for the reason given in `LinearMemory::new`:
+        // a grow to the wasm32 maximum of 65536 pages is exactly the case that
+        // overflows `u32`, and `new_size` has just been checked against the cap, so
+        // it is a size this memory is entitled to reach.
         self.inner
-            .resize((new_size * WASM_MEMORY_PAGE_SIZE) as usize, 0);
+            .resize(new_size as usize * WASM_MEMORY_PAGE_SIZE as usize, 0);
 
         Ok(old_size)
     }
@@ -574,8 +589,8 @@ mod tests {
     #[test]
     fn grow_page_overflow_fails_instead_of_wrapping() {
         let mut m = LinearMemory::new(1);
-        // 1 + u64::MAX would wrap to 0 and wrongly look acceptable.
-        let res = m.grow(u64::MAX, u64::MAX);
+        // 1 + u32::MAX would wrap to 0 and wrongly look acceptable.
+        let res = m.grow(u32::MAX, u32::MAX);
 
         assert!(matches!(res, Err(MemoryError::GrowFailed(..))));
         assert_eq!(m.size_in_pages(), 1);
@@ -889,5 +904,29 @@ mod tests {
 
         assert!(m.read(0, &mut buf).is_err()); // needs 4, only 2
         assert_eq!(buf, [7, 7, 7, 7]); // copy happens only after bounds checks pass
+    }
+
+    /// 65536 pages is the maximum a wasm32 memory may legally reach, and its byte
+    /// length is 2^32 — exactly one past the top of the `u32` the page count and the
+    /// page size are both stored in. Computing the length at `u32` wraps it to a
+    /// 0-byte allocation on release and aborts on debug, so both conversions widen
+    /// to `usize` first.
+    ///
+    /// Ignored because it commits 4 GiB: run with `--ignored` to check it.
+    #[test]
+    #[ignore = "allocates 4 GiB"]
+    #[cfg(target_pointer_width = "64")]
+    fn wasm32_maximum_memory_is_allocatable_and_growable() {
+        let m = LinearMemory::new(65536);
+        assert_eq!(m.size_in_pages(), 65536);
+        assert_eq!(m.size_in_bytes(), 65536 * WASM_MEMORY_PAGE_SIZE as usize);
+
+        let mut m = LinearMemory::new(65535);
+        assert_eq!(m.grow(1, 65536).unwrap(), 65535);
+        assert_eq!(
+            m.size_in_pages(),
+            65536,
+            "grow must not silently discard it"
+        );
     }
 }
