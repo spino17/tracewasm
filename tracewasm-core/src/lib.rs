@@ -68,7 +68,6 @@
 /// without taking a direct dependency on `anyhow`. A public trait that requires
 /// naming a foreign type has to hand that type out.
 pub use anyhow;
-
 pub mod error;
 pub mod instance;
 pub mod memory;
