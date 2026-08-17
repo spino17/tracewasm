@@ -90,6 +90,8 @@ pub trait CallerBaseData {
 pub trait RuntimeFrame {
     /// How this machine names a callee's frame base. See [`CallerBaseData`].
     type CallerBaseData: CallerBaseData;
+    type BrTableTarget;
+    type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
 
     /// Seeds the *entry* function's params, before the driver runs a single
     /// instruction.
@@ -130,7 +132,7 @@ pub trait RuntimeFrame {
     /// It needs no [`CallerBaseData`] because "final" pins which activation it
     /// means: the outermost one, whose base is 0 on either machine. A per-call
     /// version would need the base — nested results are handled by
-    /// [`Self::tear_callee_frame_and_set_results`] instead.
+    /// [`Self::exit_frame`] instead.
     fn get_final_results(&mut self, results_count: u32) -> SmallVec<[Value; 3]>;
 
     /// Empties the frame, so an instance survives a trap and can be called
@@ -140,26 +142,29 @@ pub trait RuntimeFrame {
     /// rather than the failing one unwinding tidily.
     fn reset(&mut self);
 
-    /// Initialises the callee's declared locals — everything after its params —
-    /// to the zero of their type, as wasm requires.
+    /// Makes room for a callee's frame and initialises its declared locals —
+    /// everything after its params — to the zero of their type, as wasm requires.
     ///
     /// `locals_ty` covers the whole addressable range, params included, so the
-    /// declared locals are `locals_ty[params_count..]`.
-    fn set_zero_values_in_locals_after_params(
+    /// declared locals are `locals_ty[params_count..]`. The params themselves are
+    /// already in place: the caller staged them where the callee's params belong,
+    /// or [`Self::set_initial_params`] seeded them for the entry function.
+    ///
+    /// `frame_layout` is what a positional machine sizes its storage from — the
+    /// frame spans the params, the declared locals, and then the layout's operand
+    /// registers. A stack machine grows as it pushes and ignores it.
+    fn enter_frame(
         &mut self,
         params_count: u32,
         locals_ty: &[ValType],
         caller_base_data: &Self::CallerBaseData,
+        frame_layout: &Self::FrameLayout,
     );
 
     /// Drops a returning callee's frame and leaves its results where the caller
-    /// expects them — the counterpart of [`Self::set_zero_values_in_locals_after_params`]
-    /// at the other end of a call.
-    fn tear_callee_frame_and_set_results(
-        &mut self,
-        results_count: u32,
-        caller_base_data: &Self::CallerBaseData,
-    );
+    /// expects them — the counterpart of [`Self::enter_frame`] at the other end of
+    /// a call.
+    fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData);
 }
 
 /// The per-function storage plan a lowering produces alongside its instructions.
@@ -205,7 +210,12 @@ pub trait Instruction: Sized {
     /// The storage plan lowering produces for one body.
     type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
     /// Where this machine keeps live values during execution.
-    type RuntimeFrame: Default + RuntimeFrame<CallerBaseData = Self::CallerBaseData>;
+    type RuntimeFrame: Default
+        + RuntimeFrame<
+            CallerBaseData = Self::CallerBaseData,
+            BrTableTarget = Self::BrTableTarget,
+            FrameLayout = Self::FrameLayout,
+        >;
     /// How this machine locates a callee's frame within the caller's.
     type CallerBaseData: CallerBaseData;
 
@@ -218,7 +228,7 @@ pub trait Instruction: Sized {
     /// index — because diagnostics index them by program counter to name the
     /// operator that trapped. An implementation that emits several instructions
     /// for one operator must record an offset for each.
-    fn emit_instruction_for_func(
+    fn emit_instructions_for_func(
         operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,

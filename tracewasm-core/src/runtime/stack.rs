@@ -60,7 +60,10 @@
 //! safety argument for it.
 
 use crate::{
-    instruction::{RuntimeFrame, stack::StackCallerBaseData},
+    instruction::{
+        RuntimeFrame,
+        stack::{StackBrTableTarget, StackCallerBaseData, StackFrameLayout},
+    },
     runtime::{Value, value::Val},
 };
 use smallvec::{SmallVec, smallvec};
@@ -292,6 +295,8 @@ impl<T: Clone> Stack<T> {
 
 impl RuntimeFrame for Stack<Value> {
     type CallerBaseData = StackCallerBaseData;
+    type BrTableTarget = StackBrTableTarget;
+    type FrameLayout = StackFrameLayout;
 
     fn reset(&mut self) {
         self.reset();
@@ -349,11 +354,12 @@ impl RuntimeFrame for Stack<Value> {
         s
     }
 
-    fn set_zero_values_in_locals_after_params(
+    fn enter_frame(
         &mut self,
         params_count: u32,
         locals_ty: &[crate::module::ValType],
         _caller_base_data: &StackCallerBaseData,
+        _frame_layout: &StackFrameLayout,
     ) {
         let locals_len = locals_ty.len();
         let params_count = params_count as usize;
@@ -365,11 +371,7 @@ impl RuntimeFrame for Stack<Value> {
         }
     }
 
-    fn tear_callee_frame_and_set_results(
-        &mut self,
-        results_count: u32,
-        caller_base_data: &Self::CallerBaseData,
-    ) {
+    fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData) {
         self.truncate_by_preserving_arity(caller_base_data.base_height, results_count as u32);
     }
 }

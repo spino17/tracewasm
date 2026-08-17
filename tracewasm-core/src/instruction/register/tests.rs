@@ -3,7 +3,7 @@
 //! Two layers, because they catch different things.
 //!
 //! [`lower`] takes a `.wat` module, runs the real
-//! [`RegInstruction::emit_instruction_for_func`] over its first function, and
+//! [`RegInstruction::emit_instructions_for_func`] over its first function, and
 //! returns the instruction stream plus its [`FrameLayout`]. That is the layer that
 //! catches "the pass emits the wrong program", and it reads like the wasm it came
 //! from, so a test is legible to someone who has never seen this file.
@@ -140,7 +140,7 @@ fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncTy
         })
         .collect();
 
-    let body = RegInstruction::emit_instruction_for_func(
+    let body = RegInstruction::emit_instructions_for_func(
         body.get_operators_reader().expect("operators"),
         params,
         results,
@@ -186,7 +186,7 @@ fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
 // ---------------------------------------------------------------------------
 
 /// A stack with the implicit function frame already pushed, as
-/// `emit_instruction_for_func` sets up.
+/// `emit_instructions_for_func` sets up.
 fn sim(locals: u32, globals: u32) -> SimulatedStack {
     let mut s = SimulatedStack::new(locals, globals);
 

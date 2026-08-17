@@ -144,7 +144,7 @@ enum BlockVariant {
     Block,
     /// The implicit label around the whole body, which `return` targets.
     ///
-    /// Never constructed today: [`RegInstruction::emit_instruction_for_func`] pushes
+    /// Never constructed today: [`RegInstruction::emit_instructions_for_func`] pushes
     /// that [`Block`] itself rather than going through [`SimulatedStack::add_block`],
     /// since a function frame has no operator to open it and no block type to read.
     /// The variant exists for the mapping in `add_block` to be total.
@@ -2099,8 +2099,8 @@ impl RegInstruction {
 }
 
 pub struct RegCallerBaseData {
-    base_register_index: u32,
-    callee_frame_base_register_index: u32,
+    pub base_register_index: u32,
+    pub callee_frame_base_register_index: u32,
 }
 
 impl CallerBaseData for RegCallerBaseData {
@@ -2139,7 +2139,7 @@ impl Instruction for RegInstruction {
     ///
     /// Rejects any operator the pass does not model as
     /// [`TraceWasmError::Unsupported`].
-    fn emit_instruction_for_func(
+    fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
@@ -3018,6 +3018,7 @@ impl Instruction for RegInstruction {
         Ok((instructions, instruction_offsets, frame))
     }
 
+    #[inline(always)]
     fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
         &self,
         module: &crate::module::Module<Self>,

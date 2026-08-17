@@ -581,7 +581,7 @@ pub struct FuncBody<Instr: Instruction> {
     /// byte offset in the module binary of the operator that produced
     /// `instructions[i]`, and both slices always have the same length. It is the
     /// lowering's job to uphold it — see
-    /// [`emit_instruction_for_func`](crate::instruction::Instruction::emit_instruction_for_func).
+    /// [`emit_instructions_for_func`](crate::instruction::Instruction::emit_instructions_for_func).
     pub instruction_offsets: Box<[u32]>,
     /// Whatever else this lowering needs to run the body: `br_table` arms for
     /// both machines, plus register and spill counts for the register machine.
@@ -1344,7 +1344,7 @@ impl<Instr: Instruction> Module<Instr> {
                     }
 
                     let (instructions, instruction_offsets, frame_layout) =
-                        Instr::emit_instruction_for_func(
+                        Instr::emit_instructions_for_func(
                             code_sec_entry.get_operators_reader()?,
                             params.len() as u32,
                             results.len() as u32,

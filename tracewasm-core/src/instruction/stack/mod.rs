@@ -7,7 +7,7 @@
 //! files. [`StackInstruction::execute`] — the interpreter's whole dispatch — is
 //! the second half, below the enum.
 //!
-//! [`StackInstruction::emit_instruction_for_func`] (function bodies) and
+//! [`StackInstruction::emit_instructions_for_func`] (function bodies) and
 //! `StackInstruction::emit_instruction_for_const_expr` (constant expressions) each
 //! consume a [`wasmparser::OperatorsReader`] and produce a flat instruction list
 //! in which **structured control
@@ -108,7 +108,7 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 /// A lowered TraceWasm instruction.
 ///
 /// `wasmparser` operators are translated into this owned form by the crate's
-/// internal lowering pass — `emit_instruction_for_func` for function bodies and
+/// internal lowering pass — `emit_instructions_for_func` for function bodies and
 /// `emit_instruction_for_const_expr` for constant expressions; any operator
 /// TraceWasm does not model is rejected as unsupported at lowering time.
 /// Index fields (`end_index`, `else_index`, `target_index`, ...) are *absolute*
@@ -988,7 +988,7 @@ impl FrameLayout for StackFrameLayout {
 /// the source-offset sidecar indexed alongside it, and the flat `br_table` target
 /// array the [`StackInstruction::BrTable`] ranges point into.
 ///
-/// See [`StackInstruction::emit_instruction_for_func`] for the invariants that tie the
+/// See [`StackInstruction::emit_instructions_for_func`] for the invariants that tie the
 /// three together.
 type StackLoweredFuncBody = (Vec<StackInstruction>, Vec<u32>, StackFrameLayout);
 
@@ -1233,7 +1233,7 @@ impl StackInstruction {
     /// else is [`TraceWasmError::Unsupported`]. The terminating `end` closes the
     /// expression and is consumed rather than emitted.
     ///
-    /// Unlike [`Self::emit_instruction_for_func`] there is no control stack, no
+    /// Unlike [`Self::emit_instructions_for_func`] there is no control stack, no
     /// height tracking, and no backpatching, because the subset contains no
     /// branches — so this returns the instruction list alone, with no source-offset
     /// sidecar and no `br_table` target array.
@@ -1336,7 +1336,7 @@ impl Instruction for StackInstruction {
     type RuntimeFrame = Stack<Value>;
     type CallerBaseData = StackCallerBaseData;
 
-    fn emit_instruction_for_func(
+    fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,

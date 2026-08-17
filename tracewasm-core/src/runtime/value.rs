@@ -256,7 +256,7 @@ const TAG_SOME: u64 = 1 << TAG_SHIFT;
 ///
 /// Floats are stored as raw bits rather than converted, so NaN payloads and
 /// signed zeroes survive a round trip unchanged, as wasm requires.
-#[derive(Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct Value(u64);
 
 impl Value {

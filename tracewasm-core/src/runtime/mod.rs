@@ -508,6 +508,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let instruction_offsets = &func_body.instruction_offsets;
+
         // Annotated as a slice so the `Box` is dereferenced here rather than at the
         // call in the loop. The dispatch takes `&[TargetBranch]`, and coercing a
         // `&Box<[_]>` to it re-reads the pointer and length out of the `Box` — two
@@ -524,10 +525,11 @@ impl TraceVM {
         // The declared locals follow the params and must start at the zero value
         // of their type, per the spec. Pushing them here is what makes the locals
         // region contiguous, so `get_local` can index it directly.
-        instance.frame.set_zero_values_in_locals_after_params(
+        instance.frame.enter_frame(
             params_count,
             locals_ty,
             &caller_base_data,
+            &func_body.frame_layout,
         );
 
         // Entering a frame. The matching decrement is after the driver loop; the
@@ -642,9 +644,7 @@ impl TraceVM {
         // preserving the results on top. They therefore land in exactly the slots
         // the caller's arguments occupied, which is what lets the caller do
         // nothing at all after a `Call` returns.
-        instance
-            .frame
-            .tear_callee_frame_and_set_results(results_count, &caller_base_data);
+        instance.frame.exit_frame(results_count, &caller_base_data);
 
         Ok(())
     }
