@@ -24,6 +24,13 @@ pub enum TraceWasmError {
     /// it can render a backtrace without the caller supplying context.
     #[error("{0:?}")]
     FuncCall(FuncCallError),
+    /// The module's `start` function trapped during
+    /// [`Module::instantiate`](crate::module::Module::instantiate), so the
+    /// instance was never handed back.
+    ///
+    /// Carries the rendered failure rather than the [`FuncCallError`] it came
+    /// from, so the backtrace that error assembled is not reachable from here —
+    /// only its `Display` form.
     #[error("error occured while executing start function: {0}")]
     StartFunctionError(String),
     /// A linear-memory failure raised outside instruction execution — for example

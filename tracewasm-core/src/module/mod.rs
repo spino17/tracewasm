@@ -1123,8 +1123,7 @@ impl<Instr: Instruction> Module<Instr> {
                             wasmparser::TableInit::Expr(const_expr) => TableInit::Expr(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     const_expr.get_operators_reader(),
-                                )
-                                .unwrap() // todo!
+                                )?
                                 .into_boxed_slice(),
                             ),
                         };
@@ -1593,8 +1592,11 @@ impl<Instr: Instruction> Module<Instr> {
     /// - [`TraceWasmError::Unsupported`] for constructs only reachable at
     ///   instantiation: a non-`funcref` element expression, a data segment
     ///   targeting a memory other than index 0, or a `v128` imported global.
-    /// - Anything the module's `start` function raises, since it runs before this
-    ///   returns.
+    /// - [`TraceWasmError::StartFunctionError`] if the module declares a `start`
+    ///   function and it traps. It runs at the end of instantiation, on the
+    ///   instance being built, so everything else — memory, globals, tables,
+    ///   segments — is already in place when it does. A failure here means no
+    ///   instance is returned at all.
     pub fn instantiate<M: Memory, I: ImportRegistry>(
         self: &Arc<Module<Instr>>,
         import_registry: I,

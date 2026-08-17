@@ -401,9 +401,14 @@ impl TraceVM {
     /// `params` in it, and delegates to [`Self::execute_on_native_stack`], which
     /// leaves the results in the frame for this function to take.
     ///
-    /// Fixed to the stack machine for now: the register backend's `execute` is
-    /// still unimplemented, so there is nothing for a generic entry point to
-    /// drive.
+    /// Generic over the lowering, so the driver itself is machine-agnostic: the
+    /// frame comes from [`RuntimeFrame`](crate::instruction::RuntimeFrame) and its
+    /// base from
+    /// [`CallerBaseData::iniital_data`](crate::instruction::CallerBaseData::iniital_data).
+    /// Whether a given lowering can actually be driven is
+    /// [`Instruction::execute`](crate::instruction::Instruction::execute)'s
+    /// business — the register machine's is still unimplemented, so driving one
+    /// panics rather than failing to compile.
     ///
     /// Resetting on entry rather than on exit is what makes an instance reusable
     /// after a trap: a failing call returns early with values still on the stack,
@@ -426,7 +431,7 @@ impl TraceVM {
 
         instance.frame.reset();
 
-        let caller_base_data = Instr::CallerBaseData::inital_data();
+        let caller_base_data = Instr::CallerBaseData::iniital_data();
 
         instance.frame.set_params(params);
 

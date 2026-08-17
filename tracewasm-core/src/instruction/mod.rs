@@ -47,7 +47,12 @@ pub mod stack;
 /// operand-stack slots, the register machine in registers — so the driver holds
 /// it behind this trait rather than as a `u32` it would have to interpret.
 pub trait CallerBaseData {
-    fn inital_data() -> Self;
+    /// The base data for an outermost activation, where there is no caller.
+    ///
+    /// Both machines start at offset 0 with the callee-locals boundary unset;
+    /// [`Self::set_callee_locals_count`] fills it in once the entry function's
+    /// body is known.
+    fn iniital_data() -> Self;
     /// The callee's frame base, in whatever unit the machine counts.
     ///
     /// A positional machine adds this to every local and operand index it
