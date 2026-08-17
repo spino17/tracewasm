@@ -40,11 +40,14 @@
 //! loaded machine is worse than no test at all. The only assertions are that the
 //! trap workloads in §6 really trap — timing a silent success would be meaningless.
 
+// Every workload here is a compiled guest, so the whole file compiles away when the
+// wasm target is missing and `tracewasm_test::guests` does not exist.
+#![cfg(not(no_guest_wasm))]
+
 use std::time::Instant;
 
 use tracewasm_core::{
-    instance::config::Config, instruction::stack::StackInstruction, memory::linear::LinearMemory,
-    module::Module,
+    Stack, instance::config::Config, memory::linear::LinearMemory, module::Module,
 };
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, NoImports, guests, with_large_stack};
 
@@ -271,7 +274,7 @@ struct RssMilestones {
 fn rss_milestones() -> RssMilestones {
     let start = rss_kib();
 
-    let module = Module::compile(guests::HEAP).expect("guest compiles");
+    let module = Module::<Stack>::compile(guests::HEAP).expect("guest compiles");
     let after_compile = rss_kib();
 
     let mut instance = module
@@ -332,8 +335,8 @@ fn report() {
         "release"
     };
     println!(
-        " profile: {profile}    size_of::<Instruction>(): {} B",
-        size_of::<StackInstruction>()
+        " profile: {profile}    instruction size: {} B",
+        Module::<Stack>::instruction_size()
     );
 
     let timer = timer_floor();
@@ -385,7 +388,7 @@ fn startup() {
         let mut compile = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
-            let m = Module::compile(wasm).expect("guest compiles");
+            let m = Module::<Stack>::compile(wasm).expect("guest compiles");
             compile.push(t.elapsed().as_secs_f64() * 1e3);
             std::hint::black_box(&m);
         }
@@ -394,7 +397,7 @@ fn startup() {
         // Instantiation is measured separately: it allocates linear memory and
         // runs the start section, and scales with the guest's data segments
         // rather than its code size.
-        let module = Module::compile(wasm).expect("guest compiles");
+        let module = Module::<Stack>::compile(wasm).expect("guest compiles");
         let mut inst = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
@@ -406,11 +409,7 @@ fn startup() {
         }
         let inst = Dist::new(inst);
 
-        let instrs: usize = module
-            .func_bodies
-            .iter()
-            .map(|b| b.instructions.len())
-            .sum();
+        let instrs = module.instruction_count();
 
         println!(
             "   {:<16}{:>9.2}{:>9}{:>12.2}{:>10.2}{:>12.0}{:>13.1}",
@@ -538,19 +537,15 @@ fn memory(rss: &RssMilestones) {
         "guest", "instrs", "stream KB", "offsets KB", "locals KB"
     );
 
-    let isz = size_of::<StackInstruction>();
+    let isz = Module::<Stack>::instruction_size();
     let (mut ti, mut ts, mut to) = (0usize, 0usize, 0usize);
 
     for w in GUESTS {
         let (name, wasm) = (w.name, w.wasm);
-        let m = Module::compile(wasm).expect("guest compiles");
-        let instrs: usize = m.func_bodies.iter().map(|b| b.instructions.len()).sum();
-        let offs: usize = m
-            .func_bodies
-            .iter()
-            .map(|b| b.instruction_offsets.len())
-            .sum();
-        let locals: usize = m.func_bodies.iter().map(|b| b.locals.len()).sum();
+        let m = Module::<Stack>::compile(wasm).expect("guest compiles");
+        let instrs = m.instruction_count();
+        let offs = m.instruction_offset_count();
+        let locals = m.locals_count();
 
         ti += instrs;
         ts += instrs * isz;

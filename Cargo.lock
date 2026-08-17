@@ -407,6 +407,7 @@ name = "tracewasm-core"
 version = "0.1.0"
 dependencies = [
  "addr2line",
+ "anyhow",
  "bytemuck",
  "gimli",
  "id-arena",
@@ -435,6 +436,7 @@ version = "0.1.0"
 dependencies = [
  "tracewasm-core",
  "tracewasm-macros",
+ "wat",
 ]
 
 [[package]]

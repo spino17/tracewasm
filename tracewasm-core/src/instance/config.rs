@@ -15,16 +15,16 @@ pub struct Config {
     /// the module's own declared maximum, so on an instantiated
     /// [`Instance`](crate::instance::Instance) it is the *effective* limit and may
     /// read lower than the value supplied.
-    max_memory_size_in_pages: u64,
+    max_memory_size_in_pages: u32,
     /// Max number of elements in a table, checked when a table is materialized at
     /// instantiation.
-    max_table_elements: u64,
+    max_table_elements: u32,
     /// Max number of locals per function (including params).
     ///
     /// **Not currently enforced.** The setter and getter exist so that callers can
     /// carry the intent, but no code consults it; a module with more locals than
     /// this is accepted.
-    max_locals_per_func: u64,
+    max_locals_per_func: u32,
     /// Max depth of nested wasm calls before
     /// [`InstructionExecutionError::CallStackExhausted`](crate::error::InstructionExecutionError::CallStackExhausted).
     ///
@@ -44,6 +44,12 @@ pub struct Config {
     /// against that. A limit the native stack cannot hold turns a clean trap back
     /// into a process abort, because the overflow arrives before the guard does.
     max_call_stack_depth: u32,
+    /// Max number of function imports a module may declare.
+    ///
+    /// **Not currently enforced**, like [`Self::get_max_locals_per_func`]: the
+    /// setter and getter carry the intent, but no code consults it, and a module
+    /// declaring more imports than this instantiates normally.
+    max_imported_funcs: u32,
 }
 
 impl Default for Config {
@@ -53,6 +59,7 @@ impl Default for Config {
             max_table_elements: 10000,
             max_locals_per_func: 50000,
             max_call_stack_depth: 2000,
+            max_imported_funcs: 1000,
         }
     }
 }
@@ -69,32 +76,42 @@ impl Config {
     }
 
     /// Sets `max_memory_size_in_pages`
-    pub fn set_max_memory_size_in_pages(&mut self, val: u64) {
+    pub fn set_max_memory_size_in_pages(&mut self, val: u32) {
         self.max_memory_size_in_pages = val;
     }
 
     /// Returns `max_memory_size_in_pages`
-    pub fn get_max_memory_size_in_pages(&self) -> u64 {
+    pub fn get_max_memory_size_in_pages(&self) -> u32 {
         self.max_memory_size_in_pages
     }
 
     /// Sets `max_table_elements`
-    pub fn set_max_table_elements(&mut self, val: u64) {
+    pub fn set_max_table_elements(&mut self, val: u32) {
         self.max_table_elements = val;
     }
 
     /// Returns `max_table_elements`
-    pub fn get_max_table_elements(&self) -> u64 {
+    pub fn get_max_table_elements(&self) -> u32 {
         self.max_table_elements
     }
 
     /// Sets `max_locals_per_func`
-    pub fn set_max_locals_per_func(&mut self, val: u64) {
+    pub fn set_max_locals_per_func(&mut self, val: u32) {
         self.max_locals_per_func = val;
     }
 
     /// Returns `max_locals_per_func`
-    pub fn get_max_locals_per_func(&self) -> u64 {
+    pub fn get_max_locals_per_func(&self) -> u32 {
         self.max_locals_per_func
+    }
+
+    /// Returns `max_imported_funcs`
+    pub fn get_max_imported_funcs(&self) -> u32 {
+        self.max_imported_funcs
+    }
+
+    /// Sets `max_imported_funcs`
+    pub fn set_max_imported_funcs(&mut self, val: u32) {
+        self.max_imported_funcs = val;
     }
 }

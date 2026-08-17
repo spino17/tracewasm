@@ -30,8 +30,11 @@ the program does not need. This is the mode for long workloads and realistic inp
 where a faithful but slow interpreter would change the very behaviour you are trying to
 observe.
 
-Both consume the same compiled module, so you can trace exhaustively and then run at
-speed without changing anything about the program under test.
+Both lower the same `.wasm`, so you can trace exhaustively and then run at speed without
+changing anything about the program under test. Which machine a module is compiled for is
+chosen at compile time — `Module::<Stack>::compile(&wasm)` or `Module::<Register>` — so the
+two produce separate compiled modules from that one input, and everything downstream is
+generic over the choice.
 
 ## The machine is yours to define
 

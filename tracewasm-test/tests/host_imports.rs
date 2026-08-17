@@ -6,7 +6,7 @@
 //! marshalling and its `MemoryView` plumbing, not interpretation.
 
 use tracewasm_core::{
-    error::TraceWasmError,
+    error::MemoryError,
     instance::traits::{ImportRegistry, Val},
     memory::{MemoryView, linear::LinearMemory},
 };
@@ -34,14 +34,15 @@ impl Host {
     }
 
     /// Fallible: an out-of-bounds pointer from the guest must trap, not panic.
-    /// The `?` converts `MemoryError` through its `From` impl.
+    /// The `?` converts `MemoryError` into the `anyhow::Error` the registry
+    /// reports failures with.
     #[module("env")]
     fn checked_poke<V: MemoryView>(
         &mut self,
         addr: i32,
         byte: i32,
         mem: &mut V,
-    ) -> Result<(i32,), TraceWasmError> {
+    ) -> Result<(i32,), tracewasm_core::anyhow::Error> {
         mem.write_u8(addr as usize, byte as u8)?;
 
         Ok((mem.read_u8(addr as usize)? as i32,))
@@ -106,10 +107,13 @@ fn fallible_host_fn_traps_instead_of_panicking_on_a_bad_pointer() {
         &mut mem,
     );
 
-    // The error reaches the interpreter as a normal trap.
+    // The error reaches the interpreter as a normal trap, and the `MemoryError`
+    // it came from survives being carried as an `anyhow::Error`.
+    let err = res.expect_err("an out-of-bounds poke must fail");
+
     assert!(
-        matches!(res, Err(TraceWasmError::MemoryError(_))),
-        "expected a memory trap, got: {res:?}"
+        err.downcast_ref::<MemoryError>().is_some(),
+        "expected a memory trap, got: {err:?}"
     );
 }
 
@@ -127,4 +131,50 @@ fn signature_excludes_the_memory_view() {
     );
     assert_eq!(results.as_ref().len(), 1);
     assert_eq!(host.func_count(), 3);
+}
+
+/// A registry with a type parameter: the generated `ImportRegistry` impl has to
+/// carry the annotated block's generics and where-clause, or `T` is unbound in it.
+struct GenericHost<T> {
+    tag: T,
+}
+
+#[imports]
+impl<T: Copy + Into<i64>> GenericHost<T> {
+    /// The whole point of this one: it takes the memory view and *no* wasm
+    /// parameters, so `memory_view` is the only argument in the generated call.
+    #[module("env")]
+    fn size<V: MemoryView>(&mut self, mem: &mut V) -> (i32,) {
+        (mem.size_in_pages() as i32,)
+    }
+
+    /// Neither a memory view nor parameters — the generated call takes no arguments
+    /// at all, and the body reads the generic field.
+    #[module("env")]
+    fn tag(&mut self) -> (i64,) {
+        (self.tag.into(),)
+    }
+}
+
+#[test]
+fn a_host_fn_taking_only_the_memory_view_dispatches() {
+    let mut host = GenericHost { tag: 7i32 };
+    let mut mem = LinearMemory::new(3);
+
+    let out = host.execute("env", "size", &[], &mut mem).unwrap();
+    assert!(matches!(out.as_ref()[0], Val::I32(3)));
+
+    // Declared as taking nothing, since the view is not a wasm parameter.
+    let (params, results) = host.signature("env", "size").unwrap();
+    assert_eq!(params.as_ref().len(), 0);
+    assert_eq!(results.as_ref().len(), 1);
+}
+
+#[test]
+fn a_host_fn_taking_nothing_dispatches() {
+    let mut host = GenericHost { tag: 7i32 };
+    let mut mem = LinearMemory::new(1);
+
+    let out = host.execute("env", "tag", &[], &mut mem).unwrap();
+    assert!(matches!(out.as_ref()[0], Val::I64(7)));
 }

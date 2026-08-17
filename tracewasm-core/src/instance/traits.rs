@@ -7,13 +7,13 @@
 //! [`crate::instance::TypedFunc`] can convert arguments and results without the
 //! caller touching raw `Val`s.
 
-use crate::{error::TraceWasmError, memory::MemoryView, module::ValType};
+use crate::{memory::MemoryView, module::ValType};
 use smallvec::{Array, SmallVec, smallvec};
 
-// The runtime value type lives in the crate-internal `vm` module; re-export it
+// The runtime value type lives in the crate-internal `runtime` module; re-export it
 // here so it has a public path (`instance::traits::Val`) for the `ImportRegistry`
 // signatures and the `#[imports]`-generated code, without exposing the VM.
-pub use crate::vm::stack::Val;
+pub use crate::runtime::value::Val;
 
 /// A Rust type corresponding to a single WebAssembly value type.
 pub trait WasmTy: Sized {
@@ -368,7 +368,7 @@ pub trait ImportRegistry {
         func_name: &str,
         params: &[Val],
         memory_view: &mut V,
-    ) -> Result<ResultVals, TraceWasmError>;
+    ) -> Result<ResultVals, anyhow::Error>;
 
     /// Returns the `(params, results)` signature of `module_name::func_name`, or
     /// `None` if the registry has no such function.
@@ -383,14 +383,15 @@ pub trait ImportRegistry {
     fn global_count(&self) -> u32;
 
     /// Returns the value of the imported global `module_name::global_name`, or
-    /// [`TraceWasmError::ImportNotFound`] if the registry has no such global.
+    /// an error if the registry has no such global — the `#[imports]` macro
+    /// generates `anyhow!("import not found: …")` for that case.
     /// The value's type is cross-checked against the module's declared global
     /// type at instantiation.
     ///
     /// Called only once per global, during [`Module::instantiate`](crate::module::Module::instantiate):
     /// the resolved value is copied into the [`Instance`](crate::instance::Instance)
     /// and read from there for the rest of the module's execution.
-    fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError>;
+    fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, anyhow::Error>;
 }
 
 /// Compile-time assertion helper: calling it forces `F` to satisfy

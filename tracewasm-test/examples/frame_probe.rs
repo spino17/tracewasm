@@ -7,9 +7,26 @@
 //! the process with it. That is the point: the caller reads the exit status, and
 //! one process per probe means a failed probe cannot poison the next one.
 
+#[cfg(not(no_guest_wasm))]
 use tracewasm_core::instance::config::Config;
+#[cfg(not(no_guest_wasm))]
 use tracewasm_test::{Guest, guests};
 
+/// Exit code for "the probe could not run", kept distinct from the 0/1 a real probe
+/// reports so a caller cannot read a missing toolchain as a passing measurement.
+#[cfg(no_guest_wasm)]
+const NO_GUESTS: i32 = 2;
+
+#[cfg(no_guest_wasm)]
+fn main() {
+    eprintln!(
+        "frame_probe needs the wasm32-unknown-unknown target: the `frames` guest was \
+         not built. Install it with: rustup target add wasm32-unknown-unknown"
+    );
+    std::process::exit(NO_GUESTS);
+}
+
+#[cfg(not(no_guest_wasm))]
 fn main() {
     let mut a = std::env::args().skip(1);
     let stack: usize = a.next().unwrap().parse().unwrap();

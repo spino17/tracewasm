@@ -38,8 +38,8 @@
 //! ## Operands live in flat side tables
 //!
 //! A [`RegInstruction`] never stores its operands inline. Inputs go into
-//! [`FrameLayout::input_registers_arena`] and destination registers into
-//! [`FrameLayout::output_registers_arena`]; the variant holds only a start index and
+//! [`RegFrameLayout::input_registers_arena`] and destination registers into
+//! [`RegFrameLayout::output_registers_arena`]; the variant holds only a start index and
 //! (for the variable-arity forms) a length. That is what keeps the enum at 24 bytes
 //! — inline operands would put `Select` alone at 56 — and it means resolving an
 //! operand at execution is a slice index rather than a pointer chase.
@@ -106,16 +106,17 @@
 use crate::{
     error::TraceWasmError,
     instruction::{
-        Block, BlockKind, Instruction, check_memory_index, params_and_results_from_blockty,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        params_and_results_from_blockty,
         register::lazy::{
             Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
             LocalSlot, SpillArena, SpillIndex,
         },
     },
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    vm::stack::Stack,
+    runtime::{reg::RegFrame, stack::Stack},
 };
-use std::marker::PhantomData;
+use std::{marker::PhantomData, u32};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
@@ -143,7 +144,7 @@ enum BlockVariant {
     Block,
     /// The implicit label around the whole body, which `return` targets.
     ///
-    /// Never constructed today: [`RegInstruction::emit_instruction_for_func`] pushes
+    /// Never constructed today: [`RegInstruction::emit_instructions_for_func`] pushes
     /// that [`Block`] itself rather than going through [`SimulatedStack::add_block`],
     /// since a function frame has no operator to open it and no block type to read.
     /// The variant exists for the mapping in `add_block` to be total.
@@ -153,7 +154,7 @@ enum BlockVariant {
 
 /// An immediate operand, carried inline because it has no home to be read from.
 #[derive(Debug, Clone, Copy)]
-pub enum Const {
+pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
     /// A 64-bit integer immediate.
@@ -169,9 +170,9 @@ pub enum Const {
     /// place by whatever consumes it.
     ///
     /// The heap type `ref.null` names is deliberately not carried, matching
-    /// [`Instruction::RefNull`](crate::instruction::stack::Instruction::RefNull) in
+    /// [`StackInstruction::RefNull`](crate::instruction::stack::StackInstruction::RefNull) in
     /// the stack pass and
-    /// [`Val::Ref`](crate::vm::stack::Val::Ref) at execution: a null is a null,
+    /// [`Val::Ref`](crate::runtime::value::Val::Ref) at execution: a null is a null,
     /// validation has already established that each one reached a slot willing to
     /// hold it, and nothing downstream can distinguish a null `funcref` from a null
     /// `externref`. A *non-null* `externref` would not fit here — none can exist
@@ -186,7 +187,7 @@ pub enum Const {
 /// values were produced by a preceding instruction; the rest are read straight out of
 /// the frame's constants, locals, globals, or spill area.
 #[derive(Debug, Clone, Copy)]
-pub enum Slot {
+pub(crate) enum Slot {
     /// An immediate, needing no load at all.
     Const(Const),
     /// Read local `n` in place. Valid because nothing writes that local between the
@@ -267,7 +268,8 @@ enum StackSlot {
 /// `T` is [`Slot`] for input runs and `u32` for output-register runs; the parameter
 /// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
 /// is, which is what lets instruction variants stay small.
-pub struct Registers<const L: usize, T> {
+#[derive(Debug)]
+pub(crate) struct Registers<const L: usize, T> {
     /// Index of the run's first entry in its arena; it covers `L` from there.
     start: u32,
     phantom: PhantomData<T>,
@@ -294,7 +296,8 @@ impl<const L: usize, T> Registers<L, T> {
 /// inputs are consumed, so an instruction's output frequently reuses the register one
 /// of its inputs occupied. An executor must read every operand before writing any
 /// destination.
-pub struct Signature<const I: usize, const O: usize> {
+#[derive(Debug)]
+pub(crate) struct Signature<const I: usize, const O: usize> {
     /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
     pub input: Registers<I, Slot>,
     /// Destination registers, in the order results are pushed.
@@ -308,7 +311,8 @@ pub struct Signature<const I: usize, const O: usize> {
 /// writes exactly as many destinations as it reads sources. Storing two lengths would
 /// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
 /// its size budget.
-pub struct DynSignature {
+#[derive(Debug)]
+pub(crate) struct DynSignature {
     /// Start of the source run in the input arena.
     input: u32,
     /// Start of the destination run in the output arena.
@@ -524,7 +528,7 @@ impl UnreachableTrackingControlStack {
 /// loop and non-loop labels: validation only requires the label *types* to match, so
 /// the arities agree but the unwind heights — and therefore the destination registers
 /// — differ per arm.
-pub struct RegBrTableTarget {
+pub(crate) struct RegBrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
     pub mov: DynSignature,
@@ -1177,21 +1181,31 @@ impl SimulatedStack {
 
 /// The storage one lowered body needs, in slot counts.
 ///
-/// Both fields are high-water marks over the whole body rather than counts at any
-/// one point, so a frame sized to them never has to grow mid-execution.
+/// [`Self::registers`] and [`Self::spills`] are high-water marks over the whole
+/// body rather than counts at any one point, so a frame sized to them never has to
+/// grow mid-execution.
 ///
-/// **Operands only.** Locals are not counted here: like the stack pass's
-/// [`max_height`](crate::instruction::stack), these are measured from the frame's
-/// operand base, so a consumer laying out storage needs
-/// `locals_len + registers + spills`.
-pub struct RegFrameLayout {
+/// **They size two separate regions, not one.** The runtime keeps the register file
+/// and the spill area in different allocations, so a spill index stays independent
+/// of a register index and neither count has to be added to the other. Within a
+/// frame, the register file holds the params, then the declared locals, then
+/// `registers` operand slots; the spill area holds `spills` slots of its own.
+///
+/// **Operands only.** Locals are not counted in either field: like the stack pass's
+/// [`max_height`](crate::instruction::stack), `registers` is measured from the
+/// frame's operand base, which sits above the locals.
+pub(crate) struct RegFrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
+    ///
+    /// Numbered from the frame's operand base, so register `r` of a frame whose
+    /// operands begin at `b` is the runtime's `b + r`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
     /// [`RegInstruction::LocalSpill`] / [`RegInstruction::GlobalSpill`].
     ///
     /// Zero for a body that never overwrites a lazily-forwarded local or global,
-    /// which is the common case.
+    /// which is the common case — and then the frame's spill region is empty rather
+    /// than absent, since the runtime still records a base to release on exit.
     pub spills: u32,
     /// Every instruction's input operands, concatenated in lowering order.
     ///
@@ -1210,6 +1224,14 @@ pub struct RegFrameLayout {
     pub br_targets_arena: Box<[RegBrTableTarget]>,
 }
 
+impl FrameLayout for RegFrameLayout {
+    type BrTableTarget = RegBrTableTarget;
+
+    fn br_table_targets(&self) -> &[Self::BrTableTarget] {
+        &self.br_targets_arena
+    }
+}
+
 /// The two outputs of lowering one function body into register form: the
 /// instruction list, and the frame required to execute it.
 type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
@@ -1224,8 +1246,8 @@ type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 /// [`Kind`](tracewasm_macros::Kind) derives the fieldless [`RegInstructionKind`]
 /// alongside this, so a table keyed by kind is an exhaustive `match` *and* is
 /// visited in full — see the derive's docs for why both halves matter.
-#[derive(tracewasm_macros::Kind)]
-pub enum RegInstruction {
+#[derive(Debug, tracewasm_macros::Kind)]
+pub(crate) enum RegInstruction {
     /// `global.set`: write the operand into a global.
     ///
     /// Any operand still forwarding to this global was rescued by a preceding
@@ -2086,9 +2108,42 @@ impl RegInstruction {
     }
 }
 
+pub(crate) struct RegCallerBaseData {
+    pub base_register_index: u32,
+    pub callee_frame_base_register_index: u32,
+    pub spills_base_index: u32,
+}
+
+impl RegCallerBaseData {
+    pub(crate) fn set_spills_base_index(&mut self, spill_index: u32) {
+        self.spills_base_index = spill_index;
+    }
+}
+
+impl CallerBaseData for RegCallerBaseData {
+    fn initial_data() -> Self {
+        RegCallerBaseData {
+            base_register_index: 0,
+            callee_frame_base_register_index: u32::MAX,
+            spills_base_index: u32::MAX,
+        }
+    }
+
+    fn base_offset(&self) -> u32 {
+        self.base_register_index
+    }
+
+    fn set_callee_locals_count(&mut self, count: u32) {
+        self.callee_frame_base_register_index = self.base_register_index + count;
+    }
+}
+
 impl Instruction for RegInstruction {
+    type Vm = crate::Register;
     type BrTableTarget = RegBrTableTarget;
     type FrameLayout = RegFrameLayout;
+    type RuntimeFrame = RegFrame;
+    type CallerBaseData = RegCallerBaseData;
 
     /// Lowers one function body's operator stream into register form.
     ///
@@ -2103,7 +2158,7 @@ impl Instruction for RegInstruction {
     ///
     /// Rejects any operator the pass does not model as
     /// [`TraceWasmError::Unsupported`].
-    fn emit_instruction_for_func(
+    fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
         params: u32,
         results: u32,
@@ -2980,6 +3035,18 @@ impl Instruction for RegInstruction {
         };
 
         Ok((instructions, instruction_offsets, frame))
+    }
+
+    #[inline(always)]
+    fn execute<M: crate::memory::Memory, I: crate::instance::traits::ImportRegistry>(
+        &self,
+        module: &crate::module::Module<Self::Vm>,
+        instance: &mut crate::instance::Instance<M, I, Self::Vm>,
+        br_table_targets: &[Self::BrTableTarget],
+        caller_base_data: &Self::CallerBaseData,
+        imported_func_count: u32,
+    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
+        todo!()
     }
 }
 
