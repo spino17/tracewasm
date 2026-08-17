@@ -123,7 +123,7 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // Returns `TypedFunc::call`'s own error type unchanged; boxing it here would
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
-pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError<StackInstruction>> {
+pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
     let module = Module::<StackInstruction>::compile(wasm).expect("module should compile");
 
     let func = module
@@ -258,11 +258,7 @@ impl Guest {
 
     /// [`Self::i32_i32`], surfacing the trap instead of panicking.
     #[allow(clippy::result_large_err)]
-    pub fn try_i32_i32(
-        &mut self,
-        name: &str,
-        arg: i32,
-    ) -> Result<i32, FuncCallError<StackInstruction>> {
+    pub fn try_i32_i32(&mut self, name: &str, arg: i32) -> Result<i32, FuncCallError> {
         let f = self
             .module
             .get_typed_func::<(i32,), (i32,)>(name)
@@ -273,11 +269,7 @@ impl Guest {
 
     /// [`Self::i32_i64`], surfacing the trap instead of panicking.
     #[allow(clippy::result_large_err)]
-    pub fn try_i32_i64(
-        &mut self,
-        name: &str,
-        arg: i32,
-    ) -> Result<i64, FuncCallError<StackInstruction>> {
+    pub fn try_i32_i64(&mut self, name: &str, arg: i32) -> Result<i64, FuncCallError> {
         let f = self
             .module
             .get_typed_func::<(i32,), (i64,)>(name)

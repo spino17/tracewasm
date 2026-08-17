@@ -160,7 +160,7 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
         &self,
         params: P,
         instance: &mut Instance<M, I, StackInstruction>,
-    ) -> Result<R, FuncCallError<StackInstruction>> {
+    ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();
         let module = instance.module.clone();

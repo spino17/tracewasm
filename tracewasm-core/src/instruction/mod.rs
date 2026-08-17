@@ -200,7 +200,7 @@ pub trait Instruction: Sized {
         func_decls: &[FuncDecl],
         locals_count: u32,
         globals_count: u32,
-    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError<Self>>;
+    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError>;
 
     /// Executes this one instruction against `instance`.
     ///
@@ -218,7 +218,7 @@ pub trait Instruction: Sized {
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
-    ) -> Result<Step<Self>, Box<InstructionExecutionError<Self>>>;
+    ) -> Result<Step<Self>, Box<InstructionExecutionError>>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to
@@ -335,7 +335,7 @@ fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (
 /// already enforces at the section level; this catches the same thing at the
 /// instruction level, where the multi-memory proposal puts an index on every
 /// memory operator. Generic only so it can name the caller's error type.
-fn check_memory_index<Instr: Instruction>(index: u32) -> Result<(), TraceWasmError<Instr>> {
+fn check_memory_index(index: u32) -> Result<(), TraceWasmError> {
     if index != 0 {
         return Err(TraceWasmError::Unsupported(
             "more than one memory".to_string(),

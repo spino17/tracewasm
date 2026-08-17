@@ -1236,7 +1236,7 @@ impl StackInstruction {
     /// sidecar and no `br_table` target array.
     pub(crate) fn emit_instruction_for_const_expr(
         mut operator_reader: OperatorsReader<'_>,
-    ) -> Result<Vec<StackInstruction>, TraceWasmError<StackInstruction>> {
+    ) -> Result<Vec<StackInstruction>, TraceWasmError> {
         let mut instructions = vec![];
 
         while !operator_reader.eof() {
@@ -1334,7 +1334,7 @@ impl Instruction for StackInstruction {
         func_decls: &[FuncDecl],
         _locals_count: u32,
         _globals_count: u32,
-    ) -> Result<StackLoweredFuncBody, TraceWasmError<StackInstruction>> {
+    ) -> Result<StackLoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<StackInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
@@ -2370,8 +2370,7 @@ impl Instruction for StackInstruction {
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
-    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError<Self>>>
-    {
+    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
         let res = match self {
             StackInstruction::Call {
                 func_index: callee_func_index,

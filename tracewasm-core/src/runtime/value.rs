@@ -181,7 +181,7 @@ impl Val {
     /// # Errors
     ///
     /// Returns [`TraceWasmError::Unsupported`] for `V128`.
-    pub fn has_ty<Instr: Instruction>(&self, ty: ValType) -> Result<bool, TraceWasmError<Instr>> {
+    pub fn has_ty(&self, ty: ValType) -> Result<bool, TraceWasmError> {
         let val = match ty {
             ValType::I32 => matches!(self, Val::I32(_)),
             ValType::I64 => matches!(self, Val::I64(_)),
@@ -418,7 +418,7 @@ mod tests {
     // Val helpers used during locals init / type checks
     // ------------------------------------------------------------------
 
-    use crate::{instruction::stack::StackInstruction, module::ValType, runtime::value::Val};
+    use crate::{module::ValType, runtime::value::Val};
 
     #[test]
     fn zero_of_ty_produces_typed_zeroes() {
@@ -440,51 +440,17 @@ mod tests {
 
     #[test]
     fn is_ty_matches_and_rejects() {
-        assert!(
-            Val::I32(1)
-                .has_ty::<StackInstruction>(ValType::I32)
-                .unwrap()
-        );
-        assert!(
-            !Val::I32(1)
-                .has_ty::<StackInstruction>(ValType::I64)
-                .unwrap()
-        );
-        assert!(
-            !Val::I32(1)
-                .has_ty::<StackInstruction>(ValType::F32)
-                .unwrap()
-        );
-
-        assert!(
-            Val::F64(1.0)
-                .has_ty::<StackInstruction>(ValType::F64)
-                .unwrap()
-        );
-        assert!(
-            !Val::F64(1.0)
-                .has_ty::<StackInstruction>(ValType::I32)
-                .unwrap()
-        );
-
-        assert!(
-            Val::Ref(None)
-                .has_ty::<StackInstruction>(ValType::FUNCREF)
-                .unwrap()
-        );
-        assert!(
-            !Val::Ref(None)
-                .has_ty::<StackInstruction>(ValType::I32)
-                .unwrap()
-        );
+        assert!(Val::I32(1).has_ty(ValType::I32).unwrap());
+        assert!(!Val::I32(1).has_ty(ValType::I64).unwrap());
+        assert!(!Val::I32(1).has_ty(ValType::F32).unwrap());
+        assert!(Val::F64(1.0).has_ty(ValType::F64).unwrap());
+        assert!(!Val::F64(1.0).has_ty(ValType::I32).unwrap());
+        assert!(Val::Ref(None).has_ty(ValType::FUNCREF).unwrap());
+        assert!(!Val::Ref(None).has_ty(ValType::I32).unwrap());
     }
 
     #[test]
     fn is_ty_rejects_v128() {
-        assert!(
-            Val::I32(1)
-                .has_ty::<StackInstruction>(ValType::V128)
-                .is_err()
-        );
+        assert!(Val::I32(1).has_ty(ValType::V128).is_err());
     }
 }

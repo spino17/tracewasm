@@ -477,7 +477,7 @@ pub struct Module<Instr: Instruction> {
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
     pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
-    pub custom_section: CustomSection,
+    pub custom_section: Arc<CustomSection>,
     /// The module's DWARF debug info, parsed from its `.debug_*` custom sections,
     /// or `None` if the module carries none (no `.debug_info`).
     ///
@@ -520,7 +520,7 @@ impl<Instr: Instruction> Module<Instr> {
     pub fn get_typed_func<P: Params, R: Results>(
         &self,
         name: &str,
-    ) -> Result<TypedFunc<P, R>, TraceWasmError<Instr>> {
+    ) -> Result<TypedFunc<P, R>, TraceWasmError> {
         let Some(export) = self.export(name) else {
             return Err(TraceWasmError::ExportNotFound(name.to_string()));
         };
@@ -791,7 +791,7 @@ pub enum Export {
 impl Export {
     /// Returns the function index if this is a [`Export::Func`], otherwise
     /// [`TraceWasmError::ExportNotA`].
-    pub fn to_func<Instr: Instruction>(&self) -> Result<FuncIndex, TraceWasmError<Instr>> {
+    pub fn to_func(&self) -> Result<FuncIndex, TraceWasmError> {
         let Export::Func(func_index) = self else {
             return Err(TraceWasmError::ExportNotA("function".to_string()));
         };
@@ -866,10 +866,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex> Default for NameMap<T> {
 impl<T: PartialEq + Eq + Hash + EntityIndex> NameMap<T> {
     /// Converts a `wasmparser` name map into an owned [`NameMap`], turning each
     /// raw `u32` into the typed index `T`.
-    pub(crate) fn from_wasmparser_name_map<Instr: Instruction>(
+    pub(crate) fn from_wasmparser_name_map(
         map: wasmparser::NameMap<'_>,
         new_map: &mut NameMap<T>,
-    ) -> Result<(), TraceWasmError<Instr>> {
+    ) -> Result<(), TraceWasmError> {
         for name in map {
             let name = name?;
             let index = T::from(name.index);
@@ -906,10 +906,10 @@ impl<T: PartialEq + Eq + Hash + EntityIndex, V: PartialEq + Eq + Hash + EntityIn
     IndirectNameMap<T, V>
 {
     /// Converts a `wasmparser` indirect name map into the owned two-level form.
-    pub(crate) fn from_wasmparser_indirect_map<Instr: Instruction>(
+    pub(crate) fn from_wasmparser_indirect_map(
         map: wasmparser::IndirectNameMap<'_>,
         new_map: &mut IndirectNameMap<T, V>,
-    ) -> Result<(), TraceWasmError<Instr>> {
+    ) -> Result<(), TraceWasmError> {
         for entry in map {
             let entry = entry?;
             let outer_index = T::from(entry.index);
@@ -972,7 +972,7 @@ impl<Instr: Instruction> Module<Instr> {
     /// TraceWasm does not model: components, imports other than functions and
     /// globals, 64-bit memory, more than one memory, tables of anything but
     /// `funcref`, `v128` locals, or any operator the lowering pass rejects.
-    pub fn compile(buf: &[u8]) -> Result<Arc<Module<Instr>>, TraceWasmError<Instr>> {
+    pub fn compile(buf: &[u8]) -> Result<Arc<Module<Instr>>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm
         // that is known to be well-formed.
@@ -1549,7 +1549,7 @@ impl<Instr: Instruction> Module<Instr> {
             imported_global_count,
             func_bodies: func_bodies.into_boxed_slice(),
             unknown_sections: unknown_sections.into_boxed_slice(),
-            custom_section: CustomSection {
+            custom_section: Arc::new(CustomSection {
                 module_name: custom_section_module_name,
                 func: custom_section_func,
                 local: custom_section_local,
@@ -1565,7 +1565,7 @@ impl<Instr: Instruction> Module<Instr> {
                 name_unknown: custom_section_name_unknown,
                 other: custom_section_others,
                 unknown: custom_section_unknowns,
-            },
+            }),
             dwarf: possible_dwarf,
         }))
     }
@@ -1603,7 +1603,7 @@ impl<Instr: Instruction> Module<Instr> {
         self: &Arc<Module<Instr>>,
         import_registry: I,
         config: Option<Config>,
-    ) -> Result<Instance<M, I, Instr>, TraceWasmError<Instr>> {
+    ) -> Result<Instance<M, I, Instr>, TraceWasmError> {
         let initial_pages = if !self.memories.is_empty() {
             self.memories[0].initial()
         } else {

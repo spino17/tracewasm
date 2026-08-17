@@ -2140,7 +2140,7 @@ impl Instruction for RegInstruction {
         func_decls: &[FuncDecl],
         locals_count: u32,
         globals_count: u32,
-    ) -> Result<RegLoweredFuncBody, TraceWasmError<RegInstruction>> {
+    ) -> Result<RegLoweredFuncBody, TraceWasmError> {
         let mut instructions: Vec<RegInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
@@ -3018,8 +3018,7 @@ impl Instruction for RegInstruction {
         br_table_targets: &[Self::BrTableTarget],
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
-    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError<Self>>>
-    {
+    ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
         todo!()
     }
 }

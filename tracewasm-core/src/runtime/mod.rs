@@ -421,7 +421,7 @@ impl TraceVM {
         params: &[Val],
         instance: &mut Instance<M, I, StackInstruction>,
         module: &Arc<Module<StackInstruction>>,
-    ) -> Result<ResultVals, FuncCallError<StackInstruction>> {
+    ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
 
         instance.frame.reset();
@@ -492,7 +492,7 @@ impl TraceVM {
         module: &Arc<Module<Instr>>,
         call_stack_depth: &mut u32,
         mut caller_base_data: Instr::CallerBaseData,
-    ) -> Result<(), Unwind<Instr>> {
+    ) -> Result<(), Unwind> {
         // `func_bodies` holds only locally-defined functions, so shift the global
         // function index down by the number of imports to index into it.
         let imported_func_count = module.imported_func_count;
@@ -864,7 +864,7 @@ impl TraceVM {
         instance: &mut Instance<M, I, Instr>,
         is_indirect: Option<TableIndex>,
         caller_base_data: &Instr::CallerBaseData,
-    ) -> Result<(), Box<InstructionExecutionError<Instr>>> {
+    ) -> Result<(), Box<InstructionExecutionError>> {
         let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
         let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
 
@@ -1025,12 +1025,12 @@ impl TraceVM {
 /// legibility — it states the intent without asking the reader to work through
 /// IEEE comparison semantics — so note that no input can reach the range test
 /// only to be caught by the guard, and removing it would not change behaviour.
-pub(crate) fn trunc_float_to_int<Instr: Instruction>(
+pub(crate) fn trunc_float_to_int(
     operand: f64,
     low: f64,
     high: f64,
     target: &str,
-) -> Result<f64, InstructionExecutionError<Instr>> {
+) -> Result<f64, InstructionExecutionError> {
     if operand.is_nan() || operand.is_infinite() {
         return Err(InstructionExecutionError::FloatToIntTruncation(
             operand.to_string(),
@@ -1056,13 +1056,13 @@ pub(crate) fn trunc_float_to_int<Instr: Instruction>(
 /// arm is inlined into the driver loop along with the rest of dispatch — where
 /// that expansion inflates the loop's frame for a path taken only on a trap.
 #[inline(never)]
-pub(crate) fn signature_mismatch<Instr: Instruction>(
+pub(crate) fn signature_mismatch(
     table_index: TableIndex,
     declared_params: &[ValType],
     declared_results: &[ValType],
     params: &[ValType],
     results: &[ValType],
-) -> InstructionExecutionError<Instr> {
+) -> InstructionExecutionError {
     InstructionExecutionError::CallIndirect(
         table_index,
         CallIndirectError::FunctionSignatureMismatch(
@@ -1087,7 +1087,7 @@ pub(crate) fn signature_mismatch<Instr: Instruction>(
 /// it during the unwind rather than reconstructing it afterwards: the trapping
 /// instruction seeds it, and each enclosing frame appends its `call` as the error
 /// passes through. [`TraceVM::run`] closes it into a [`FuncCallError`].
-type Unwind<Instr> = Vec<TraceRecord<Instr>>;
+type Unwind = Vec<TraceRecord>;
 
 /// Seeds an [`Unwind`] at the instruction that trapped.
 ///
@@ -1096,12 +1096,12 @@ type Unwind<Instr> = Vec<TraceRecord<Instr>>;
 /// instruction it executes.
 #[inline(never)]
 #[cold]
-fn trap_here<Instr: Instruction>(
+fn trap_here(
     func_index: FuncIndex,
     pc: usize,
     instruction_offsets: &[u32],
-    err: InstructionExecutionError<Instr>,
-) -> Unwind<Instr> {
+    err: InstructionExecutionError,
+) -> Unwind {
     vec![TraceRecord {
         func_index,
         instr_index: pc,
@@ -1115,9 +1115,9 @@ fn trap_here<Instr: Instruction>(
 #[inline(never)]
 fn func_call_err_from_unwind<Instr: Instruction>(
     func_index: FuncIndex,
-    trace: Unwind<Instr>,
+    trace: Unwind,
     module: &Arc<Module<Instr>>,
-) -> FuncCallError<Instr> {
+) -> FuncCallError {
     // A `TypedFunc` is only handed out for an export, so the lookup resolves;
     // falling back rather than unwrapping keeps a failure while *reporting* a
     // trap from replacing it with a panic.
@@ -1126,11 +1126,7 @@ fn func_call_err_from_unwind<Instr: Instruction>(
         .map(String::as_str)
         .unwrap_or("<unknown>");
 
-    FuncCallError::new(
-        func_name.to_string(),
-        trace.into_boxed_slice(),
-        module.clone(),
-    )
+    FuncCallError::new(func_name.to_string(), trace.into_boxed_slice(), module)
 }
 
 /// Builds the caller-visible error for the explicit-frame-stack driver,
@@ -1150,17 +1146,17 @@ fn func_call_err_from_unwind<Instr: Instruction>(
 fn func_call_err<Instr: Instruction>(
     func_index: FuncIndex,
     frames: Vec<Frame>,
-    err: InstructionExecutionError<Instr>,
+    err: InstructionExecutionError,
     instr_index: usize,
     instr_offset: u32,
     module: &Arc<Module<Instr>>,
-) -> FuncCallError<Instr> {
+) -> FuncCallError {
     let func_name = module
         .exported_func_name(func_index)
         .map(String::as_str)
         .unwrap_or("<unknown>");
 
-    let mut trace: Vec<TraceRecord<Instr>> = vec![];
+    let mut trace: Vec<TraceRecord> = vec![];
 
     trace.push(TraceRecord {
         func_index: if frames.is_empty() {
@@ -1189,9 +1185,5 @@ fn func_call_err<Instr: Instruction>(
         });
     }
 
-    FuncCallError::new(
-        func_name.to_string(),
-        trace.into_boxed_slice(),
-        module.clone(),
-    )
+    FuncCallError::new(func_name.to_string(), trace.into_boxed_slice(), module)
 }
