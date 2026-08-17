@@ -163,6 +163,9 @@ impl RuntimeFrame for RegFrame {
             spills_base_index + frame_layout.spills as usize,
             Value::default(),
         );
+
+        caller_base_data.callee_frame_base_register_index =
+            caller_base_data.base_register_index + locals_ty.len() as u32;
     }
 
     /// Moves the callee's results down over its locals, so they land where the
@@ -266,9 +269,8 @@ mod tests {
         frame.inner.len()
     }
 
-    /// [`enter`] following the driver's full entry sequence — `enter_frame` then
-    /// `set_callee_locals_count` — and handing back the base data, so a test can
-    /// read the recorded bases or pass it to `exit_frame`.
+    /// [`enter`], handing back the base data so a test can read the bases
+    /// `enter_frame` recorded into it, or pass it to `exit_frame`.
     fn enter_full(
         frame: &mut RegFrame,
         base: u32,
@@ -295,8 +297,6 @@ mod tests {
             &mut caller_base_data,
             &frame_layout,
         );
-
-        caller_base_data.set_callee_locals_count(locals_ty.len() as u32);
 
         caller_base_data
     }

@@ -393,7 +393,7 @@ impl RuntimeFrame for Stack<Value> {
         &mut self,
         params_count: u32,
         locals_ty: &[crate::module::ValType],
-        _caller_base_data: &mut StackCallerBaseData,
+        caller_base_data: &mut StackCallerBaseData,
         _frame_layout: &StackFrameLayout,
     ) {
         let locals_count = locals_ty.len();
@@ -410,6 +410,9 @@ impl RuntimeFrame for Stack<Value> {
 
             self.push(Value::zero_of_ty(ty));
         }
+
+        caller_base_data.callee_frame_base_height =
+            caller_base_data.base_height + locals_ty.len() as u32;
     }
 
     /// Drops the frame, leaving its `results_count` results where the caller's

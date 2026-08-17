@@ -1336,13 +1336,11 @@ pub(crate) struct StackCallerBaseData {
     /// callee's locals count.
     ///
     /// **`u32::MAX` until
-    /// [`set_callee_locals_count`](crate::instruction::CallerBaseData::set_callee_locals_count)
-    /// fills it
-    /// in**, which the driver does once the callee's body is known and before its
-    /// first instruction runs. An imported callee never runs instructions, so its
-    /// sentinel is never replaced — safe only because this machine's
-    /// [`RuntimeFrame`](crate::instruction::RuntimeFrame) ignores the argument
-    /// entirely.
+    /// [`enter_frame`](crate::instruction::RuntimeFrame::enter_frame) fills it in**,
+    /// which happens as the frame is set up and so before its first instruction runs.
+    /// An imported callee has no frame entered for it and never runs instructions, so
+    /// it is the caller's base data that is passed along and this field is never read
+    /// against a sentinel.
     pub callee_frame_base_height: u32,
 }
 
@@ -1356,10 +1354,6 @@ impl CallerBaseData for StackCallerBaseData {
 
     fn base_offset(&self) -> u32 {
         self.base_height
-    }
-
-    fn set_callee_locals_count(&mut self, count: u32) {
-        self.callee_frame_base_height = self.base_height + count;
     }
 }
 

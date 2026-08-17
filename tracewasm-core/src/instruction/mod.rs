@@ -58,8 +58,8 @@ pub(crate) trait CallerBaseData {
     /// The base data for an outermost activation, where there is no caller.
     ///
     /// Both machines start at offset 0 with the callee-locals boundary unset;
-    /// [`Self::set_callee_locals_count`] fills it in once the entry function's
-    /// body is known.
+    /// [`RuntimeFrame::enter_frame`] fills it in once the entry function's body is
+    /// known, which is before its first instruction runs.
     fn initial_data() -> Self;
     /// The callee's frame base, in whatever unit the machine counts.
     ///
@@ -67,15 +67,6 @@ pub(crate) trait CallerBaseData {
     /// touches. A stack machine, whose positions are implicit in the stack
     /// pointer, mostly ignores it and uses it only to bound an unwind.
     fn base_offset(&self) -> u32;
-
-    /// Records how many locals the callee declares, fixing the boundary between
-    /// its locals and its operands.
-    ///
-    /// Called once per call, after the callee's body is known and before its
-    /// first instruction runs. Branch targets are computed against the resulting
-    /// boundary, so an implementation that leaves it unset leaves those
-    /// computations reading whatever it was initialised to.
-    fn set_callee_locals_count(&mut self, count: u32);
 }
 
 /// One function activation's value storage, as the calling convention sees it.
@@ -169,14 +160,15 @@ pub(crate) trait RuntimeFrame {
     /// frame spans the params, the declared locals, and then the layout's operand
     /// registers. A stack machine grows as it pushes and ignores it.
     ///
-    /// **`caller_base_data`'s locals boundary is not set yet.** The driver calls
-    /// [`CallerBaseData::set_callee_locals_count`] *after* this returns, so
-    /// [`CallerBaseData::base_offset`] is readable here but the boundary between the
-    /// callee's locals and its operands is still whatever
-    /// [`CallerBaseData::initial_data`] left. Size the frame from `params_count` and
-    /// `locals_ty` — which are complete — rather than from the base data. The
-    /// argument is `&mut` so an implementation can *record* into it, not so it can
-    /// read a boundary this early.
+    /// **An implementation must record the callee's locals boundary into
+    /// `caller_base_data` before returning** — the height or index at which this
+    /// frame's operands begin, which is `base_offset() + locals_ty.len()` in whatever
+    /// unit the machine counts. Every height-sensitive control operation resolves its
+    /// target against it, and [`CallerBaseData::initial_data`] leaves it unset, so a
+    /// frame entered without it runs its first branch against a sentinel.
+    ///
+    /// That is why the argument is `&mut`, and why this is the only place the
+    /// boundary is written: a driver cannot enter a frame and forget to fix it.
     fn enter_frame(
         &mut self,
         params_count: u32,

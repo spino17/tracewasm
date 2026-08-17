@@ -167,7 +167,7 @@ pub enum Step<Instr: Instruction> {
 /// describe the call if the callee traps. The slice references borrow from the
 /// [`Module`], so saving a frame copies pointers rather than instructions.
 ///
-/// Built only by [`TraceVM::execute_on_frame_stack`], which [`TraceVM::run`] does
+/// Built only by [`TraceVM::_execute_on_frame_stack`], which [`TraceVM::run`] does
 /// not currently use — so nothing constructs one.
 struct Frame<'a, Instr: Instruction> {
     func_index: FuncIndex,
@@ -321,12 +321,11 @@ impl TraceVM {
         let br_table_targets: &[<InstrOf<V> as Instruction>::BrTableTarget] =
             func_body.frame_layout.br_table_targets();
 
-        // `locals` in the body is laid out params-first, then declared locals,
-        // and `locals_ty[i]` is the declared type of local slot `i`. So
-        // `locals_count >= params_count` always, and the subtraction below cannot
-        // underflow.
+        // `locals` in the body is laid out params-first, then declared locals, and
+        // `locals_ty[i]` is the declared type of local slot `i`. So
+        // `locals_ty.len() >= params_count` always, which is what `enter_frame` relies
+        // on when it skips the params.
         let locals_ty = &func_body.locals;
-        let locals_count = locals_ty.len() as u32;
 
         // The declared locals follow the params and must start at the zero value
         // of their type, per the spec. Pushing them here is what makes the locals
@@ -358,8 +357,6 @@ impl TraceVM {
         // round.
         let mut pc = 0;
         let instr_count = instructions.len();
-
-        caller_base_data.set_callee_locals_count(locals_count);
 
         loop {
             let instr = &instructions[pc];
@@ -492,7 +489,7 @@ impl TraceVM {
     /// A [`FuncCallError`] directly, rather than the [`Unwind`] the recursive driver
     /// returns. There is no native unwind to hang a per-frame record on, so
     /// [`func_call_err`] reconstructs the whole trace from `frames` in one pass.
-    fn execute_on_frame_stack<M: Memory, I: ImportRegistry, V: VirtualMachine>(
+    fn _execute_on_frame_stack<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         mut func_index: FuncIndex,
         instance: &mut Instance<M, I, V>,
         module: &Arc<Module<V>>,
@@ -526,12 +523,6 @@ impl TraceVM {
             &mut caller_base_data,
             &func_body.frame_layout,
         );
-
-        // Fixes the boundary between this frame's locals and its operands, which
-        // every height-sensitive control operation resolves its target against.
-        // Until this runs the boundary is a sentinel, so it has to happen before the
-        // first instruction — as it does after each `enter_frame` below.
-        caller_base_data.set_callee_locals_count(locals_ty.len() as u32);
 
         loop {
             let instr = &instructions[pc];
@@ -635,8 +626,6 @@ impl TraceVM {
                         &mut caller_base_data,
                         &callee_func_body.frame_layout,
                     );
-
-                    caller_base_data.set_callee_locals_count(callee_locals_ty.len() as u32);
 
                     continue;
                 }
@@ -964,7 +953,7 @@ fn func_call_err_from_unwind<V: VirtualMachine>(
     FuncCallError::new(func_name.to_string(), trace.into_boxed_slice(), module)
 }
 
-/// Builds the caller-visible error for [`TraceVM::execute_on_frame_stack`],
+/// Builds the caller-visible error for [`TraceVM::_execute_on_frame_stack`],
 /// reconstructing the trace from its saved frames. Unused while [`TraceVM::run`]
 /// drives on the native stack.
 ///

@@ -2132,10 +2132,6 @@ impl CallerBaseData for RegCallerBaseData {
     fn base_offset(&self) -> u32 {
         self.base_register_index
     }
-
-    fn set_callee_locals_count(&mut self, count: u32) {
-        self.callee_frame_base_register_index = self.base_register_index + count;
-    }
 }
 
 impl Instruction for RegInstruction {
