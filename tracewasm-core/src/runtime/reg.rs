@@ -43,13 +43,13 @@ impl Default for RegFrame {
 impl RuntimeFrame for RegFrame {
     type CallerBaseData = RegCallerBaseData;
 
-    fn set_params(&mut self, params: &[super::value::Val]) {
+    fn set_initial_params(&mut self, params: &[super::value::Val]) {
         for (i, param) in params.iter().enumerate() {
             self.inner[i] = param.into();
         }
     }
 
-    fn get_params(
+    fn get_params_for_import_call(
         &mut self,
         params_count: u32,
         caller_base_data: &RegCallerBaseData,
@@ -64,7 +64,7 @@ impl RuntimeFrame for RegFrame {
         s
     }
 
-    fn set_results<R: IntoIterator<Item = super::value::Val>>(
+    fn set_results_from_import_call<R: IntoIterator<Item = super::value::Val>>(
         &mut self,
         results: R,
         caller_base_data: &Self::CallerBaseData,
@@ -81,7 +81,7 @@ impl RuntimeFrame for RegFrame {
     /// **Reads from register 0, not from the activation's base**, because the
     /// trait method takes no `CallerBaseData` to offset against — correct only
     /// for the outermost frame.
-    fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
+    fn get_final_results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
         for i in 0..results_count {

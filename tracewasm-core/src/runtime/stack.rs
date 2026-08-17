@@ -297,13 +297,13 @@ impl RuntimeFrame for Stack<Value> {
         self.reset();
     }
 
-    fn set_params(&mut self, params: &[Val]) {
+    fn set_initial_params(&mut self, params: &[Val]) {
         for param in params {
             self.push(param.into());
         }
     }
 
-    fn get_params(
+    fn get_params_for_import_call(
         &mut self,
         params_count: u32,
         _caller_base_data: &StackCallerBaseData,
@@ -319,7 +319,7 @@ impl RuntimeFrame for Stack<Value> {
         s
     }
 
-    fn set_results<R: IntoIterator<Item = Val>>(
+    fn set_results_from_import_call<R: IntoIterator<Item = Val>>(
         &mut self,
         results: R,
         _caller_base_data: &Self::CallerBaseData,
@@ -337,7 +337,7 @@ impl RuntimeFrame for Stack<Value> {
     /// [`RuntimeFrame`](crate::instruction::RuntimeFrame) trait docs.
     ///
     /// Precondition: at least `results_count` values are present.
-    fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
+    fn get_final_results(&mut self, results_count: u32) -> SmallVec<[Value; 3]> {
         let mut s = smallvec![];
 
         for i in 0..(results_count as usize) {

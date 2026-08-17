@@ -404,7 +404,7 @@ impl TraceVM {
     /// Generic over the lowering, so the driver itself is machine-agnostic: the
     /// frame comes from [`RuntimeFrame`](crate::instruction::RuntimeFrame) and its
     /// base from
-    /// [`CallerBaseData::iniital_data`](crate::instruction::CallerBaseData::iniital_data).
+    /// [`CallerBaseData::initial_data`](crate::instruction::CallerBaseData::initial_data).
     /// Whether a given lowering can actually be driven is
     /// [`Instruction::execute`](crate::instruction::Instruction::execute)'s
     /// business — the register machine's is still unimplemented, so driving one
@@ -431,9 +431,9 @@ impl TraceVM {
 
         instance.frame.reset();
 
-        let caller_base_data = Instr::CallerBaseData::iniital_data();
+        let caller_base_data = Instr::CallerBaseData::initial_data();
 
-        instance.frame.set_params(params);
+        instance.frame.set_initial_params(params);
 
         // The reset above put the stack at height 0, so this frame's base is 0.
         Self::execute_on_native_stack(
@@ -450,7 +450,7 @@ impl TraceVM {
         let results_ty = &module.types[func_decl.ty.0 as usize].results;
         let results_len = results_ty.len() as u32;
 
-        let results = instance.frame.results(results_len);
+        let results = instance.frame.get_final_results(results_len);
 
         let mut s: SmallVec<[Val; 3]> = smallvec![];
 
@@ -887,7 +887,7 @@ impl TraceVM {
         let callee_params = ParamVals::new(
             instance
                 .frame
-                .get_params(callee_params_count, caller_base_data)
+                .get_params_for_import_call(callee_params_count, caller_base_data)
                 .iter()
                 .zip(callee_params_ty)
                 .map(|(param, ty)| param.into_val(ty))
@@ -915,7 +915,9 @@ impl TraceVM {
                 })
             })?;
 
-        instance.frame.set_results(results, caller_base_data);
+        instance
+            .frame
+            .set_results_from_import_call(results, caller_base_data);
 
         Ok(())
     }

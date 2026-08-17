@@ -2104,7 +2104,7 @@ pub struct RegCallerBaseData {
 }
 
 impl CallerBaseData for RegCallerBaseData {
-    fn iniital_data() -> Self {
+    fn initial_data() -> Self {
         RegCallerBaseData {
             base_register_index: 0,
             callee_frame_base_register_index: u32::MAX,

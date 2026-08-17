@@ -1314,7 +1314,7 @@ pub struct StackCallerBaseData {
 }
 
 impl CallerBaseData for StackCallerBaseData {
-    fn iniital_data() -> Self {
+    fn initial_data() -> Self {
         StackCallerBaseData {
             base_height: 0,
             callee_frame_base_height: u32::MAX,

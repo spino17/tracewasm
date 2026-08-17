@@ -52,7 +52,7 @@ pub trait CallerBaseData {
     /// Both machines start at offset 0 with the callee-locals boundary unset;
     /// [`Self::set_callee_locals_count`] fills it in once the entry function's
     /// body is known.
-    fn iniital_data() -> Self;
+    fn initial_data() -> Self;
     /// The callee's frame base, in whatever unit the machine counts.
     ///
     /// A positional machine adds this to every local and operand index it
@@ -72,52 +72,66 @@ pub trait CallerBaseData {
 
 /// One function activation's value storage, as the calling convention sees it.
 ///
-/// **The two implementations differ in kind, not just in layout**, and callers
-/// have to respect both:
+/// **The two implementations differ in kind, not just in layout:**
 ///
-/// * The stack machine's `Stack<Value>` is *consuming and implicit*.
-///   [`get_params`](Self::get_params) and [`results`](Self::results) pop what
-///   they return, and position comes from the stack pointer, so the
-///   `caller_base_data` argument is unused.
-/// * The register machine's `RegFrame` is *positional and
-///   non-consuming*. Nothing is removed; every access is an index relative to
+/// * The stack machine's `Stack<Value>` is *consuming and implicit*. The reading
+///   methods pop what they return, and position comes from the stack pointer, so
+///   the `caller_base_data` argument goes unused.
+/// * The register machine's `RegFrame` is *positional and non-consuming*. Nothing
+///   is removed; every access is an index relative to
 ///   [`CallerBaseData::base_offset`].
 ///
-/// So a driver must call the reading methods exactly once per call and must not
-/// assume either behaviour — reading twice yields the same values on one machine
-/// and underflows the other.
+/// A reader therefore cannot assume either behaviour. What keeps that from being
+/// a trap is that **every method here names the one moment it is called at** —
+/// `initial`/`final` for the outermost frame, `for_import_call`/`from_import_call`
+/// for the host boundary — and each is called from exactly one place in the
+/// driver. Read the name as part of the contract: it is why "call it once" needs
+/// no enforcing.
 pub trait RuntimeFrame {
     /// How this machine names a callee's frame base. See [`CallerBaseData`].
     type CallerBaseData: CallerBaseData;
 
-    /// Places a call's arguments where the callee expects to find its params.
-    fn set_params(&mut self, params: &[Val]);
-    /// Reads a callee's arguments back out, to hand to an imported function.
+    /// Seeds the *entry* function's params, before the driver runs a single
+    /// instruction.
+    ///
+    /// Only the outermost activation needs this. Every nested call finds its
+    /// arguments already in place — the caller left them where the callee's params
+    /// belong — which is what makes a call allocation-free.
+    fn set_initial_params(&mut self, params: &[Val]);
+
+    /// Reads a callee's arguments out to hand to an *imported* function, which
+    /// runs on the host and cannot reach into the frame itself.
     ///
     /// **Consumes them on the stack machine** and leaves them in place on the
-    /// register machine; see the trait docs.
-    fn get_params(
+    /// register machine; see the trait docs. Paired with
+    /// [`Self::set_results_from_import_call`], and called only from the host-call
+    /// path — a locally-defined callee reads its params in place instead.
+    fn get_params_for_import_call(
         &mut self,
         params_count: u32,
         caller_base_data: &Self::CallerBaseData,
     ) -> SmallVec<[Value; 5]>;
 
-    /// Writes a call's results back where the caller will look for them.
-    fn set_results<R: IntoIterator<Item = Val>>(
+    /// Puts an imported function's return values back where the wasm caller will
+    /// look for them, completing the pair with
+    /// [`Self::get_params_for_import_call`].
+    fn set_results_from_import_call<R: IntoIterator<Item = Val>>(
         &mut self,
         results: R,
         caller_base_data: &Self::CallerBaseData,
     );
 
-    /// Takes the results a finished function left behind, in push order
-    /// (`result0..resultN-1`).
+    /// Takes the *entry* function's results once the whole call is over, in push
+    /// order (`result0..resultN-1`).
     ///
-    /// **Consumes them on the stack machine**, as [`Self::get_params`] does.
+    /// **Consumes them on the stack machine**, as
+    /// [`Self::get_params_for_import_call`] does.
     ///
-    /// Unlike every other accessor here this takes no [`CallerBaseData`], so a
-    /// positional implementation has no frame base to read against and can only
-    /// answer for the outermost activation.
-    fn results(&mut self, results_count: u32) -> SmallVec<[Value; 3]>;
+    /// It needs no [`CallerBaseData`] because "final" pins which activation it
+    /// means: the outermost one, whose base is 0 on either machine. A per-call
+    /// version would need the base — nested results are handled by
+    /// [`Self::tear_callee_frame_and_set_results`] instead.
+    fn get_final_results(&mut self, results_count: u32) -> SmallVec<[Value; 3]>;
 
     /// Empties the frame, so an instance survives a trap and can be called
     /// again.
