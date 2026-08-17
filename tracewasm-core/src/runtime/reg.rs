@@ -8,9 +8,19 @@
 //! machine's convention on both counts, which the
 //! [`RuntimeFrame`](crate::instruction::RuntimeFrame) trait docs spell out.
 //!
-//! **Unfinished.** The register backend is not yet executable, and this file is
-//! where that shows: `inner` is never sized (see [`RegFrame`]) and `reset` does
-//! nothing.
+//! Two regions, each a stack of per-frame slices with its own base:
+//!
+//! * the **register file**, holding a frame's params, declared locals and operand
+//!   registers contiguously. Its base comes from the caller's position, so the
+//!   space a returning frame occupied is reused without being reclaimed.
+//! * the **spill area**, holding the locals and globals a frame materialised ahead
+//!   of a write (see [`lazy`](crate::instruction::register::lazy)). Its base is the
+//!   area's current length, so unlike the register file it *has* to be truncated on
+//!   frame exit — nothing else would ever hand a slot back.
+//!
+//! **Unfinished.** The register backend is not yet executable: `RegInstruction`'s
+//! `execute` is unimplemented, so nothing yet reads a spill slot or a register
+//! back out.
 
 use crate::{
     instruction::{
@@ -21,23 +31,37 @@ use crate::{
 };
 use smallvec::{SmallVec, smallvec};
 
-/// One instance's register file, shared by every activation in a call chain.
+/// One instance's value storage, shared by every activation in a call chain.
 ///
-/// **`inner` is currently only reserved, never sized.** [`Default`] uses
-/// `Vec::with_capacity`, which leaves `len() == 0`, and no method here pushes or
-/// resizes — so every indexed write below is out of bounds until something gives
-/// the file a length. The stack machine gets away with the same constructor
-/// because it reaches its storage through `push`.
+/// Both regions are sized by [`RuntimeFrame::enter_frame`] from the callee's
+/// [`RegFrameLayout`], and both are emptied by [`RuntimeFrame::reset`] at the start
+/// of every call — which is what makes an instance reusable after a trap, since a
+/// trap unwinds without reaching [`RuntimeFrame::exit_frame`].
 pub struct RegFrame {
     /// The register file. Register `n` of an activation based at `b` is
-    /// `inner[b + n]`.
+    /// `inner[b + n]`, where the frame spans its params, its declared locals, and
+    /// then the layout's operand registers.
+    ///
+    /// `reset` must clear it, not merely truncate to a base:
+    /// [`RuntimeFrame::set_initial_params`] positions the entry function's params
+    /// by `push`, so they only land at register 0 — where
+    /// [`CallerBaseData::initial_data`] says they are — while this is empty.
     inner: Vec<Value>,
+    /// The spill area, one region per live frame, based at
+    /// [`RegCallerBaseData::spills_base_index`].
+    ///
+    /// Kept apart from `inner` so a spill index stays independent of a register
+    /// index. The cost is that its base is this vector's length rather than a
+    /// position derived from the caller, so a frame's region is only released by
+    /// `exit_frame` truncating to the recorded base.
+    spills: Vec<Value>,
 }
 
 impl Default for RegFrame {
     fn default() -> Self {
         RegFrame {
             inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
+            spills: vec![],
         }
     }
 }
@@ -95,15 +119,23 @@ impl RuntimeFrame for RegFrame {
         s
     }
 
-    /// Currently a no-op, so a trapped call's values survive into the next one.
-    /// The stack machine's `reset` moves its pointer back to zero.
-    fn reset(&mut self) {}
+    /// Empties both regions, so the next call starts from a base of 0 in each.
+    ///
+    /// Needed on every call, not only after a trap: `set_initial_params` pushes, so
+    /// the entry frame's params land at register 0 only while the file is empty.
+    /// The spill area additionally *has* to be cleared here, because a trap returns
+    /// without reaching `exit_frame` and its base is a length — an orphaned region
+    /// would push every later frame's base up for the life of the instance.
+    fn reset(&mut self) {
+        self.inner.clear();
+        self.spills.clear();
+    }
 
     fn enter_frame(
         &mut self,
         params_count: u32,
         locals_ty: &[crate::module::ValType],
-        caller_base_data: &RegCallerBaseData,
+        caller_base_data: &mut RegCallerBaseData,
         frame_layout: &RegFrameLayout,
     ) {
         // base_register_index, base_register_index+1...base_register_index + params_count - 1 is filled with params
@@ -122,6 +154,15 @@ impl RuntimeFrame for RegFrame {
 
             self.inner[base_register_index + params_count + i] = Value::zero_of_ty(ty);
         }
+
+        let spills_base_index = self.spills.len();
+
+        caller_base_data.set_spills_base_index(spills_base_index as u32);
+
+        self.spills.resize(
+            spills_base_index + frame_layout.spills as usize,
+            Value::default(),
+        );
     }
 
     /// Moves the callee's results down over its locals, so they land where the
@@ -159,6 +200,11 @@ impl RuntimeFrame for RegFrame {
         for i in 0..results_count as usize {
             self.inner[base_register_index + i] = temp[i];
         }
+
+        self.spills.resize(
+            caller_base_data.spills_base_index as usize,
+            Value::default(),
+        );
     }
 }
 
@@ -176,6 +222,8 @@ impl RuntimeFrame for RegFrame {
 /// frame compounds with depth.
 #[cfg(test)]
 mod tests {
+    use std::u32;
+
     use super::*;
     use crate::{module::ValType, runtime::value::Val};
 
@@ -202,19 +250,163 @@ mod tests {
     ) -> usize {
         let locals_ty: Vec<ValType> = params.iter().chain(declared).copied().collect();
 
-        let caller_base_data = RegCallerBaseData {
+        let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
             callee_frame_base_register_index: u32::MAX,
+            spills_base_index: u32::MAX,
         };
 
         frame.enter_frame(
             params.len() as u32,
             &locals_ty,
-            &caller_base_data,
+            &mut caller_base_data,
             &layout(registers),
         );
 
         frame.inner.len()
+    }
+
+    /// [`enter`] following the driver's full entry sequence — `enter_frame` then
+    /// `set_callee_locals_count` — and handing back the base data, so a test can
+    /// read the recorded bases or pass it to `exit_frame`.
+    fn enter_full(
+        frame: &mut RegFrame,
+        base: u32,
+        params: &[ValType],
+        declared: &[ValType],
+        registers: u32,
+        spills: u32,
+    ) -> RegCallerBaseData {
+        let locals_ty: Vec<ValType> = params.iter().chain(declared).copied().collect();
+
+        let mut caller_base_data = RegCallerBaseData {
+            base_register_index: base,
+            callee_frame_base_register_index: u32::MAX,
+            spills_base_index: u32::MAX,
+        };
+
+        let mut frame_layout = layout(registers);
+        frame_layout.spills = spills;
+
+        frame.enter_frame(
+            params.len() as u32,
+            &locals_ty,
+            &mut caller_base_data,
+            &frame_layout,
+        );
+        caller_base_data.set_callee_locals_count(locals_ty.len() as u32);
+
+        caller_base_data
+    }
+
+    #[test]
+    fn a_frames_spill_region_is_appended_and_its_base_recorded() {
+        let mut frame = RegFrame::default();
+
+        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
+
+        assert_eq!(
+            base_data.spills_base_index, 0,
+            "the first frame's spills start at 0"
+        );
+        assert_eq!(frame.spills.len(), 2, "its two slots are appended");
+    }
+
+    #[test]
+    fn a_nested_frames_spills_sit_above_its_callers() {
+        let mut frame = RegFrame::default();
+
+        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
+        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
+
+        assert_eq!(caller.spills_base_index, 0);
+        assert_eq!(
+            callee.spills_base_index, 2,
+            "the callee's region starts where the caller's ended"
+        );
+        assert_eq!(frame.spills.len(), 5, "2 + 3 slots are live at this depth");
+    }
+
+    /// Unlike the register file — whose base comes from the caller's position and so
+    /// reuses space naturally — a spill base is `spills.len()`, which only moves up.
+    /// Truncating on exit is therefore what keeps a loop of calls from growing it
+    /// without bound.
+    #[test]
+    fn exiting_a_frame_releases_its_spill_region() {
+        let mut frame = RegFrame::default();
+
+        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
+        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
+
+        assert_eq!(frame.spills.len(), 5);
+
+        // a callee with no results, so only the spill half of the teardown runs
+        frame.exit_frame(0, &callee);
+
+        assert_eq!(
+            frame.spills.len(),
+            2,
+            "the callee's region is released, the caller's survives"
+        );
+
+        frame.exit_frame(0, &caller);
+
+        assert_eq!(frame.spills.len(), 0, "and the caller's in turn");
+    }
+
+    #[test]
+    fn repeated_calls_at_the_same_depth_reuse_the_same_spill_base() {
+        let mut frame = RegFrame::default();
+
+        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 1);
+
+        let mut bases = vec![];
+
+        for _ in 0..4 {
+            let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 2);
+
+            bases.push(callee.spills_base_index);
+            frame.exit_frame(0, &callee);
+        }
+
+        assert!(
+            bases.windows(2).all(|w| w[0] == w[1]),
+            "every call at this depth must get the same base, not a fresh one: {bases:?}"
+        );
+        assert_eq!(frame.spills.len(), 1, "only the caller's region is left");
+
+        let _ = caller;
+    }
+
+    #[test]
+    fn a_frame_with_no_spills_still_records_a_base() {
+        let mut frame = RegFrame::default();
+
+        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 0);
+
+        assert_eq!(
+            base_data.spills_base_index, 0,
+            "the base must be recorded even when the region is empty, since \
+             `exit_frame` truncates to it"
+        );
+        assert_eq!(frame.spills.len(), 0);
+    }
+
+    #[test]
+    fn reset_clears_the_spill_area_too() {
+        let mut frame = RegFrame::default();
+
+        enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 3);
+
+        assert_eq!(frame.spills.len(), 3);
+
+        // a trap unwinds without reaching `exit_frame`, so the next call's reset is
+        // what releases the region — otherwise every spill base above it shifts up
+        // for the life of the instance
+        frame.reset();
+
+        assert_eq!(frame.spills.len(), 0, "spills are released");
+        assert_eq!(frame.inner.len(), 0, "and the register file with them");
     }
 
     #[test]
@@ -295,6 +487,32 @@ mod tests {
         assert_eq!(
             shallow, deep,
             "re-entering a frame at base 0 must leave the file at its high-water mark"
+        );
+    }
+
+    /// `set_initial_params` positions by `push`, so it lands at `inner.len()` —
+    /// but `initial_data` says the entry frame is based at 0. The two only agree
+    /// while the file is empty, which is what `reset` has to guarantee on every
+    /// call, not just the first.
+    #[test]
+    fn a_second_call_puts_its_params_back_at_zero() {
+        let mut frame = RegFrame::default();
+
+        frame.set_initial_params(&[Val::I32(7)]);
+        enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
+
+        assert_eq!(frame.inner[0].as_i32(), 7, "first call's param lands at 0");
+
+        // the driver resets at the start of every call, which is what makes an
+        // instance reusable — including after a trap left the file grown
+        frame.reset();
+        frame.set_initial_params(&[Val::I32(9)]);
+
+        assert_eq!(
+            frame.inner[0].as_i32(),
+            9,
+            "the second call's param must land at 0 too, not above the first call's \
+             high-water mark"
         );
     }
 

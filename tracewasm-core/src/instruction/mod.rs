@@ -157,7 +157,7 @@ pub trait RuntimeFrame {
         &mut self,
         params_count: u32,
         locals_ty: &[ValType],
-        caller_base_data: &Self::CallerBaseData,
+        caller_base_data: &mut Self::CallerBaseData,
         frame_layout: &Self::FrameLayout,
     );
 

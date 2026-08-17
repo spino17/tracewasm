@@ -1181,21 +1181,31 @@ impl SimulatedStack {
 
 /// The storage one lowered body needs, in slot counts.
 ///
-/// Both fields are high-water marks over the whole body rather than counts at any
-/// one point, so a frame sized to them never has to grow mid-execution.
+/// [`Self::registers`] and [`Self::spills`] are high-water marks over the whole
+/// body rather than counts at any one point, so a frame sized to them never has to
+/// grow mid-execution.
 ///
-/// **Operands only.** Locals are not counted here: like the stack pass's
-/// [`max_height`](crate::instruction::stack), these are measured from the frame's
-/// operand base, so a consumer laying out storage needs
-/// `locals_len + registers + spills`.
+/// **They size two separate regions, not one.** The runtime keeps the register file
+/// and the spill area in different allocations, so a spill index stays independent
+/// of a register index and neither count has to be added to the other. Within a
+/// frame, the register file holds the params, then the declared locals, then
+/// `registers` operand slots; the spill area holds `spills` slots of its own.
+///
+/// **Operands only.** Locals are not counted in either field: like the stack pass's
+/// [`max_height`](crate::instruction::stack), `registers` is measured from the
+/// frame's operand base, which sits above the locals.
 pub struct RegFrameLayout {
     /// Operand registers, i.e. the peak `curr_register_index`.
+    ///
+    /// Numbered from the frame's operand base, so register `r` of a frame whose
+    /// operands begin at `b` is the runtime's `b + r`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
     /// [`RegInstruction::LocalSpill`] / [`RegInstruction::GlobalSpill`].
     ///
     /// Zero for a body that never overwrites a lazily-forwarded local or global,
-    /// which is the common case.
+    /// which is the common case — and then the frame's spill region is empty rather
+    /// than absent, since the runtime still records a base to release on exit.
     pub spills: u32,
     /// Every instruction's input operands, concatenated in lowering order.
     ///
@@ -2101,6 +2111,13 @@ impl RegInstruction {
 pub struct RegCallerBaseData {
     pub base_register_index: u32,
     pub callee_frame_base_register_index: u32,
+    pub spills_base_index: u32,
+}
+
+impl RegCallerBaseData {
+    pub(crate) fn set_spills_base_index(&mut self, spill_index: u32) {
+        self.spills_base_index = spill_index;
+    }
 }
 
 impl CallerBaseData for RegCallerBaseData {
@@ -2108,6 +2125,7 @@ impl CallerBaseData for RegCallerBaseData {
         RegCallerBaseData {
             base_register_index: 0,
             callee_frame_base_register_index: u32::MAX,
+            spills_base_index: u32::MAX,
         }
     }
 

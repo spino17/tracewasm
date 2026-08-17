@@ -528,7 +528,7 @@ impl TraceVM {
         instance.frame.enter_frame(
             params_count,
             locals_ty,
-            &caller_base_data,
+            &mut caller_base_data,
             &func_body.frame_layout,
         );
 

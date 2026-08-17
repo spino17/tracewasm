@@ -358,7 +358,7 @@ impl RuntimeFrame for Stack<Value> {
         &mut self,
         params_count: u32,
         locals_ty: &[crate::module::ValType],
-        _caller_base_data: &StackCallerBaseData,
+        _caller_base_data: &mut StackCallerBaseData,
         _frame_layout: &StackFrameLayout,
     ) {
         let locals_len = locals_ty.len();
