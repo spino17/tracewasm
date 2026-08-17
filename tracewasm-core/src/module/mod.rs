@@ -1177,8 +1177,7 @@ impl<Instr: Instruction> Module<Instr> {
                             kind: GlobalKind::Local(
                                 StackInstruction::emit_instruction_for_const_expr(
                                     global.init_expr.get_operators_reader(),
-                                )
-                                .unwrap() // todo!
+                                )?
                                 .into_boxed_slice(),
                             ),
                         });
@@ -1231,8 +1230,7 @@ impl<Instr: Instruction> Module<Instr> {
                                     table_index: table_index.map(TableIndex),
                                     offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
-                                    )
-                                    .unwrap() // todo!
+                                    )?
                                     .into_boxed_slice(),
                                 },
                             },
@@ -1258,8 +1256,7 @@ impl<Instr: Instruction> Module<Instr> {
                                         exprs.push(
                                             StackInstruction::emit_instruction_for_const_expr(
                                                 expr.get_operators_reader(),
-                                            )
-                                            .unwrap() // todo!
+                                            )?
                                             .into_boxed_slice(),
                                         );
                                     }
@@ -1295,8 +1292,7 @@ impl<Instr: Instruction> Module<Instr> {
                                     memory_index: MemoryIndex(memory_index),
                                     offset_expr: StackInstruction::emit_instruction_for_const_expr(
                                         offset_expr.get_operators_reader(),
-                                    )
-                                    .unwrap() // todo!
+                                    )?
                                     .into_boxed_slice(),
                                 },
                             },

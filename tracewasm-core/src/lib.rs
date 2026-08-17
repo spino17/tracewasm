@@ -21,12 +21,16 @@
 //! lowers the same operators into a register machine that moves values only when
 //! it has to.
 //!
-//! [`module::Module`], [`instance::Instance`] and the error types are all generic
-//! over that trait. Two things are not, and deliberately so: **constant
-//! expressions are always lowered as `StackInstruction`** whatever the module's
-//! lowering, since they run once at instantiation and never on a hot path; and
-//! execution currently accepts only a `StackInstruction` instance, because the
-//! register machine's `execute` is still being written.
+//! [`module::Module`] and [`instance::Instance`] are generic over that trait.
+//! [`error::TraceWasmError`] is deliberately not: nothing a trap carries names an
+//! instruction, so parameterising it would spread the lowering across every
+//! `Result` in the crate to describe something the errors do not hold.
+//!
+//! Two more things stay concrete on purpose. **Constant expressions are always
+//! lowered as `StackInstruction`** whatever the module's lowering, since they run
+//! once at instantiation and never on a hot path. And execution currently accepts
+//! only a `StackInstruction` instance, because the register machine's `execute`
+//! is still being written.
 //!
 //! ## Scope
 //!

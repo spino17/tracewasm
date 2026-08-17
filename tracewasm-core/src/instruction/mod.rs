@@ -165,9 +165,15 @@ pub trait FrameLayout {
 /// This is the seam between the two machines. [`StackInstruction`](stack::StackInstruction)
 /// keeps wasm's own operand stack and is the reference for tracing fidelity;
 /// [`RegInstruction`](register::RegInstruction) lowers the same operators into a
-/// register machine that moves values only when it must. Everything downstream —
-/// [`Module`], [`Instance`], the error types — is generic over this trait rather
-/// than over the two concrete sets.
+/// register machine that moves values only when it must. [`Module`] and
+/// [`Instance`] are generic over this trait rather than over the two concrete
+/// sets.
+///
+/// The error types deliberately are **not**. A trap carries a rendered backtrace
+/// and the sections needed to resolve it, none of which name an instruction, so
+/// parameterising them would have spread `Instr` across every `Result` in the
+/// crate — and across every embedder's signatures — to describe something the
+/// errors do not hold.
 ///
 /// The associated types are tied together so a machine cannot be assembled from
 /// mismatched halves: a body's [`FrameLayout`] must yield the same

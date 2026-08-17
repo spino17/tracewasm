@@ -121,22 +121,37 @@ impl From<wasmparser::Error> for TraceWasmError {
 /// context needed to explain it.
 ///
 /// A trap is raised deep inside the interpreter, where the entry function and the
-/// [`Module`] are not in reach. This pairs the trace with both, so a caller can go
-/// straight from the error to a rendered backtrace via [`Self::stack_trace`]
-/// without threading that context in themselves.
+/// [`Module`] it ran in are not in reach. This pairs the trace with the context
+/// needed to explain it, so a caller can go straight from the error to a rendered
+/// backtrace via [`Self::stack_trace`] without threading that context in
+/// themselves.
 ///
-/// The `Module` is held by `Arc` rather than borrowed so the error outlives the
-/// call it came from — a backtrace can be rendered long afterwards, and needs the
-/// name and DWARF sections to do it.
+/// It keeps **only the two pieces rendering needs** — the name section and the
+/// DWARF — rather than the whole [`Module`]. Both are already refcounted, so
+/// holding them costs two pointer bumps and lets the error outlive the call it
+/// came from; a backtrace can be rendered long afterwards. Keeping the module
+/// instead would mean naming its lowering, which is what forced this whole error
+/// hierarchy to be generic over
+/// [`Instruction`](crate::instruction::Instruction) before.
 pub struct FuncCallError {
+    /// The entry function the failed call was made through.
     func_name: String,
+    /// The captured backtrace, innermost-first. See [`Self::new`] for the
+    /// invariants it must satisfy.
     trace: Box<[TraceRecord]>,
+    /// The module's name section, for naming frames in a rendered trace.
     custom_section: Arc<CustomSection>,
+    /// The module's DWARF, for resolving frames to source locations. `None` for a
+    /// module built without debug info.
     dwarf: Option<ModuleDwarf>,
 }
 
 impl FuncCallError {
-    /// Pairs a completed trace with the entry function and module it happened in.
+    /// Pairs a completed trace with the entry function it happened in, copying
+    /// the name and DWARF sections out of `module`.
+    ///
+    /// Generic over the lowering only to read those two sections; nothing about
+    /// the instruction set survives into the error.
     ///
     /// # Invariants
     ///
@@ -390,9 +405,15 @@ pub enum TraceRecordKind {
 /// A captured interpreter backtrace, innermost-first: frame `0` is where
 /// execution trapped and each later frame is the caller that led to it.
 pub struct StackTrace<'a> {
+    /// The frames, innermost-first.
     trace: &'a [TraceRecord],
+    /// The entry function the call was made through, which is not itself a frame.
     func_name: &'a str,
+    /// Borrowed from the [`FuncCallError`], for naming frames.
     custom_section: &'a CustomSection,
+    /// Borrowed from the [`FuncCallError`]; `None` when the module carries no
+    /// debug info, in which case [`Self::to_source_trace`] yields frames with an
+    /// empty inline trace rather than dropping them.
     dwarf: Option<&'a ModuleDwarf>,
 }
 
