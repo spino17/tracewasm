@@ -24,6 +24,8 @@ pub enum TraceWasmError {
     /// it can render a backtrace without the caller supplying context.
     #[error("{0:?}")]
     FuncCall(FuncCallError),
+    #[error("error occured while executing start function: {0}")]
+    StartFunctionError(String),
     /// A linear-memory failure raised outside instruction execution — for example
     /// a data-segment write during instantiation. Field: the specific
     /// [`MemoryError`].

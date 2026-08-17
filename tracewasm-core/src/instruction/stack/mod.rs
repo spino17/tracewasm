@@ -99,7 +99,10 @@ use crate::{
         value::{DataVal, Value},
     },
 };
-use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use std::{
+    ops::{BitAnd, BitOr, BitXor, Neg},
+    u32,
+};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
@@ -1311,6 +1314,13 @@ pub struct StackCallerBaseData {
 }
 
 impl CallerBaseData for StackCallerBaseData {
+    fn inital_data() -> Self {
+        StackCallerBaseData {
+            base_height: 0,
+            callee_frame_base_height: u32::MAX,
+        }
+    }
+
     fn base_offset(&self) -> u32 {
         self.base_height
     }

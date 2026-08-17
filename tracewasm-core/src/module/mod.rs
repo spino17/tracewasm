@@ -1917,8 +1917,8 @@ impl<Instr: Instruction> Module<Instr> {
 
         // execute start function
         if let Some(func_index) = self.start_section {
-            // TraceVM::run(func_index, &[], &mut instance, self)?;
-            todo!()
+            TraceVM::run(func_index, &[], &mut instance, self)
+                .map_err(|err| TraceWasmError::StartFunctionError(err.to_string()))?;
         }
 
         Ok(instance)

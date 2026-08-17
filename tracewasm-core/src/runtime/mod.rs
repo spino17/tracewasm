@@ -416,20 +416,17 @@ impl TraceVM {
     /// interpreter's [`Unwind`] is turned into an error the caller sees, because
     /// it is the only frame that knows the entry function the call was made
     /// through.
-    pub(crate) fn run<M: Memory, I: ImportRegistry>(
+    pub(crate) fn run<M: Memory, I: ImportRegistry, Instr: Instruction>(
         func_index: FuncIndex,
         params: &[Val],
-        instance: &mut Instance<M, I, StackInstruction>,
-        module: &Arc<Module<StackInstruction>>,
+        instance: &mut Instance<M, I, Instr>,
+        module: &Arc<Module<Instr>>,
     ) -> Result<ResultVals, FuncCallError> {
         let mut call_stack_depth = 0;
 
         instance.frame.reset();
 
-        let caller_base_data = StackCallerBaseData {
-            base_height: instance.frame.height(), // 0
-            callee_frame_base_height: u32::MAX,
-        };
+        let caller_base_data = Instr::CallerBaseData::inital_data();
 
         instance.frame.set_params(params);
 
@@ -860,7 +857,7 @@ impl TraceVM {
     pub(crate) fn call_imported<M: Memory, I: ImportRegistry, Instr: Instruction>(
         callee_func_index: FuncIndex,
         callee_params_count: u32,
-        module: &Module<StackInstruction>,
+        module: &Module<Instr>,
         instance: &mut Instance<M, I, Instr>,
         is_indirect: Option<TableIndex>,
         caller_base_data: &Instr::CallerBaseData,
