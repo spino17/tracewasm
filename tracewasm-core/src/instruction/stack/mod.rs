@@ -193,176 +193,133 @@ pub(crate) enum StackInstruction {
     // Loads. Every variant pops an address and pushes one value read from
     // `address + offset` (little-endian); the narrow `*_u`/`*_s` forms read fewer
     // bytes than the result type and zero- / sign-extend to it. `offset` is the
-    // static `memarg` byte offset added to the popped address; `align` is the
-    // alignment hint (log2), which is validation-only — the interpreter ignores
-    // it, since unaligned access is permitted.
+    // static `memarg` byte offset added to the popped address.
+    //
+    // A `memarg` also carries an alignment hint, which is not lowered: it is
+    // validation-only, and wasm permits unaligned access, so it cannot change what
+    // an execution does.
     /// `i32.load`: load 4 bytes as the `i32` result.
     I32Load {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.load8_u`: load 1 byte, zero-extend to `i32`.
     I32Load8U {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.load8_s`: load 1 byte, sign-extend to `i32`.
     I32Load8S {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.load16_u`: load 2 bytes, zero-extend to `i32`.
     I32Load16U {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.load16_s`: load 2 bytes, sign-extend to `i32`.
     I32Load16S {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load`: load 8 bytes as the `i64` result.
     I64Load {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load8_u`: load 1 byte, zero-extend to `i64`.
     I64Load8U {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load8_s`: load 1 byte, sign-extend to `i64`.
     I64Load8S {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load16_u`: load 2 bytes, zero-extend to `i64`.
     I64Load16U {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load16_s`: load 2 bytes, sign-extend to `i64`.
     I64Load16S {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load32_u`: load 4 bytes, zero-extend to `i64`.
     I64Load32U {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.load32_s`: load 4 bytes, sign-extend to `i64`.
     I64Load32S {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `f32.load`: load 4 bytes as the `f32` result, preserving the exact bit
     /// pattern (no NaN canonicalization).
     F32Load {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `f64.load`: load 8 bytes as the `f64` result, preserving the exact bit
     /// pattern (no NaN canonicalization).
     F64Load {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     // Stores. Every variant pops the value then the address (the value is pushed
     // last, so it sits on top) and writes to `address + offset` little-endian.
-    // `offset` and `align` carry the same meaning as for the loads above.
+    // `offset` carries the same meaning as for the loads above, and the alignment
+    // hint is dropped for the same reason.
     /// `i32.store`: pop an `i32` value and an address, write the value's 4 bytes.
     I32Store {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.store8`: write the low 1 byte of the popped `i32` (wrapping).
     I32Store8 {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i32.store16`: write the low 2 bytes of the popped `i32` (wrapping).
     I32Store16 {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.store`: pop an `i64` value and an address, write the value's 8 bytes.
     I64Store {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.store8`: write the low 1 byte of the popped `i64` (wrapping).
     I64Store8 {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.store16`: write the low 2 bytes of the popped `i64` (wrapping).
     I64Store16 {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `i64.store32`: write the low 4 bytes of the popped `i64` (wrapping).
     I64Store32 {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `f32.store`: write the popped `f32`'s 4 bytes, preserving the exact bit
     /// pattern (no NaN canonicalization).
     F32Store {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     /// `f64.store`: write the popped `f64`'s 8 bytes, preserving the exact bit
     /// pattern (no NaN canonicalization).
     F64Store {
         /// Static byte offset added to the popped address.
         offset: u32,
-        /// Alignment hint (log2); ignored at execution.
-        align: u8,
     },
     // Unary bit-counting operators: each pops one value and pushes a count of the
     // same type as its operand (not an `i32`, unlike the comparisons). All three
@@ -1485,98 +1442,84 @@ impl Instruction for StackInstruction {
                 Operator::I32Load { memarg } => (
                     StackInstruction::I32Load {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8U { memarg } => (
                     StackInstruction::I32Load8U {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load8S { memarg } => (
                     StackInstruction::I32Load8S {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16U { memarg } => (
                     StackInstruction::I32Load16U {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I32Load16S { memarg } => (
                     StackInstruction::I32Load16S {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load { memarg } => (
                     StackInstruction::I64Load {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8U { memarg } => (
                     StackInstruction::I64Load8U {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load8S { memarg } => (
                     StackInstruction::I64Load8S {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16U { memarg } => (
                     StackInstruction::I64Load16U {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load16S { memarg } => (
                     StackInstruction::I64Load16S {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32U { memarg } => (
                     StackInstruction::I64Load32U {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::I64Load32S { memarg } => (
                     StackInstruction::I64Load32S {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F32Load { memarg } => (
                     StackInstruction::F32Load {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
                 Operator::F64Load { memarg } => (
                     StackInstruction::F64Load {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Loads,
                 ),
@@ -1584,63 +1527,54 @@ impl Instruction for StackInstruction {
                 Operator::I32Store { memarg } => (
                     StackInstruction::I32Store {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store8 { memarg } => (
                     StackInstruction::I32Store8 {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I32Store16 { memarg } => (
                     StackInstruction::I32Store16 {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store { memarg } => (
                     StackInstruction::I64Store {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store8 { memarg } => (
                     StackInstruction::I64Store8 {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store16 { memarg } => (
                     StackInstruction::I64Store16 {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::I64Store32 { memarg } => (
                     StackInstruction::I64Store32 {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F32Store { memarg } => (
                     StackInstruction::F32Store {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
                 Operator::F64Store { memarg } => (
                     StackInstruction::F64Store {
                         offset: memarg.offset as u32,
-                        align: memarg.align,
                     },
                     StackEffectResult::Stores,
                 ),
@@ -2648,7 +2582,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Load { offset, align: _ } => {
+            StackInstruction::I32Load { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)?;
 
@@ -2656,7 +2590,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Load8U { offset, align: _ } => {
+            StackInstruction::I32Load8U { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i32;
 
@@ -2664,7 +2598,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Load8S { offset, align: _ } => {
+            StackInstruction::I32Load8S { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i32;
 
@@ -2672,7 +2606,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Load16U { offset, align: _ } => {
+            StackInstruction::I32Load16U { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i32;
 
@@ -2680,7 +2614,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Load16S { offset, align: _ } => {
+            StackInstruction::I32Load16S { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i32;
 
@@ -2688,7 +2622,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load { offset, align: _ } => {
+            StackInstruction::I64Load { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i64(effective_offset)?;
 
@@ -2696,7 +2630,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load8U { offset, align: _ } => {
+            StackInstruction::I64Load8U { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u8(effective_offset)? as i64;
 
@@ -2704,7 +2638,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load8S { offset, align: _ } => {
+            StackInstruction::I64Load8S { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i8(effective_offset)? as i64;
 
@@ -2712,7 +2646,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load16U { offset, align: _ } => {
+            StackInstruction::I64Load16U { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u16(effective_offset)? as i64;
 
@@ -2720,7 +2654,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load16S { offset, align: _ } => {
+            StackInstruction::I64Load16S { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i16(effective_offset)? as i64;
 
@@ -2728,7 +2662,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load32U { offset, align: _ } => {
+            StackInstruction::I64Load32U { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_u32(effective_offset)? as i64;
 
@@ -2736,7 +2670,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Load32S { offset, align: _ } => {
+            StackInstruction::I64Load32S { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_i32(effective_offset)? as i64;
 
@@ -2744,7 +2678,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::F32Load { offset, align: _ } => {
+            StackInstruction::F32Load { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f32(effective_offset)?;
 
@@ -2752,7 +2686,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::F64Load { offset, align: _ } => {
+            StackInstruction::F64Load { offset } => {
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
                 let val = instance.memory.read_f64(effective_offset)?;
 
@@ -2760,7 +2694,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Store { offset, align: _ } => {
+            StackInstruction::I32Store { offset } => {
                 let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2768,7 +2702,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Store8 { offset, align: _ } => {
+            StackInstruction::I32Store8 { offset } => {
                 let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2776,7 +2710,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I32Store16 { offset, align: _ } => {
+            StackInstruction::I32Store16 { offset } => {
                 let val = instance.frame.pop().as_i32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2784,7 +2718,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Store { offset, align: _ } => {
+            StackInstruction::I64Store { offset } => {
                 let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2792,7 +2726,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Store8 { offset, align: _ } => {
+            StackInstruction::I64Store8 { offset } => {
                 let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2800,7 +2734,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Store16 { offset, align: _ } => {
+            StackInstruction::I64Store16 { offset } => {
                 let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2808,7 +2742,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::I64Store32 { offset, align: _ } => {
+            StackInstruction::I64Store32 { offset } => {
                 let val = instance.frame.pop().as_i64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2816,7 +2750,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::F32Store { offset, align: _ } => {
+            StackInstruction::F32Store { offset } => {
                 let val = instance.frame.pop().as_f32();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
@@ -2824,7 +2758,7 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::F64Store { offset, align: _ } => {
+            StackInstruction::F64Store { offset } => {
                 let val = instance.frame.pop().as_f64();
                 let effective_offset = Self::pop_effective_address(*offset, instance)?;
 
