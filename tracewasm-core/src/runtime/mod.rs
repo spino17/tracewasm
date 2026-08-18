@@ -465,9 +465,7 @@ impl TraceVM {
     /// It passes the whole suite in both profiles when swapped in for
     /// [`Self::execute_on_native_stack`], including the differential tests and the
     /// multi-frame backtrace and depth-limit cases.
-    //
-    // It is measurably slower, and for a reason that is structural rather than
-    // incidental. The frame state it must carry across the dispatch loop —
+    ///
     /// It is measurably slower, and for a reason that is structural rather than
     /// incidental. The frame state it must carry across the dispatch loop —
     /// instruction slice, offsets, branch targets, the base data — occupies registers
