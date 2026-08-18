@@ -833,8 +833,8 @@ fn spill_slot(index: &SpillIndex) -> usize {
 
 /// Executes `prog`, skipping the half-open range `skip` — the instructions a branch
 /// jumps over on one of its paths.
-fn run(prog: &[RegInstruction], ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
-    for (pc, instruction) in prog.iter().enumerate() {
+fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
+    for (pc, instruction) in prog.inner.iter().enumerate() {
         if skip.contains(&pc) {
             continue;
         }
@@ -860,13 +860,13 @@ fn run(prog: &[RegInstruction], ins: &[Slot], skip: Range<usize>, frame: &mut Fr
 #[test]
 fn a_conditional_arm_cannot_own_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
     s.push_local(1); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(
         !prog.is_empty(),
@@ -888,10 +888,13 @@ fn a_conditional_arm_cannot_own_the_spill() {
 
         let sig = s.registers_for::<1, 0>();
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                sig,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -922,13 +925,13 @@ fn a_conditional_arm_cannot_own_the_spill() {
 #[test]
 fn a_conditional_arm_cannot_own_a_global_spill() {
     let mut s = sim(1, 2);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_global(1);
     s.push_local(0); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
 
@@ -941,10 +944,13 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 
         let sig = s.registers_for::<1, 0>();
 
-        prog.push(RegInstruction::GlobalSet {
-            index: GlobalIndex(1),
-            sig,
-        });
+        prog.push(
+            RegInstruction::GlobalSet {
+                index: GlobalIndex(1),
+                sig,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -972,7 +978,7 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 #[test]
 fn a_taken_br_if_cannot_skip_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
@@ -981,8 +987,8 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
     s.push_const(Const::I32(1)); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let _cond = s.registers_for::<1, 0>();
     let _mov = s.br_truncation_registers(base, 0);
@@ -995,10 +1001,13 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
         let sig = s.registers_for::<1, 0>();
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                sig,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -1021,12 +1030,12 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 #[test]
 fn a_loop_body_cannot_own_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow, below the loop
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let entry = 0..prog.len();
 
@@ -1048,15 +1057,18 @@ fn a_loop_body_cannot_own_the_spill() {
 
         let sig = s.registers_for::<1, 0>();
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                sig,
+            },
+            0,
+        );
 
         // the back-edge branches too, and must add nothing
         let before = prog.len();
 
-        RegInstruction::spill_live_locals(&mut s, &mut prog);
+        RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
 
         assert_eq!(prog.len(), before, "nothing left to spill at the back-edge");
 
@@ -1072,14 +1084,14 @@ fn a_loop_body_cannot_own_the_spill() {
     for iterations in [1, 2, 5] {
         let mut frame = Frame::new(&[42, 1], &[]);
 
-        for (pc, instruction) in prog.iter().enumerate() {
+        for (pc, instruction) in prog.inner.iter().enumerate() {
             if entry.contains(&pc) {
                 frame.exec(instruction, &s.input_registers);
             }
         }
 
         for _ in 0..iterations {
-            for (pc, instruction) in prog.iter().enumerate() {
+            for (pc, instruction) in prog.inner.iter().enumerate() {
                 if body.contains(&pc) {
                     frame.exec(instruction, &s.input_registers);
                 }
@@ -1099,11 +1111,11 @@ fn a_loop_body_cannot_own_the_spill() {
 #[test]
 fn a_block_does_not_hoist_spills() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog); // the Block arm makes no such call
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0); // the Block arm makes no such call
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
@@ -1117,7 +1129,7 @@ fn a_block_does_not_hoist_spills() {
 #[test]
 fn hoisting_costs_nothing_when_no_borrow_is_live() {
     let mut s = sim(8, 4);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
 
@@ -1125,8 +1137,8 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 
     s.push_const(Const::I32(1)); // a condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(prog.is_empty(), "no live borrows, no instructions");
     assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
@@ -3574,4 +3586,184 @@ fn the_arenas_ship_with_the_body() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Instruction offsets
+// ---------------------------------------------------------------------------
+//
+// The driver reads `instruction_offsets[pc]` whenever it records a trace record,
+// so a body whose offsets are shorter than its instruction list panics on the
+// first trap deep enough to reach the missing entry. These pin the two properties
+// that makes impossible: the lists stay the same length, and every entry is a real
+// operator offset rather than a plausible-looking number.
+
+/// Every byte offset `wasmparser` reports for an operator of function `n`, in
+/// order — the ground truth both lowering passes record against.
+fn operator_offsets(wat: &str, n: usize) -> Vec<u32> {
+    let bytes = wat::parse_str(wat).expect("invalid wat");
+    let mut bodies = vec![];
+
+    for payload in Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.expect("parse") {
+            bodies.push(body);
+        }
+    }
+
+    let body = bodies.into_iter().nth(n).expect("no such function body");
+    let mut reader = body.get_operators_reader().expect("operators");
+    let mut offsets = vec![];
+
+    while !reader.eof() {
+        let (_operator, offset) = reader.read_with_offset().expect("operator");
+
+        offsets.push(offset as u32);
+    }
+
+    offsets
+}
+
+/// A body covering every shape that emits more than one instruction per operator —
+/// blocks that move block params, an `if`/`else` and a `br_if` that spill live
+/// borrows, a `br_table`, and a call — so the cases where the two lists could most
+/// easily drift apart are all present.
+const OFFSET_PROBE: &str = r#"(module
+    (global $g (mut i32) (i32.const 0))
+    (func $callee (param i32) (result i32) local.get 0)
+    (func $probe (param i32 i32) (result i32) (local i32)
+        local.get 0
+        local.set 2
+        block (result i32)
+            local.get 2
+            global.get $g
+            i32.add
+            local.get 1
+            br_if 0
+            local.get 0
+            i32.const 7
+            i32.mul
+            local.set 2
+            local.get 1
+            br_table 0 0
+        end
+        local.get 2
+        i32.add
+        call $callee
+        local.get 1
+        if (result i32)
+            local.get 2
+            i32.const 1
+            i32.add
+            local.set 2
+            local.get 2
+        else
+            global.get $g
+            local.set 2
+            i32.const 0
+        end
+        i32.add
+        loop (result i32)
+            local.get 2
+            local.set 2
+            local.get 0
+        end
+        i32.add))"#;
+
+#[test]
+fn offsets_and_instructions_stay_the_same_length() {
+    for n in 0..2 {
+        let (instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+
+        assert_eq!(
+            offsets.len(),
+            instructions.len(),
+            "function {n}: the driver indexes offsets by `pc`, so a short list is a panic \
+             waiting for a deep enough trap"
+        );
+    }
+}
+
+#[test]
+fn every_offset_is_a_real_operator_offset() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+        let real = operator_offsets(OFFSET_PROBE, n);
+
+        for offset in &offsets {
+            assert!(
+                real.contains(offset),
+                "function {n}: {offset} is not an operator boundary; \
+                 real offsets are {real:?}"
+            );
+        }
+    }
+}
+
+// Operators are read in order and instructions are only ever appended, so the
+// offsets a body records can repeat — one operator lowering to a spill, a move and
+// then itself — but can never go backwards. A decrease would mean an instruction
+// had been inserted behind one already emitted, which would also silently
+// misattribute every later `pc`.
+#[test]
+fn offsets_never_go_backwards() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+
+        for pair in offsets.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "function {n}: offsets decrease, {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+}
+
+// The register pass emits zero instructions for the operators it handles lazily
+// (`local.get`, `i32.const`) and several for others, so its offset list is neither
+// the operator list nor a permutation of it — but the *distinct* offsets it records
+// must appear in operator order, and must be a subset of the real ones.
+#[test]
+fn distinct_offsets_follow_operator_order() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+        let real = operator_offsets(OFFSET_PROBE, n);
+
+        let mut distinct: Vec<u32> = vec![];
+
+        for offset in offsets {
+            if distinct.last() != Some(&offset) {
+                distinct.push(offset);
+            }
+        }
+
+        let mut next = real.iter();
+
+        for offset in &distinct {
+            assert!(
+                next.any(|candidate| candidate == offset),
+                "function {n}: {offset} is out of operator order in {distinct:?}"
+            );
+        }
+    }
+}
+
+// A body that emits nothing until its final `end` still has to produce one offset
+// for that `end` — the degenerate case where an off-by-one in the wiring would go
+// unnoticed by the probe above.
+#[test]
+fn a_body_that_lowers_to_one_instruction_still_records_its_offset() {
+    let wat = "(module (func))";
+    let (instructions, offsets, _) = lower_func(wat, 0);
+    let real = operator_offsets(wat, 0);
+
+    assert_eq!(instructions.len(), 1, "just the terminating `end`");
+    assert_eq!(offsets.len(), 1);
+
+    assert_eq!(
+        offsets[0],
+        *real.last().expect("the `end` operator"),
+        "the sole instruction is the `end`, so it carries the `end`'s offset"
+    );
 }

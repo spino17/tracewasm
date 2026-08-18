@@ -2042,14 +2042,15 @@ impl RegInstruction {
     fn spill_lazy<T, F: Fn(SpillIndex, u32) -> RegInstruction>(
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
-        instructions: &mut Vec<RegInstruction>,
+        instructions: &mut Instructions,
         instruction_emitter: F,
+        offset: u32,
     ) {
         let lazy_count = arena.origin.len() as u32;
 
         for index in 0..lazy_count {
             if let Some(spill_index) = SimulatedStack::set_lazy(index, arena, spills) {
-                instructions.push(instruction_emitter(spill_index, index));
+                instructions.push(instruction_emitter(spill_index, index), offset);
             }
         }
     }
@@ -2061,7 +2062,8 @@ impl RegInstruction {
     /// a call site that makes only one of them leaves the other origin space exposed.
     fn spill_live_locals(
         simulated_stack: &mut SimulatedStack,
-        instructions: &mut Vec<RegInstruction>,
+        instructions: &mut Instructions,
+        offset: u32,
     ) {
         let instruction_emitter =
             |spill_index: SpillIndex, index: u32| RegInstruction::LocalSpill {
@@ -2074,6 +2076,7 @@ impl RegInstruction {
             &mut simulated_stack.spills,
             instructions,
             instruction_emitter,
+            offset,
         );
     }
 
@@ -2081,7 +2084,8 @@ impl RegInstruction {
     /// the frame's spill pool.
     fn spill_live_globals(
         simulated_stack: &mut SimulatedStack,
-        instructions: &mut Vec<RegInstruction>,
+        instructions: &mut Instructions,
+        offset: u32,
     ) {
         let instruction_emitter =
             |spill_index: SpillIndex, index: u32| RegInstruction::GlobalSpill {
@@ -2094,17 +2098,19 @@ impl RegInstruction {
             &mut simulated_stack.spills,
             instructions,
             instruction_emitter,
+            offset,
         );
     }
 
     fn emit<const I: usize, const O: usize, F: FnOnce(Signature<I, O>) -> RegInstruction>(
         simulated_stack: &mut SimulatedStack,
-        instructions: &mut Vec<RegInstruction>,
+        instructions: &mut Instructions,
+        offset: u32,
         emitter: F,
     ) {
         let registers = simulated_stack.registers_for::<I, O>();
 
-        instructions.push(emitter(registers));
+        instructions.push(emitter(registers), offset);
     }
 }
 
@@ -2131,6 +2137,27 @@ impl CallerBaseData for RegCallerBaseData {
 
     fn base_offset(&self) -> u32 {
         self.base_register_index
+    }
+}
+
+#[derive(Default)]
+struct Instructions {
+    inner: Vec<RegInstruction>,
+    offsets: Vec<u32>,
+}
+
+impl Instructions {
+    fn push(&mut self, instr: RegInstruction, offset: u32) {
+        self.inner.push(instr);
+        self.offsets.push(offset);
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 
@@ -2163,8 +2190,7 @@ impl Instruction for RegInstruction {
         locals_count: u32,
         globals_count: u32,
     ) -> Result<RegLoweredFuncBody, TraceWasmError> {
-        let mut instructions: Vec<RegInstruction> = vec![];
-        let mut instruction_offsets: Vec<u32> = vec![];
+        let mut instructions = Instructions::default();
         let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
         let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
 
@@ -2178,25 +2204,26 @@ impl Instruction for RegInstruction {
             attached_breaks: vec![],
         });
 
-        /// [`Self::emit`] against this body's `simulated_stack` and `instructions`.
-        ///
-        /// Declared inside the function so it can name both by hand, which is what
-        /// keeps an arm to one line: the two are the same for every operator, and
-        /// spelling them out per arm is the only thing that made these five lines
-        /// long instead of one.
-        ///
-        /// The argument is normally the variant itself — a tuple-variant
-        /// constructor *is* a `Fn(Signature<I, O>) -> RegInstruction`, so the arity
-        /// comes from the variant's own declaration and no arm restates it. Pass a
-        /// closure where the variant carries an immediate beside its signature.
-        macro_rules! emit {
-            ($build:expr) => {
-                Self::emit(&mut simulated_stack, &mut instructions, $build)
-            };
-        }
-
         while !operator_reader.eof() {
-            let (operator, _offset) = operator_reader.read_with_offset()?;
+            let (operator, offset) = operator_reader.read_with_offset()?;
+            let offset = offset as u32;
+
+            /// [`Self::emit`] against this body's `simulated_stack` and `instructions`.
+            ///
+            /// Declared inside the function so it can name both by hand, which is what
+            /// keeps an arm to one line: the two are the same for every operator, and
+            /// spelling them out per arm is the only thing that made these five lines
+            /// long instead of one.
+            ///
+            /// The argument is normally the variant itself — a tuple-variant
+            /// constructor *is* a `Fn(Signature<I, O>) -> RegInstruction`, so the arity
+            /// comes from the variant's own declaration and no arm restates it. Pass a
+            /// closure where the variant carries an immediate beside its signature.
+            macro_rules! emit {
+                ($build:expr) => {
+                    Self::emit(&mut simulated_stack, &mut instructions, offset, $build)
+                };
+            }
 
             if !matches!(
                 unreachable_tracking_stack.check_unreachablity(&operator),
@@ -2215,18 +2242,24 @@ impl Instruction for RegInstruction {
                         &mut simulated_stack.lazy_globals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::GlobalSpill {
-                            index: GlobalIndex(global_index),
-                            spill_index,
-                        });
+                        instructions.push(
+                            RegInstruction::GlobalSpill {
+                                index: GlobalIndex(global_index),
+                                spill_index,
+                            },
+                            offset,
+                        );
                     }
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::GlobalSet {
-                        index: GlobalIndex(global_index),
-                        sig: registers,
-                    });
+                    instructions.push(
+                        RegInstruction::GlobalSet {
+                            index: GlobalIndex(global_index),
+                            sig: registers,
+                        },
+                        offset,
+                    );
                 }
                 Operator::LocalGet { local_index } => {
                     simulated_stack.push_local(local_index);
@@ -2237,18 +2270,24 @@ impl Instruction for RegInstruction {
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::LocalSpill {
-                            index: LocalIndex(local_index),
-                            spill_index,
-                        });
+                        instructions.push(
+                            RegInstruction::LocalSpill {
+                                index: LocalIndex(local_index),
+                                spill_index,
+                            },
+                            offset,
+                        );
                     }
 
                     let registers = simulated_stack.registers_for::<1, 0>();
 
-                    instructions.push(RegInstruction::LocalSet {
-                        index: LocalIndex(local_index),
-                        sig: registers,
-                    });
+                    instructions.push(
+                        RegInstruction::LocalSet {
+                            index: LocalIndex(local_index),
+                            sig: registers,
+                        },
+                        offset,
+                    );
                 }
                 Operator::LocalTee { local_index } => {
                     if let Some(spill_index) = SimulatedStack::set_lazy(
@@ -2256,10 +2295,13 @@ impl Instruction for RegInstruction {
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
                     ) {
-                        instructions.push(RegInstruction::LocalSpill {
-                            index: LocalIndex(local_index),
-                            spill_index,
-                        });
+                        instructions.push(
+                            RegInstruction::LocalSpill {
+                                index: LocalIndex(local_index),
+                                spill_index,
+                            },
+                            offset,
+                        );
                     }
 
                     let input_start = simulated_stack.input_registers.len();
@@ -2277,10 +2319,13 @@ impl Instruction for RegInstruction {
                         },
                     };
 
-                    instructions.push(RegInstruction::LocalTee {
-                        index: LocalIndex(local_index),
-                        sig: registers,
-                    });
+                    instructions.push(
+                        RegInstruction::LocalTee {
+                            index: LocalIndex(local_index),
+                            sig: registers,
+                        },
+                        offset,
+                    );
                 }
                 Operator::RefNull { hty: _ } => {
                     simulated_stack.push_const(Const::Ref(None));
@@ -2322,7 +2367,7 @@ impl Instruction for RegInstruction {
                     })
                 }
                 Operator::DataDrop { data_index } => {
-                    instructions.push(RegInstruction::DataDrop(data_index));
+                    instructions.push(RegInstruction::DataDrop(data_index), offset);
                 }
 
                 Operator::I32Const { value } => {
@@ -2593,15 +2638,15 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_params);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
                 }
                 Operator::Loop { blockty } => {
                     // A loop repeats: a rescue left inside the body would re-run on
                     // the back-edge and capture what the previous iteration wrote.
                     // Hoisting it above the header runs it exactly once, on entry.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let (block_params, _) = simulated_stack.add_block(
                         BlockVariant::Loop,
@@ -2614,14 +2659,14 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_params);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
                 }
                 Operator::If { blockty } => {
                     // Control diverges here, and a write in either arm would leave
                     // the other path reading a spill slot nothing wrote.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
                     // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
@@ -2641,14 +2686,17 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_params + 1);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
-                    instructions.push(RegInstruction::If {
-                        cond: simulated_stack.registers_for::<1, 0>(),
-                        else_index: None,
-                        end_index: u32::MAX,
-                    });
+                    instructions.push(
+                        RegInstruction::If {
+                            cond: simulated_stack.registers_for::<1, 0>(),
+                            else_index: None,
+                            end_index: u32::MAX,
+                        },
+                        offset,
+                    );
                 }
                 Operator::Else => {
                     let if_block = simulated_stack.get_curr_block_mut();
@@ -2680,7 +2728,7 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(block_results);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
                     // reset the frame layout with params on top for else instructions.
@@ -2689,9 +2737,12 @@ impl Instruction for RegInstruction {
                         block_params,
                     );
 
-                    instructions.push(RegInstruction::Else {
-                        end_index: u32::MAX,
-                    });
+                    instructions.push(
+                        RegInstruction::Else {
+                            end_index: u32::MAX,
+                        },
+                        offset,
+                    );
                 }
                 Operator::Br { relative_depth } => {
                     let block_index =
@@ -2727,10 +2778,10 @@ impl Instruction for RegInstruction {
                         };
 
                     if !move_registers.is_empty() {
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
-                    instructions.push(RegInstruction::Br { target_index });
+                    instructions.push(RegInstruction::Br { target_index }, offset);
 
                     simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
@@ -2738,8 +2789,8 @@ impl Instruction for RegInstruction {
                 Operator::BrIf { relative_depth } => {
                     // Taking the branch skips everything after it, including any
                     // write that would have rescued a borrow still live here.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let block_index =
                         simulated_stack.control_stack.len() - 1 - relative_depth as usize;
@@ -2769,17 +2820,20 @@ impl Instruction for RegInstruction {
                             (move_registers, u32::MAX)
                         };
 
-                    instructions.push(RegInstruction::BrIf {
-                        cond,
-                        mov: move_registers,
-                        target_index,
-                    });
+                    instructions.push(
+                        RegInstruction::BrIf {
+                            cond,
+                            mov: move_registers,
+                            target_index,
+                        },
+                        offset,
+                    );
                 }
                 Operator::BrTable { targets: table } => {
                     // As for `br_if`: every arm jumps away, so a later write cannot
                     // be relied on to have rescued anything.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let targets_start = simulated_stack.br_targets.len() as u32;
                     let mut targets_len = 0;
@@ -2829,11 +2883,14 @@ impl Instruction for RegInstruction {
                         targets_len += 1;
                     }
 
-                    instructions.push(RegInstruction::BrTable {
-                        index: table_index,
-                        targets_start,
-                        targets_len,
-                    });
+                    instructions.push(
+                        RegInstruction::BrTable {
+                            index: table_index,
+                            targets_start,
+                            targets_len,
+                        },
+                        offset,
+                    );
 
                     simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
@@ -2853,18 +2910,21 @@ impl Instruction for RegInstruction {
                         ));
 
                     if !move_registers.is_empty() {
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
-                    instructions.push(RegInstruction::Return {
-                        target_index: u32::MAX,
-                    });
+                    instructions.push(
+                        RegInstruction::Return {
+                            target_index: u32::MAX,
+                        },
+                        offset,
+                    );
 
                     simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Call { function_index } => {
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let func_decl = &func_decls[function_index as usize];
                     let func_ty = &types[func_decl.ty.0 as usize];
@@ -2877,13 +2937,16 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(params);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
-                    instructions.push(RegInstruction::Call {
-                        func_index: FuncIndex(function_index),
-                        caller_base,
-                    });
+                    instructions.push(
+                        RegInstruction::Call {
+                            func_index: FuncIndex(function_index),
+                            caller_base,
+                        },
+                        offset,
+                    );
 
                     simulated_stack
                         .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
@@ -2892,7 +2955,7 @@ impl Instruction for RegInstruction {
                     type_index,
                     table_index,
                 } => {
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions);
+                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let ty = &types[type_index as usize];
                     let params = ty.params.len() as u32;
@@ -2905,19 +2968,22 @@ impl Instruction for RegInstruction {
                     let move_registers =
                         simulated_stack.materialize_stack_slots_in_registers(params);
 
-                    instructions.push(RegInstruction::CallIndirect {
-                        ty_index: TyIndex(type_index),
-                        table_index: TableIndex(table_index),
-                        slot,
-                        operands: move_registers.input,
-                        caller_base,
-                    });
+                    instructions.push(
+                        RegInstruction::CallIndirect {
+                            ty_index: TyIndex(type_index),
+                            table_index: TableIndex(table_index),
+                            slot,
+                            operands: move_registers.input,
+                            caller_base,
+                        },
+                        offset,
+                    );
 
                     simulated_stack
                         .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
                 }
                 Operator::Unreachable => {
-                    instructions.push(RegInstruction::Unreachable);
+                    instructions.push(RegInstruction::Unreachable, offset);
 
                     simulated_stack.reset_enclosing_block_layout();
                     unreachable_tracking_stack.set_unreachable();
@@ -2931,7 +2997,7 @@ impl Instruction for RegInstruction {
                         let move_registers =
                             simulated_stack.materialize_stack_slots_in_registers(results);
 
-                        instructions.push(RegInstruction::Move(move_registers));
+                        instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
                     debug_assert!(
@@ -2941,7 +3007,7 @@ impl Instruction for RegInstruction {
                     let index = instructions.len() as u32;
 
                     for (br_index, br_targets_index) in attached_breaks {
-                        match &mut instructions[*br_index as usize] {
+                        match &mut instructions.inner[*br_index as usize] {
                             RegInstruction::Br { target_index } => {
                                 *target_index = index;
                             }
@@ -2981,7 +3047,7 @@ impl Instruction for RegInstruction {
                                 cond: _,
                                 else_index,
                                 end_index,
-                            } = &mut instructions[if_index as usize]
+                            } = &mut instructions.inner[if_index as usize]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
@@ -2995,7 +3061,7 @@ impl Instruction for RegInstruction {
                             // that falls through into `else` knows where the construct closes.
                             if let Some(else_index) = ei {
                                 let RegInstruction::Else { end_index } =
-                                    &mut instructions[else_index as usize]
+                                    &mut instructions.inner[else_index as usize]
                                 else {
                                     unreachable!(
                                         "hitting this means TraceWasm has a bug recording the instructions"
@@ -3007,7 +3073,7 @@ impl Instruction for RegInstruction {
                         }
                     }
 
-                    instructions.push(RegInstruction::End);
+                    instructions.push(RegInstruction::End, offset);
                 }
                 _ => {
                     return Err(TraceWasmError::Unsupported(format!(
@@ -3030,7 +3096,7 @@ impl Instruction for RegInstruction {
             br_targets_arena: simulated_stack.br_targets.into_boxed_slice(),
         };
 
-        Ok((instructions, instruction_offsets, frame))
+        Ok((instructions.inner, instructions.offsets, frame))
     }
 
     #[inline(always)]
