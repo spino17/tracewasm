@@ -1232,8 +1232,12 @@ impl FrameLayout for RegFrameLayout {
     }
 }
 
-/// The two outputs of lowering one function body into register form: the
-/// instruction list, and the frame required to execute it.
+/// The three parallel outputs of lowering one function body into register form: the
+/// instruction list, the source-offset sidecar indexed alongside it, and the frame
+/// required to execute it.
+///
+/// The first two come out of an [`Instructions`], which is what keeps them the same
+/// length; see [`RegInstruction::emit_instructions_for_func`].
 type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 
 /// One lowered instruction.
@@ -1297,9 +1301,7 @@ pub(crate) enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else {
-        end_index: u32,
-    },
+    Else { end_index: u32 },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -1941,14 +1943,53 @@ pub(crate) enum RegInstruction {
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
     Move(DynSignature),
+    // The bulk-memory operators. Each takes its operands in wasm push order, so the
+    // run reads left to right as the operands are written in the text format —
+    // `input[0]` is the deepest, not the top of the stack. All of them address memory
+    // 0; lowering rejects any other index, so none carries one.
+    /// `memory.size`: write the memory's current size in pages to the destination
+    /// register.
+    ///
+    /// The only variant here with no inputs, so it carries a bare output run rather
+    /// than a [`Signature`].
     MemorySize(Registers<1, u32>),
+    /// `memory.grow`: grow the memory by the page delta in the input, writing the
+    /// size *before* the growth to the output.
+    ///
+    /// Does **not** trap when the request cannot be satisfied — it writes `-1` and
+    /// execution continues. The ceiling is the module's declared maximum, narrowed by
+    /// the instance [`Config`](crate::instance::config::Config).
     MemoryGrow(Signature<1, 1>),
+    /// `memory.copy`: copy within linear memory. Operands are `dest`, `src`, `len`.
+    ///
+    /// The ranges may overlap (`memmove` semantics). Traps if either runs past the
+    /// end of memory, with nothing written — so an executor must bounds-check both
+    /// before it moves a byte.
     MemoryCopy(Registers<3, Slot>),
+    /// `memory.fill`: set a range to the low byte of a value. Operands are `dest`,
+    /// `value`, `len`.
+    ///
+    /// Only the low byte of `value` is used, though the operand is a full `i32`.
+    /// Traps if the range runs past the end of memory.
     MemoryFill(Registers<3, Slot>),
+    /// `memory.init`: copy from a passive data segment into linear memory. Operands
+    /// are `dest`, `src`, `len`, where `src` indexes the *segment*.
+    ///
+    /// Traps if the source range exceeds the segment or the destination exceeds
+    /// memory. A segment already released by [`Self::DataDrop`] reads as empty, so a
+    /// zero-length init still succeeds where any non-empty one traps.
     MemoryInit {
+        /// Index of the data segment to copy from.
         data_index: u32,
+        /// `dest`, `src`, `len`.
         operands: Registers<3, Slot>,
     },
+    /// `data.drop`: release a passive data segment's bytes. The field is the segment
+    /// index.
+    ///
+    /// The segment becomes empty rather than invalid, so a later [`Self::MemoryInit`]
+    /// traps only if it asks for a non-empty range. Dropping twice is harmless. Takes
+    /// no operands, which is why it is the one memory variant with no register run.
     DataDrop(u32),
     /// Closes a label, one per `end` operator.
     ///
@@ -2060,6 +2101,10 @@ impl RegInstruction {
     /// See [`Self::spill_lazy`] for why the rescue cannot be left at the write, and
     /// [`Self::spill_live_globals`] for the other half — a construct needs both, and
     /// a call site that makes only one of them leaves the other origin space exposed.
+    ///
+    /// `offset` is the construct's own byte offset, so a spill hoisted above it
+    /// traces back to the operator that forced it rather than to the write it
+    /// rescued.
     fn spill_live_locals(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Instructions,
@@ -2102,6 +2147,12 @@ impl RegInstruction {
         );
     }
 
+    /// Claims the registers an operator of arity `I` -> `O` needs, hands them to
+    /// `emitter` to build the instruction, and appends it at `offset`.
+    ///
+    /// The arity is carried by the const parameters, so it comes from the variant's
+    /// own declaration — see the `emit!` macro in
+    /// [`Self::emit_instructions_for_func`], which is how every arm reaches this.
     fn emit<const I: usize, const O: usize, F: FnOnce(Signature<I, O>) -> RegInstruction>(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Instructions,
@@ -2140,6 +2191,16 @@ impl CallerBaseData for RegCallerBaseData {
     }
 }
 
+/// A body under construction: the instruction list and its source-offset sidecar,
+/// which have to stay the same length.
+///
+/// The two are paired in a type rather than kept as two `Vec`s because this pass
+/// appends from around thirty places — every operator arm, plus the spill and move
+/// helpers — and several emit more than one instruction per operator. Nothing but
+/// [`Self::push`] can change the length, so "an offset for every instruction" holds
+/// by construction instead of by remembering it at each site. Diagnostics index the
+/// sidecar by program counter, so a list that fell short would not be caught until a
+/// trap reached the missing entry.
 #[derive(Default)]
 struct Instructions {
     inner: Vec<RegInstruction>,
@@ -2147,15 +2208,21 @@ struct Instructions {
 }
 
 impl Instructions {
+    /// Appends `instr`, recording `offset` as the byte offset of the operator it was
+    /// lowered from. Several instructions from one operator share its offset.
     fn push(&mut self, instr: RegInstruction, offset: u32) {
         self.inner.push(instr);
         self.offsets.push(offset);
     }
 
+    /// The index the next pushed instruction will take — which is what a block or a
+    /// branch records as its target. See [`RegInstruction::spill_lazy`] on why spills
+    /// have to be emitted before an arm reads this.
     fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Whether anything has been emitted yet.
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -2175,9 +2242,16 @@ impl Instruction for RegInstruction {
     /// declared locals, and `globals_count` the module's globals — both size the lazy
     /// origin tables, which are indexed unchecked.
     ///
-    /// Returns the instruction list alongside the [`FrameLayout`] needed to run it.
-    /// The two are inseparable: every operand in the list is an index into the
-    /// arenas the layout carries.
+    /// Returns the instruction list, the byte offset of the operator each instruction
+    /// was lowered from, and the [`FrameLayout`] needed to run it. The list and the
+    /// layout are inseparable: every operand in the list is an index into the arenas
+    /// the layout carries.
+    ///
+    /// The offsets are parallel to the instructions, index for index, as the trait
+    /// requires. This pass emits several instructions for some operators — a spill,
+    /// a move and then the operator itself — and all of them carry that operator's
+    /// offset. Both lists come from one [`Instructions`], which is what makes their
+    /// lengths agree without every emit site having to.
     ///
     /// Rejects any operator the pass does not model as
     /// [`TraceWasmError::Unsupported`].
@@ -2208,12 +2282,15 @@ impl Instruction for RegInstruction {
             let (operator, offset) = operator_reader.read_with_offset()?;
             let offset = offset as u32;
 
-            /// [`Self::emit`] against this body's `simulated_stack` and `instructions`.
+            /// [`Self::emit`] against this body's `simulated_stack` and
+            /// `instructions`, at the current operator's `offset`.
             ///
-            /// Declared inside the function so it can name both by hand, which is what
-            /// keeps an arm to one line: the two are the same for every operator, and
+            /// Declared inside the loop rather than at function scope so it can name
+            /// `offset`, which changes per operator; the other two are the same
+            /// throughout. Naming all three here is what keeps an arm to one line —
             /// spelling them out per arm is the only thing that made these five lines
-            /// long instead of one.
+            /// long instead of one. Expansion is compile-time, so redeclaring it each
+            /// iteration costs nothing.
             ///
             /// The argument is normally the variant itself — a tuple-variant
             /// constructor *is* a `Fn(Signature<I, O>) -> RegInstruction`, so the arity
