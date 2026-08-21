@@ -3194,8 +3194,10 @@ impl Instruction for RegInstruction {
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
         let res = match self {
-            RegInstruction::Unreachable => {
-                return Err(Box::new(InstructionExecutionError::Unreachable));
+            RegInstruction::Move(sig) => {
+                Self::execute_mov(sig, caller_base_data, frame_layout, instance);
+
+                Step::Next
             }
             RegInstruction::Call {
                 func_index: callee_func_index,
@@ -3292,7 +3294,7 @@ impl Instruction for RegInstruction {
                     tmp.push(Self::slot_value(slot, caller_base_data, instance));
                 }
 
-                for (i, val) in tmp.iter().enumerate() {
+                for (i, val) in tmp.into_iter().enumerate() {
                     Self::set_value_to_register(
                         *caller_base + i as u32,
                         val,
@@ -3328,8 +3330,31 @@ impl Instruction for RegInstruction {
                     Step::Next
                 }
             }
-            RegInstruction::Move(sig) => {
-                Self::execute_mov(sig, caller_base_data, frame_layout, instance);
+            RegInstruction::Select(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let output_register_index =
+                    sig.output.registers(&frame_layout.output_registers_arena)[0];
+
+                let cond = Self::slot_value(&inputs[2], caller_base_data, instance).as_i32();
+                let b = Self::slot_value(&inputs[1], caller_base_data, instance);
+                let a = Self::slot_value(&inputs[0], caller_base_data, instance);
+
+                // true condition
+                if cond != 0 {
+                    Self::set_value_to_register(
+                        output_register_index,
+                        a,
+                        caller_base_data,
+                        instance,
+                    );
+                } else {
+                    Self::set_value_to_register(
+                        output_register_index,
+                        b,
+                        caller_base_data,
+                        instance,
+                    );
+                }
 
                 Step::Next
             }
@@ -3406,7 +3431,11 @@ impl Instruction for RegInstruction {
 
                 Step::JumpTo(branch.target_index)
             }
+            RegInstruction::Return { target_index } => Step::JumpTo(*target_index),
             RegInstruction::End => Step::Next,
+            RegInstruction::Unreachable => {
+                return Err(Box::new(InstructionExecutionError::Unreachable));
+            }
             _ => todo!(),
         };
 
@@ -3457,23 +3486,22 @@ impl RegInstruction {
     #[inline(always)]
     fn set_value_to_register<M: Memory, I: ImportRegistry>(
         relative_index: u32,
-        val: &Value,
+        val: Value,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
         instance.frame.registers
-            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize] = *val;
+            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize] = val;
     }
 
     #[inline(always)]
     fn set_value_to_spills<M: Memory, I: ImportRegistry>(
         relative_index: u32,
-        val: &Value,
+        val: Value,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
-        instance.frame.spills[(caller_base_data.spills_base_index + relative_index) as usize] =
-            *val;
+        instance.frame.spills[(caller_base_data.spills_base_index + relative_index) as usize] = val;
     }
 
     #[inline(always)]
@@ -3492,7 +3520,7 @@ impl RegInstruction {
             tmp.push(Self::slot_value(slot, caller_base_data, instance));
         }
 
-        for (i, val) in tmp.iter().enumerate() {
+        for (i, val) in tmp.into_iter().enumerate() {
             Self::set_value_to_register(outputs[i], val, caller_base_data, instance);
         }
     }
