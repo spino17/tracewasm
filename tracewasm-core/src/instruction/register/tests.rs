@@ -814,11 +814,11 @@ impl Frame {
             RegInstruction::GlobalSpill { index, spill_index } => {
                 self.spills[spill_slot(spill_index)] = self.globals[index.0 as usize];
             }
-            RegInstruction::LocalSet { index, sig } => {
-                self.locals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            RegInstruction::LocalSet { index, input } => {
+                self.locals[index.0 as usize] = self.read(&input.registers(ins)[0]);
             }
-            RegInstruction::GlobalSet { index, sig } => {
-                self.globals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            RegInstruction::GlobalSet { index, input } => {
+                self.globals[index.0 as usize] = self.read(&input.registers(ins)[0]);
             }
             _ => unreachable!("these tests emit only spills and writes"),
         }
@@ -886,12 +886,12 @@ fn a_conditional_arm_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
         prog.push(
             RegInstruction::LocalSet {
                 index: LocalIndex(0),
-                sig,
+                input,
             },
             0,
         );
@@ -942,12 +942,12 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 
         assert!(SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills).is_none());
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
         prog.push(
             RegInstruction::GlobalSet {
                 index: GlobalIndex(1),
-                sig,
+                input,
             },
             0,
         );
@@ -999,12 +999,12 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
         assert!(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none());
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
         prog.push(
             RegInstruction::LocalSet {
                 index: LocalIndex(0),
-                sig,
+                input,
             },
             0,
         );
@@ -1055,12 +1055,12 @@ fn a_loop_body_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
         prog.push(
             RegInstruction::LocalSet {
                 index: LocalIndex(0),
-                sig,
+                input,
             },
             0,
         );

@@ -1269,7 +1269,7 @@ pub(crate) enum RegInstruction {
     /// [`Self::GlobalSpill`].
     GlobalSet {
         index: GlobalIndex,
-        sig: Signature<1, 0>,
+        input: Registers<1, Slot>,
     },
     /// [`Self::LocalSpill`] for a global.
     GlobalSpill {
@@ -1280,7 +1280,7 @@ pub(crate) enum RegInstruction {
     /// rescues.
     LocalSet {
         index: LocalIndex,
-        sig: Signature<1, 0>,
+        input: Registers<1, Slot>,
     },
     /// Copies a local into a spill slot, immediately before a write that would
     /// otherwise invalidate operands still reading it. See [`lazy`].
@@ -1294,7 +1294,7 @@ pub(crate) enum RegInstruction {
     /// already is — no destination register is allocated.
     LocalTee {
         index: LocalIndex,
-        sig: Signature<1, 0>,
+        input: Registers<1, Slot>,
     },
     Loop,
     /// `if`: fall through when the condition is non-zero, otherwise jump past
@@ -2342,12 +2342,12 @@ impl Instruction for RegInstruction {
                         );
                     }
 
-                    let registers = simulated_stack.registers_for::<1, 0>();
+                    let registers = simulated_stack.registers_for::<1, 0>().input;
 
                     instructions.push(
                         RegInstruction::GlobalSet {
                             index: GlobalIndex(global_index),
-                            sig: registers,
+                            input: registers,
                         },
                         offset,
                     );
@@ -2370,12 +2370,12 @@ impl Instruction for RegInstruction {
                         );
                     }
 
-                    let registers = simulated_stack.registers_for::<1, 0>();
+                    let registers = simulated_stack.registers_for::<1, 0>().input;
 
                     instructions.push(
                         RegInstruction::LocalSet {
                             index: LocalIndex(local_index),
-                            sig: registers,
+                            input: registers,
                         },
                         offset,
                     );
@@ -2399,21 +2399,15 @@ impl Instruction for RegInstruction {
 
                     simulated_stack.input_registers.push(simulated_stack.tee());
 
-                    let registers = Signature {
-                        input: Registers {
-                            start: input_start as u32,
-                            phantom: PhantomData,
-                        },
-                        output: Registers {
-                            start: simulated_stack.output_registers.len() as u32,
-                            phantom: PhantomData,
-                        },
+                    let registers = Registers {
+                        start: input_start as u32,
+                        phantom: PhantomData,
                     };
 
                     instructions.push(
                         RegInstruction::LocalTee {
                             index: LocalIndex(local_index),
-                            sig: registers,
+                            input: registers,
                         },
                         offset,
                     );
@@ -3429,6 +3423,66 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
+            RegInstruction::LocalSet { index, input } => {
+                Self::set_local(
+                    *index,
+                    Self::slot_value(
+                        input.registers(&frame_layout.input_registers_arena)[0],
+                        caller_base_data,
+                        instance,
+                    ),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::LocalSpill { index, spill_index } => {
+                Self::set_value_to_spills(
+                    spill_index.raw_value(),
+                    Self::local(*index, caller_base_data, instance),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::LocalTee { index, input } => {
+                Self::set_local(
+                    *index,
+                    Self::slot_value(
+                        input.registers(&frame_layout.input_registers_arena)[0],
+                        caller_base_data,
+                        instance,
+                    ),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::GlobalSet { index, input } => {
+                let ty = module.globals[index.0 as usize].ty.content_type();
+
+                instance.global_vals[index.0 as usize] = Self::slot_value(
+                    input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .into_val(&ty);
+
+                Step::Next
+            }
+            RegInstruction::GlobalSpill { index, spill_index } => {
+                Self::set_value_to_spills(
+                    spill_index.raw_value(),
+                    instance.global_vals[index.0 as usize].into(),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
             RegInstruction::I32Load { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -3573,6 +3627,25 @@ impl Instruction for RegInstruction {
 }
 
 impl RegInstruction {
+    #[inline(always)]
+    fn local<M: Memory, I: ImportRegistry>(
+        index: LocalIndex,
+        caller_base_data: &RegCallerBaseData,
+        instance: &Instance<M, I, crate::Register>,
+    ) -> Value {
+        instance.frame.registers[(caller_base_data.base_register_index + index.0) as usize]
+    }
+
+    #[inline(always)]
+    fn set_local<M: Memory, I: ImportRegistry>(
+        index: LocalIndex,
+        val: Value,
+        caller_base_data: &RegCallerBaseData,
+        instance: &mut Instance<M, I, crate::Register>,
+    ) {
+        instance.frame.registers[(caller_base_data.base_register_index + index.0) as usize] = val;
+    }
+
     #[inline(always)]
     fn slot_value<M: Memory, I: ImportRegistry>(
         slot: Slot,

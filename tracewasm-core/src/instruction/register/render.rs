@@ -307,20 +307,20 @@ impl RegInstruction {
                 sig.output.registers(outs),
             ),
 
-            RegInstruction::LocalSet { index, sig } => format!(
+            RegInstruction::LocalSet { index, input } => format!(
                 "local.set    local{} <- {}",
                 index.0,
-                sig.input.registers(ins)[0].render()
+                input.registers(ins)[0].render()
             ),
-            RegInstruction::LocalTee { index, sig } => format!(
+            RegInstruction::LocalTee { index, input } => format!(
                 "local.tee    local{} <- {}",
                 index.0,
-                sig.input.registers(ins)[0].render()
+                input.registers(ins)[0].render()
             ),
-            RegInstruction::GlobalSet { index, sig } => format!(
+            RegInstruction::GlobalSet { index, input } => format!(
                 "global.set   global{} <- {}",
                 index.0,
-                sig.input.registers(ins)[0].render()
+                input.registers(ins)[0].render()
             ),
             RegInstruction::LocalSpill { index, spill_index } => {
                 format!("local.spill  local{} -> spill{spill_index}", index.0)
