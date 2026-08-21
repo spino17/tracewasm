@@ -116,7 +116,7 @@ use crate::{
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
     runtime::{reg::RegFrame, stack::Stack},
 };
-use std::{marker::PhantomData, u32};
+use std::marker::PhantomData;
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;

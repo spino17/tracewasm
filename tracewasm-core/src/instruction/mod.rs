@@ -200,6 +200,8 @@ pub(crate) trait FrameLayout {
     fn br_table_targets(&self) -> &[Self::BrTableTarget];
 }
 
+type LoweredFuncBody<T: Instruction> = (Vec<T>, Vec<u32>, T::FrameLayout);
+
 /// One lowering strategy: an instruction set, the frame it runs in, and how a
 /// body is produced and executed.
 ///
@@ -262,7 +264,7 @@ pub(crate) trait Instruction: Sized {
         func_decls: &[FuncDecl],
         locals_count: u32,
         globals_count: u32,
-    ) -> Result<(Vec<Self>, Vec<u32>, Self::FrameLayout), TraceWasmError>;
+    ) -> Result<LoweredFuncBody<Self>, TraceWasmError>;
 
     /// Executes this one instruction against `instance`.
     ///

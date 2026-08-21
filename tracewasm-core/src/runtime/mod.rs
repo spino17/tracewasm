@@ -104,7 +104,7 @@ use crate::{
     },
 };
 use smallvec::{SmallVec, smallvec};
-use std::{sync::Arc, u32};
+use std::sync::Arc;
 
 // No outer doc comments on these: each module carries its own `//!` docs, and an
 // outer `///` at the declaration site re-scopes the intra-doc links inside it to
@@ -504,7 +504,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let mut instructions = func_body.instructions.as_ref();
         let mut instruction_offsets = func_body.instruction_offsets.as_ref();
-        let mut br_table_targets = func_body.frame_layout.br_table_targets().as_ref();
+        let mut br_table_targets = func_body.frame_layout.br_table_targets();
 
         let locals_ty = &func_body.locals;
         let mut pc = 0;
@@ -815,9 +815,7 @@ impl TraceVM {
             }
         }
 
-        let val = stack.pop();
-
-        val
+        stack.pop()
     }
 }
 

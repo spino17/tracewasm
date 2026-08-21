@@ -99,10 +99,7 @@ use crate::{
         value::{DataVal, Value},
     },
 };
-use std::{
-    ops::{BitAnd, BitOr, BitXor, Neg},
-    u32,
-};
+use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 /// A lowered TraceWasm instruction.
@@ -2556,7 +2553,7 @@ impl Instruction for StackInstruction {
                 // any non-empty read fails the bounds check below.
                 let segment: &[u8] = match &instance.data_vals[*data_index as usize] {
                     DataVal::Dropped => &[],
-                    DataVal::Passive(segment) => &segment,
+                    DataVal::Passive(segment) => segment,
                 };
 
                 // The source range is validated against the segment before

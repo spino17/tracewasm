@@ -205,7 +205,7 @@ impl FuncCallError {
             tracewasm_unreachable::unreachable()
         };
 
-        &err
+        err
     }
 
     /// The interpreter backtrace for this failure, innermost frame first.
