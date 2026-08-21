@@ -672,7 +672,6 @@ impl TraceVM {
     /// Whatever the imported callee returned, wrapped to name the callee.
     pub(crate) fn call_imported<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         callee_func_index: FuncIndex,
-        callee_params_count: u32,
         module: &Module<V>,
         instance: &mut Instance<M, I, V>,
         is_indirect: Option<TableIndex>,
@@ -680,6 +679,7 @@ impl TraceVM {
     ) -> Result<(), Box<InstructionExecutionError>> {
         let callee_func_decl = &module.func_decls[callee_func_index.0 as usize];
         let callee_params_ty = &module.types[callee_func_decl.ty.0 as usize].params;
+        let callee_params_count = callee_params_ty.len() as u32;
 
         debug_assert!(matches!(callee_func_decl.kind, FuncKind::Imported { .. }));
 

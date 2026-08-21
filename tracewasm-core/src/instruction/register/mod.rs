@@ -119,7 +119,7 @@ use crate::{
     runtime::{Step, reg::RegFrame, stack::Stack, value::Value},
 };
 use smallvec::{SmallVec, smallvec};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, u32};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
@@ -3198,9 +3198,34 @@ impl Instruction for RegInstruction {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
             }
             RegInstruction::Call {
-                func_index,
+                func_index: callee_func_index,
                 caller_base,
-            } => todo!(),
+            } => {
+                let callee_caller_base_data = RegCallerBaseData {
+                    base_register_index: *caller_base
+                        + caller_base_data.callee_frame_base_register_index,
+                    callee_frame_base_register_index: u32::MAX,
+                    spills_base_index: u32::MAX,
+                };
+
+                if callee_func_index.0 >= imported_func_count {
+                    Step::Call {
+                        func_index: *callee_func_index,
+                        caller_base_data: callee_caller_base_data,
+                        is_indirect: None,
+                    }
+                } else {
+                    crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
+                        *callee_func_index,
+                        module,
+                        instance,
+                        None,
+                        &callee_caller_base_data,
+                    )?;
+
+                    Step::Next
+                }
+            }
             RegInstruction::CallIndirect {
                 ty_index,
                 table_index,

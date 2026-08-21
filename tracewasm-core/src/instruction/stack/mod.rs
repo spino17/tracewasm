@@ -2345,7 +2345,7 @@ impl Instruction for StackInstruction {
                 func_index: callee_func_index,
                 params_count: callee_params_count,
             } => {
-                let caller_base_data = StackCallerBaseData {
+                let callee_caller_base_data = StackCallerBaseData {
                     base_height: instance.frame.height() - *callee_params_count,
                     callee_frame_base_height: u32::MAX,
                 };
@@ -2356,17 +2356,16 @@ impl Instruction for StackInstruction {
                 if callee_func_index.0 >= imported_func_count {
                     Step::Call {
                         func_index: *callee_func_index,
-                        caller_base_data,
+                        caller_base_data: callee_caller_base_data,
                         is_indirect: None,
                     }
                 } else {
                     crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
                         *callee_func_index,
-                        *callee_params_count,
                         module,
                         instance,
                         None,
-                        &caller_base_data,
+                        &callee_caller_base_data,
                     )?;
 
                     Step::Next
@@ -2421,7 +2420,7 @@ impl Instruction for StackInstruction {
                     )));
                 }
 
-                let caller_base_data = StackCallerBaseData {
+                let callee_caller_base_data = StackCallerBaseData {
                     base_height: instance.frame.height() - declared_params.len() as u32,
                     callee_frame_base_height: u32::MAX,
                 };
@@ -2431,17 +2430,16 @@ impl Instruction for StackInstruction {
                 if callee_func_index.0 >= imported_func_count {
                     Step::Call {
                         func_index: callee_func_index,
-                        caller_base_data,
+                        caller_base_data: callee_caller_base_data,
                         is_indirect: Some(*table_index),
                     }
                 } else {
                     crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
                         callee_func_index,
-                        declared_params.len() as u32,
                         module,
                         instance,
                         Some(*table_index),
-                        &caller_base_data,
+                        &callee_caller_base_data,
                     )?;
 
                     Step::Next
