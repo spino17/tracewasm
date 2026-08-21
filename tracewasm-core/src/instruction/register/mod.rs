@@ -169,7 +169,7 @@ enum BlockVariant {
 
 /// An immediate operand, carried inline because it has no home to be read from.
 #[derive(Debug, Clone, Copy)]
-enum Const {
+pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
     /// A 64-bit integer immediate.
@@ -224,7 +224,7 @@ impl Slot {
         matches!(self, Slot::Register(_))
     }
 
-    pub fn render(&self) -> String {
+    fn render(&self) -> String {
         match self {
             Slot::Const(Const::I32(v)) => format!("{v}"),
             Slot::Const(Const::I64(v)) => format!("{v}i64"),
