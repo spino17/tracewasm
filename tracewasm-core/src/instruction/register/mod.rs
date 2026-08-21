@@ -104,7 +104,7 @@
 //! balanced without a reconciliation step.
 
 use crate::{
-    error::{CallIndirectError, InstructionExecutionError, TraceWasmError},
+    error::{CallIndirectError, InstructionExecutionError, MemoryError, TraceWasmError},
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
@@ -3238,7 +3238,7 @@ impl Instruction for RegInstruction {
                 let table = &instance.table_vals[table_index.0 as usize];
 
                 let slot = Self::slot_value(
-                    &slot.registers(&frame_layout.input_registers_arena)[0],
+                    slot.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -3291,7 +3291,7 @@ impl Instruction for RegInstruction {
                 let mut tmp: SmallVec<[Value; 3]> = smallvec![];
 
                 for slot in param_slots {
-                    tmp.push(Self::slot_value(slot, caller_base_data, instance));
+                    tmp.push(Self::slot_value(*slot, caller_base_data, instance));
                 }
 
                 for (i, val) in tmp.into_iter().enumerate() {
@@ -3335,9 +3335,9 @@ impl Instruction for RegInstruction {
                 let output_register_index =
                     sig.output.registers(&frame_layout.output_registers_arena)[0];
 
-                let cond = Self::slot_value(&inputs[2], caller_base_data, instance).as_i32();
-                let b = Self::slot_value(&inputs[1], caller_base_data, instance);
-                let a = Self::slot_value(&inputs[0], caller_base_data, instance);
+                let cond = Self::slot_value(inputs[2], caller_base_data, instance).as_i32();
+                let b = Self::slot_value(inputs[1], caller_base_data, instance);
+                let a = Self::slot_value(inputs[0], caller_base_data, instance);
 
                 // true condition
                 if cond != 0 {
@@ -3364,7 +3364,7 @@ impl Instruction for RegInstruction {
                 end_index,
             } => {
                 let cond = Self::slot_value(
-                    &cond.registers(&frame_layout.input_registers_arena)[0],
+                    cond.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -3389,7 +3389,7 @@ impl Instruction for RegInstruction {
                 target_index,
             } => {
                 let cond = Self::slot_value(
-                    &cond.registers(&frame_layout.input_registers_arena)[0],
+                    cond.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -3413,7 +3413,7 @@ impl Instruction for RegInstruction {
                 let targets = &br_table_targets[start..start + *targets_len as usize];
 
                 let index = Self::slot_value(
-                    &index.registers(&frame_layout.input_registers_arena)[0],
+                    index.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -3436,6 +3436,36 @@ impl Instruction for RegInstruction {
             RegInstruction::Unreachable => {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
             }
+            RegInstruction::I32Load { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+
+                let val = instance.memory.read_i32(effective_offset)?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Store { offset, sig } => {
+                let input = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(input[1], caller_base_data, instance).as_i32();
+
+                let effective_offset =
+                    Self::effective_address(*offset, input[0], caller_base_data, instance)?;
+
+                instance.memory.write_u32(effective_offset, val as u32)?;
+
+                Step::Next
+            }
             _ => todo!(),
         };
 
@@ -3446,25 +3476,25 @@ impl Instruction for RegInstruction {
 impl RegInstruction {
     #[inline(always)]
     fn slot_value<M: Memory, I: ImportRegistry>(
-        slot: &Slot,
+        slot: Slot,
         caller_base_data: &RegCallerBaseData,
         instance: &Instance<M, I, crate::Register>,
     ) -> Value {
         match slot {
             Slot::Const(val) => match val {
-                Const::I32(val) => Value::from_i32(*val),
-                Const::I64(val) => Value::from_i64(*val),
-                Const::F32(val) => Value::from_f32(*val),
-                Const::F64(val) => Value::from_f64(*val),
-                Const::Ref(r) => Value::from_ref(*r),
+                Const::I32(val) => Value::from_i32(val),
+                Const::I64(val) => Value::from_i64(val),
+                Const::F32(val) => Value::from_f32(val),
+                Const::F64(val) => Value::from_f64(val),
+                Const::Ref(r) => Value::from_ref(r),
             },
-            Slot::Global(index) => instance.global_vals[*index as usize].into(),
+            Slot::Global(index) => instance.global_vals[index as usize].into(),
             Slot::Local(index) => {
-                instance.frame.registers[(caller_base_data.base_register_index + *index) as usize]
+                instance.frame.registers[(caller_base_data.base_register_index + index) as usize]
             }
             Slot::Register(index) => {
                 instance.frame.registers
-                    [(caller_base_data.callee_frame_base_register_index + *index) as usize]
+                    [(caller_base_data.callee_frame_base_register_index + index) as usize]
             }
             Slot::Spilled(index) => {
                 instance.frame.spills
@@ -3517,12 +3547,28 @@ impl RegInstruction {
 
         // memmove: input and output can overlap!
         for slot in inputs {
-            tmp.push(Self::slot_value(slot, caller_base_data, instance));
+            tmp.push(Self::slot_value(*slot, caller_base_data, instance));
         }
 
         for (i, val) in tmp.into_iter().enumerate() {
             Self::set_value_to_register(outputs[i], val, caller_base_data, instance);
         }
+    }
+
+    #[inline(always)]
+    fn effective_address<M: Memory, I: ImportRegistry>(
+        memarg_offset: u32,
+        slot: Slot,
+        caller_base_data: &RegCallerBaseData,
+        instance: &mut Instance<M, I, crate::Register>,
+    ) -> Result<usize, MemoryError> {
+        let addr = Self::slot_value(slot, caller_base_data, instance).as_i32() as u32;
+
+        let effective_offset = addr
+            .checked_add(memarg_offset)
+            .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
+
+        Ok(effective_offset as usize)
     }
 }
 
