@@ -104,7 +104,9 @@
 //! balanced without a reconciliation step.
 
 use crate::{
-    error::{CallIndirectError, InstructionExecutionError, MemoryError, TraceWasmError},
+    error::{
+        CallIndirectError, InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
+    },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
@@ -116,7 +118,13 @@ use crate::{
     },
     memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    runtime::{Step, reg::RegFrame, signature_mismatch, stack::Stack, value::Value},
+    runtime::{
+        Step,
+        reg::RegFrame,
+        signature_mismatch,
+        stack::Stack,
+        value::{DataVal, Value},
+    },
 };
 use smallvec::{SmallVec, smallvec};
 use std::{marker::PhantomData, u32};
@@ -3244,7 +3252,6 @@ impl Instruction for RegInstruction {
                 )
                 .as_i32() as u32 as usize;
 
-                // Trap if the index is past the table's end (wasm: "undefined element").
                 let Some(func_ref) = table.table.get(slot).copied() else {
                     return Err(Box::new(InstructionExecutionError::CallIndirect(
                         *table_index,
@@ -3252,7 +3259,6 @@ impl Instruction for RegInstruction {
                     )));
                 };
 
-                // Trap on a null element (wasm: "uninitialized element").
                 let Some(callee_func_index) = func_ref else {
                     return Err(Box::new(InstructionExecutionError::CallIndirect(
                         *table_index,
@@ -3270,8 +3276,6 @@ impl Instruction for RegInstruction {
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;
 
-                // Trap if the callee's signature differs from the type the
-                // instruction expects (wasm: "indirect call type mismatch").
                 if params.as_ref() != declared_params.as_ref()
                     || results.as_ref() != declared_results.as_ref()
                 {
@@ -3310,8 +3314,6 @@ impl Instruction for RegInstruction {
                     spills_base_index: u32::MAX,
                 };
 
-                // As for `Call` above; the table index rides along so a failure can
-                // say which table the call went through.
                 if callee_func_index.0 >= imported_func_count {
                     Step::Call {
                         func_index: callee_func_index,
@@ -3330,14 +3332,141 @@ impl Instruction for RegInstruction {
                     Step::Next
                 }
             }
+            RegInstruction::MemorySize(outputs) => {
+                Self::set_value_to_register(
+                    outputs.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(instance.memory.size_in_pages() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::MemoryGrow(sig) => {
+                let delta_in_pages = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32;
+
+                let max_pages = instance.config.get_max_memory_size_in_pages();
+
+                match instance.memory.grow(delta_in_pages, max_pages) {
+                    Ok(old_page) => Self::set_value_to_register(
+                        sig.output.registers(&frame_layout.output_registers_arena)[0],
+                        Value::from_i32(old_page as i32),
+                        caller_base_data,
+                        instance,
+                    ),
+                    Err(_) => Self::set_value_to_register(
+                        sig.output.registers(&frame_layout.output_registers_arena)[0],
+                        Value::from_i32(-1),
+                        caller_base_data,
+                        instance,
+                    ),
+                }
+
+                Step::Next
+            }
+            RegInstruction::MemoryCopy(inputs) => {
+                let inputs = inputs.registers(&frame_layout.input_registers_arena);
+                let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
+                    as usize;
+                let src = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32
+                    as usize;
+                let len = Self::slot_value(inputs[2], caller_base_data, instance).as_i32() as u32
+                    as usize;
+
+                instance.memory.copy_within(dest, src, len)?;
+
+                Step::Next
+            }
+            RegInstruction::MemoryFill(inputs) => {
+                let inputs = inputs.registers(&frame_layout.input_registers_arena);
+                let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
+                    as usize;
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let len = Self::slot_value(inputs[2], caller_base_data, instance).as_i32() as u32
+                    as usize;
+
+                instance.memory.fill(dest, val, len)?;
+
+                Step::Next
+            }
+            RegInstruction::MemoryInit {
+                data_index,
+                operands,
+            } => {
+                let inputs = operands.registers(&frame_layout.input_registers_arena);
+                let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
+                    as usize;
+                let src = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32
+                    as usize;
+                let len = Self::slot_value(inputs[2], caller_base_data, instance).as_i32() as u32
+                    as usize;
+
+                let segment: &[u8] = match &instance.data_vals[*data_index as usize] {
+                    DataVal::Dropped => &[],
+                    DataVal::Passive(segment) => segment,
+                };
+
+                let end = src
+                    .checked_add(len)
+                    .filter(|end| *end <= segment.len())
+                    .ok_or(MemoryError::OutOfBoundsAccess(
+                        MemoryAccessKind::Read,
+                        src,
+                        segment.len(),
+                    ))?;
+
+                instance.memory.write(dest, &segment[src..end])?;
+
+                Step::Next
+            }
+            RegInstruction::DataDrop(data_index) => {
+                instance.data_vals[*data_index as usize] = DataVal::Dropped;
+
+                Step::Next
+            }
+            RegInstruction::I32Load { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+
+                let val = instance.memory.read_i32(effective_offset)?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Store { offset, sig } => {
+                let input = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(input[1], caller_base_data, instance).as_i32();
+
+                let effective_offset =
+                    Self::effective_address(*offset, input[0], caller_base_data, instance)?;
+
+                instance.memory.write_u32(effective_offset, val as u32)?;
+
+                Step::Next
+            }
             RegInstruction::Select(sig) => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let output_register_index =
                     sig.output.registers(&frame_layout.output_registers_arena)[0];
 
-                let cond = Self::slot_value(inputs[2], caller_base_data, instance).as_i32();
-                let b = Self::slot_value(inputs[1], caller_base_data, instance);
                 let a = Self::slot_value(inputs[0], caller_base_data, instance);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance);
+                let cond = Self::slot_value(inputs[2], caller_base_data, instance).as_i32();
 
                 // true condition
                 if cond != 0 {
@@ -3435,36 +3564,6 @@ impl Instruction for RegInstruction {
             RegInstruction::End => Step::Next,
             RegInstruction::Unreachable => {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
-            }
-            RegInstruction::I32Load { offset, sig } => {
-                let effective_offset = Self::effective_address(
-                    *offset,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )?;
-
-                let val = instance.memory.read_i32(effective_offset)?;
-
-                Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
-                    Value::from_i32(val),
-                    caller_base_data,
-                    instance,
-                );
-
-                Step::Next
-            }
-            RegInstruction::I32Store { offset, sig } => {
-                let input = sig.input.registers(&frame_layout.input_registers_arena);
-                let val = Self::slot_value(input[1], caller_base_data, instance).as_i32();
-
-                let effective_offset =
-                    Self::effective_address(*offset, input[0], caller_base_data, instance)?;
-
-                instance.memory.write_u32(effective_offset, val as u32)?;
-
-                Step::Next
             }
             _ => todo!(),
         };
