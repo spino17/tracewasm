@@ -390,7 +390,7 @@ impl RegInstruction {
                 end_index,
             } => format!(
                 "if           {} else={} end={}",
-                sig1(&cond.input),
+                sig1(&cond),
                 else_index
                     .map(|i| i.to_string())
                     .unwrap_or_else(|| "-".into()),

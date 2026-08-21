@@ -1295,7 +1295,7 @@ pub(crate) enum RegInstruction {
     /// Block params, if any, were materialized by a [`Self::Move`] emitted just
     /// before this instruction.
     If {
-        cond: Signature<1, 0>,
+        cond: Registers<1, Slot>,
         /// Index of the matching [`Self::Else`], backpatched at `end`.
         else_index: Option<u32>,
         /// Index of the matching `end`, backpatched.
@@ -2776,7 +2776,7 @@ impl Instruction for RegInstruction {
 
                     instructions.push(
                         RegInstruction::If {
-                            cond: simulated_stack.registers_for::<1, 0>(),
+                            cond: simulated_stack.registers_for::<1, 0>().input,
                             else_index: None,
                             end_index: u32::MAX,
                         },
@@ -3333,6 +3333,42 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
+            RegInstruction::If {
+                cond,
+                else_index,
+                end_index,
+            } => {
+                let cond = Self::slot_value(
+                    &cond.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                if cond != 0 {
+                    Step::Next
+                } else {
+                    if let Some(else_index) = else_index {
+                        Step::JumpTo(*else_index + 1) // first instruction of the else branch
+                    } else {
+                        Step::JumpTo(*end_index)
+                    }
+                }
+            }
+            RegInstruction::Else { end_index } => Step::JumpTo(*end_index),
+            RegInstruction::Loop => Step::Next,
+            RegInstruction::Br { target_index } => todo!(),
+            RegInstruction::BrIf {
+                cond,
+                mov,
+                target_index,
+            } => todo!(),
+            RegInstruction::BrTable {
+                index,
+                targets_start,
+                targets_len,
+            } => todo!(),
+            RegInstruction::End => Step::Next,
             _ => todo!(),
         };
 
