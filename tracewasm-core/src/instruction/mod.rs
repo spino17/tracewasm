@@ -279,7 +279,7 @@ pub(crate) trait Instruction: Sized {
         &self,
         module: &Module<Self::Vm>,
         instance: &mut Instance<M, I, Self::Vm>,
-        br_table_targets: &[Self::BrTableTarget],
+        frame_layout: &Self::FrameLayout,
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<Step<Self>, Box<InstructionExecutionError>>;

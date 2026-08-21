@@ -302,6 +302,13 @@ impl SpillArena {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SpillIndex(u32);
 
+impl SpillIndex {
+    #[inline(always)]
+    pub fn raw_value(&self) -> u32 {
+        self.0
+    }
+}
+
 impl fmt::Display for SpillIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)

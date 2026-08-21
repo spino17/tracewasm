@@ -46,7 +46,7 @@ pub(crate) struct RegFrame {
     /// [`RuntimeFrame::set_initial_params`] positions the entry function's params
     /// by `push`, so they only land at register 0 — where
     /// [`CallerBaseData::initial_data`] says they are — while this is empty.
-    inner: Vec<Value>,
+    pub registers: Vec<Value>,
     /// The spill area, one region per live frame, based at
     /// [`RegCallerBaseData::spills_base_index`].
     ///
@@ -54,13 +54,13 @@ pub(crate) struct RegFrame {
     /// index. The cost is that its base is this vector's length rather than a
     /// position derived from the caller, so a frame's region is only released by
     /// `exit_frame` truncating to the recorded base.
-    spills: Vec<Value>,
+    pub spills: Vec<Value>,
 }
 
 impl Default for RegFrame {
     fn default() -> Self {
         RegFrame {
-            inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
+            registers: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
             spills: vec![],
         }
     }
@@ -73,7 +73,7 @@ impl RuntimeFrame for RegFrame {
 
     fn set_initial_params(&mut self, params: &[super::value::Val]) {
         for param in params {
-            self.inner.push(param.into());
+            self.registers.push(param.into());
         }
     }
 
@@ -86,7 +86,7 @@ impl RuntimeFrame for RegFrame {
         let mut s = smallvec![];
 
         for i in 0..(params_count as usize) {
-            s.push(self.inner[base_register_index + i]);
+            s.push(self.registers[base_register_index + i]);
         }
 
         s
@@ -100,7 +100,7 @@ impl RuntimeFrame for RegFrame {
         let base_register_index = caller_base_data.base_offset() as usize;
 
         for (i, res) in results.into_iter().enumerate() {
-            self.inner[base_register_index + i] = res.into();
+            self.registers[base_register_index + i] = res.into();
         }
     }
 
@@ -113,7 +113,7 @@ impl RuntimeFrame for RegFrame {
         let mut s = smallvec![];
 
         for i in 0..results_count {
-            s.push(self.inner[i as usize]);
+            s.push(self.registers[i as usize]);
         }
 
         s
@@ -127,7 +127,7 @@ impl RuntimeFrame for RegFrame {
     /// without reaching `exit_frame` and its base is a length — an orphaned region
     /// would push every later frame's base up for the life of the instance.
     fn reset(&mut self) {
-        self.inner.clear();
+        self.registers.clear();
         self.spills.clear();
     }
 
@@ -145,14 +145,15 @@ impl RuntimeFrame for RegFrame {
         let total_register_capacity =
             base_register_index + locals_count + frame_layout.registers as usize;
 
-        if self.inner.len() < total_register_capacity {
-            self.inner.resize(total_register_capacity, Value::default());
+        if self.registers.len() < total_register_capacity {
+            self.registers
+                .resize(total_register_capacity, Value::default());
         }
 
         for i in 0..(locals_count - params_count) {
             let ty = locals_ty[i + params_count];
 
-            self.inner[base_register_index + params_count + i] = Value::zero_of_ty(ty);
+            self.registers[base_register_index + params_count + i] = Value::zero_of_ty(ty);
         }
 
         let spills_base_index = self.spills.len();
@@ -197,11 +198,11 @@ impl RuntimeFrame for RegFrame {
         let callee_frame_base_index = caller_base_data.callee_frame_base_register_index as usize;
 
         for i in 0..results_count as usize {
-            temp.push(self.inner[callee_frame_base_index + i]);
+            temp.push(self.registers[callee_frame_base_index + i]);
         }
 
         for i in 0..results_count as usize {
-            self.inner[base_register_index + i] = temp[i];
+            self.registers[base_register_index + i] = temp[i];
         }
 
         self.spills.resize(
@@ -266,7 +267,7 @@ mod tests {
             &layout(registers),
         );
 
-        frame.inner.len()
+        frame.registers.len()
     }
 
     /// [`enter`], handing back the base data so a test can read the bases
@@ -406,7 +407,7 @@ mod tests {
         frame.reset();
 
         assert_eq!(frame.spills.len(), 0, "spills are released");
-        assert_eq!(frame.inner.len(), 0, "and the register file with them");
+        assert_eq!(frame.registers.len(), 0, "and the register file with them");
     }
 
     #[test]
@@ -500,7 +501,11 @@ mod tests {
 
         enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
 
-        assert_eq!(frame.inner[0].as_i32(), 7, "first call's param lands at 0");
+        assert_eq!(
+            frame.registers[0].as_i32(),
+            7,
+            "first call's param lands at 0"
+        );
 
         // the driver resets at the start of every call, which is what makes an
         // instance reusable — including after a trap left the file grown
@@ -508,7 +513,7 @@ mod tests {
         frame.set_initial_params(&[Val::I32(9)]);
 
         assert_eq!(
-            frame.inner[0].as_i32(),
+            frame.registers[0].as_i32(),
             9,
             "the second call's param must land at 0 too, not above the first call's \
              high-water mark"
@@ -532,8 +537,12 @@ mod tests {
             1,
         );
 
-        assert_eq!(frame.inner[0].as_i64(), -9, "the param is not overwritten");
-        assert_eq!(frame.inner[1].as_i64(), 0, "declared local 0 is zeroed");
-        assert_eq!(frame.inner[2].as_i64(), 0, "declared local 1 is zeroed");
+        assert_eq!(
+            frame.registers[0].as_i64(),
+            -9,
+            "the param is not overwritten"
+        );
+        assert_eq!(frame.registers[1].as_i64(), 0, "declared local 0 is zeroed");
+        assert_eq!(frame.registers[2].as_i64(), 0, "declared local 1 is zeroed");
     }
 }

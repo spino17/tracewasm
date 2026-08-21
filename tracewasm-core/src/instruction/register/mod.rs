@@ -105,6 +105,7 @@
 
 use crate::{
     error::TraceWasmError,
+    instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
@@ -113,9 +114,11 @@ use crate::{
             LocalSlot, SpillArena, SpillIndex,
         },
     },
+    memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    runtime::{reg::RegFrame, stack::Stack},
+    runtime::{reg::RegFrame, stack::Stack, value::Value},
 };
+use smallvec::{SmallVec, smallvec};
 use std::marker::PhantomData;
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -3181,11 +3184,94 @@ impl Instruction for RegInstruction {
         &self,
         module: &crate::module::Module<Self::Vm>,
         instance: &mut crate::instance::Instance<M, I, Self::Vm>,
-        br_table_targets: &[Self::BrTableTarget],
+        frame_layout: &Self::FrameLayout,
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
         todo!()
+    }
+}
+
+impl RegInstruction {
+    #[inline(always)]
+    fn slot_value<M: Memory, I: ImportRegistry>(
+        slot: &Slot,
+        caller_base_data: &RegCallerBaseData,
+        instance: &Instance<M, I, crate::Register>,
+    ) -> Value {
+        match slot {
+            Slot::Const(val) => match val {
+                Const::I32(val) => Value::from_i32(*val),
+                Const::I64(val) => Value::from_i64(*val),
+                Const::F32(val) => Value::from_f32(*val),
+                Const::F64(val) => Value::from_f64(*val),
+                Const::Ref(r) => Value::from_ref(*r),
+            },
+            Slot::Global(index) => instance.global_vals[*index as usize].into(),
+            Slot::Local(index) => {
+                instance.frame.registers[(caller_base_data.base_register_index + *index) as usize]
+            }
+            Slot::Register(index) => {
+                instance.frame.registers
+                    [(caller_base_data.callee_frame_base_register_index + *index) as usize]
+            }
+            Slot::Spilled(index) => {
+                instance.frame.spills
+                    [(caller_base_data.spills_base_index + index.raw_value()) as usize]
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn register_value<M: Memory, I: ImportRegistry>(
+        relative_index: u32,
+        caller_base_data: &RegCallerBaseData,
+        instance: &Instance<M, I, crate::Register>,
+    ) -> Value {
+        instance.frame.registers
+            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize]
+    }
+
+    #[inline(always)]
+    fn set_value_to_register<M: Memory, I: ImportRegistry>(
+        relative_index: u32,
+        val: Value,
+        caller_base_data: &RegCallerBaseData,
+        instance: &mut Instance<M, I, crate::Register>,
+    ) {
+        instance.frame.registers
+            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize] = val;
+    }
+
+    #[inline(always)]
+    fn set_value_to_spills<M: Memory, I: ImportRegistry>(
+        relative_index: u32,
+        val: Value,
+        caller_base_data: &RegCallerBaseData,
+        instance: &mut Instance<M, I, crate::Register>,
+    ) {
+        instance.frame.spills[(caller_base_data.spills_base_index + relative_index) as usize] = val;
+    }
+
+    #[inline(always)]
+    fn execute_mov<M: Memory, I: ImportRegistry>(
+        signature: &DynSignature,
+        caller_base_data: &RegCallerBaseData,
+        frame_layout: &RegFrameLayout,
+        instance: &mut Instance<M, I, crate::Register>,
+    ) {
+        let mut tmp: SmallVec<[Value; 3]> = smallvec![];
+        let inputs = signature.input_registers(&frame_layout.input_registers_arena);
+        let outputs = signature.output_registers(&frame_layout.output_registers_arena);
+
+        // memmove: input and output can overlap!
+        for slot in inputs {
+            tmp.push(Self::slot_value(slot, caller_base_data, instance));
+        }
+
+        for (i, val) in tmp.iter().enumerate() {
+            Self::set_value_to_register(outputs[i], *val, caller_base_data, instance);
+        }
     }
 }
 

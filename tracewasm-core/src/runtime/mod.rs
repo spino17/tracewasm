@@ -176,7 +176,7 @@ struct Frame<'a, Instr: Instruction> {
     /// one, and a trace records the call site.
     pc: u32,
     caller_base_data: Instr::CallerBaseData,
-    br_table_targets: &'a [Instr::BrTableTarget],
+    frame_layout: &'a Instr::FrameLayout,
     instruction_offsets: &'a [u32],
     /// Result count of the callee, needed on return to know how much of its
     /// region to keep when truncating back to `caller_base_height`.
@@ -314,13 +314,6 @@ impl TraceVM {
         let instructions = &func_body.instructions;
         let instruction_offsets = &func_body.instruction_offsets;
 
-        // Annotated as a slice so the `Box` is dereferenced here rather than at the
-        // call in the loop. The dispatch takes `&[Instruction::BrTableTarget]`, and
-        // coercing a `&Box<[_]>` to it re-reads the pointer and length out of the
-        // `Box` — two loads for a pair that is fixed for the whole frame.
-        let br_table_targets: &[<InstrOf<V> as Instruction>::BrTableTarget] =
-            func_body.frame_layout.br_table_targets();
-
         // `locals` in the body is laid out params-first, then declared locals, and
         // `locals_ty[i]` is the declared type of local slot `i`. So
         // `locals_ty.len() >= params_count` always, which is what `enter_frame` relies
@@ -364,7 +357,7 @@ impl TraceVM {
             let step = instr.execute(
                 module,
                 instance,
-                br_table_targets,
+                &func_body.frame_layout,
                 &caller_base_data,
                 imported_func_count,
             );
@@ -504,7 +497,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let mut instructions = func_body.instructions.as_ref();
         let mut instruction_offsets = func_body.instruction_offsets.as_ref();
-        let mut br_table_targets = func_body.frame_layout.br_table_targets();
+        let mut frame_layout = &func_body.frame_layout;
 
         let locals_ty = &func_body.locals;
         let mut pc = 0;
@@ -528,7 +521,7 @@ impl TraceVM {
             let step = instr.execute(
                 module,
                 instance,
-                br_table_targets,
+                frame_layout,
                 &caller_base_data,
                 imported_func_count,
             );
@@ -594,8 +587,8 @@ impl TraceVM {
                         &module.func_bodies[(callee_func_index.0 - imported_func_count) as usize];
                     let callee_instructions = &callee_func_body.instructions;
                     let callee_locals_ty = &callee_func_body.locals;
-                    let callee_br_table_targets = &callee_func_body.frame_layout.br_table_targets();
                     let callee_instruction_offsets = &callee_func_body.instruction_offsets;
+                    let callee_frame_layout = &callee_func_body.frame_layout;
 
                     // save current frame's state
                     frames.push(Frame {
@@ -603,7 +596,7 @@ impl TraceVM {
                         instructions,
                         pc: pc as u32,
                         caller_base_data,
-                        br_table_targets,
+                        frame_layout,
                         instruction_offsets,
                         callee_results_count,
                         callee_func_index,
@@ -615,7 +608,7 @@ impl TraceVM {
                     instructions = callee_instructions;
                     pc = 0;
                     caller_base_data = callee_caller_base_data;
-                    br_table_targets = callee_br_table_targets;
+                    frame_layout = callee_frame_layout;
                     instruction_offsets = callee_instruction_offsets;
 
                     instance.frame.enter_frame(
@@ -646,7 +639,7 @@ impl TraceVM {
                 instructions = frame.instructions;
                 pc = frame.pc as usize + 1; // next instruction past the call
                 caller_base_data = frame.caller_base_data;
-                br_table_targets = frame.br_table_targets;
+                frame_layout = frame.frame_layout;
                 instruction_offsets = frame.instruction_offsets;
             }
         }

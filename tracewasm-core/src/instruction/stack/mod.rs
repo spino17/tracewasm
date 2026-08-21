@@ -2336,7 +2336,7 @@ impl Instruction for StackInstruction {
         &self,
         module: &crate::module::Module<Self::Vm>,
         instance: &mut crate::instance::Instance<M, I, crate::Stack>,
-        br_table_targets: &[Self::BrTableTarget],
+        frame_layout: &Self::FrameLayout,
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
@@ -4082,6 +4082,7 @@ impl Instruction for StackInstruction {
                 }
             }
             StackInstruction::BrTable { start_index, len } => {
+                let br_table_targets = frame_layout.br_table_targets();
                 // Widen before adding: the sum is bounded by the function's target
                 // count, but doing it in `u32` would make an overflow a debug panic
                 // rather than a wider add.
@@ -4161,10 +4162,10 @@ impl StackInstruction {
         // Mirrors the SAFETY argument below, so a broken link shows up as a failed
         // test rather than as a silent out-of-bounds read. Compiled out in release.
         debug_assert!(
-            slot < instance.frame.inner.len(),
+            slot < instance.frame.stack.len(),
             "local slot {slot} is outside the operand stack's backing storage \
              (len {}) — one of the invariants in the SAFETY comment no longer holds",
-            instance.frame.inner.len()
+            instance.frame.stack.len()
         );
 
         // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
@@ -4196,7 +4197,7 @@ impl StackInstruction {
         // smaller `Stack::for_const_expr_evaluation`, and
         // `emit_instruction_for_const_expr` accepts a closed whitelist of operators
         // that excludes `local.get`/`local.set`/`local.tee`.
-        unsafe { *instance.frame.inner.get_unchecked(slot) }
+        unsafe { *instance.frame.stack.get_unchecked(slot) }
     }
 
     /// Writes local slot `index` of the frame based at `caller_base_height`.
@@ -4213,11 +4214,11 @@ impl StackInstruction {
         let slot = (index.0 + caller_base_height) as usize;
 
         debug_assert!(
-            slot < instance.frame.inner.len(),
+            slot < instance.frame.stack.len(),
             "local slot {slot} is outside the operand stack's backing storage \
              (len {}) — one of the invariants in `get_local`'s SAFETY comment no \
              longer holds",
-            instance.frame.inner.len()
+            instance.frame.stack.len()
         );
 
         // SAFETY: identical to [`Self::get_local`] — see the four invariants
@@ -4225,7 +4226,7 @@ impl StackInstruction {
         // slot is inside this frame's locals region, which the operand discipline
         // never touches for the life of the frame.
         unsafe {
-            *instance.frame.inner.get_unchecked_mut(slot) = val;
+            *instance.frame.stack.get_unchecked_mut(slot) = val;
         }
     }
 

@@ -78,7 +78,7 @@ use smallvec::{SmallVec, smallvec};
 pub(crate) struct Stack<T> {
     /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
-    pub(crate) inner: Vec<T>,
+    pub(crate) stack: Vec<T>,
     /// Logical height: index one past the top value. The top is
     /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
     stack_pointer: usize, // points to the top of the stack
@@ -89,7 +89,7 @@ impl<T> Default for Stack<T> {
     /// capacity reserved up front, so steady-state pushes never reallocate.
     fn default() -> Self {
         Stack {
-            inner: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
+            stack: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
             stack_pointer: 0,
         }
     }
@@ -105,7 +105,7 @@ impl<T: Clone> Stack<T> {
     /// be far worse than a few reallocations.
     pub fn new_with_capacity(cap: u32) -> Self {
         Stack {
-            inner: Vec::with_capacity(cap as usize),
+            stack: Vec::with_capacity(cap as usize),
             stack_pointer: 0,
         }
     }
@@ -114,7 +114,7 @@ impl<T: Clone> Stack<T> {
     /// needs only a handful of slots, avoiding the large `Default` reservation.
     pub(crate) fn for_const_expr_evaluation() -> Self {
         Stack {
-            inner: Vec::with_capacity(2), // needs very small stack
+            stack: Vec::with_capacity(2), // needs very small stack
             stack_pointer: 0,
         }
     }
@@ -132,7 +132,7 @@ impl<T: Clone> Stack<T> {
         // Indexing directly would reach `panic_bounds_check`, which takes the index
         // and the length as arguments; `top_underflow` takes nothing. See the note
         // in [`Self::pop`], whose shape this follows.
-        let Some(val) = self.inner.get(self.stack_pointer.wrapping_sub(1)) else {
+        let Some(val) = self.stack.get(self.stack_pointer.wrapping_sub(1)) else {
             top_underflow()
         };
 
@@ -172,8 +172,8 @@ impl<T: Clone> Stack<T> {
     /// Do not add `#[cold]` to the helper: it measures slower than `#[inline(never)]`
     /// alone.
     pub fn push(&mut self, val: T) {
-        if self.stack_pointer < self.inner.len() {
-            self.inner[self.stack_pointer] = val;
+        if self.stack_pointer < self.stack.len() {
+            self.stack[self.stack_pointer] = val;
             self.stack_pointer += 1;
         } else {
             self.push_grow(val);
@@ -190,7 +190,7 @@ impl<T: Clone> Stack<T> {
     /// Kept out of line so [`Self::push`] stays cheap; see the note there.
     #[inline(never)]
     fn push_grow(&mut self, val: T) {
-        self.inner.push(val);
+        self.stack.push(val);
         self.stack_pointer += 1;
     }
 
@@ -205,7 +205,7 @@ impl<T: Clone> Stack<T> {
         // save and restore is then paid on every pop. `pop_underflow` takes nothing.
         let sp = self.stack_pointer.wrapping_sub(1);
 
-        let Some(val) = self.inner.get(sp) else {
+        let Some(val) = self.stack.get(sp) else {
             pop_underflow()
         };
 
@@ -223,7 +223,7 @@ impl<T: Clone> Stack<T> {
         let mut v = Vec::with_capacity(num as usize);
 
         for i in 0..(num as usize) {
-            v.push(self.inner[self.stack_pointer - 1 - i].clone());
+            v.push(self.stack[self.stack_pointer - 1 - i].clone());
         }
 
         self.stack_pointer -= num as usize;
@@ -242,7 +242,7 @@ impl<T: Clone> Stack<T> {
         let mut v = Vec::with_capacity(num as usize);
 
         for i in 0..(num as usize) {
-            v.push(self.inner[self.stack_pointer - num as usize + i].clone());
+            v.push(self.stack[self.stack_pointer - num as usize + i].clone());
         }
 
         self.stack_pointer -= num as usize;
@@ -277,8 +277,8 @@ impl<T: Clone> Stack<T> {
         let arity = arity as usize;
 
         for i in 0..arity {
-            self.inner[new_height as usize + i] =
-                self.inner[self.stack_pointer - arity + i].clone();
+            self.stack[new_height as usize + i] =
+                self.stack[self.stack_pointer - arity + i].clone();
         }
 
         self.stack_pointer = new_height as usize + arity;
@@ -293,7 +293,7 @@ impl<T: Clone> Stack<T> {
     /// Precondition: the stack is non-empty. Peeking an empty stack underflows
     /// `stack_pointer` and panics.
     pub fn tee(&self) -> T {
-        self.inner[self.stack_pointer - 1].clone()
+        self.stack[self.stack_pointer - 1].clone()
     }
 
     /// Borrows the value `depth` places below the top without removing it, so
@@ -307,7 +307,7 @@ impl<T: Clone> Stack<T> {
     /// Bounded by `stack_pointer` rather than `inner.len()`, for the reason
     /// [`Self::top`] gives.
     pub fn peek_from_top(&self, depth: u32) -> &T {
-        &self.inner[(self.height() - 1 - depth) as usize]
+        &self.stack[(self.height() - 1 - depth) as usize]
     }
 }
 
@@ -341,7 +341,7 @@ impl RuntimeFrame for Stack<Value> {
         let mut s = smallvec![];
 
         for i in 0..(params_count as usize) {
-            s.push(self.inner[self.stack_pointer - params_count as usize + i]);
+            s.push(self.stack[self.stack_pointer - params_count as usize + i]);
         }
 
         self.stack_pointer -= params_count as usize;
@@ -371,7 +371,7 @@ impl RuntimeFrame for Stack<Value> {
         let mut s = smallvec![];
 
         for i in 0..(results_count as usize) {
-            s.push(self.inner[self.stack_pointer - results_count as usize + i]);
+            s.push(self.stack[self.stack_pointer - results_count as usize + i]);
         }
 
         self.stack_pointer -= results_count as usize;
@@ -466,7 +466,7 @@ mod tests {
     /// assert on the pointer/backing-vec invariants directly.
     fn stack<T>() -> Stack<T> {
         Stack {
-            inner: Vec::new(),
+            stack: Vec::new(),
             stack_pointer: 0,
         }
     }
@@ -474,7 +474,7 @@ mod tests {
     /// The logically-live portion of the stack (`inner[..sp]`), bottom-to-top.
     /// Slots above `stack_pointer` are stale and intentionally excluded.
     fn live<T: Clone>(s: &Stack<T>) -> Vec<T> {
-        s.inner[..s.stack_pointer].to_vec()
+        s.stack[..s.stack_pointer].to_vec()
     }
 
     // ------------------------------------------------------------------
@@ -486,9 +486,9 @@ mod tests {
         let s: Stack<i32> = Stack::default();
 
         assert_eq!(s.stack_pointer, 0);
-        assert_eq!(s.inner.len(), 0);
+        assert_eq!(s.stack.len(), 0);
         // the allocation is reserved up front so pushes don't realloc mid-execution
-        assert!(s.inner.capacity() >= VM_STACK_INITIAL_ALLOCATION_SIZE);
+        assert!(s.stack.capacity() >= VM_STACK_INITIAL_ALLOCATION_SIZE);
     }
 
     // ------------------------------------------------------------------
@@ -522,12 +522,12 @@ mod tests {
 
         s.pop(); // sp == 2, but backing vec is still length 3
 
-        assert_eq!(s.inner.len(), 3);
+        assert_eq!(s.stack.len(), 3);
 
         s.push(9); // sp (2) < len (3) => overwrite inner[2], do NOT grow
 
         assert_eq!(s.stack_pointer, 3);
-        assert_eq!(s.inner.len(), 3, "push after pop must reuse the freed slot");
+        assert_eq!(s.stack.len(), 3, "push after pop must reuse the freed slot");
         assert_eq!(live(&s), vec![1, 2, 9]);
     }
 
@@ -537,11 +537,11 @@ mod tests {
 
         s.push(1); // sp == len == 1
 
-        assert_eq!(s.inner.len(), 1);
+        assert_eq!(s.stack.len(), 1);
 
         s.push(2); // sp == len == 2, must grow
 
-        assert_eq!(s.inner.len(), 2);
+        assert_eq!(s.stack.len(), 2);
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
         s.pop();
 
         // 30 is still sitting in `inner`, above the live region
-        assert!(s.inner.len() > s.stack_pointer);
+        assert!(s.stack.len() > s.stack_pointer);
         assert_eq!(*s.top(), 20);
     }
 
@@ -723,7 +723,7 @@ mod tests {
         s.truncate(2);
 
         assert_eq!(s.stack_pointer, 2);
-        assert_eq!(s.inner.len(), 5, "truncate must not deallocate");
+        assert_eq!(s.stack.len(), 5, "truncate must not deallocate");
         assert_eq!(live(&s), vec![1, 2]);
     }
 
