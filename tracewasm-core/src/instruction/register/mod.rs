@@ -104,7 +104,7 @@
 //! balanced without a reconciliation step.
 
 use crate::{
-    error::TraceWasmError,
+    error::{InstructionExecutionError, TraceWasmError},
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
@@ -116,7 +116,7 @@ use crate::{
     },
     memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    runtime::{reg::RegFrame, stack::Stack, value::Value},
+    runtime::{Step, reg::RegFrame, stack::Stack, value::Value},
 };
 use smallvec::{SmallVec, smallvec};
 use std::marker::PhantomData;
@@ -1288,6 +1288,7 @@ pub(crate) enum RegInstruction {
         index: LocalIndex,
         sig: Signature<1, 0>,
     },
+    Loop,
     /// `if`: fall through when the condition is non-zero, otherwise jump past
     /// `else_index` to the else-arm — or to `end_index` when there is none.
     ///
@@ -1304,7 +1305,9 @@ pub(crate) enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else { end_index: u32 },
+    Else {
+        end_index: u32,
+    },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -2741,6 +2744,8 @@ impl Instruction for RegInstruction {
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
+
+                    instructions.push(RegInstruction::Loop, offset);
                 }
                 Operator::If { blockty } => {
                     // Control diverges here, and a write in either arm would leave
@@ -3188,7 +3193,32 @@ impl Instruction for RegInstruction {
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
-        todo!()
+        let res = match self {
+            RegInstruction::Unreachable => {
+                return Err(Box::new(InstructionExecutionError::Unreachable));
+            }
+            RegInstruction::Call {
+                func_index,
+                caller_base,
+            } => todo!(),
+            RegInstruction::CallIndirect {
+                ty_index,
+                table_index,
+                slot,
+                operands,
+                caller_base,
+            } => {
+                todo!()
+            }
+            RegInstruction::Move(sig) => {
+                Self::execute_mov(sig, caller_base_data, frame_layout, instance);
+
+                Step::Next
+            }
+            _ => todo!(),
+        };
+
+        Ok(res)
     }
 }
 
@@ -3235,22 +3265,23 @@ impl RegInstruction {
     #[inline(always)]
     fn set_value_to_register<M: Memory, I: ImportRegistry>(
         relative_index: u32,
-        val: Value,
+        val: &Value,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
         instance.frame.registers
-            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize] = val;
+            [(caller_base_data.callee_frame_base_register_index + relative_index) as usize] = *val;
     }
 
     #[inline(always)]
     fn set_value_to_spills<M: Memory, I: ImportRegistry>(
         relative_index: u32,
-        val: Value,
+        val: &Value,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
-        instance.frame.spills[(caller_base_data.spills_base_index + relative_index) as usize] = val;
+        instance.frame.spills[(caller_base_data.spills_base_index + relative_index) as usize] =
+            *val;
     }
 
     #[inline(always)]
@@ -3270,7 +3301,7 @@ impl RegInstruction {
         }
 
         for (i, val) in tmp.iter().enumerate() {
-            Self::set_value_to_register(outputs[i], *val, caller_base_data, instance);
+            Self::set_value_to_register(outputs[i], val, caller_base_data, instance);
         }
     }
 }

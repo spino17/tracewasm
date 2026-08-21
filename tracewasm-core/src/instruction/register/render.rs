@@ -477,6 +477,7 @@ impl RegInstruction {
                 )
             }
             RegInstruction::Unreachable => "unreachable".to_string(),
+            RegInstruction::Loop => "loop".to_string(),
             RegInstruction::End => "end".to_string(),
         }
     }

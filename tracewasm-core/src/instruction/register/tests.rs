@@ -1952,10 +1952,20 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
 
     assert!(else_index.is_none(), "there is no else to jump to");
 
-    assert!(
-        matches!(prog[end_index as usize], RegInstruction::End),
-        "end_index must name an End"
-    );
+    // The exact index, not just "an End": there are two here — the `if`'s at 3 and
+    // the body's at 4 — and a false condition must reach the first, not fall out of
+    // the function.
+    assert_eq!(at, 1, "the `if`'s own index");
+    assert_eq!(end_index, 3, "the `if`'s end, not the body's");
+
+    let ends: Vec<usize> = prog
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
+        .map(|(n, _)| n)
+        .collect();
+
+    assert_eq!(ends, vec![3, 4], "the if's end, then the body's");
 }
 
 #[test]
@@ -2035,7 +2045,9 @@ fn an_outward_branch_targets_the_outer_label() {
 
 #[test]
 fn a_loop_back_edge_skips_the_entry_spill() {
-    // the entry rescue must run once; the back-edge has to land after it
+    // The entry rescue must run once, so the back-edge has to land after it — on the
+    // `loop` header, which is the label's own instruction and falls through into the
+    // body.
     assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
@@ -2047,12 +2059,13 @@ fn a_loop_back_edge_skips_the_entry_spill() {
              end))"#,
         "
           0  local.spill  local0 -> spill0
-          1  local.set    local0 <- 5
-          2  local.spill  local1 -> spill1
-          3  br_if        spill1 -> 1
-          4  end
-          5  move         spill0 -> r0
-          6  end
+          1  loop
+          2  local.set    local0 <- 5
+          3  local.spill  local1 -> spill1
+          4  br_if        spill1 -> 1
+          5  end
+          6  move         spill0 -> r0
+          7  end
              frame: 1 registers, 2 spills
         ",
     );
@@ -2083,9 +2096,36 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
         "a back-edge transfers the loop's params, not its results"
     );
 
+    // The exact target, not merely that it points backwards. The header `Move` that
+    // materialises the loop's entry params is instruction 0; the label is the `loop`
+    // at 1. Targeting 0 would re-run that move on every iteration and pin the params
+    // to their entry values, which is the bug this number rules out.
+    assert_eq!(br, 3, "the back-edge's own index");
+    assert_eq!(
+        *target_index, 1,
+        "the loop header's index, past the entry move"
+    );
     assert!(
-        (*target_index as usize) < br,
-        "a back-edge jumps backwards: {target_index} should precede {br}"
+        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        "the target must be the `loop` itself, found {:?}",
+        prog[*target_index as usize].kind()
+    );
+    assert!(
+        matches!(prog[0], RegInstruction::Move(_)),
+        "instruction 0 is the entry move the back-edge must skip"
+    );
+
+    // And the destination the back-edge writes is the same register the header move
+    // fills, which is what makes skipping the header correct rather than lossy.
+    let back_edge_dst = mov.output_registers(&frame.output_registers_arena);
+    let RegInstruction::Move(header) = &prog[0] else {
+        unreachable!()
+    };
+
+    assert_eq!(
+        back_edge_dst,
+        header.output_registers(&frame.output_registers_arena),
+        "a back-edge must land the params in the registers the loop body reads"
     );
 }
 
@@ -2111,21 +2151,25 @@ fn br_table_arms_resolve_to_their_own_labels() {
         &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
     let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
 
-    assert_eq!(targets.len(), 3, "two arms plus the default");
+    // The exact arms, not just their relationships. Depth 0 is the inner block,
+    // whose end is 2; depth 1 is the outer block, whose end is 3. `br_table 0 1 0`
+    // therefore resolves to [2, 3, 2] — which subsumes "arm 0 equals the default"
+    // and "depth 1 differs", and additionally pins *which* label each names.
+    assert_eq!(table, 1, "the table's own index");
+    assert_eq!(targets, vec![2, 3, 2], "arm 0, arm 1, default");
+
+    let ends: Vec<usize> = prog
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
+        .map(|(n, _)| n)
+        .collect();
 
     assert_eq!(
-        targets[0], targets[2],
-        "arm 0 and the default both name depth 0"
+        ends,
+        vec![2, 3, 4],
+        "inner block's end, outer block's end, body's end"
     );
-
-    assert_ne!(targets[0], targets[1], "depth 1 is a different label");
-
-    for t in &targets {
-        assert!(
-            matches!(prog[*t as usize], RegInstruction::End),
-            "every arm must land on an End"
-        );
-    }
 }
 
 #[test]
@@ -2176,29 +2220,32 @@ fn each_br_table_arm_carries_its_own_move() {
 
 #[test]
 fn the_if_arm_hoists_the_spill_above_the_branch() {
-    let body = lower(
+    // Both rescues land at 0 and 1, ahead of the `if` at 2 — and the `if` records no
+    // else and an end of exactly 4, so the whole shape is pinned rather than just
+    // the ordering.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              local.get 1
              if i32.const 5 local.set 0 end))"#,
-    );
-
-    let prog = &body.0;
-
-    let spill =
-        index_of_kind(prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
-    let branch = index_of_kind(prog, RegInstructionKind::If).expect("the if");
-
-    assert!(
-        spill < branch,
-        "spill at {spill} must precede the branch at {branch}:\n{}",
-        RegInstruction::render_body(&body, &[])
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  if           spill1 else=- end=4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  end
+             frame: 1 registers, 2 spills
+        ",
     );
 }
 
 #[test]
 fn the_br_if_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _, _) = lower(
+    // The taken edge leaves at 2 for the block's end at 4, so the rescues at 0 and 1
+    // are the only instructions it cannot skip.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2207,13 +2254,17 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  br_if        spill1 -> 4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  end
+             frame: 1 registers, 2 spills
+        ",
     );
-
-    let spill =
-        index_of_kind(&prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
-    let branch = index_of_kind(&prog, RegInstructionKind::BrIf).expect("the br_if");
-
-    assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
 
 #[test]
@@ -2235,22 +2286,63 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
         unreachable!()
     };
 
-    let rescue = prog
+    // The exact numbers, not just their order: local 0's rescue is instruction 0, the
+    // repeated region starts at 1, and the back-edge is instruction 4.
+    assert_eq!(back_edge, 4, "the back-edge's own index");
+    assert_eq!(*target_index, 1, "the loop header's index");
+    assert!(
+        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        "a back-edge must land on the `loop` itself, not on a body instruction: found {:?}",
+        prog[*target_index as usize].kind()
+    );
+
+    let rescues: Vec<usize> = prog
         .iter()
         .enumerate()
-        .find(|(_, i)| matches!(i, RegInstruction::LocalSpill { index, .. } if index.0 == 0))
+        .filter(|(_, i)| matches!(i, RegInstruction::LocalSpill { index, .. } if index.0 == 0))
         .map(|(n, _)| n)
-        .expect("local 0 must be rescued");
+        .collect();
 
-    assert!(
-        rescue < *target_index as usize,
-        "the rescue at {rescue} is inside the repeated region starting at {target_index}"
+    assert_eq!(
+        rescues,
+        vec![0],
+        "local 0 is rescued exactly once, before the repeated region"
+    );
+}
+
+/// The whole body of [`the_loop_arm_hoists_the_spill_out_of_the_repeated_region`],
+/// so the indices its assertions name cannot drift without this failing too.
+#[test]
+fn the_loop_hoist_lowers_exactly() {
+    assert_lowers_to(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             loop
+               i32.const 5
+               local.set 0
+               local.get 1
+               br_if 0
+             end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  loop
+          2  local.set    local0 <- 5
+          3  local.spill  local1 -> spill1
+          4  br_if        spill1 -> 1
+          5  end
+          6  move         spill0 -> r0
+          7  end
+             frame: 1 registers, 2 spills
+        ",
     );
 }
 
 #[test]
 fn the_br_table_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _, _) = lower(
+    // Every arm leaves, so the rescues at 0 and 1 are unskippable — and both arms
+    // resolve to the block's end at 3. The `local.set` after the table is dead and
+    // does not appear at all, which is why the body is only four instructions.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2259,13 +2351,16 @@ fn the_br_table_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  br_table     spill1 ->3 ->3
+          3  end
+          4  move         spill0 -> r0
+          5  end
+             frame: 1 registers, 2 spills
+        ",
     );
-
-    let spill =
-        index_of_kind(&prog, RegInstructionKind::LocalSpill).expect("the borrow must be rescued");
-    let branch = index_of_kind(&prog, RegInstructionKind::BrTable).expect("the br_table");
-
-    assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
 
 // ---------------------------------------------------------------------------
@@ -3403,6 +3498,7 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
         | RegInstructionKind::GlobalSpill
         | RegInstructionKind::If
         | RegInstructionKind::Else
+        | RegInstructionKind::Loop
         | RegInstructionKind::Br
         | RegInstructionKind::BrIf
         | RegInstructionKind::BrTable
