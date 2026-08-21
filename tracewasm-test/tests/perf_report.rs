@@ -440,7 +440,7 @@ fn latency(timer: &Dist) {
 
     // n=1 keeps the guest body to a handful of instructions, isolating the cost
     // of entering and leaving the VM.
-    let mut g = Guest::new(guests::ARITHMETIC);
+    let mut g = Guest::<Stack>::new(guests::ARITHMETIC);
     let mut v = Vec::with_capacity(LATENCY_SAMPLES);
     for _ in 0..LATENCY_SAMPLES {
         let t = Instant::now();
@@ -449,7 +449,7 @@ fn latency(timer: &Dist) {
     }
     dist_row("arith_mixed_workload(1)", &Dist::new(v));
 
-    let mut f = Guest::new(guests::FRAMES);
+    let mut f = Guest::<Stack>::new(guests::FRAMES);
     let mut v = Vec::with_capacity(LATENCY_SAMPLES);
     for _ in 0..LATENCY_SAMPLES {
         let t = Instant::now();
@@ -487,7 +487,7 @@ fn throughput() {
     );
 
     for w in GUESTS {
-        let mut g = Guest::new(w.wasm);
+        let mut g = Guest::<Stack>::new(w.wasm);
         g.i32_i64(w.export, w.work); // warm-up: fault in the pages, not counted
 
         let mut v = Vec::with_capacity(REPEATS);
@@ -594,7 +594,7 @@ fn scaling() {
     );
 
     println!("   {:<22}{:>12}{:>14}", "work size (n)", "ms/call", "ns/op");
-    let mut g = Guest::new(guests::ARITHMETIC);
+    let mut g = Guest::<Stack>::new(guests::ARITHMETIC);
     for n in [100, 1_000, 20_000, 100_000] {
         // Median of several reps, not a single shot: one sample per size made a
         // 160-vs-144 ns/op blip look like a scaling cliff when it was noise.
@@ -624,7 +624,7 @@ fn scaling() {
     // overflow is SIGABRT and would take the binary down.
     let mut cfg = Config::default();
     cfg.set_max_call_stack_depth(4_000);
-    let mut f = Guest::with_config(guests::FRAMES, Some(cfg));
+    let mut f = Guest::<Stack>::with_config(guests::FRAMES, Some(cfg));
 
     for depth in [100, 1_000, 3_000]
         .into_iter()
@@ -666,7 +666,7 @@ fn error_path() {
     ];
 
     for (label, wasm, export) in traps {
-        let mut g = Guest::new(wasm);
+        let mut g = Guest::<Stack>::new(wasm);
 
         // Confirm it actually traps: timing a success would be meaningless.
         assert!(

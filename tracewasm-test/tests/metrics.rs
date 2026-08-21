@@ -23,6 +23,7 @@
 
 #![cfg(not(no_guest_wasm))]
 
+use tracewasm_core::Stack;
 use tracewasm_core::instance::config::Config;
 use tracewasm_test::metrics::Table;
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
@@ -68,7 +69,7 @@ const MAX_PER_CALL_NS: u128 = if cfg!(debug_assertions) {
 fn report_throughput_by_category() {
     let mut table = Table::new("throughput by workload category (release)");
 
-    let mut arith = Guest::new(guests::ARITHMETIC);
+    let mut arith = Guest::<Stack>::new(guests::ARITHMETIC);
     table.measure(
         "arithmetic (i64 + f64 mix)",
         REPS,
@@ -78,7 +79,7 @@ fn report_throughput_by_category() {
         },
     );
 
-    let mut cf = Guest::new(guests::CONTROL_FLOW);
+    let mut cf = Guest::<Stack>::new(guests::CONTROL_FLOW);
     table.measure(
         "control flow (match + loops)",
         REPS,
@@ -88,12 +89,12 @@ fn report_throughput_by_category() {
         },
     );
 
-    let mut mem = Guest::new(guests::MEMORY);
+    let mut mem = Guest::<Stack>::new(guests::MEMORY);
     table.measure("memory (load/store)", REPS, Some(WORK as u64), || {
         mem.i32_i64("mem_mixed_workload", WORK);
     });
 
-    let mut frames = Guest::new(guests::FRAMES);
+    let mut frames = Guest::<Stack>::new(guests::FRAMES);
     table.measure(
         "calls (one indirect per iter)",
         REPS,
@@ -103,7 +104,7 @@ fn report_throughput_by_category() {
         },
     );
 
-    let mut heap = Guest::new(guests::HEAP);
+    let mut heap = Guest::<Stack>::new(guests::HEAP);
     table.measure("heap (alloc + collections)", REPS, None, || {
         heap.i32_i64("heap_mixed_workload", 2_000);
     });
@@ -132,7 +133,7 @@ fn report_throughput_by_category() {
 fn report_per_call_overhead() {
     let mut table = Table::new("host-boundary overhead");
 
-    let mut arith = Guest::new(guests::ARITHMETIC);
+    let mut arith = Guest::<Stack>::new(guests::ARITHMETIC);
 
     // n = 1 keeps the guest body to a handful of instructions, so this is
     // dominated by call setup and teardown
@@ -140,7 +141,7 @@ fn report_per_call_overhead() {
         arith.i32_i64("arith_mixed_workload", 1);
     });
 
-    let mut frames = Guest::new(guests::FRAMES);
+    let mut frames = Guest::<Stack>::new(guests::FRAMES);
     table.measure("5-param call", CALL_REPS, Some(1), || {
         frames.i32x5_i64("fr_five_params", (1, 2, 3, 4, 5));
     });
@@ -193,7 +194,7 @@ fn deep_recursion_body() {
     let mut cfg = Config::default();
     cfg.set_max_call_stack_depth(SAFE_LIMIT);
 
-    let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+    let mut g = Guest::<Stack>::with_config(guests::FRAMES, Some(cfg));
 
     let mut table = Table::new("deep recursion (guard set to 4000)");
 
@@ -259,7 +260,7 @@ fn report_compile_and_instantiate_cost() {
         ("exotic", guests::EXOTIC),
     ] {
         table.measure(format!("compile + instantiate: {label}"), 5, None, || {
-            let _ = Guest::new(wasm);
+            let _ = Guest::<Stack>::new(wasm);
         });
     }
 
@@ -295,7 +296,7 @@ fn report_compile_and_instantiate_cost() {
 fn report_guest_memory_growth() {
     let mut table = Table::new("guest linear-memory growth");
 
-    let mut mem = Guest::new(guests::MEMORY);
+    let mut mem = Guest::<Stack>::new(guests::MEMORY);
 
     // each unit is roughly one 64 KiB page, so this walks the grow path
     for pages in [1, 8, 32] {
@@ -304,7 +305,7 @@ fn report_guest_memory_growth() {
         });
     }
 
-    let mut heap = Guest::new(guests::HEAP);
+    let mut heap = Guest::<Stack>::new(guests::HEAP);
     table.measure("vec growth to 20k elements", 3, None, || {
         heap.i32_i64("heap_vec_growth", 20_000);
     });

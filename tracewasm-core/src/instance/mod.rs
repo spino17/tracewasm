@@ -178,10 +178,10 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     /// Params and results are not re-checked here: `TypedFunc<P, R>` is only
     /// handed out after [`Module::get_typed_func`](crate::module::Module::get_typed_func)
     /// has matched `P`/`R` against the module's declared signature.
-    pub fn call<M: Memory, I: ImportRegistry>(
+    pub fn call<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         &self,
         params: P,
-        instance: &mut Instance<M, I, crate::Stack>,
+        instance: &mut Instance<M, I, V>,
     ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();

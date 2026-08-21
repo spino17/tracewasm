@@ -49,7 +49,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracewasm_core::Stack;
+use tracewasm_core::VirtualMachine;
 use tracewasm_core::error::FuncCallError;
 use tracewasm_core::instance::config::Config;
 use tracewasm_core::instance::traits::{ImportRegistry, ImportSignature, ResultVals, Results, Val};
@@ -106,16 +106,16 @@ impl ImportRegistry for NoImports {
 ///
 /// Panics on any failure. For the trapping cases, where the error *is* the thing
 /// under test, use [`try_call`].
-pub fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
-    match try_call::<R>(wasm, name) {
+pub fn call_typed<V: VirtualMachine, R: Results>(wasm: &[u8], name: &str) -> R {
+    match try_call::<V, R>(wasm, name) {
         Ok(v) => v,
         Err(e) => panic!("calling `{name}` failed: {e}"),
     }
 }
 
 /// [`call_typed`] specialised to the very common `() -> i32` shape.
-pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
-    let (v,) = call_typed::<(i32,)>(wasm, name);
+pub fn call_i32<V: VirtualMachine>(wasm: &[u8], name: &str) -> i32 {
+    let (v,) = call_typed::<V, (i32,)>(wasm, name);
     v
 }
 
@@ -123,8 +123,11 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // Returns `TypedFunc::call`'s own error type unchanged; boxing it here would
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
-pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
-    let module = Module::<Stack>::compile(wasm).expect("module should compile");
+pub fn try_call<V: VirtualMachine, R: Results>(
+    wasm: &[u8],
+    name: &str,
+) -> Result<R, FuncCallError> {
+    let module = Module::<V>::compile(wasm).expect("module should compile");
 
     let func = module
         .get_typed_func::<(), R>(name)
@@ -193,12 +196,12 @@ pub mod guests {
 /// Compilation and instantiation are the expensive part — a guest linking `std`
 /// is well over a megabyte of wasm — so a test file checking many exports should
 /// build one of these and reuse it.
-pub struct Guest {
-    module: std::sync::Arc<Module<Stack>>,
-    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, Stack>,
+pub struct Guest<V: VirtualMachine> {
+    module: std::sync::Arc<Module<V>>,
+    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, V>,
 }
 
-impl Guest {
+impl<V: VirtualMachine> Guest<V> {
     /// Compiles and instantiates `wasm` with the default configuration.
     pub fn new(wasm: &[u8]) -> Self {
         Self::with_config(wasm, None)
@@ -211,7 +214,7 @@ impl Guest {
     /// stack is the binding constraint, and a "how deep can we go" measurement
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
-        let module = Module::<Stack>::compile(wasm).expect("guest should compile");
+        let module = Module::<V>::compile(wasm).expect("guest should compile");
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");

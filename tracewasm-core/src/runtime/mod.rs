@@ -24,7 +24,7 @@
 //! only asks it to enter a frame, exit one, and hand back results. What follows
 //! describes the stack machine's layout, since that is the one whose base
 //! arithmetic the lowered instructions encode; the register machine sizes a
-//! register file from its [`FrameLayout`] instead.
+//! register file from its [`FrameLayout`](crate::instruction::FrameLayout) instead.
 //!
 //! Rather than giving every call its own operand stack, the whole call tree shares
 //! a single [`Stack`]. A call does not allocate a new stack; the callee builds its
@@ -93,9 +93,7 @@ use crate::{
         Instance,
         traits::{ImportRegistry, ParamVals, ResultVals},
     },
-    instruction::{
-        CallerBaseData, FrameLayout, Instruction, RuntimeFrame, stack::StackInstruction,
-    },
+    instruction::{CallerBaseData, Instruction, RuntimeFrame, stack::StackInstruction},
     memory::Memory,
     module::{FuncIndex, FuncKind, Module, TableIndex, ValType, formatted_val_types},
     runtime::{

@@ -8,8 +8,9 @@
 //! one process per probe means a failed probe cannot poison the next one.
 
 #[cfg(not(no_guest_wasm))]
-use tracewasm_core::instance::config::Config;
+use tracewasm_core::Stack;
 #[cfg(not(no_guest_wasm))]
+use tracewasm_core::instance::config::Config;
 use tracewasm_test::{Guest, guests};
 
 /// Exit code for "the probe could not run", kept distinct from the 0/1 a real probe
@@ -39,7 +40,7 @@ fn main() {
             // The guard must not be what stops this: the probe is looking for
             // the native cliff.
             cfg.set_max_call_stack_depth(depth as u32 + 1_000);
-            let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+            let mut g = Guest::<Stack>::with_config(guests::FRAMES, Some(cfg));
             g.i32_i64("fr_recurse_depth", depth)
         })
         .unwrap();

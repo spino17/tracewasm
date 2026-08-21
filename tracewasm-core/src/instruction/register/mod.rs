@@ -119,15 +119,19 @@ use crate::{
     memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
     runtime::{
-        Step,
+        I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
+        U64_TRUNC_HIGH,
         reg::RegFrame,
         signature_mismatch,
         stack::Stack,
+        trunc_float_to_int,
         value::{DataVal, Value},
     },
 };
 use smallvec::{SmallVec, smallvec};
-use std::{marker::PhantomData, u32};
+use std::marker::PhantomData;
+// The bitwise and negation arms name these as methods, as the stack machine's do.
+use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod lazy;
@@ -3619,7 +3623,2558 @@ impl Instruction for RegInstruction {
             RegInstruction::Unreachable => {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
             }
-            _ => todo!(),
+            RegInstruction::F32Abs(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.abs()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Add(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a + b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Ceil(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.ceil()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32ConvertI32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a as f32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32ConvertI32U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a as f32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32ConvertI64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a as f32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32ConvertI64U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a as f32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Copysign(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                // Purely a sign-bit transplant: the magnitude of `a` with the sign
+                // of `b`. Defined even when either operand is NaN — the sign is
+                // copied without inspecting the payload — so unlike `min`/`max`
+                // this needs no NaN special case, and Rust's method matches.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.copysign(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32DemoteF64(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a as f32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Div(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                // Unlike the integer divides this never traps: IEEE 754 gives
+                // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a / b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Eq(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a == b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Floor(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.floor()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Ge(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Gt(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Le(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Load { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_f32(effective_offset)?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Lt(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Max(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(r),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Min(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f32::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(r),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Mul(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a * b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Ne(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a != b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Nearest(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.round_ties_even()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Neg(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.neg()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32ReinterpretI32(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(f32::from_bits(a)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Sqrt(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.sqrt()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Store { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_f32(effective_offset, val)?;
+
+                Step::Next
+            }
+            RegInstruction::F32Sub(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a - b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F32Trunc(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f32(a.trunc()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Abs(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.abs()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Add(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a + b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Ceil(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.ceil()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64ConvertI32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a as f64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64ConvertI32U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a as f64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64ConvertI64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a as f64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64ConvertI64U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a as f64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Copysign(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.copysign(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Div(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                // See `F32Div`: division by zero yields an infinity or NaN, never
+                // a trap.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a / b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Eq(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a == b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Floor(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.floor()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Ge(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Gt(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Le(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Load { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_f64(effective_offset)?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Lt(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Max(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: max wants +0.0
+                    if a.is_sign_positive() { a } else { b }
+                } else if a > b {
+                    a
+                } else {
+                    b
+                };
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(r),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Min(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                let r = if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else if a == b {
+                    // -0.0 and +0.0 compare equal, so pick by sign: min wants -0.0
+                    if a.is_sign_negative() { a } else { b }
+                } else if a < b {
+                    a
+                } else {
+                    b
+                };
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(r),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Mul(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a * b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Ne(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a != b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Nearest(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.round_ties_even()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Neg(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.neg()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64PromoteF32(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a as f64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64ReinterpretI64(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(f64::from_bits(a)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Sqrt(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.sqrt()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Store { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_f64(effective_offset, val)?;
+
+                Step::Next
+            }
+            RegInstruction::F64Sub(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a - b),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::F64Trunc(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_f64(a.trunc()),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Add(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_add(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32And(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.bitand(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Clz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.leading_zeros() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Ctz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.trailing_zeros() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32DivS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )?),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32DivU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(
+                        a.checked_div(b)
+                            .ok_or(InstructionExecutionError::Division {
+                                num: a.to_string(),
+                                deno: b.to_string(),
+                            })? as i32,
+                    ),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Eq(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a == b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Eqz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(if a == 0 { 1 } else { 0 }),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Extend16S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i16 as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Extend8S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i8 as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32GeS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32GeU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32GtS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32GtU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32LeS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32LeU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Load16S { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i16(effective_offset)? as i32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Load16U { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_u16(effective_offset)? as i32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Load8S { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i8(effective_offset)? as i32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Load8U { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_u8(effective_offset)? as i32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32LtS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32LtU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Mul(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_mul(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Ne(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a != b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Or(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.bitor(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Popcnt(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                // Counts set bits in the two's-complement representation, so a
+                // negative operand counts its sign bits too — which is what the
+                // spec's bit-level definition asks for.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.count_ones() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32ReinterpretF32(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.to_bits() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32RemS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                // A zero divisor is the *only* trap here. Unlike `i32.div_s`,
+                // `rem_s` does not trap on overflow: the spec defines
+                // `i32::MIN % -1` as `0`, which is what `wrapping_rem` returns.
+                // `checked_rem` would wrongly report that case as a failure.
+                if b == 0 {
+                    return Err(Box::new(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    }));
+                }
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_rem(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32RemU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.checked_rem(b).ok_or(
+                        InstructionExecutionError::Remainder {
+                            left: a.to_string(),
+                            right: b.to_string(),
+                        },
+                    )? as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Rotl(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.rotate_left(b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Rotr(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.rotate_right(b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Shl(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_shl(b as u32)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32ShrS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                // Arithmetic shift: on `i32` the sign bit is replicated.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_shr(b as u32)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32ShrU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
+
+                // Logical shift: done on `u32` so the vacated high bits are zeros.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_shr(b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Store16 { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u16(effective_offset, val as u16)?;
+
+                Step::Next
+            }
+            RegInstruction::I32Store8 { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u8(effective_offset, val as u8)?;
+
+                Step::Next
+            }
+            RegInstruction::I32Sub(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.wrapping_sub(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncF32S(sig) => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as f64;
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(truncated as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncF32U(sig) => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as f64;
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                // The result is the `u32` bit pattern held in an `i32`, so values
+                // above `i32::MAX` come back out negative.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(truncated as u32 as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncF64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+                let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(truncated as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncF64U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+                let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(truncated as u32 as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncSatF32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncSatF32U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncSatF64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32TruncSatF64U(sig) => {
+                // Saturate to `u32`, the *target* width — going through `u64` here
+                // would clamp at the wrong bound and then wrap on the way down.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32WrapI64(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I32Xor(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(a.bitxor(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Add(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_add(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64And(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.bitand(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Clz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.leading_zeros() as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Ctz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.trailing_zeros() as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64DivS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.checked_div(b).ok_or(
+                        InstructionExecutionError::Division {
+                            num: a.to_string(),
+                            deno: b.to_string(),
+                        },
+                    )?),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64DivU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(
+                        a.checked_div(b)
+                            .ok_or(InstructionExecutionError::Division {
+                                num: a.to_string(),
+                                deno: b.to_string(),
+                            })? as i64,
+                    ),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Eq(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a == b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Eqz(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(if a == 0 { 1 } else { 0 }),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Extend16S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i16 as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Extend32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i32 as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Extend8S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i8 as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64ExtendI32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64ExtendI32U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64GeS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64GeU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a >= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64GtS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64GtU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a > b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64LeS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64LeU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a <= b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i64(effective_offset)?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load16S { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i16(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load16U { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_u16(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load32S { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i32(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load32U { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_u32(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load8S { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_i8(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Load8U { offset, sig } => {
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )?;
+                let val = instance.memory.read_u8(effective_offset)? as i64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(val),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64LtS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64LtU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a < b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Mul(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_mul(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Ne(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32((a != b) as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Or(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.bitor(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Popcnt(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i64();
+
+                // See `I32Popcnt`. The count is at most 64, but the result type is
+                // `i64` — unary integer ops keep their operand's width, unlike the
+                // comparisons.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.count_ones() as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64ReinterpretF64(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.to_bits() as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64RemS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                // See `I32RemS`: only a zero divisor traps; `i64::MIN % -1` is `0`.
+                if b == 0 {
+                    return Err(Box::new(InstructionExecutionError::Remainder {
+                        left: a.to_string(),
+                        right: b.to_string(),
+                    }));
+                }
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_rem(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64RemU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.checked_rem(b).ok_or(
+                        InstructionExecutionError::Remainder {
+                            left: a.to_string(),
+                            right: b.to_string(),
+                        },
+                    )? as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Rotl(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.rotate_left(b as u32) as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Rotr(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.rotate_right(b as u32) as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Shl(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_shl(b as u32)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64ShrS(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                // Arithmetic shift: on `i64` the sign bit is replicated.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_shr(b as u32)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64ShrU(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
+
+                // Logical shift: done on `u64` so the vacated high bits are zeros.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_shr(b as u32) as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Store { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u64(effective_offset, val as u64)?;
+
+                Step::Next
+            }
+            RegInstruction::I64Store16 { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u16(effective_offset, val as u16)?;
+
+                Step::Next
+            }
+            RegInstruction::I64Store32 { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u32(effective_offset, val as u32)?;
+
+                Step::Next
+            }
+            RegInstruction::I64Store8 { offset, sig } => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let effective_offset =
+                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+
+                instance.memory.write_u8(effective_offset, val as u8)?;
+
+                Step::Next
+            }
+            RegInstruction::I64Sub(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.wrapping_sub(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncF32S(sig) => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as f64;
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(truncated as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncF32U(sig) => {
+                // `f32` promotes to `f64` losslessly, keeping the bounds exact.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as f64;
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                // As with the `i32` forms, the result is the unsigned bit pattern
+                // held in a signed value.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(truncated as u64 as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncF64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+                let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(truncated as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncF64U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+                let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(truncated as u64 as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncSatF32S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncSatF32U(sig) => {
+                // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
+                // first would lose every value an `i64` can still represent.
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f32() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncSatF64S(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64TruncSatF64U(sig) => {
+                let a = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_f64() as u64;
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a as i64),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::I64Xor(sig) => {
+                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
+                let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
+
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i64(a.bitxor(b)),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
+            RegInstruction::RefIsNull(sig) => {
+                let func_ref = Self::slot_value(
+                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_ref();
+
+                // A predicate, so the result is an `i32` and not a reference — the
+                // same convention `iNN.eqz` follows, which is what lets it feed a
+                // `br_if` directly.
+                Self::set_value_to_register(
+                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    Value::from_i32(func_ref.is_none() as i32),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
         };
 
         Ok(res)

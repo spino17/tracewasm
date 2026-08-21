@@ -12,6 +12,7 @@
 #![cfg(not(no_guest_wasm))]
 
 use tracewasm_core::instance::config::Config;
+use tracewasm_core::{Register, Stack, VirtualMachine};
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 
 /// Every trapping export returns `Err` rather than panicking or aborting, and the
@@ -35,7 +36,12 @@ use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 /// what rustc really emits, fixtures reach the instructions rustc guards away.
 #[test]
 fn guest_faults_become_catchable_errors() {
-    let mut g = Guest::new(guests::MEMORY);
+    with_large_stack(|| guest_faults_become_catchable_errors_on::<Stack>());
+    with_large_stack(|| guest_faults_become_catchable_errors_on::<Register>());
+}
+
+fn guest_faults_become_catchable_errors_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     let cases: &[(&str, &str)] = &[
         // a Rust bounds-check failure panics, which lowers to `unreachable`
@@ -71,7 +77,12 @@ fn guest_faults_become_catchable_errors() {
 /// allocation, bounds checks) should surface with the intervening frames intact.
 #[test]
 fn a_trap_reports_the_wasm_call_chain() {
-    let mut g = Guest::new(guests::MEMORY);
+    with_large_stack(|| a_trap_reports_the_wasm_call_chain_on::<Stack>());
+    with_large_stack(|| a_trap_reports_the_wasm_call_chain_on::<Register>());
+}
+
+fn a_trap_reports_the_wasm_call_chain_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     let err = g
         .try_i32_i64("mem_trap_oob_read", 0)
@@ -107,6 +118,11 @@ fn a_trap_reports_the_wasm_call_chain() {
 /// which is why this test exists even though it is slow.
 #[test]
 fn runaway_recursion_traps_instead_of_aborting_the_process() {
+    with_large_stack(|| runaway_recursion_traps_instead_of_aborting_the_process_on::<Stack>());
+    with_large_stack(|| runaway_recursion_traps_instead_of_aborting_the_process_on::<Register>());
+}
+
+fn runaway_recursion_traps_instead_of_aborting_the_process_on<V: VirtualMachine>() {
     with_large_stack(|| {
         let mut cfg = Config::default();
 
@@ -114,7 +130,7 @@ fn runaway_recursion_traps_instead_of_aborting_the_process() {
         // keeps the test fast. The default is higher.
         cfg.set_max_call_stack_depth(512);
 
-        let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+        let mut g = Guest::<V>::with_config(guests::FRAMES, Some(cfg));
 
         let err = g
             .try_i32_i64("fr_trap_infinite_recursion", 0)
@@ -139,11 +155,16 @@ fn runaway_recursion_traps_instead_of_aborting_the_process() {
 /// exactly that bug.
 #[test]
 fn the_depth_guard_counts_depth_not_total_calls() {
+    with_large_stack(|| the_depth_guard_counts_depth_not_total_calls_on::<Stack>());
+    with_large_stack(|| the_depth_guard_counts_depth_not_total_calls_on::<Register>());
+}
+
+fn the_depth_guard_counts_depth_not_total_calls_on<V: VirtualMachine>() {
     with_large_stack(|| {
         let mut cfg = Config::default();
         cfg.set_max_call_stack_depth(64);
 
-        let mut g = Guest::with_config(guests::FRAMES, Some(cfg));
+        let mut g = Guest::<V>::with_config(guests::FRAMES, Some(cfg));
 
         // `fr_call_chain` nests only ~5 deep but makes thousands of calls in total,
         // so it must succeed under a limit of 64
@@ -167,6 +188,11 @@ fn the_depth_guard_counts_depth_not_total_calls() {
 /// is genuinely driven by configuration rather than a hardcoded constant.
 #[test]
 fn the_depth_limit_is_configurable() {
+    with_large_stack(|| the_depth_limit_is_configurable_on::<Stack>());
+    with_large_stack(|| the_depth_limit_is_configurable_on::<Register>());
+}
+
+fn the_depth_limit_is_configurable_on<V: VirtualMachine>() {
     with_large_stack(|| {
         // capped for debug builds, where each frame costs ~30 KB of native stack
         let depth = 300.min(MAX_TEST_RECURSION);
@@ -177,8 +203,8 @@ fn the_depth_limit_is_configurable() {
         let mut high = Config::default();
         high.set_max_call_stack_depth(4_000);
 
-        let mut g_low = Guest::with_config(guests::FRAMES, Some(low));
-        let mut g_high = Guest::with_config(guests::FRAMES, Some(high));
+        let mut g_low = Guest::<V>::with_config(guests::FRAMES, Some(low));
+        let mut g_high = Guest::<V>::with_config(guests::FRAMES, Some(high));
 
         assert!(
             g_low.try_i32_i64("fr_recurse_depth", depth).is_err(),
@@ -200,7 +226,12 @@ fn the_depth_limit_is_configurable() {
 /// counter in a corrupt state, which would show up as the *second* call failing.
 #[test]
 fn an_instance_is_reusable_after_a_trap() {
-    let mut g = Guest::new(guests::MEMORY);
+    with_large_stack(|| an_instance_is_reusable_after_a_trap_on::<Stack>());
+    with_large_stack(|| an_instance_is_reusable_after_a_trap_on::<Register>());
+}
+
+fn an_instance_is_reusable_after_a_trap_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     // a healthy call first, to establish a baseline
     let before = g.i32_i64("mem_endianness", 0);
