@@ -3357,17 +3357,55 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::Else { end_index } => Step::JumpTo(*end_index),
             RegInstruction::Loop => Step::Next,
-            RegInstruction::Br { target_index } => todo!(),
+            RegInstruction::Br { target_index } => Step::JumpTo(*target_index),
             RegInstruction::BrIf {
                 cond,
                 mov,
                 target_index,
-            } => todo!(),
+            } => {
+                let cond = Self::slot_value(
+                    &cond.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32();
+
+                if cond != 0 {
+                    Self::execute_mov(mov, caller_base_data, frame_layout, instance);
+
+                    Step::JumpTo(*target_index)
+                } else {
+                    Step::Next
+                }
+            }
             RegInstruction::BrTable {
                 index,
                 targets_start,
                 targets_len,
-            } => todo!(),
+            } => {
+                let br_table_targets = frame_layout.br_table_targets();
+                let start = *targets_start as usize;
+                let targets = &br_table_targets[start..start + *targets_len as usize];
+
+                let index = Self::slot_value(
+                    &index.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32 as usize;
+
+                let target_count = targets.len() - 1;
+
+                let branch = if target_count <= index {
+                    &targets[target_count] // always the last element of targets
+                } else {
+                    &targets[index]
+                };
+
+                Self::execute_mov(&branch.mov, caller_base_data, frame_layout, instance);
+
+                Step::JumpTo(branch.target_index)
+            }
             RegInstruction::End => Step::Next,
             _ => todo!(),
         };
