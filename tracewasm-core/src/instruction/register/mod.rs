@@ -104,7 +104,7 @@
 //! balanced without a reconciliation step.
 
 use crate::{
-    error::{InstructionExecutionError, TraceWasmError},
+    error::{CallIndirectError, InstructionExecutionError, TraceWasmError},
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
@@ -116,7 +116,7 @@ use crate::{
     },
     memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
-    runtime::{Step, reg::RegFrame, stack::Stack, value::Value},
+    runtime::{Step, reg::RegFrame, signature_mismatch, stack::Stack, value::Value},
 };
 use smallvec::{SmallVec, smallvec};
 use std::{marker::PhantomData, u32};
@@ -3233,7 +3233,100 @@ impl Instruction for RegInstruction {
                 operands,
                 caller_base,
             } => {
-                todo!()
+                let table = &instance.table_vals[table_index.0 as usize];
+
+                let slot = Self::slot_value(
+                    &slot.registers(&frame_layout.input_registers_arena)[0],
+                    caller_base_data,
+                    instance,
+                )
+                .as_i32() as u32 as usize;
+
+                // Trap if the index is past the table's end (wasm: "undefined element").
+                let Some(func_ref) = table.table.get(slot).copied() else {
+                    return Err(Box::new(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::TableSlotOutOfBounds,
+                    )));
+                };
+
+                // Trap on a null element (wasm: "uninitialized element").
+                let Some(callee_func_index) = func_ref else {
+                    return Err(Box::new(InstructionExecutionError::CallIndirect(
+                        *table_index,
+                        CallIndirectError::NullElementInTable,
+                    )));
+                };
+
+                let func_ty = &module.types[ty_index.0 as usize];
+                let params = &func_ty.params;
+                let results = &func_ty.results;
+
+                let func = &module.func_decls[callee_func_index.0 as usize];
+                let ty = &module.types[func.ty.0 as usize];
+
+                let declared_params = &ty.params;
+                let declared_results = &ty.results;
+
+                // Trap if the callee's signature differs from the type the
+                // instruction expects (wasm: "indirect call type mismatch").
+                if params.as_ref() != declared_params.as_ref()
+                    || results.as_ref() != declared_results.as_ref()
+                {
+                    return Err(Box::new(signature_mismatch(
+                        *table_index,
+                        declared_params,
+                        declared_results,
+                        params,
+                        results,
+                    )));
+                }
+
+                let input_start = *operands as usize;
+                let param_slots = &frame_layout.input_registers_arena
+                    [input_start..(input_start + declared_params.len())];
+
+                let mut tmp: SmallVec<[Value; 3]> = smallvec![];
+
+                for slot in param_slots {
+                    tmp.push(Self::slot_value(slot, caller_base_data, instance));
+                }
+
+                for (i, val) in tmp.iter().enumerate() {
+                    Self::set_value_to_register(
+                        *caller_base + i as u32,
+                        val,
+                        caller_base_data,
+                        instance,
+                    );
+                }
+
+                let callee_caller_base_data = RegCallerBaseData {
+                    base_register_index: *caller_base
+                        + caller_base_data.callee_frame_base_register_index,
+                    callee_frame_base_register_index: u32::MAX,
+                    spills_base_index: u32::MAX,
+                };
+
+                // As for `Call` above; the table index rides along so a failure can
+                // say which table the call went through.
+                if callee_func_index.0 >= imported_func_count {
+                    Step::Call {
+                        func_index: callee_func_index,
+                        caller_base_data: callee_caller_base_data,
+                        is_indirect: Some(*table_index),
+                    }
+                } else {
+                    crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
+                        callee_func_index,
+                        module,
+                        instance,
+                        Some(*table_index),
+                        &callee_caller_base_data,
+                    )?;
+
+                    Step::Next
+                }
             }
             RegInstruction::Move(sig) => {
                 Self::execute_mov(sig, caller_base_data, frame_layout, instance);
