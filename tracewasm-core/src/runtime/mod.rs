@@ -311,6 +311,7 @@ impl TraceVM {
         let func_body = &module.func_bodies[(func_index.0 - imported_func_count) as usize];
         let instructions = &func_body.instructions;
         let instruction_offsets = &func_body.instruction_offsets;
+        let frame_layout = &func_body.frame_layout;
 
         // `locals` in the body is laid out params-first, then declared locals, and
         // `locals_ty[i]` is the declared type of local slot `i`. So
@@ -321,12 +322,9 @@ impl TraceVM {
         // The declared locals follow the params and must start at the zero value
         // of their type, per the spec. Pushing them here is what makes the locals
         // region contiguous, so `get_local` can index it directly.
-        instance.frame.enter_frame(
-            params_count,
-            locals_ty,
-            &mut caller_base_data,
-            &func_body.frame_layout,
-        );
+        instance
+            .frame
+            .enter_frame(params_count, locals_ty, &mut caller_base_data, frame_layout);
 
         // Entering a frame. The matching decrement is after the driver loop; the
         // error paths out of the loop deliberately skip it, because an error always
@@ -355,7 +353,7 @@ impl TraceVM {
             let step = instr.execute(
                 module,
                 instance,
-                &func_body.frame_layout,
+                frame_layout,
                 &caller_base_data,
                 imported_func_count,
             );
@@ -438,7 +436,9 @@ impl TraceVM {
         // preserving the results on top. They therefore land in exactly the slots
         // the caller's arguments occupied, which is what lets the caller do
         // nothing at all after a `Call` returns.
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, frame_layout);
 
         Ok(())
     }
@@ -506,12 +506,9 @@ impl TraceVM {
         // two cannot be the same variable.
         let entry_func_index = func_index;
 
-        instance.frame.enter_frame(
-            params_count,
-            locals_ty,
-            &mut caller_base_data,
-            &func_body.frame_layout,
-        );
+        instance
+            .frame
+            .enter_frame(params_count, locals_ty, &mut caller_base_data, frame_layout);
 
         loop {
             let instr = &instructions[pc];
@@ -613,7 +610,7 @@ impl TraceVM {
                         callee_params_count,
                         callee_locals_ty,
                         &mut caller_base_data,
-                        &callee_func_body.frame_layout,
+                        &callee_frame_layout,
                     );
 
                     continue;
@@ -628,9 +625,11 @@ impl TraceVM {
                 // pop the frame!
                 let frame = frames.pop().unwrap(); // safe to unwrap as checked above!
 
-                instance
-                    .frame
-                    .exit_frame(frame.callee_results_count, &caller_base_data);
+                instance.frame.exit_frame(
+                    frame.callee_results_count,
+                    &caller_base_data,
+                    frame_layout,
+                );
 
                 // reset the state of the frame which executed call instruction
                 func_index = frame.func_index;
@@ -642,7 +641,9 @@ impl TraceVM {
             }
         }
 
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, frame_layout);
 
         Ok(())
     }

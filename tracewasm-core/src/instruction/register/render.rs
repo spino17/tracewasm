@@ -6,16 +6,35 @@ use crate::{
 };
 
 impl RegInstruction {
-    pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
+    pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType], locals_count: u32) -> String {
         let ins = &frame.input_registers_arena;
         let outs = &frame.output_registers_arena;
 
-        let sig1 = |i: &Registers<1, Slot>| i.registers(ins)[0].render();
-        let list = |xs: &[Slot]| xs.iter().map(|x| x.render()).collect::<Vec<_>>().join(", ");
+        let sig1 =
+            |i: &Registers<1, Slot>| i.registers(ins)[0].render(locals_count, frame.registers);
+        let list = |xs: &[Slot]| {
+            xs.iter()
+                .map(|x| x.render(locals_count, frame.registers))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
 
+        // Destinations are frame indices, on the same footing as a
+        // `Slot::RegisterFrame` operand, so they are rendered by the same rule: below
+        // `locals_count` names a local, at or above it an operand register. A
+        // destination should never be a local — those are written through
+        // `set_local` — so `localN` appearing here is a bug worth seeing.
         let regs = |xs: &[u32]| {
             xs.iter()
-                .map(|r| format!("r{r}"))
+                .map(|&r| {
+                    if r < locals_count {
+                        format!("local{r}")
+                    } else if r < frame.registers {
+                        format!("r{}", r - locals_count)
+                    } else {
+                        format!("spill{}", r - frame.registers)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -27,7 +46,7 @@ impl RegInstruction {
             format!(
                 "{:<12} [{}]+{offset} -> {}",
                 mnemonic(kind),
-                inputs[0].render(),
+                inputs[0].render(locals_count, frame.registers),
                 regs(outputs)
             )
         };
@@ -36,8 +55,8 @@ impl RegInstruction {
             format!(
                 "{:<12} [{}]+{offset} <- {}",
                 mnemonic(kind),
-                inputs[0].render(),
-                inputs[1].render()
+                inputs[0].render(locals_count, frame.registers),
+                inputs[1].render(locals_count, frame.registers)
             )
         };
 
@@ -310,17 +329,17 @@ impl RegInstruction {
             RegInstruction::LocalSet { index, input } => format!(
                 "local.set    local{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(locals_count, frame.registers)
             ),
             RegInstruction::LocalTee { index, input } => format!(
                 "local.tee    local{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(locals_count, frame.registers)
             ),
             RegInstruction::GlobalSet { index, input } => format!(
                 "global.set   global{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(locals_count, frame.registers)
             ),
             RegInstruction::LocalSpill { index, spill_index } => {
                 format!("local.spill  local{} -> spill{spill_index}", index.0)
@@ -487,12 +506,12 @@ impl RegInstruction {
     ///
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.
-    pub fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
+    pub fn render_body(body: &RegLoweredFuncBody, types: &[FuncType], locals_count: u32) -> String {
         let (instructions, _, frame) = body;
         let mut out = String::new();
 
         for (pc, i) in instructions.iter().enumerate() {
-            let line = i.render(frame, types);
+            let line = i.render(frame, types, locals_count);
 
             out.push_str(&format!("{pc:>3}  {line}\n"));
         }
