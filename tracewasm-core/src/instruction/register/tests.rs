@@ -38,9 +38,37 @@ fn locals_of(s: &SimulatedStack) -> u32 {
     s.lazy_locals.origin.len() as u32
 }
 
+/// Applies the spill backpatch `emit_instructions_for_func` performs once a body is
+/// fully lowered.
+///
+/// A spill's frame index is `max_registers + slot`, and `max_registers` is only final
+/// at the end — so the pass emits a placeholder and fixes the arena afterwards. A test
+/// that reads operands straight out of the arena has to do the same, or it sees the
+/// placeholder.
+fn resolve_spills(s: &mut SimulatedStack) {
+    for (i, spill) in std::mem::take(&mut s.spill_backpatches) {
+        s.input_registers[i] = Slot::RegisterFrame(s.max_registers + spill.raw_value());
+    }
+}
+
+/// Renders a lowering-time operand, which may still be an unresolved spill.
+///
+/// A spill's frame index is not known until `max_registers` is final, so the pass
+/// carries it as a `SpillIndex` and backpatches the arena at the end. Before that
+/// point there is no frame index to print, so it renders as `spillN` — which is what
+/// these tests assert against.
+fn render_operand(o: &SlotOrSpill, locals_count: u32, registers: u32) -> String {
+    match o {
+        SlotOrSpill::Spill(i) => format!("spill{i}"),
+        SlotOrSpill::Slot(s) => s.render(locals_count, registers),
+    }
+}
+
 /// Renders a run of operands.
-fn slots(xs: &[Slot], locals_count: u32) -> Vec<String> {
-    xs.iter().map(|x| x.render(locals_count)).collect()
+fn slots(xs: &[Slot], locals_count: u32, registers: u32) -> Vec<String> {
+    xs.iter()
+        .map(|x| x.render(locals_count, registers))
+        .collect()
 }
 
 /// Renders what `set_lazy` returned: `Some("spill0")` when it rescued a borrow.
@@ -253,6 +281,8 @@ fn borrows_of_one_local_share_a_single_spill() {
     let _set = s.registers_for::<1, 0>();
     let add = s.registers_for::<2, 1>();
 
+    resolve_spills(&mut s);
+
     assert_eq!(
         spilled_to(spill),
         Some("spill0".into()),
@@ -260,7 +290,11 @@ fn borrows_of_one_local_share_a_single_spill() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers), locals_of(&s)),
+        slots(
+            add.input.registers(&s.input_registers),
+            locals_of(&s),
+            s.max_registers
+        ),
         ["spill0", "spill0"],
         "both operands redirect"
     );
@@ -303,6 +337,8 @@ fn successive_writes_produce_independent_snapshots() {
     let _ = s.registers_for::<1, 0>();
     let add = s.registers_for::<2, 1>();
 
+    resolve_spills(&mut s);
+
     assert_eq!(
         (spilled_to(first), spilled_to(second)),
         (Some("spill0".into()), Some("spill1".into())),
@@ -310,7 +346,11 @@ fn successive_writes_produce_independent_snapshots() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers), locals_of(&s)),
+        slots(
+            add.input.registers(&s.input_registers),
+            locals_of(&s),
+            s.max_registers
+        ),
         ["spill0", "spill1"],
         "each operand keeps its own snapshot"
     );
@@ -355,7 +395,7 @@ fn tee_spills_before_reading_the_top() {
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
     assert_eq!(
-        operand.render(locals_of(&s)),
+        render_operand(&operand, locals_of(&s), s.max_registers),
         "spill0",
         "tee must observe the redirect"
     );
@@ -818,14 +858,23 @@ impl Frame {
         }
     }
 
-    fn read(&self, slot: &Slot) -> i64 {
+    /// [`Self::read`] for an already-resolved arena entry.
+    fn read_slot(&self, slot: &Slot) -> i64 {
+        self.read(&SlotOrSpill::Slot(*slot))
+    }
+
+    fn read(&self, slot: &SlotOrSpill) -> i64 {
         match slot {
-            Slot::Const(Const::I32(v)) => *v as i64,
-            Slot::Global(n) => self.globals[*n as usize],
-            Slot::Spilled(i) => self.spills[spill_slot(i)],
-            Slot::RegisterFrame(n) if (*n as usize) < self.locals.len() => self.locals[*n as usize],
-            Slot::RegisterFrame(_) => unreachable!("these tests emit no register writes"),
-            Slot::Const(_) => unreachable!("i32 constants only"),
+            SlotOrSpill::Spill(i) => self.spills[spill_slot(i)],
+            SlotOrSpill::Slot(Slot::Const(Const::I32(v))) => *v as i64,
+            SlotOrSpill::Slot(Slot::Global(n)) => self.globals[*n as usize],
+            SlotOrSpill::Slot(Slot::RegisterFrame(n)) if (*n as usize) < self.locals.len() => {
+                self.locals[*n as usize]
+            }
+            SlotOrSpill::Slot(Slot::RegisterFrame(_)) => {
+                unreachable!("these tests emit no register writes")
+            }
+            SlotOrSpill::Slot(Slot::Const(_)) => unreachable!("i32 constants only"),
         }
     }
 
@@ -838,10 +887,10 @@ impl Frame {
                 self.spills[spill_slot(spill_index)] = self.globals[index.0 as usize];
             }
             RegInstruction::LocalSet { index, input } => {
-                self.locals[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.locals[index.0 as usize] = self.read_slot(&input.registers(ins)[0]);
             }
             RegInstruction::GlobalSet { index, input } => {
-                self.globals[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.globals[index.0 as usize] = self.read_slot(&input.registers(ins)[0]);
             }
             _ => unreachable!("these tests emit only spills and writes"),
         }
@@ -939,7 +988,7 @@ fn a_conditional_arm_cannot_own_the_spill() {
             frame.read(&consumer),
             42,
             "{tag}: <use> reads {}, which that path never wrote",
-            consumer.render(locals_of(&s))
+            render_operand(&consumer, locals_of(&s), s.max_registers)
         );
     }
 }
@@ -1187,10 +1236,16 @@ fn global_borrows_behave_like_local_ones() {
     let _set = s.registers_for::<1, 0>();
     let add = s.registers_for::<2, 1>();
 
+    resolve_spills(&mut s);
+
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers), locals_of(&s)),
+        slots(
+            add.input.registers(&s.input_registers),
+            locals_of(&s),
+            s.max_registers
+        ),
         ["spill0", "spill0"]
     );
 }
@@ -1216,12 +1271,12 @@ fn a_local_and_a_global_of_the_same_index_are_independent() {
     );
 
     assert_eq!(
-        s.pop().render(locals_of(&s)),
+        render_operand(&s.pop(), locals_of(&s), s.max_registers),
         "spill0",
         "the global was rescued"
     );
     assert_eq!(
-        s.pop().render(locals_of(&s)),
+        render_operand(&s.pop(), locals_of(&s), s.max_registers),
         "local0",
         "the local still forwards"
     );
@@ -1257,9 +1312,21 @@ fn writing_one_local_leaves_other_borrows_alone() {
     let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(s.pop().render(locals_of(&s)), "local2", "untouched above");
-    assert_eq!(s.pop().render(locals_of(&s)), "spill0", "rescued");
-    assert_eq!(s.pop().render(locals_of(&s)), "local0", "untouched below");
+    assert_eq!(
+        render_operand(&s.pop(), locals_of(&s), s.max_registers),
+        "local2",
+        "untouched above"
+    );
+    assert_eq!(
+        render_operand(&s.pop(), locals_of(&s), s.max_registers),
+        "spill0",
+        "rescued"
+    );
+    assert_eq!(
+        render_operand(&s.pop(), locals_of(&s), s.max_registers),
+        "local0",
+        "untouched below"
+    );
 }
 
 #[test]
@@ -1291,7 +1358,7 @@ fn three_borrows_share_one_entry() {
 
     for _ in 0..3 {
         assert_eq!(
-            s.pop().render(locals_of(&s)),
+            render_operand(&s.pop(), locals_of(&s), s.max_registers),
             "spill0",
             "all three redirect"
         );
@@ -1313,7 +1380,10 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
     // `local.tee 0` on a value read from local 0: correct, if redundant
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(operand.render(locals_of(&s)), "spill0");
+    assert_eq!(
+        render_operand(&operand, locals_of(&s), s.max_registers),
+        "spill0"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1375,7 +1445,11 @@ fn operands_are_recorded_deepest_first() {
     let select = s.registers_for::<3, 1>();
 
     assert_eq!(
-        slots(select.input.registers(&s.input_registers), locals_of(&s)),
+        slots(
+            select.input.registers(&s.input_registers),
+            locals_of(&s),
+            s.max_registers
+        ),
         ["local0", "local1", "local2"],
         "select reads a, b, cond in that order"
     );
@@ -1391,7 +1465,11 @@ fn store_records_address_then_value() {
     let store = s.registers_for::<2, 0>();
 
     assert_eq!(
-        slots(store.input.registers(&s.input_registers), locals_of(&s)),
+        slots(
+            store.input.registers(&s.input_registers),
+            locals_of(&s),
+            s.max_registers
+        ),
         ["local0", "9"]
     );
 }
@@ -1411,7 +1489,7 @@ fn a_result_reuses_an_operands_register() {
     let inputs = add.input.registers(&s.input_registers);
     let output = add.output.registers(&s.output_registers)[0];
 
-    assert_eq!(slots(inputs, locals_of(&s)), ["r0", "r1"]);
+    assert_eq!(slots(inputs, locals_of(&s), s.max_registers), ["r0", "r1"]);
 
     assert_eq!(
         output, 4,
@@ -1775,6 +1853,7 @@ fn br_table_arms_survive_lowering() {
     let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
+        locals_count: s.lazy_locals.origin.len() as u32,
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
         br_targets_arena: s.br_targets.into_boxed_slice(),
@@ -1808,6 +1887,7 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
     let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
+        locals_count: s.lazy_locals.origin.len() as u32,
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
         br_targets_arena: s.br_targets.into_boxed_slice(),
@@ -2224,7 +2304,8 @@ fn each_br_table_arm_carries_its_own_move() {
         assert_eq!(
             slots(
                 arm.mov.input_registers(&frame.input_registers_arena),
-                locals
+                locals,
+                frame.registers,
             ),
             ["9"],
             "every arm transfers the same value"
@@ -2541,6 +2622,7 @@ fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
             RegInstruction::I32Add(sig) => Some(slots(
                 sig.input.registers(&frame.input_registers_arena),
                 locals,
+                frame.registers,
             )),
             _ => None,
         })

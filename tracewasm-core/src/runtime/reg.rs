@@ -219,9 +219,10 @@ mod tests {
     /// records: `max_registers` starts at `locals_count` and counts up from there.
     /// The `enter*` helpers below take an operand count and add the locals, so a test
     /// can still say "this body needs two registers" and mean it.
-    fn layout(registers: u32) -> RegFrameLayout {
+    fn layout(registers: u32, locals_count: u32) -> RegFrameLayout {
         RegFrameLayout {
             registers,
+            locals_count,
             spills: 0,
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
@@ -241,15 +242,13 @@ mod tests {
 
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
-            locals_count: u32::MAX,
-            spills_base_index: u32::MAX,
         };
 
         frame.enter_frame(
             params.len() as u32,
             &locals_ty,
             &mut caller_base_data,
-            &layout(locals_ty.len() as u32 + registers),
+            &layout(locals_ty.len() as u32 + registers, locals_ty.len() as u32),
         );
 
         frame.registers.len()
@@ -269,11 +268,9 @@ mod tests {
 
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
-            locals_count: u32::MAX,
-            spills_base_index: u32::MAX,
         };
 
-        let mut frame_layout = layout(locals_ty.len() as u32 + registers);
+        let mut frame_layout = layout(locals_ty.len() as u32 + registers, locals_ty.len() as u32);
 
         frame_layout.spills = spills;
 
@@ -287,112 +284,90 @@ mod tests {
         caller_base_data
     }
 
+    // -----------------------------------------------------------------------
+    // spills, as a region inside the frame
+    // -----------------------------------------------------------------------
+    //
+    // Spills used to be a second `Vec` with its own base, which had to be truncated
+    // on exit because that base was a length and only ever moved up. They now sit
+    // above the frame's registers in the one file, so the base arithmetic and the
+    // truncation are both gone: the next frame at a lower base simply overwrites
+    // them, exactly as it does the registers.
+
+    /// The reservation has to cover the spills as well as the registers, or a spill
+    /// write lands past the end of the file.
     #[test]
-    fn a_frames_spill_region_is_appended_and_its_base_recorded() {
+    fn a_frames_spill_region_is_reserved_above_its_registers() {
         let mut frame = RegFrame::default();
-        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
+
+        // 1 param, so the layout's total width is 1 local + 1 register = 2, plus 2
+        // spill slots above that
+        let _ = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
 
         assert_eq!(
-            base_data.spills_base_index, 0,
-            "the first frame's spills start at 0"
+            frame.registers.len(),
+            4,
+            "2 for the locals and registers, 2 more for the spills"
         );
-        assert_eq!(frame.spills.len(), 2, "its two slots are appended");
     }
 
+    /// A callee based above its caller's frame gets a spill region above its own
+    /// registers, and it cannot reach back into the caller's.
     #[test]
-    fn a_nested_frames_spills_sit_above_its_callers() {
+    fn a_nested_frames_spills_do_not_collide_with_its_callers() {
         let mut frame = RegFrame::default();
+
         let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
-        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
+        // the caller occupies [0, 2) for locals+registers and [2, 4) for spills
+        let callee = enter_full(&mut frame, 4, &[ValType::I32], &[], 1, 3);
 
-        assert_eq!(caller.spills_base_index, 0);
-
-        assert_eq!(
-            callee.spills_base_index, 2,
-            "the callee's region starts where the caller's ended"
-        );
-
-        assert_eq!(frame.spills.len(), 5, "2 + 3 slots are live at this depth");
-    }
-
-    /// Unlike the register file — whose base comes from the caller's position and so
-    /// reuses space naturally — a spill base is `spills.len()`, which only moves up.
-    /// Truncating on exit is therefore what keeps a loop of calls from growing it
-    /// without bound.
-    #[test]
-    fn exiting_a_frame_releases_its_spill_region() {
-        let mut frame = RegFrame::default();
-        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
-        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
-
-        assert_eq!(frame.spills.len(), 5);
-
-        // a callee with no results, so only the spill half of the teardown runs
-        frame.exit_frame(0, &callee);
+        assert_eq!(caller.base_register_index, 0);
+        assert_eq!(callee.base_register_index, 4);
 
         assert_eq!(
-            frame.spills.len(),
-            2,
-            "the callee's region is released, the caller's survives"
+            frame.registers.len(),
+            4 + 2 + 3,
+            "the callee's own registers and spills sit above everything the caller holds"
         );
-
-        frame.exit_frame(0, &caller);
-
-        assert_eq!(frame.spills.len(), 0, "and the caller's in turn");
     }
 
+    /// Repeated calls at one depth reuse the same space rather than growing the file,
+    /// which is the property the old spill vector needed an explicit truncation for.
     #[test]
-    fn repeated_calls_at_the_same_depth_reuse_the_same_spill_base() {
+    fn repeated_calls_at_the_same_depth_reuse_the_same_space() {
         let mut frame = RegFrame::default();
-        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 1);
-        let mut bases = vec![];
+
+        let _caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 1);
+        let mut lens = vec![];
 
         for _ in 0..4 {
-            let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 2);
-
-            bases.push(callee.spills_base_index);
-            frame.exit_frame(0, &callee);
+            let _ = enter_full(&mut frame, 3, &[ValType::I32], &[], 1, 2);
+            lens.push(frame.registers.len());
         }
 
         assert!(
-            bases.windows(2).all(|w| w[0] == w[1]),
-            "every call at this depth must get the same base, not a fresh one: {bases:?}"
+            lens.windows(2).all(|w| w[0] == w[1]),
+            "the file must not grow across calls at one depth: {lens:?}"
         );
-
-        assert_eq!(frame.spills.len(), 1, "only the caller's region is left");
-
-        let _ = caller;
     }
 
     #[test]
-    fn a_frame_with_no_spills_still_records_a_base() {
-        let mut frame = RegFrame::default();
-        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 0);
-
-        assert_eq!(
-            base_data.spills_base_index, 0,
-            "the base must be recorded even when the region is empty, since \
-             `exit_frame` truncates to it"
-        );
-
-        assert_eq!(frame.spills.len(), 0);
-    }
-
-    #[test]
-    fn reset_clears_the_spill_area_too() {
+    fn reset_clears_the_whole_file() {
         let mut frame = RegFrame::default();
 
         enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 3);
+        assert!(frame.registers.len() >= 4);
 
-        assert_eq!(frame.spills.len(), 3);
-
-        // a trap unwinds without reaching `exit_frame`, so the next call's reset is
-        // what releases the region — otherwise every spill base above it shifts up
-        // for the life of the instance
+        // A trap unwinds without reaching `exit_frame`, so `reset` is what makes the
+        // instance reusable — and it must *clear*, not truncate: `set_initial_params`
+        // pushes, so the entry frame's params only land at index 0 while it is empty.
         frame.reset();
 
-        assert_eq!(frame.spills.len(), 0, "spills are released");
-        assert_eq!(frame.registers.len(), 0, "and the register file with them");
+        assert_eq!(
+            frame.registers.len(),
+            0,
+            "the file is emptied, not truncated"
+        );
     }
 
     #[test]

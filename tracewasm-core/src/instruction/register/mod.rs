@@ -240,7 +240,15 @@ impl Slot {
         }
     }
 
-    fn render(&self, locals_count: u32) -> String {
+    /// `locals_count` and `registers` are the frame's two interior boundaries, both
+    /// read off its [`RegFrameLayout`]: a frame index below the first names a local,
+    /// below the second an operand register, and at or above it a spill slot.
+    ///
+    /// Execution needs none of this — the index is already absolute within the frame,
+    /// which is the whole point of folding the three regions together. The
+    /// classification survives only for rendering, where a spill that printed as an
+    /// ordinary register would make the spill tests unreadable.
+    fn render(&self, locals_count: u32, registers: u32) -> String {
         match self {
             Slot::Const(Const::I32(v)) => format!("{v}"),
             Slot::Const(Const::I64(v)) => format!("{v}i64"),
@@ -254,12 +262,20 @@ impl Slot {
                 }
             }
             Slot::Global(n) => format!("global{n}"),
+            // The placeholder a spill carries until `max_registers` is final. It
+            // should never survive into a lowered body, so it renders as plainly
+            // broken rather than as a spill slot four billion deep.
+            Slot::RegisterFrame(u32::MAX) => "<unresolved spill>".to_string(),
             Slot::RegisterFrame(frame_index) => {
-                // TODO: handle spill rendering too if frame_index >= max_registers -> spill_index: frame_index - max_registers
                 if *frame_index < locals_count {
                     format!("local{}", frame_index)
-                } else {
+                } else if *frame_index < registers {
                     format!("r{}", *frame_index - locals_count)
+                } else {
+                    // The spill region begins where the registers end, which is what
+                    // the backpatch adds to a `SpillIndex` once `max_registers` is
+                    // final — so subtracting it recovers the original slot number.
+                    format!("spill{}", *frame_index - registers)
                 }
             }
         }
@@ -913,8 +929,10 @@ impl SimulatedStack {
     /// location, so a spill occurring before it is read still reaches it. A register
     /// allocates one.
     ///
-    /// [`Slot::Spilled`] is rejected: a spill is a *transition* of an existing
-    /// borrow, applied through [`Self::set_lazy`], never a value pushed from nothing.
+    /// A spill cannot be pushed: it is a *transition* of an existing borrow, applied
+    /// through [`Self::set_lazy`], never a value pushed from nothing. That is why this
+    /// takes a [`Slot`] and not a [`SlotOrSpill`] — the spill form only arises from a
+    /// redirect, and only inside the lazy arenas.
     fn push(&mut self, val: Slot) {
         let slot = match val {
             Slot::Const(val) => StackSlot::Const(val),
@@ -2106,8 +2124,10 @@ impl RegInstruction {
     /// A borrow of a local or global reads its origin in place (see [`lazy`]), and
     /// stays valid only until something writes that origin. The write emits a spill
     /// that copies the old value aside, and the borrow is redirected to it — so from
-    /// then on the operand resolves to [`Slot::Spilled`] *for every path*, because
-    /// lowering resolves it once.
+    /// then on the operand resolves to that spill slot *for every path*, because
+    /// lowering resolves it once. It is carried as [`SlotOrSpill::Spill`] until the
+    /// body's `max_registers` is final, then backpatched into the frame index the
+    /// spill region actually occupies.
     ///
     /// That is only sound if the copy satisfies two properties. Emitting it at the
     /// write satisfies neither in general:
