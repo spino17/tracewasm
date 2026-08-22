@@ -431,6 +431,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracewasm-scratch"
+version = "0.1.0"
+
+[[package]]
 name = "tracewasm-test"
 version = "0.1.0"
 dependencies = [

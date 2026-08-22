@@ -1,33 +1,14 @@
 use std::fs;
-use tracewasm_core::{
-    Stack,
-    memory::{MemoryView, linear::LinearMemory},
-    module::Module,
-};
+use tracewasm_core::{Stack, memory::linear::LinearMemory, module::Module};
 use tracewasm_macros::imports;
 
-/// Example host module. The `#[imports]` macro reads the `#[module("...")]`-tagged
-/// (and any `#[global("...")]`-tagged) methods below and generates the entire
-/// [`ImportRegistry`] impl (`execute`, `signature`, `func_count`, `global_count`,
-/// `get_global`) — the embedder writes only the function bodies.
-///
-/// Serves as the example host state / import registry for the playground.
-pub struct ImportedFunctions {
-    /// Call counter mutated by the host functions to demonstrate `&mut self` state.
-    count: u32,
-}
+pub struct ImportedFunctions;
 
 #[imports]
 impl ImportedFunctions {
     #[module("env")]
-    fn host1<V: MemoryView>(&mut self, a: i32, b: i32, _memory_view: &mut V) -> (i32,) {
-        self.count += 1;
-        (a.wrapping_add(b),)
-    }
-
-    #[module("env")]
-    fn host2<V: MemoryView>(&mut self, a: i32, b: i32, c: i64, _memory_view: &mut V) -> (i32,) {
-        (a.wrapping_add(b).wrapping_add(c as i32),)
+    fn host_call(&mut self, n: i32) {
+        println!("{}", n);
     }
 }
 
@@ -40,7 +21,7 @@ const DEFAULT_WASM: &str = concat!(
 );
 
 /// The export the playground calls, and its signature.
-const ENTRY: &str = "bench_bits";
+const ENTRY: &str = "demo";
 
 fn main() -> Result<(), anyhow::Error> {
     // `tracewasm-scratch` is not a workspace member, so the default path only
@@ -56,17 +37,20 @@ fn main() -> Result<(), anyhow::Error> {
     })?;
 
     let module = Module::<Stack>::compile(&buf)?;
-    let registry = ImportedFunctions { count: 0 };
-    let func = module.get_typed_func::<(i32, i64), (i64,)>(ENTRY)?;
+    let registry = ImportedFunctions;
+    let func = module.get_typed_func::<(i32,), (i32,)>(ENTRY)?;
     let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
 
-    let res = func.call((1, 2), &mut instance);
+    let res = func.call((-1,), &mut instance);
 
-    if let Err(err) = res {
-        let trace = err.stack_trace();
-        let source_trace = trace.to_source_trace()?;
+    match res {
+        Ok(val) => println!("{}", val.0),
+        Err(err) => {
+            let trace = err.stack_trace();
+            let source_trace = trace.to_source_trace()?;
 
-        println!("{:?}", source_trace.render())
+            println!("{:?}", source_trace.render())
+        }
     }
 
     Ok(())
