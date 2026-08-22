@@ -9,6 +9,21 @@
 //!
 //! Export names are prefixed `ex_`.
 
+// These guests are deliberately awkward programs, shaped to produce wasm that a
+// straightforward one would not. Clippy's idioms fight that on purpose:
+//
+// * the packed struct is `repr(Rust, packed)` — the same layout it always had,
+//   now stated explicitly, since `repr(C, packed)` would reorder fields and test
+//   something else;
+// * a block used directly as a match scrutinee is named as such in the source;
+// * `None.unwrap_or_default()` and a redundant cast exercise paths a tidier
+//   spelling would optimise away.
+#![allow(
+    clippy::unnecessary_cast,
+    clippy::blocks_in_conditions,
+    clippy::unnecessary_literal_unwrap,
+    unused_qualifications
+)]
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -240,7 +255,7 @@ pub extern "C" fn ex_casts(_: i32) -> i64 {
     acc
 }
 
-/// `#[repr(C)]` and `#[repr(packed)]` layouts, whose field offsets the guest can
+/// `#[repr(C)]` and `#[repr(Rust, packed)]` layouts, whose field offsets the guest can
 /// observe — a different memory-access pattern from the default layout.
 #[unsafe(no_mangle)]
 pub extern "C" fn ex_repr_layouts(_: i32) -> i64 {
@@ -252,7 +267,7 @@ pub extern "C" fn ex_repr_layouts(_: i32) -> i64 {
         d: u64,
     }
 
-    #[repr(packed)]
+    #[repr(Rust, packed)]
     struct Packed {
         a: u8,
         b: u32,

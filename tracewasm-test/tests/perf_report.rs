@@ -40,11 +40,14 @@
 //! loaded machine is worse than no test at all. The only assertions are that the
 //! trap workloads in §6 really trap — timing a silent success would be meaningless.
 
+// Every workload here is a compiled guest, so the whole file compiles away when the
+// wasm target is missing and `tracewasm_test::guests` does not exist.
+#![cfg(not(no_guest_wasm))]
+
 use std::time::Instant;
 
 use tracewasm_core::{
-    instance::config::Config, instruction::stack::Instruction, memory::linear::LinearMemory,
-    module::Module,
+    Stack, instance::config::Config, memory::linear::LinearMemory, module::Module,
 };
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, NoImports, guests, with_large_stack};
 
@@ -271,7 +274,7 @@ struct RssMilestones {
 fn rss_milestones() -> RssMilestones {
     let start = rss_kib();
 
-    let module = Module::compile(guests::HEAP).expect("guest compiles");
+    let module = Module::<Stack>::compile(guests::HEAP).expect("guest compiles");
     let after_compile = rss_kib();
 
     let mut instance = module
@@ -332,8 +335,8 @@ fn report() {
         "release"
     };
     println!(
-        " profile: {profile}    size_of::<Instruction>(): {} B",
-        size_of::<Instruction>()
+        " profile: {profile}    instruction size: {} B",
+        Module::<Stack>::instruction_size()
     );
 
     let timer = timer_floor();
@@ -385,7 +388,7 @@ fn startup() {
         let mut compile = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
-            let m = Module::compile(wasm).expect("guest compiles");
+            let m = Module::<Stack>::compile(wasm).expect("guest compiles");
             compile.push(t.elapsed().as_secs_f64() * 1e3);
             std::hint::black_box(&m);
         }
@@ -394,7 +397,7 @@ fn startup() {
         // Instantiation is measured separately: it allocates linear memory and
         // runs the start section, and scales with the guest's data segments
         // rather than its code size.
-        let module = Module::compile(wasm).expect("guest compiles");
+        let module = Module::<Stack>::compile(wasm).expect("guest compiles");
         let mut inst = Vec::with_capacity(STARTUP_SAMPLES);
         for _ in 0..STARTUP_SAMPLES {
             let t = Instant::now();
@@ -406,11 +409,7 @@ fn startup() {
         }
         let inst = Dist::new(inst);
 
-        let instrs: usize = module
-            .func_bodies
-            .iter()
-            .map(|b| b.instructions.len())
-            .sum();
+        let instrs = module.instruction_count();
 
         println!(
             "   {:<16}{:>9.2}{:>9}{:>12.2}{:>10.2}{:>12.0}{:>13.1}",
@@ -441,7 +440,7 @@ fn latency(timer: &Dist) {
 
     // n=1 keeps the guest body to a handful of instructions, isolating the cost
     // of entering and leaving the VM.
-    let mut g = Guest::new(guests::ARITHMETIC);
+    let mut g = Guest::<Stack>::new(guests::ARITHMETIC);
     let mut v = Vec::with_capacity(LATENCY_SAMPLES);
     for _ in 0..LATENCY_SAMPLES {
         let t = Instant::now();
@@ -450,7 +449,7 @@ fn latency(timer: &Dist) {
     }
     dist_row("arith_mixed_workload(1)", &Dist::new(v));
 
-    let mut f = Guest::new(guests::FRAMES);
+    let mut f = Guest::<Stack>::new(guests::FRAMES);
     let mut v = Vec::with_capacity(LATENCY_SAMPLES);
     for _ in 0..LATENCY_SAMPLES {
         let t = Instant::now();
@@ -488,7 +487,7 @@ fn throughput() {
     );
 
     for w in GUESTS {
-        let mut g = Guest::new(w.wasm);
+        let mut g = Guest::<Stack>::new(w.wasm);
         g.i32_i64(w.export, w.work); // warm-up: fault in the pages, not counted
 
         let mut v = Vec::with_capacity(REPEATS);
@@ -538,19 +537,15 @@ fn memory(rss: &RssMilestones) {
         "guest", "instrs", "stream KB", "offsets KB", "locals KB"
     );
 
-    let isz = size_of::<Instruction>();
+    let isz = Module::<Stack>::instruction_size();
     let (mut ti, mut ts, mut to) = (0usize, 0usize, 0usize);
 
     for w in GUESTS {
         let (name, wasm) = (w.name, w.wasm);
-        let m = Module::compile(wasm).expect("guest compiles");
-        let instrs: usize = m.func_bodies.iter().map(|b| b.instructions.len()).sum();
-        let offs: usize = m
-            .func_bodies
-            .iter()
-            .map(|b| b.instruction_offsets.len())
-            .sum();
-        let locals: usize = m.func_bodies.iter().map(|b| b.locals.len()).sum();
+        let m = Module::<Stack>::compile(wasm).expect("guest compiles");
+        let instrs = m.instruction_count();
+        let offs = m.instruction_offset_count();
+        let locals = m.locals_count();
 
         ti += instrs;
         ts += instrs * isz;
@@ -599,7 +594,7 @@ fn scaling() {
     );
 
     println!("   {:<22}{:>12}{:>14}", "work size (n)", "ms/call", "ns/op");
-    let mut g = Guest::new(guests::ARITHMETIC);
+    let mut g = Guest::<Stack>::new(guests::ARITHMETIC);
     for n in [100, 1_000, 20_000, 100_000] {
         // Median of several reps, not a single shot: one sample per size made a
         // 160-vs-144 ns/op blip look like a scaling cliff when it was noise.
@@ -629,7 +624,7 @@ fn scaling() {
     // overflow is SIGABRT and would take the binary down.
     let mut cfg = Config::default();
     cfg.set_max_call_stack_depth(4_000);
-    let mut f = Guest::with_config(guests::FRAMES, Some(cfg));
+    let mut f = Guest::<Stack>::with_config(guests::FRAMES, Some(cfg));
 
     for depth in [100, 1_000, 3_000]
         .into_iter()
@@ -671,7 +666,7 @@ fn error_path() {
     ];
 
     for (label, wasm, export) in traps {
-        let mut g = Guest::new(wasm);
+        let mut g = Guest::<Stack>::new(wasm);
 
         // Confirm it actually traps: timing a success would be meaningless.
         assert!(

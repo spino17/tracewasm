@@ -49,7 +49,8 @@
 
 use std::time::{Duration, Instant};
 
-use tracewasm_core::error::{FuncCallError, TraceWasmError};
+use tracewasm_core::VirtualMachine;
+use tracewasm_core::error::FuncCallError;
 use tracewasm_core::instance::config::Config;
 use tracewasm_core::instance::traits::{ImportRegistry, ImportSignature, ResultVals, Results, Val};
 use tracewasm_core::memory::{MemoryView, linear::LinearMemory};
@@ -72,7 +73,7 @@ impl ImportRegistry for NoImports {
         func_name: &str,
         _params: &[Val],
         _memory_view: &mut V,
-    ) -> Result<ResultVals, TraceWasmError> {
+    ) -> Result<ResultVals, tracewasm_core::anyhow::Error> {
         unreachable!("guest declares no imports, but called `{module_name}::{func_name}`")
     }
 
@@ -88,7 +89,11 @@ impl ImportRegistry for NoImports {
         0
     }
 
-    fn get_global(&self, module_name: &str, global_name: &str) -> Result<Val, TraceWasmError> {
+    fn get_global(
+        &self,
+        module_name: &str,
+        global_name: &str,
+    ) -> Result<Val, tracewasm_core::anyhow::Error> {
         unreachable!("guest declares no globals, but read `{module_name}::{global_name}`")
     }
 }
@@ -101,16 +106,16 @@ impl ImportRegistry for NoImports {
 ///
 /// Panics on any failure. For the trapping cases, where the error *is* the thing
 /// under test, use [`try_call`].
-pub fn call_typed<R: Results>(wasm: &[u8], name: &str) -> R {
-    match try_call::<R>(wasm, name) {
+pub fn call_typed<V: VirtualMachine, R: Results>(wasm: &[u8], name: &str) -> R {
+    match try_call::<V, R>(wasm, name) {
         Ok(v) => v,
         Err(e) => panic!("calling `{name}` failed: {e}"),
     }
 }
 
 /// [`call_typed`] specialised to the very common `() -> i32` shape.
-pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
-    let (v,) = call_typed::<(i32,)>(wasm, name);
+pub fn call_i32<V: VirtualMachine>(wasm: &[u8], name: &str) -> i32 {
+    let (v,) = call_typed::<V, (i32,)>(wasm, name);
     v
 }
 
@@ -118,8 +123,11 @@ pub fn call_i32(wasm: &[u8], name: &str) -> i32 {
 // Returns `TypedFunc::call`'s own error type unchanged; boxing it here would
 // diverge from the signature under test.
 #[allow(clippy::result_large_err)]
-pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError> {
-    let module = Module::compile(wasm).expect("module should compile");
+pub fn try_call<V: VirtualMachine, R: Results>(
+    wasm: &[u8],
+    name: &str,
+) -> Result<R, FuncCallError> {
+    let module = Module::<V>::compile(wasm).expect("module should compile");
 
     let func = module
         .get_typed_func::<(), R>(name)
@@ -137,7 +145,27 @@ pub fn try_call<R: Results>(wasm: &[u8], name: &str) -> Result<R, FuncCallError>
 // ---------------------------------------------------------------------------
 
 /// Whether the guest programs were built. `false` when the wasm target is absent.
+///
+/// Read by [`guests_were_built`], whose whole job is to make a `false` here visible
+/// in the test output.
 pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
+
+/// Reports whether the guest-backed suites ran at all.
+///
+/// Four test files compile away entirely without the wasm target, so a machine
+/// missing it gets a green run with roughly 35 fewer tests and nothing in the output
+/// to say so. This test is always compiled, and `ignore`s itself with a reason when
+/// the guests are absent — turning that silence into a named `ignored` line in the
+/// summary, next to a `cargo::warning` from `build.rs` that scrolls past.
+#[cfg_attr(
+    no_guest_wasm,
+    ignore = "wasm32-unknown-unknown is not installed, so every guest-backed test was skipped: \
+              rustup target add wasm32-unknown-unknown"
+)]
+#[test]
+fn guests_were_built() {
+    assert!(GUESTS_AVAILABLE);
+}
 
 /// The `.wasm` blobs built from `guests/*.rs`.
 ///
@@ -168,12 +196,12 @@ pub mod guests {
 /// Compilation and instantiation are the expensive part — a guest linking `std`
 /// is well over a megabyte of wasm — so a test file checking many exports should
 /// build one of these and reuse it.
-pub struct Guest {
-    module: std::sync::Arc<Module>,
-    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports>,
+pub struct Guest<V: VirtualMachine> {
+    module: std::sync::Arc<Module<V>>,
+    instance: tracewasm_core::instance::Instance<LinearMemory, NoImports, V>,
 }
 
-impl Guest {
+impl<V: VirtualMachine> Guest<V> {
     /// Compiles and instantiates `wasm` with the default configuration.
     pub fn new(wasm: &[u8]) -> Self {
         Self::with_config(wasm, None)
@@ -186,7 +214,7 @@ impl Guest {
     /// stack is the binding constraint, and a "how deep can we go" measurement
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
-        let module = Module::compile(wasm).expect("guest should compile");
+        let module = Module::<V>::compile(wasm).expect("guest should compile");
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");

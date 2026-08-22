@@ -50,12 +50,12 @@
 //!
 //! A method may return `Result<T, E>` instead of `T` to signal a wasm trap. The
 //! wasm signature is taken from `T`, and the error is propagated with `?`, so any
-//! `E` convertible into a [`TraceWasmError`] works:
+//! `E` convertible into an `anyhow::Error` works:
 //!
 //! ```ignore
 //! #[module("env")]
 //! fn read_byte<V: MemoryView>(&mut self, addr: i32, mem: &mut V)
-//!     -> Result<(i32,), TraceWasmError>
+//!     -> Result<(i32,), anyhow::Error>
 //! {
 //!     Ok((mem.read_u8(addr as usize)? as i32,))   // OOB pointer → trap
 //! }
@@ -182,6 +182,12 @@ pub fn imports(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = impl_block.self_ty.clone();
+
+    // The generated `ImportRegistry` impl repeats the annotated block's generics and
+    // where-clause, so a registry with type parameters — `impl<T> Host<T>` — is
+    // implemented for the same parameters rather than for an unbound `Host<T>`.
+    let generics = impl_block.generics.clone();
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
 
     // Collect the tagged methods, stripping the `#[module(...)]` attribute from
     // each so the impl block can be re-emitted with the user's bodies intact.
@@ -337,13 +343,24 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
             >>
         };
 
-        // Forwarded after the wasm arguments, and only to methods that asked for
-        // it — a host function that ignores guest memory need not declare it.
-        let memory_arg = if entry.takes_memory_view {
-            quote! { , memory_view }
-        } else {
-            quote! {}
-        };
+        // The call's arguments: each wasm parameter decoded from the value slice,
+        // then the memory view for the methods that declared one. Collected into one
+        // list so the commas come from a single repetition — a method taking the view
+        // and no wasm parameters has `memory_view` as its only argument.
+        let mut call_args: Vec<proc_macro2::TokenStream> = param_types
+            .iter()
+            .zip(&indices)
+            .map(|(ty, index)| {
+                quote! {
+                    <#ty as ::tracewasm_core::instance::traits::WasmTy>::from_val(params[#index])
+                        .expect("import argument type mismatch (validated at instantiation)")
+                }
+            })
+            .collect();
+
+        if entry.takes_memory_view {
+            call_args.push(quote! { memory_view });
+        }
 
         // Propagated with `?`, so any error type the host uses is converted into a
         // `TraceWasmError` through the usual `From` impl.
@@ -357,13 +374,7 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
         // call the method, then marshal the result tuple into `ResultVals`.
         execute_arms.push(quote! {
             (#module, #fn_name) => {
-                let __res = self.#fn_ident(
-                    #(
-                        <#param_types as ::tracewasm_core::instance::traits::WasmTy>::from_val(params[#indices])
-                            .expect("import argument type mismatch (validated at instantiation)")
-                    ),*
-                    #memory_arg
-                ) #propagate;
+                let __res = self.#fn_ident( #(#call_args),* ) #propagate;
 
                 ::core::result::Result::Ok(#result_entity::to_vals(&__res))
             }
@@ -400,7 +411,9 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #impl_block
 
-        impl ::tracewasm_core::instance::traits::ImportRegistry for #self_ty {
+        impl #impl_generics ::tracewasm_core::instance::traits::ImportRegistry
+            for #self_ty #where_clause
+        {
             fn execute<V: ::tracewasm_core::memory::MemoryView>(
                 &mut self,
                 module_name: &str,
@@ -409,14 +422,15 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 memory_view: &mut V,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::ResultVals,
-                ::tracewasm_core::error::TraceWasmError,
+                ::tracewasm_core::anyhow::Error,
             > {
                 match (module_name, func_name) {
                     #(#execute_arms)*
                     _ => ::core::result::Result::Err(
-                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
-                            module_name.to_string(),
-                            func_name.to_string(),
+                        ::tracewasm_core::anyhow::anyhow!(
+                            "import not found: {}::{}",
+                            module_name,
+                            func_name
                         ),
                     ),
                 }
@@ -447,14 +461,15 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 global_name: &str,
             ) -> ::core::result::Result<
                 ::tracewasm_core::instance::traits::Val,
-                ::tracewasm_core::error::TraceWasmError
+                ::tracewasm_core::anyhow::Error
             > {
                 match (module_name, global_name) {
                     #(#get_global_arms)*
                     _ => ::core::result::Result::Err(
-                        ::tracewasm_core::error::TraceWasmError::ImportNotFound(
-                            module_name.to_string(),
-                            global_name.to_string(),
+                        ::tracewasm_core::anyhow::anyhow!(
+                            "import not found: {}::{}",
+                            module_name,
+                            global_name
                         ),
                     ),
                 }
@@ -475,5 +490,89 @@ fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
                 #(#asserts)*
             }
         };
+    })
+}
+
+/// Derives a fieldless `…Kind` twin of an enum, plus the mapping from the enum to
+/// it.
+///
+/// For `enum RegInstruction { I32Add(Signature<2, 1>), End, .. }` this generates
+/// `enum RegInstructionKind { I32Add, End, .. }`, a `RegInstructionKind::ALL`
+/// listing every kind, and `RegInstruction::kind()`.
+///
+/// # Why
+///
+/// Rust cannot enumerate the variants of an enum whose variants carry data — a
+/// test that wants to visit every instruction has to build one of each by hand,
+/// and that list goes stale silently the moment a variant is added. Stripping the
+/// fields removes the obstacle: the kinds are unit variants, so `ALL` is just a
+/// list of names the macro already has.
+///
+/// The point is what that buys at the use site. A table keyed by kind is an
+/// exhaustive `match`, so adding a variant to the instruction enum stops the
+/// table compiling until it is handled, *and* `ALL` grows to include it, so
+/// whatever the table says about it actually runs. Neither half can be forgotten,
+/// which is what a hand-maintained list of variants could never promise.
+#[proc_macro_derive(Kind)]
+pub fn kind(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+
+    match expand_kind(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_kind(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let syn::Data::Enum(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "`Kind` can only be derived for an enum",
+        ));
+    };
+
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "`Kind` does not support generic enums",
+        ));
+    }
+
+    let name = &input.ident;
+    let kind_name = syn::Ident::new(&format!("{name}Kind"), name.span());
+    let vis = &input.vis;
+    let variants: Vec<_> = data.variants.iter().map(|variant| &variant.ident).collect();
+
+    // One arm per variant, ignoring whatever it carries: `Named { .. }` also
+    // matches a tuple variant and a unit one, so a single pattern shape covers
+    // all three.
+    let arms = variants.iter().map(|variant| {
+        quote! { #name::#variant { .. } => #kind_name::#variant }
+    });
+
+    let doc = format!("The variants of [`{name}`], without their operands.");
+
+    Ok(quote! {
+        #[doc = #doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #vis enum #kind_name {
+            #(#variants,)*
+        }
+
+        impl #kind_name {
+            /// Every kind, in declaration order.
+            #vis const ALL: &'static [#kind_name] = &[
+                #(#kind_name::#variants,)*
+            ];
+        }
+
+        impl #name {
+            /// Which variant this is, without its operands.
+            #vis fn kind(&self) -> #kind_name {
+                match self {
+                    #(#arms,)*
+                }
+            }
+        }
     })
 }

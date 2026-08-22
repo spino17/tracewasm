@@ -12,6 +12,9 @@
 //!
 //! Export names are prefixed `mem_`.
 
+// `vec!` of a small literal is not a mistake here: these guests read past the end
+// of a *heap* buffer, and an array would put it on the stack and test nothing.
+#![allow(clippy::useless_vec)]
 #![allow(dead_code)]
 
 use std::hint::black_box;

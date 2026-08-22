@@ -3,7 +3,7 @@
 //! Two layers, because they catch different things.
 //!
 //! [`lower`] takes a `.wat` module, runs the real
-//! [`RegInstruction::emit_instruction_for_func`] over its first function, and
+//! [`RegInstruction::emit_instructions_for_func`] over its first function, and
 //! returns the instruction stream plus its [`FrameLayout`]. That is the layer that
 //! catches "the pass emits the wrong program", and it reads like the wasm it came
 //! from, so a test is legible to someone who has never seen this file.
@@ -29,23 +29,9 @@ use wasmparser::Parser;
 // values, which also keeps assertions reading like the emitted code.
 // ---------------------------------------------------------------------------
 
-/// Renders one operand: `5`, `local1`, `global0`, `spill0`, `r2`.
-fn slot_str(s: &Slot) -> String {
-    match s {
-        Slot::Const(Const::I32(v)) => format!("{v}"),
-        Slot::Const(Const::I64(v)) => format!("{v}i64"),
-        Slot::Const(Const::F32(v)) => format!("{v}f32"),
-        Slot::Const(Const::F64(v)) => format!("{v}f64"),
-        Slot::Local(n) => format!("local{n}"),
-        Slot::Global(n) => format!("global{n}"),
-        Slot::Spilled(i) => format!("spill{i}"),
-        Slot::Register(r) => format!("r{r}"),
-    }
-}
-
 /// Renders a run of operands.
 fn slots(xs: &[Slot]) -> Vec<String> {
-    xs.iter().map(slot_str).collect()
+    xs.iter().map(|x| x.render()).collect()
 }
 
 /// Renders what `set_lazy` returned: `Some("spill0")` when it rescued a borrow.
@@ -61,7 +47,7 @@ fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
 ///
 /// Panics on malformed input, which in a test is what you want: the `.wat` is part
 /// of the test, so a mistake in it is a test bug and should be loud.
-fn lower(wat: &str) -> LoweredRegFuncBody {
+fn lower(wat: &str) -> RegLoweredFuncBody {
     lower_func(wat, 0)
 }
 
@@ -70,7 +56,7 @@ fn lower(wat: &str) -> LoweredRegFuncBody {
 ///
 /// Imported functions are not modelled: the index space here is the code section's,
 /// so `call n` inside the wat must name a defined function.
-fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
+fn lower_func(wat: &str, n: usize) -> RegLoweredFuncBody {
     lower_func_with_types(wat, n).0
 }
 
@@ -79,8 +65,18 @@ fn lower_func(wat: &str, n: usize) -> LoweredRegFuncBody {
 /// A `call_indirect` stores only a `ty_index`, so how many of the operands in its
 /// arena run are arguments is recoverable only through the types. Rendering one
 /// therefore needs exactly what executing one will need.
-fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncType>) {
+fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncType>) {
     let bytes = wat::parse_str(wat).expect("invalid wat");
+
+    // `wat::parse_str` assembles without type-checking, so an ill-typed body
+    // reaches lowering intact — `i32.add` over an `f32` operand and all. The pass
+    // trusts validation to have happened (as it has for a real module, in
+    // `Module::compile`), so it would lower the nonsense without complaint and the
+    // test would assert against it. Validating here is what makes a `.wat` in a
+    // test self-checking, the same way `Module::compile` does for real input.
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .expect("wat does not validate");
 
     let mut types: Vec<FuncType> = vec![];
     let mut func_tys: Vec<TyIndex> = vec![];
@@ -144,7 +140,7 @@ fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncTy
         })
         .collect();
 
-    let body = RegInstruction::emit_instruction_for_func(
+    let body = RegInstruction::emit_instructions_for_func(
         body.get_operators_reader().expect("operators"),
         params,
         results,
@@ -158,185 +154,6 @@ fn lower_func_with_types(wat: &str, n: usize) -> (LoweredRegFuncBody, Vec<FuncTy
     (body, types)
 }
 
-/// Renders a lowered body as one line per instruction, operands resolved against
-/// the arenas.
-///
-/// Assertions compare against this rather than against the enum, so a failure shows
-/// the whole program and a reader can see what changed.
-fn render(body: &LoweredRegFuncBody, types: &[FuncType]) -> String {
-    let (instructions, frame) = body;
-    let ins = &frame.input_registers_arena;
-    let outs = &frame.output_registers_arena;
-
-    let slot = slot_str;
-    let sig1 = |i: &Registers<1, Slot>| slot(&i.registers(ins)[0]);
-    let list = |xs: &[Slot]| xs.iter().map(slot).collect::<Vec<_>>().join(", ");
-
-    let regs = |xs: &[u32]| {
-        xs.iter()
-            .map(|r| format!("r{r}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let mut out = String::new();
-
-    for (pc, i) in instructions.iter().enumerate() {
-        let line = match i {
-            RegInstruction::I32Load { offset, sig } => format!(
-                "i32.load     [{}]+{offset} -> {}",
-                slot(&sig.input.registers(ins)[0]),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::I32Store { offset, sig } => {
-                let a = sig.input.registers(ins);
-
-                format!("i32.store    [{}]+{offset} <- {}", slot(&a[0]), slot(&a[1]))
-            }
-            RegInstruction::LocalSet { index, sig } => format!(
-                "local.set    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalTee { index, sig } => format!(
-                "local.tee    local{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::GlobalSet { index, sig } => format!(
-                "global.set   global{} <- {}",
-                index.0,
-                slot(&sig.input.registers(ins)[0])
-            ),
-            RegInstruction::LocalSpill { index, spill_index } => {
-                format!("local.spill  local{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                format!("global.spill global{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::I32Add(sig) => format!(
-                "i32.add      {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::I32Eqz(sig) => format!(
-                "i32.eqz      {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::Select(sig) => format!(
-                "select       {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
-            RegInstruction::Move(sig) => format!(
-                "move         {} -> {}",
-                list(sig.input_registers(ins)),
-                regs(sig.output_registers(outs))
-            ),
-            RegInstruction::If {
-                cond,
-                else_index,
-                end_index,
-            } => format!(
-                "if           {} else={} end={}",
-                sig1(&cond.input),
-                else_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "-".into()),
-                end_index
-            ),
-            RegInstruction::Else { end_index } => format!("else         end={end_index}"),
-            RegInstruction::Br { target_index } => format!("br           -> {target_index}"),
-            RegInstruction::BrIf {
-                cond,
-                mov,
-                target_index,
-            } => format!(
-                "br_if        {} -> {target_index}{}",
-                sig1(cond),
-                if mov.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "  move {} -> {}",
-                        list(mov.input_registers(ins)),
-                        regs(mov.output_registers(outs))
-                    )
-                }
-            ),
-            RegInstruction::BrTable {
-                index,
-                targets_start,
-                targets_len,
-            } => {
-                let arms = &frame.br_targets_arena
-                    [*targets_start as usize..(targets_start + targets_len) as usize];
-                let rendered: Vec<String> = arms
-                    .iter()
-                    .map(|a| {
-                        if a.mov.is_empty() {
-                            format!("->{}", a.target_index)
-                        } else {
-                            format!(
-                                "->{} [{} -> {}]",
-                                a.target_index,
-                                list(a.mov.input_registers(ins)),
-                                regs(a.mov.output_registers(outs))
-                            )
-                        }
-                    })
-                    .collect();
-
-                format!("br_table     {} {}", sig1(index), rendered.join(" "))
-            }
-            RegInstruction::Return { target_index } => format!("return       -> {target_index}"),
-            RegInstruction::Call {
-                func_index,
-                caller_base,
-            } => format!("call         f{} caller_base={caller_base}", func_index.0),
-            RegInstruction::CallIndirect {
-                ty_index,
-                table_index,
-                slot,
-                operands,
-                caller_base,
-            } => {
-                // Both runs are implicit: the arguments are the `params` operands
-                // starting at `operands`, and their destinations are the same many
-                // registers based at `caller_base`. Rendering them the way the
-                // executor has to reconstruct them is the point — a test that read
-                // them any other way would not notice the two disagreeing.
-                let params = types[ty_index.0 as usize].params.len();
-                let args = &ins[*operands as usize..*operands as usize + params];
-                let dsts: Vec<u32> = (0..params as u32).map(|i| caller_base + i).collect();
-
-                format!(
-                    "call_indirect [{}] ty{} table{} caller_base={caller_base}{}",
-                    sig1(slot),
-                    ty_index.0,
-                    table_index.0,
-                    if params == 0 {
-                        String::new()
-                    } else {
-                        format!("  move {} -> {}", list(args), regs(&dsts))
-                    }
-                )
-            }
-            RegInstruction::End => "end".to_string(),
-        };
-
-        out.push_str(&format!("{pc:>3}  {line}\n"));
-    }
-
-    out.push_str(&format!(
-        "     frame: {} registers, {} spills\n",
-        frame.registers, frame.spills
-    ));
-
-    out
-}
-
 /// Asserts a lowered body renders exactly as `expected`, ignoring leading
 /// indentation so the expectation can be written inline.
 fn assert_lowers_to(wat: &str, expected: &str) {
@@ -346,7 +163,7 @@ fn assert_lowers_to(wat: &str, expected: &str) {
 /// [`assert_lowers_to`] for a body that is not function 0 — a caller, typically.
 fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
     let (body, types) = lower_func_with_types(wat, n);
-    let got = render(&body, &types);
+    let got = RegInstruction::render_body(&body, &types);
 
     let norm = |s: &str| {
         s.lines()
@@ -369,7 +186,7 @@ fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
 // ---------------------------------------------------------------------------
 
 /// A stack with the implicit function frame already pushed, as
-/// `emit_instruction_for_func` sets up.
+/// `emit_instructions_for_func` sets up.
 fn sim(locals: u32, globals: u32) -> SimulatedStack {
     let mut s = SimulatedStack::new(locals, globals);
 
@@ -516,13 +333,168 @@ fn tee_spills_before_reading_the_top() {
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
-    assert_eq!(
-        slot_str(&operand),
-        "spill0",
-        "tee must observe the redirect"
-    );
+    assert_eq!(operand.render(), "spill0", "tee must observe the redirect");
 
     assert_eq!(s.stack.height(), 1, "tee peeks, it does not consume");
+}
+
+// ---------------------------------------------------------------------------
+// reference immediates
+//
+// `ref.null` and `ref.func` push a value that is fully described by the operator
+// itself, so they are [`Const`]s and behave like `i32.const`: nothing is emitted,
+// nothing is allocated, and the value is read in place by whatever consumes it.
+//
+// A reference is `Option<FuncIndex>`, matching the runtime's `Val::Ref`, so the
+// two agree on what a reference *is* without a conversion in between.
+// ---------------------------------------------------------------------------
+
+/// Two functions, so a `ref.func 0` has something to name. `elem declare` is what
+/// makes referencing it legal without putting it in a table.
+fn ref_module(body: &str) -> String {
+    format!("(module (func) (elem declare func 0) {body})")
+}
+
+#[test]
+fn a_reference_is_an_immediate_and_emits_nothing() {
+    // the push itself costs no instruction; the value appears at its consumer
+    assert_func_lowers_to(
+        &ref_module("(func (result funcref) ref.func 0)"),
+        1,
+        "
+          0  move         (0)ref -> r0
+          1  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    assert_lowers_to(
+        "(module (func (result funcref) ref.null func))",
+        "
+          0  move         (null)ref -> r0
+          1  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// Written straight into its destination, with no register in between — the whole
+/// point of carrying it as an operand rather than materializing it.
+#[test]
+fn a_reference_is_stored_in_place() {
+    assert_func_lowers_to(
+        &format!(
+            "(module (global (mut funcref) (ref.null func)) (func) (elem declare func 0) {})",
+            "(func ref.func 0 global.set 0)"
+        ),
+        1,
+        "
+          0  global.set   global0 <- (0)ref
+          1  end
+             frame: 0 registers, 0 spills
+        ",
+    );
+
+    assert_func_lowers_to(
+        &ref_module("(func (local funcref) ref.func 0 local.set 0)"),
+        1,
+        "
+          0  local.set    local0 <- (0)ref
+          1  end
+             frame: 0 registers, 0 spills
+        ",
+    );
+}
+
+/// The heap type is dropped, as it is in the stack pass: `Val::Ref(None)` is the
+/// only null there is at execution, and validation has already established that
+/// each null reached a slot willing to hold it. Nothing downstream can tell a null
+/// `funcref` from a null `externref`, so nothing needs to.
+#[test]
+fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
+    let funcref = RegInstruction::render_body(
+        &lower("(module (func (result funcref) ref.null func))"),
+        &[],
+    );
+    let externref = RegInstruction::render_body(
+        &lower("(module (func (result externref) ref.null extern))"),
+        &[],
+    );
+
+    assert_eq!(funcref, externref);
+    assert!(funcref.contains("(null)ref"), "{funcref}");
+}
+
+/// `ref.is_null` is the only consumer of a reference the pass has, and it reads
+/// its operand wherever it already lives — as an immediate when the reference came
+/// straight from `ref.func`/`ref.null`, out of a local otherwise.
+#[test]
+fn ref_is_null_reads_its_operand_in_place() {
+    assert_func_lowers_to(
+        &ref_module("(func (result i32) ref.func 0 ref.is_null)"),
+        1,
+        "
+          0  ref.is_null  (0)ref -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    assert_lowers_to(
+        "(module (func (param funcref) (result i32) local.get 0 ref.is_null))",
+        "
+          0  ref.is_null  local0 -> r0
+          1  move         r0 -> r0
+          2  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// The result is an `i32` predicate, not a reference, so it feeds a branch with
+/// nothing in between — the reason it follows the comparison convention.
+#[test]
+fn ref_is_null_feeds_a_branch_directly() {
+    assert_lowers_to(
+        r#"(module (func (param funcref) (result i32)
+             block (result i32)
+               i32.const 1
+               local.get 0
+               ref.is_null
+               br_if 0
+               drop
+               i32.const 2
+             end))"#,
+        "
+          0  ref.is_null  local0 -> r0
+          1  br_if        r0 -> 3  move 1 -> r0
+          2  move         2 -> r0
+          3  end
+          4  move         r0 -> r0
+          5  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// References take part in lazy forwarding like any other value: a `funcref`
+/// global borrowed across a call is rescued, and `ref.is_null` reads the spill.
+#[test]
+fn a_reference_borrowed_across_a_call_is_rescued() {
+    assert_func_lowers_to(
+        r#"(module (global (mut funcref) (ref.null func)) (func)
+             (func (result i32) global.get 0 call 0 ref.is_null))"#,
+        1,
+        "
+          0  global.spill global0 -> spill0
+          1  call         f0 caller_base=0
+          2  ref.is_null  spill0 -> r0
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 1 spills
+        ",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -842,11 +814,11 @@ impl Frame {
             RegInstruction::GlobalSpill { index, spill_index } => {
                 self.spills[spill_slot(spill_index)] = self.globals[index.0 as usize];
             }
-            RegInstruction::LocalSet { index, sig } => {
-                self.locals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            RegInstruction::LocalSet { index, input } => {
+                self.locals[index.0 as usize] = self.read(&input.registers(ins)[0]);
             }
-            RegInstruction::GlobalSet { index, sig } => {
-                self.globals[index.0 as usize] = self.read(&sig.input.registers(ins)[0]);
+            RegInstruction::GlobalSet { index, input } => {
+                self.globals[index.0 as usize] = self.read(&input.registers(ins)[0]);
             }
             _ => unreachable!("these tests emit only spills and writes"),
         }
@@ -861,8 +833,8 @@ fn spill_slot(index: &SpillIndex) -> usize {
 
 /// Executes `prog`, skipping the half-open range `skip` — the instructions a branch
 /// jumps over on one of its paths.
-fn run(prog: &[RegInstruction], ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
-    for (pc, instruction) in prog.iter().enumerate() {
+fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
+    for (pc, instruction) in prog.inner.iter().enumerate() {
         if skip.contains(&pc) {
             continue;
         }
@@ -888,13 +860,13 @@ fn run(prog: &[RegInstruction], ins: &[Slot], skip: Range<usize>, frame: &mut Fr
 #[test]
 fn a_conditional_arm_cannot_own_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
     s.push_local(1); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(
         !prog.is_empty(),
@@ -914,12 +886,15 @@ fn a_conditional_arm_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                input,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -941,7 +916,7 @@ fn a_conditional_arm_cannot_own_the_spill() {
             frame.read(&consumer),
             42,
             "{tag}: <use> reads {}, which that path never wrote",
-            slot_str(&consumer)
+            consumer.render()
         );
     }
 }
@@ -950,13 +925,13 @@ fn a_conditional_arm_cannot_own_the_spill() {
 #[test]
 fn a_conditional_arm_cannot_own_a_global_spill() {
     let mut s = sim(1, 2);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_global(1);
     s.push_local(0); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
 
@@ -967,12 +942,15 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 
         assert!(SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills).is_none());
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
-        prog.push(RegInstruction::GlobalSet {
-            index: GlobalIndex(1),
-            sig,
-        });
+        prog.push(
+            RegInstruction::GlobalSet {
+                index: GlobalIndex(1),
+                input,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -1000,7 +978,7 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 #[test]
 fn a_taken_br_if_cannot_skip_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
@@ -1009,8 +987,8 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
     s.push_const(Const::I32(1)); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let _cond = s.registers_for::<1, 0>();
     let _mov = s.br_truncation_registers(base, 0);
@@ -1021,12 +999,15 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
         assert!(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none());
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                input,
+            },
+            0,
+        );
 
         prog.len()
     };
@@ -1049,12 +1030,12 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 #[test]
 fn a_loop_body_cannot_own_the_spill() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow, below the loop
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let entry = 0..prog.len();
 
@@ -1074,17 +1055,20 @@ fn a_loop_body_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let sig = s.registers_for::<1, 0>();
+        let input = s.registers_for::<1, 0>().input;
 
-        prog.push(RegInstruction::LocalSet {
-            index: LocalIndex(0),
-            sig,
-        });
+        prog.push(
+            RegInstruction::LocalSet {
+                index: LocalIndex(0),
+                input,
+            },
+            0,
+        );
 
         // the back-edge branches too, and must add nothing
         let before = prog.len();
 
-        RegInstruction::spill_live_locals(&mut s, &mut prog);
+        RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
 
         assert_eq!(prog.len(), before, "nothing left to spill at the back-edge");
 
@@ -1100,14 +1084,14 @@ fn a_loop_body_cannot_own_the_spill() {
     for iterations in [1, 2, 5] {
         let mut frame = Frame::new(&[42, 1], &[]);
 
-        for (pc, instruction) in prog.iter().enumerate() {
+        for (pc, instruction) in prog.inner.iter().enumerate() {
             if entry.contains(&pc) {
                 frame.exec(instruction, &s.input_registers);
             }
         }
 
         for _ in 0..iterations {
-            for (pc, instruction) in prog.iter().enumerate() {
+            for (pc, instruction) in prog.inner.iter().enumerate() {
                 if body.contains(&pc) {
                     frame.exec(instruction, &s.input_registers);
                 }
@@ -1127,11 +1111,11 @@ fn a_loop_body_cannot_own_the_spill() {
 #[test]
 fn a_block_does_not_hoist_spills() {
     let mut s = sim(2, 0);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog); // the Block arm makes no such call
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0); // the Block arm makes no such call
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
@@ -1145,7 +1129,7 @@ fn a_block_does_not_hoist_spills() {
 #[test]
 fn hoisting_costs_nothing_when_no_borrow_is_live() {
     let mut s = sim(8, 4);
-    let mut prog: Vec<RegInstruction> = vec![];
+    let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
 
@@ -1153,8 +1137,8 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 
     s.push_const(Const::I32(1)); // a condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog);
-    RegInstruction::spill_live_globals(&mut s, &mut prog);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(prog.is_empty(), "no live borrows, no instructions");
     assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
@@ -1208,8 +1192,8 @@ fn a_local_and_a_global_of_the_same_index_are_independent() {
         "local 0's borrow must survive a write to global 0"
     );
 
-    assert_eq!(slot_str(&s.pop()), "spill0", "the global was rescued");
-    assert_eq!(slot_str(&s.pop()), "local0", "the local still forwards");
+    assert_eq!(s.pop().render(), "spill0", "the global was rescued");
+    assert_eq!(s.pop().render(), "local0", "the local still forwards");
 }
 
 #[test]
@@ -1242,9 +1226,9 @@ fn writing_one_local_leaves_other_borrows_alone() {
     let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(slot_str(&s.pop()), "local2", "untouched above");
-    assert_eq!(slot_str(&s.pop()), "spill0", "rescued");
-    assert_eq!(slot_str(&s.pop()), "local0", "untouched below");
+    assert_eq!(s.pop().render(), "local2", "untouched above");
+    assert_eq!(s.pop().render(), "spill0", "rescued");
+    assert_eq!(s.pop().render(), "local0", "untouched below");
 }
 
 #[test]
@@ -1275,7 +1259,7 @@ fn three_borrows_share_one_entry() {
     );
 
     for _ in 0..3 {
-        assert_eq!(slot_str(&s.pop()), "spill0", "all three redirect");
+        assert_eq!(s.pop().render(), "spill0", "all three redirect");
     }
 
     // the pool only reclaims once the last of them is gone
@@ -1294,7 +1278,7 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
     // `local.tee 0` on a value read from local 0: correct, if redundant
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(slot_str(&operand), "spill0");
+    assert_eq!(operand.render(), "spill0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,7 +1534,7 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     s.push_const(Const::I32(0)); // the loop's param
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
 
-    let loop_block = *&s.get_curr_block().recorded_height;
+    let loop_block = s.get_curr_block().recorded_height;
     let loop_params = s.get_curr_block().params;
 
     let _ = s.materialize_stack_slots_in_registers(loop_params);
@@ -1708,11 +1692,7 @@ fn deeply_nested_dead_constructs_unwind_in_order() {
     ];
     let live = reachability(&seq);
 
-    assert_eq!(
-        live[live.len() - 1],
-        true,
-        "the live block's end must resume"
-    );
+    assert!(live[live.len() - 1], "the live block's end must resume");
     assert!(
         live[2..live.len() - 1].iter().all(|r| !r),
         "everything nested inside stays dead: {live:?}"
@@ -1749,13 +1729,13 @@ fn br_table_arms_survive_lowering() {
     for base in [inner, outer, inner] {
         let mov = s.br_truncation_registers(base, 1);
 
-        s.br_targets.push(BrTarget {
+        s.br_targets.push(RegBrTableTarget {
             mov,
             target_index: u32::MAX,
         });
     }
 
-    let frame = FrameLayout {
+    let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
@@ -1787,7 +1767,7 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
 
     let _ = s.registers_for::<1, 1>();
 
-    let frame = FrameLayout {
+    let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
@@ -1811,6 +1791,12 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
 /// Position of the first instruction matching `pred`.
 fn index_of(prog: &[RegInstruction], pred: impl Fn(&RegInstruction) -> bool) -> Option<usize> {
     prog.iter().position(pred)
+}
+
+/// [`index_of`] for the common case of looking for an instruction by kind rather
+/// than by anything it carries.
+fn index_of_kind(prog: &[RegInstruction], kind: RegInstructionKind) -> Option<usize> {
+    index_of(prog, |instruction| instruction.kind() == kind)
 }
 
 // ---------------------------------------------------------------------------
@@ -1892,14 +1878,14 @@ fn writing_a_borrowed_local_rescues_it_first() {
 
 #[test]
 fn an_unborrowed_write_rescues_nothing() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              i32.const 5
              local.set 0))"#,
     );
 
     assert!(
-        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).is_none(),
         "nothing borrows local 0"
     );
 
@@ -1947,13 +1933,13 @@ fn an_if_else_wires_both_arms_to_one_end() {
 
 #[test]
 fn an_if_without_an_else_jumps_straight_to_the_end() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32)
              local.get 0
              if i32.const 5 local.set 0 end))"#,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::If { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::If).unwrap();
 
     let (else_index, end_index) = match &prog[at] {
         RegInstruction::If {
@@ -1966,15 +1952,25 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
 
     assert!(else_index.is_none(), "there is no else to jump to");
 
-    assert!(
-        matches!(prog[end_index as usize], RegInstruction::End),
-        "end_index must name an End"
-    );
+    // The exact index, not just "an End": there are two here — the `if`'s at 3 and
+    // the body's at 4 — and a false condition must reach the first, not fall out of
+    // the function.
+    assert_eq!(at, 1, "the `if`'s own index");
+    assert_eq!(end_index, 3, "the `if`'s end, not the body's");
+
+    let ends: Vec<usize> = prog
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
+        .map(|(n, _)| n)
+        .collect();
+
+    assert_eq!(ends, vec![3, 4], "the if's end, then the body's");
 }
 
 #[test]
 fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0
              if (result i32) i32.const 1 else i32.const 2 end))"#,
@@ -2021,14 +2017,14 @@ fn a_branch_lands_past_the_fallthrough_move() {
 
 #[test]
 fn an_outward_branch_targets_the_outer_label() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32)
                block (result i32) local.get 0 br 1 end
              end))"#,
     );
 
-    let br = index_of(&prog, |i| matches!(i, RegInstruction::Br { .. })).unwrap();
+    let br = index_of_kind(&prog, RegInstructionKind::Br).unwrap();
 
     let RegInstruction::Br { target_index } = &prog[br] else {
         unreachable!()
@@ -2037,7 +2033,7 @@ fn an_outward_branch_targets_the_outer_label() {
     let ends: Vec<usize> = prog
         .iter()
         .enumerate()
-        .filter(|(_, i)| matches!(i, RegInstruction::End))
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
         .map(|(n, _)| n)
         .collect();
 
@@ -2049,7 +2045,9 @@ fn an_outward_branch_targets_the_outer_label() {
 
 #[test]
 fn a_loop_back_edge_skips_the_entry_spill() {
-    // the entry rescue must run once; the back-edge has to land after it
+    // The entry rescue must run once, so the back-edge has to land after it — on the
+    // `loop` header, which is the label's own instruction and falls through into the
+    // body.
     assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
@@ -2061,12 +2059,13 @@ fn a_loop_back_edge_skips_the_entry_spill() {
              end))"#,
         "
           0  local.spill  local0 -> spill0
-          1  local.set    local0 <- 5
-          2  local.spill  local1 -> spill1
-          3  br_if        spill1 -> 1
-          4  end
-          5  move         spill0 -> r0
-          6  end
+          1  loop
+          2  local.set    local0 <- 5
+          3  local.spill  local1 -> spill1
+          4  br_if        spill1 -> 1
+          5  end
+          6  move         spill0 -> r0
+          7  end
              frame: 1 registers, 2 spills
         ",
     );
@@ -2074,7 +2073,7 @@ fn a_loop_back_edge_skips_the_entry_spill() {
 
 #[test]
 fn a_branch_to_a_loop_carries_the_loops_params() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              i32.const 1
              loop (param i32) (result i32)
@@ -2082,7 +2081,7 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
              end))"#,
     );
 
-    let br = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+    let br = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
     let RegInstruction::BrIf {
         mov, target_index, ..
@@ -2097,20 +2096,47 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
         "a back-edge transfers the loop's params, not its results"
     );
 
+    // The exact target, not merely that it points backwards. The header `Move` that
+    // materialises the loop's entry params is instruction 0; the label is the `loop`
+    // at 1. Targeting 0 would re-run that move on every iteration and pin the params
+    // to their entry values, which is the bug this number rules out.
+    assert_eq!(br, 3, "the back-edge's own index");
+    assert_eq!(
+        *target_index, 1,
+        "the loop header's index, past the entry move"
+    );
     assert!(
-        (*target_index as usize) < br,
-        "a back-edge jumps backwards: {target_index} should precede {br}"
+        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        "the target must be the `loop` itself, found {:?}",
+        prog[*target_index as usize].kind()
+    );
+    assert!(
+        matches!(prog[0], RegInstruction::Move(_)),
+        "instruction 0 is the entry move the back-edge must skip"
+    );
+
+    // And the destination the back-edge writes is the same register the header move
+    // fills, which is what makes skipping the header correct rather than lossy.
+    let back_edge_dst = mov.output_registers(&frame.output_registers_arena);
+    let RegInstruction::Move(header) = &prog[0] else {
+        unreachable!()
+    };
+
+    assert_eq!(
+        back_edge_dst,
+        header.output_registers(&frame.output_registers_arena),
+        "a back-edge must land the params in the registers the loop body reads"
     );
 }
 
 #[test]
 fn br_table_arms_resolve_to_their_own_labels() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
 
-    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+    let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
     let RegInstruction::BrTable {
         targets_start,
@@ -2125,33 +2151,37 @@ fn br_table_arms_resolve_to_their_own_labels() {
         &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
     let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
 
-    assert_eq!(targets.len(), 3, "two arms plus the default");
+    // The exact arms, not just their relationships. Depth 0 is the inner block,
+    // whose end is 2; depth 1 is the outer block, whose end is 3. `br_table 0 1 0`
+    // therefore resolves to [2, 3, 2] — which subsumes "arm 0 equals the default"
+    // and "depth 1 differs", and additionally pins *which* label each names.
+    assert_eq!(table, 1, "the table's own index");
+    assert_eq!(targets, vec![2, 3, 2], "arm 0, arm 1, default");
+
+    let ends: Vec<usize> = prog
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.kind() == RegInstructionKind::End)
+        .map(|(n, _)| n)
+        .collect();
 
     assert_eq!(
-        targets[0], targets[2],
-        "arm 0 and the default both name depth 0"
+        ends,
+        vec![2, 3, 4],
+        "inner block's end, outer block's end, body's end"
     );
-
-    assert_ne!(targets[0], targets[1], "depth 1 is a different label");
-
-    for t in &targets {
-        assert!(
-            matches!(prog[*t as usize], RegInstruction::End),
-            "every arm must land on an End"
-        );
-    }
 }
 
 #[test]
 fn each_br_table_arm_carries_its_own_move() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32) block (result i32)
                i32.const 9 local.get 0 br_table 0 1 0
              end end))"#,
     );
 
-    let table = index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).unwrap();
+    let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
     let RegInstruction::BrTable {
         targets_start,
@@ -2190,29 +2220,32 @@ fn each_br_table_arm_carries_its_own_move() {
 
 #[test]
 fn the_if_arm_hoists_the_spill_above_the_branch() {
-    let body = lower(
+    // Both rescues land at 0 and 1, ahead of the `if` at 2 — and the `if` records no
+    // else and an end of exactly 4, so the whole shape is pinned rather than just
+    // the ordering.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              local.get 1
              if i32.const 5 local.set 0 end))"#,
-    );
-
-    let prog = &body.0;
-
-    let spill = index_of(prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch = index_of(prog, |i| matches!(i, RegInstruction::If { .. })).expect("the if");
-
-    assert!(
-        spill < branch,
-        "spill at {spill} must precede the branch at {branch}:\n{}",
-        render(&body, &[])
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  if           spill1 else=- end=4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  end
+             frame: 1 registers, 2 spills
+        ",
     );
 }
 
 #[test]
 fn the_br_if_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _) = lower(
+    // The taken edge leaves at 2 for the block's end at 4, so the rescues at 0 and 1
+    // are the only instructions it cannot skip.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2221,18 +2254,22 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  br_if        spill1 -> 4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  end
+             frame: 1 registers, 2 spills
+        ",
     );
-
-    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).expect("the br_if");
-
-    assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
 
 #[test]
 fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              loop
@@ -2243,28 +2280,69 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
              end))"#,
     );
 
-    let back_edge = index_of(&prog, |i| matches!(i, RegInstruction::BrIf { .. })).unwrap();
+    let back_edge = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
     let RegInstruction::BrIf { target_index, .. } = &prog[back_edge] else {
         unreachable!()
     };
 
-    let rescue = prog
+    // The exact numbers, not just their order: local 0's rescue is instruction 0, the
+    // repeated region starts at 1, and the back-edge is instruction 4.
+    assert_eq!(back_edge, 4, "the back-edge's own index");
+    assert_eq!(*target_index, 1, "the loop header's index");
+    assert!(
+        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        "a back-edge must land on the `loop` itself, not on a body instruction: found {:?}",
+        prog[*target_index as usize].kind()
+    );
+
+    let rescues: Vec<usize> = prog
         .iter()
         .enumerate()
-        .find(|(_, i)| matches!(i, RegInstruction::LocalSpill { index, .. } if index.0 == 0))
+        .filter(|(_, i)| matches!(i, RegInstruction::LocalSpill { index, .. } if index.0 == 0))
         .map(|(n, _)| n)
-        .expect("local 0 must be rescued");
+        .collect();
 
-    assert!(
-        rescue < *target_index as usize,
-        "the rescue at {rescue} is inside the repeated region starting at {target_index}"
+    assert_eq!(
+        rescues,
+        vec![0],
+        "local 0 is rescued exactly once, before the repeated region"
+    );
+}
+
+/// The whole body of [`the_loop_arm_hoists_the_spill_out_of_the_repeated_region`],
+/// so the indices its assertions name cannot drift without this failing too.
+#[test]
+fn the_loop_hoist_lowers_exactly() {
+    assert_lowers_to(
+        r#"(module (func (param i32 i32) (result i32)
+             local.get 0
+             loop
+               i32.const 5
+               local.set 0
+               local.get 1
+               br_if 0
+             end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  loop
+          2  local.set    local0 <- 5
+          3  local.spill  local1 -> spill1
+          4  br_if        spill1 -> 1
+          5  end
+          6  move         spill0 -> r0
+          7  end
+             frame: 1 registers, 2 spills
+        ",
     );
 }
 
 #[test]
 fn the_br_table_arm_hoists_the_spill_above_the_branch() {
-    let (prog, _) = lower(
+    // Every arm leaves, so the rescues at 0 and 1 are unskippable — and both arms
+    // resolve to the block's end at 3. The `local.set` after the table is dead and
+    // does not appear at all, which is why the body is only four instructions.
+    assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              block
@@ -2273,14 +2351,16 @@ fn the_br_table_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  local.spill  local1 -> spill1
+          2  br_table     spill1 ->3 ->3
+          3  end
+          4  move         spill0 -> r0
+          5  end
+             frame: 1 registers, 2 spills
+        ",
     );
-
-    let spill = index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. }))
-        .expect("the borrow must be rescued");
-    let branch =
-        index_of(&prog, |i| matches!(i, RegInstruction::BrTable { .. })).expect("the br_table");
-
-    assert!(spill < branch, "spill at {spill}, branch at {branch}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2321,13 +2401,13 @@ fn a_return_with_no_results_transfers_nothing() {
 
 #[test]
 fn a_return_lands_on_the_final_end_from_any_depth() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block block local.get 0 return end end
              i32.const 9))"#,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Return).unwrap();
 
     let RegInstruction::Return { target_index } = &prog[at] else {
         unreachable!()
@@ -2344,7 +2424,7 @@ fn a_return_lands_on_the_final_end_from_any_depth() {
 
 #[test]
 fn a_conditional_return_shares_the_functions_result_register() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0
              if (result i32) i32.const 1 return else i32.const 2 end))"#,
@@ -2366,27 +2446,29 @@ fn a_conditional_return_shares_the_functions_result_register() {
     );
 }
 
-/// The returning path and the falling-through path read *different* values of the
-/// same local, which only works because the borrow was rescued above the branch.
+/// The value a `return` carries is read *before* a write to the local it came
+/// from, so the rescue above the branch is what keeps it reachable: the return
+/// reads `spill0`, while `local0` itself now holds `5` on the taken path.
 #[test]
 fn a_return_reads_the_snapshot_the_hoist_preserved() {
     assert_lowers_to(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
-             block local.get 1 br_if 0 return end
-             i32.const 5
-             local.set 0
-             drop
-             local.get 0))"#,
+             local.get 1
+             if
+               i32.const 5
+               local.set 0
+             end
+             return))"#,
         "
           0  local.spill  local0 -> spill0
           1  local.spill  local1 -> spill1
-          2  br_if        spill1 -> 5
-          3  move         spill0 -> r0
-          4  return       -> 8
-          5  end
-          6  local.set    local0 <- 5
-          7  move         local0 -> r0
+          2  if           spill1 else=- end=4
+          3  local.set    local0 <- 5
+          4  end
+          5  move         spill0 -> r0
+          6  return       -> 8
+          7  move         r0 -> r0
           8  end
              frame: 1 registers, 2 spills
         ",
@@ -2395,7 +2477,7 @@ fn a_return_reads_the_snapshot_the_hoist_preserved() {
 
 #[test]
 fn a_return_makes_the_rest_of_its_block_unreachable() {
-    let (prog, _) = lower(
+    let (prog, _, _) = lower(
         r#"(module (func (param i32) (result i32)
              block (result i32)
                local.get 0
@@ -2408,12 +2490,12 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 
     // the operators after `return` are dropped, so nothing between the return and
     // the block's end survives except that end's own materialisation
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Return { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Return).unwrap();
 
     let ends = prog
         .iter()
         .skip(at)
-        .filter(|i| matches!(i, RegInstruction::End))
+        .filter(|i| i.kind() == RegInstructionKind::End)
         .count();
 
     assert_eq!(ends, 2, "only the block's end and the body's end follow");
@@ -2431,8 +2513,8 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 
 /// Two callers of the same function, differing only in what sits below the call.
 fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
-    let (prog, frame) = lower_func(wat, 1);
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+    let (prog, _, frame) = lower_func(wat, 1);
+    let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
         unreachable!()
@@ -2594,7 +2676,7 @@ fn a_zero_param_call_still_reports_its_result_base() {
 
 #[test]
 fn arguments_are_staged_at_the_caller_base() {
-    let (prog, frame) = lower_func(
+    let (prog, _, frame) = lower_func(
         r#"(module
              (func (param i32 i32) (result i32) local.get 0)
              (func (param i32) (result i32)
@@ -2602,7 +2684,7 @@ fn arguments_are_staged_at_the_caller_base() {
         1,
     );
 
-    let at = index_of(&prog, |i| matches!(i, RegInstruction::Call { .. })).unwrap();
+    let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
         unreachable!()
@@ -2646,7 +2728,7 @@ fn a_global_read_across_a_call_is_rescued() {
 
 #[test]
 fn a_local_read_across_a_call_needs_no_rescue() {
-    let (prog, _) = lower_func(
+    let (prog, _, _) = lower_func(
         r#"(module
              (func)
              (func (param i32) (result i32)
@@ -2658,7 +2740,7 @@ fn a_local_read_across_a_call_needs_no_rescue() {
     );
 
     assert!(
-        index_of(&prog, |i| matches!(i, RegInstruction::LocalSpill { .. })).is_none(),
+        index_of_kind(&prog, RegInstructionKind::LocalSpill).is_none(),
         "a callee cannot write the caller's locals"
     );
 }
@@ -2761,8 +2843,8 @@ fn a_zero_argument_call_indirect_still_pops_its_index() {
 #[test]
 fn caller_base_counts_past_the_index_to_the_deepest_argument() {
     let base_of = |wat: &str| {
-        let (prog, _) = lower_func(wat, 0);
-        let at = index_of(&prog, |i| matches!(i, RegInstruction::CallIndirect { .. })).unwrap();
+        let (prog, _, _) = lower_func(wat, 0);
+        let at = index_of_kind(&prog, RegInstructionKind::CallIndirect).unwrap();
 
         let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
             unreachable!()
@@ -2900,12 +2982,658 @@ fn a_call_indirect_leaves_its_block_balanced() {
 }
 
 // ---------------------------------------------------------------------------
+// unreachable
+//
+// It transfers control without naming a label, so it is lowered like `br` in
+// every respect but the branch itself: no move, no attached break, no target —
+// just the trap, the enclosing block reset to the layout its `end` expects, and
+// everything up to that `end` marked dead.
+//
+// The reset is what these tests are about. The block's `end` still emits its own
+// materialisation and still asserts on the height it arrives at, so an operand
+// left behind here surfaces there rather than at the trap.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_unreachable_leaves_its_block_in_the_layout_its_end_expects() {
+    assert_lowers_to(
+        r#"(module (func (result i32)
+             block (result i32)
+               unreachable
+             end))"#,
+        "
+          0  unreachable
+          1  move         r0 -> r0
+          2  end
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// Operands the trap never consumes are discarded by the reset, registers and
+/// stack-only slots alike — the block's `end` must see its own entry height plus
+/// its results, not whatever was stranded above it.
+#[test]
+fn operands_live_at_an_unreachable_are_discarded() {
+    // two constants, which occupy stack positions and no registers
+    assert_lowers_to(
+        r#"(module (func (result i32)
+             block (result i32)
+               i32.const 1
+               i32.const 2
+               unreachable
+             end))"#,
+        "
+          0  unreachable
+          1  move         r0 -> r0
+          2  end
+          3  move         r0 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+
+    // and a register, which the reset has to give back before pushing the result
+    assert_lowers_to(
+        r#"(module (memory 1) (func (result i32)
+             block (result i32)
+               i32.const 0 i32.load
+               unreachable
+             end))"#,
+        "
+          0  i32.load     [0]+0 -> r0
+          1  unreachable
+          2  move         r0 -> r0
+          3  end
+          4  move         r0 -> r0
+          5  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+#[test]
+fn code_after_an_unreachable_is_dropped() {
+    let body = lower(
+        r#"(module (func (result i32)
+             block (result i32)
+               unreachable
+               i32.const 7
+               i32.const 8
+               i32.add
+             end))"#,
+    );
+
+    assert!(
+        index_of(&body.0, |i| i.kind() == RegInstructionKind::I32Add).is_none(),
+        "the operators after the trap cannot execute:\n{}",
+        RegInstruction::render_body(&body, &[]),
+    );
+}
+
+/// Only the arm that traps is dead. `else` closes a construct opened while
+/// reachable, so lowering resumes there.
+#[test]
+fn an_unreachable_arm_does_not_kill_the_other_arm() {
+    assert_lowers_to(
+        r#"(module (func (param i32) (result i32)
+             local.get 0
+             if (result i32)
+               unreachable
+             else
+               i32.const 1
+             end))"#,
+        "
+          0  local.spill  local0 -> spill0
+          1  if           spill0 else=4 end=6
+          2  unreachable
+          3  move         r0 -> r0
+          4  else         end=6
+          5  move         1 -> r0
+          6  end
+          7  move         r0 -> r0
+          8  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+/// The reset stops at the trapping block's own entry height: an operand the
+/// *enclosing* block owns is still there afterwards, and still in its register.
+#[test]
+fn an_unreachable_block_does_not_disturb_the_enclosing_block() {
+    assert_lowers_to(
+        r#"(module (memory 1) (func (result i32)
+             i32.const 0 i32.load
+             block
+               unreachable
+             end
+             drop
+             i32.const 1))"#,
+        "
+          0  i32.load     [0]+0 -> r0
+          1  unreachable
+          2  end
+          3  move         1 -> r0
+          4  end
+             frame: 1 registers, 0 spills
+        ",
+    );
+}
+
+/// The reset pops through the same path everything else does, so a borrow it
+/// discards releases its spill slot — and one the enclosing block still holds
+/// keeps it.
+#[test]
+fn a_spill_live_across_an_unreachable_survives_it() {
+    assert_lowers_to(
+        r#"(module (global (mut i32) (i32.const 0)) (func (result i32)
+             global.get 0
+             i32.const 5
+             global.set 0
+             block
+               unreachable
+             end
+             i32.const 1
+             i32.add))"#,
+        "
+          0  global.spill global0 -> spill0
+          1  global.set   global0 <- 5
+          2  unreachable
+          3  end
+          4  i32.add      spill0, 1 -> r0
+          5  move         r0 -> r0
+          6  end
+             frame: 1 registers, 1 spills
+        ",
+    );
+}
+
+/// Results the trap can never produce are still allocated, because the `end`
+/// below is lowered as if the block could fall into it. The registers are never
+/// written at execution — the frame is one wider than it strictly needs, which is
+/// the cheap side of the trade.
+#[test]
+fn a_trapping_block_still_reserves_its_results() {
+    let (_, _, frame) = lower(
+        r#"(module (func (result i32)
+             block (result i32 i32)
+               unreachable
+             end
+             drop))"#,
+    );
+
+    assert_eq!(frame.registers, 2, "both results are given registers");
+}
+
+// ---------------------------------------------------------------------------
+// arity cross-check
+//
+// An operator lowered through `emit!` names only its variant, so the arity comes
+// from the variant's own `Signature<I, O>` declaration and no arm restates it.
+// That removes the one thing that used to disagree when a declaration was wrong:
+// declaring `RefIsNull(Signature<2, 1>)` compiles with no error and no warning,
+// and pops an operand that isn't there.
+//
+// So the declaration needs an outside opinion, and the only one that is neither
+// this pass nor a number someone typed is wasmparser's validator: it type-checks
+// the body against the spec, and `operand_stack_height` reads off what the spec
+// says each operator did. Comparing that against what the pass recorded is what
+// makes a wrong `Signature` a test failure instead of a silent miscompile.
+//
+// The `.wat` is self-checking too. Push one operand too few or too many and the
+// module fails to validate — as a leftover value at the end of a body with no
+// results, or as a missing one — so a case cannot quietly encode the wrong arity
+// either.
+// ---------------------------------------------------------------------------
+
+/// The type a value op's operands have, which its `.wat` case has to declare.
+///
+/// It is the source type the name carries when there is one — `i64.extend_i32_s`
+/// takes an `i32`, `i32.trunc_sat_f32_u` an `f32` — and the type prefix otherwise.
+/// `i32.extend8_s` has no source type: the `8` is a width, not an operand, which
+/// is exactly the distinction the mnemonic's underscores encode.
+fn operand_type(kind: RegInstructionKind) -> String {
+    let mnemonic = mnemonic(kind);
+    let (prefix, tail) = mnemonic.split_once('.').expect("a mnemonic has a prefix");
+
+    tail.split('_')
+        .find(|word| matches!(*word, "i32" | "i64" | "f32" | "f64"))
+        .unwrap_or(prefix)
+        .to_string()
+}
+
+/// A `.wat` loading through a `memory 1` and dropping the value read.
+///
+/// The address is always an `i32`, and what the load widens to is its own business
+/// since the result is dropped — so one shape covers all thirteen.
+fn load_case(kind: RegInstructionKind) -> String {
+    format!(
+        "(module (memory 1) (func (param i32) local.get 0 {} drop))",
+        mnemonic(kind)
+    )
+}
+
+/// A `.wat` storing through a `memory 1`.
+///
+/// Two operands of different types — an `i32` address and a value of the store's
+/// own type — so the value comes from a second param rather than a repeated
+/// `local.get 0`. `i64.store8` stores an `i64`: the `8` is the width written, not
+/// the type accepted, which is why [`operand_type`] reads the prefix here.
+fn store_case(kind: RegInstructionKind) -> String {
+    format!(
+        "(module (memory 1) (func (param i32 {}) local.get 0 local.get 1 {}))",
+        operand_type(kind),
+        mnemonic(kind)
+    )
+}
+
+/// A `.wat` applying one value op to `operands` operands of its own operand type,
+/// dropping the result.
+fn value_op_case(kind: RegInstructionKind, operands: usize) -> String {
+    let gets = "local.get 0 ".repeat(operands);
+
+    format!(
+        "(module (func (param {}) {gets}{} drop))",
+        operand_type(kind),
+        mnemonic(kind)
+    )
+}
+
+/// The `.wat` that pins one kind's arity, or `None` for a kind `emit!` does not
+/// lower.
+///
+/// **Exhaustive on purpose, and visited in full.** [`RegInstructionKind`] is
+/// derived from [`RegInstruction`], so adding a variant does two things at once:
+/// this `match` stops compiling until the new kind is handled, and
+/// [`RegInstructionKind::ALL`] grows to include it, so whatever this says about it
+/// actually runs. A hand-written list of cases could only ever promise the first.
+///
+/// That matters more here than for most tables: with `emit!` the variant's own
+/// `Signature<I, O>` is the only place its arity is written down, so an operator
+/// that slipped past this would have nothing at all checking it.
+///
+/// A case applies the operator to exactly the operands it takes and drops the
+/// result, so the body lowers to that one instruction and nothing else — no
+/// trailing `Move`, since these bodies return nothing.
+fn arity_case(kind: RegInstructionKind) -> Option<String> {
+    match kind {
+        // Every numeric instruction, in the order the enum declares them. Their
+        // cases are derived from the kind — the mnemonic and the operand type are
+        // both recoverable from the name, so 159 hand-written bodies would be 159
+        // chances to mistype one.
+        // i32 — loads
+        RegInstructionKind::I32Load
+        | RegInstructionKind::I32Load8S
+        | RegInstructionKind::I32Load8U
+        | RegInstructionKind::I32Load16S
+        | RegInstructionKind::I32Load16U => Some(load_case(kind)),
+
+        // i32 — stores
+        RegInstructionKind::I32Store
+        | RegInstructionKind::I32Store8
+        | RegInstructionKind::I32Store16 => Some(store_case(kind)),
+
+        // i32 — unary
+        RegInstructionKind::I32Clz
+        | RegInstructionKind::I32Ctz
+        | RegInstructionKind::I32Eqz
+        | RegInstructionKind::I32Extend16S
+        | RegInstructionKind::I32Extend8S
+        | RegInstructionKind::I32Popcnt
+        | RegInstructionKind::I32ReinterpretF32
+        | RegInstructionKind::I32TruncF32S
+        | RegInstructionKind::I32TruncF32U
+        | RegInstructionKind::I32TruncF64S
+        | RegInstructionKind::I32TruncF64U
+        | RegInstructionKind::I32TruncSatF32S
+        | RegInstructionKind::I32TruncSatF32U
+        | RegInstructionKind::I32TruncSatF64S
+        | RegInstructionKind::I32TruncSatF64U
+        | RegInstructionKind::I32WrapI64 => Some(value_op_case(kind, 1)),
+
+        // i32 — binary
+        RegInstructionKind::I32Add
+        | RegInstructionKind::I32And
+        | RegInstructionKind::I32DivS
+        | RegInstructionKind::I32DivU
+        | RegInstructionKind::I32Eq
+        | RegInstructionKind::I32GeS
+        | RegInstructionKind::I32GeU
+        | RegInstructionKind::I32GtS
+        | RegInstructionKind::I32GtU
+        | RegInstructionKind::I32LeS
+        | RegInstructionKind::I32LeU
+        | RegInstructionKind::I32LtS
+        | RegInstructionKind::I32LtU
+        | RegInstructionKind::I32Mul
+        | RegInstructionKind::I32Ne
+        | RegInstructionKind::I32Or
+        | RegInstructionKind::I32RemS
+        | RegInstructionKind::I32RemU
+        | RegInstructionKind::I32Rotl
+        | RegInstructionKind::I32Rotr
+        | RegInstructionKind::I32Shl
+        | RegInstructionKind::I32ShrS
+        | RegInstructionKind::I32ShrU
+        | RegInstructionKind::I32Sub
+        | RegInstructionKind::I32Xor => Some(value_op_case(kind, 2)),
+
+        // i64 — loads
+        RegInstructionKind::I64Load
+        | RegInstructionKind::I64Load8S
+        | RegInstructionKind::I64Load8U
+        | RegInstructionKind::I64Load16S
+        | RegInstructionKind::I64Load16U
+        | RegInstructionKind::I64Load32S
+        | RegInstructionKind::I64Load32U => Some(load_case(kind)),
+
+        // i64 — stores
+        RegInstructionKind::I64Store
+        | RegInstructionKind::I64Store8
+        | RegInstructionKind::I64Store16
+        | RegInstructionKind::I64Store32 => Some(store_case(kind)),
+
+        // i64 — unary
+        RegInstructionKind::I64Clz
+        | RegInstructionKind::I64Ctz
+        | RegInstructionKind::I64Eqz
+        | RegInstructionKind::I64Extend16S
+        | RegInstructionKind::I64Extend32S
+        | RegInstructionKind::I64Extend8S
+        | RegInstructionKind::I64ExtendI32S
+        | RegInstructionKind::I64ExtendI32U
+        | RegInstructionKind::I64Popcnt
+        | RegInstructionKind::I64ReinterpretF64
+        | RegInstructionKind::I64TruncF32S
+        | RegInstructionKind::I64TruncF32U
+        | RegInstructionKind::I64TruncF64S
+        | RegInstructionKind::I64TruncF64U
+        | RegInstructionKind::I64TruncSatF32S
+        | RegInstructionKind::I64TruncSatF32U
+        | RegInstructionKind::I64TruncSatF64S
+        | RegInstructionKind::I64TruncSatF64U => Some(value_op_case(kind, 1)),
+
+        // i64 — binary
+        RegInstructionKind::I64Add
+        | RegInstructionKind::I64And
+        | RegInstructionKind::I64DivS
+        | RegInstructionKind::I64DivU
+        | RegInstructionKind::I64Eq
+        | RegInstructionKind::I64GeS
+        | RegInstructionKind::I64GeU
+        | RegInstructionKind::I64GtS
+        | RegInstructionKind::I64GtU
+        | RegInstructionKind::I64LeS
+        | RegInstructionKind::I64LeU
+        | RegInstructionKind::I64LtS
+        | RegInstructionKind::I64LtU
+        | RegInstructionKind::I64Mul
+        | RegInstructionKind::I64Ne
+        | RegInstructionKind::I64Or
+        | RegInstructionKind::I64RemS
+        | RegInstructionKind::I64RemU
+        | RegInstructionKind::I64Rotl
+        | RegInstructionKind::I64Rotr
+        | RegInstructionKind::I64Shl
+        | RegInstructionKind::I64ShrS
+        | RegInstructionKind::I64ShrU
+        | RegInstructionKind::I64Sub
+        | RegInstructionKind::I64Xor => Some(value_op_case(kind, 2)),
+
+        // f32 — loads
+        RegInstructionKind::F32Load => Some(load_case(kind)),
+
+        // f32 — stores
+        RegInstructionKind::F32Store => Some(store_case(kind)),
+
+        // f32 — unary
+        RegInstructionKind::F32Abs
+        | RegInstructionKind::F32Ceil
+        | RegInstructionKind::F32ConvertI32S
+        | RegInstructionKind::F32ConvertI32U
+        | RegInstructionKind::F32ConvertI64S
+        | RegInstructionKind::F32ConvertI64U
+        | RegInstructionKind::F32DemoteF64
+        | RegInstructionKind::F32Floor
+        | RegInstructionKind::F32Nearest
+        | RegInstructionKind::F32Neg
+        | RegInstructionKind::F32ReinterpretI32
+        | RegInstructionKind::F32Sqrt
+        | RegInstructionKind::F32Trunc => Some(value_op_case(kind, 1)),
+
+        // f32 — binary
+        RegInstructionKind::F32Add
+        | RegInstructionKind::F32Copysign
+        | RegInstructionKind::F32Div
+        | RegInstructionKind::F32Eq
+        | RegInstructionKind::F32Ge
+        | RegInstructionKind::F32Gt
+        | RegInstructionKind::F32Le
+        | RegInstructionKind::F32Lt
+        | RegInstructionKind::F32Max
+        | RegInstructionKind::F32Min
+        | RegInstructionKind::F32Mul
+        | RegInstructionKind::F32Ne
+        | RegInstructionKind::F32Sub => Some(value_op_case(kind, 2)),
+
+        // f64 — loads
+        RegInstructionKind::F64Load => Some(load_case(kind)),
+
+        // f64 — stores
+        RegInstructionKind::F64Store => Some(store_case(kind)),
+
+        // f64 — unary
+        RegInstructionKind::F64Abs
+        | RegInstructionKind::F64Ceil
+        | RegInstructionKind::F64ConvertI32S
+        | RegInstructionKind::F64ConvertI32U
+        | RegInstructionKind::F64ConvertI64S
+        | RegInstructionKind::F64ConvertI64U
+        | RegInstructionKind::F64Floor
+        | RegInstructionKind::F64Nearest
+        | RegInstructionKind::F64Neg
+        | RegInstructionKind::F64PromoteF32
+        | RegInstructionKind::F64ReinterpretI64
+        | RegInstructionKind::F64Sqrt
+        | RegInstructionKind::F64Trunc => Some(value_op_case(kind, 1)),
+
+        // f64 — binary
+        RegInstructionKind::F64Add
+        | RegInstructionKind::F64Copysign
+        | RegInstructionKind::F64Div
+        | RegInstructionKind::F64Eq
+        | RegInstructionKind::F64Ge
+        | RegInstructionKind::F64Gt
+        | RegInstructionKind::F64Le
+        | RegInstructionKind::F64Lt
+        | RegInstructionKind::F64Max
+        | RegInstructionKind::F64Min
+        | RegInstructionKind::F64Mul
+        | RegInstructionKind::F64Ne
+        | RegInstructionKind::F64Sub => Some(value_op_case(kind, 2)),
+
+        // The rest carry something the derivation cannot supply: `select` takes
+        // three operands rather than one or two, `ref.is_null` is not named
+        // after a numeric type, and the memory ops need a memory to address.
+        RegInstructionKind::Select => Some(
+            "(module (func (param i32) local.get 0 local.get 0 local.get 0 select drop))".into(),
+        ),
+        // memory
+        //
+        // `memory.size` takes no operands, so its case has nothing to push — only
+        // the result to drop, which keeps the body to one instruction.
+        RegInstructionKind::DataDrop => {
+            Some("(module (memory 1) (data \"x\") (func data.drop 0))".into())
+        }
+        // a passive segment, since `memory.init` may only read from one
+        RegInstructionKind::MemoryInit => Some(
+            "(module (memory 1) (data \"x\") (func (param i32) local.get 0 local.get 0 local.get 0 memory.init 0))"
+                .into(),
+        ),
+        RegInstructionKind::MemoryCopy => Some(
+            "(module (memory 1) (func (param i32) local.get 0 local.get 0 local.get 0 memory.copy))"
+                .into(),
+        ),
+        RegInstructionKind::MemoryFill => Some(
+            "(module (memory 1) (func (param i32) local.get 0 local.get 0 local.get 0 memory.fill))"
+                .into(),
+        ),
+        RegInstructionKind::MemoryGrow => {
+            Some("(module (memory 1) (func (param i32) local.get 0 memory.grow drop))".into())
+        }
+        RegInstructionKind::MemorySize => {
+            Some("(module (memory 1) (func memory.size drop))".into())
+        }
+        RegInstructionKind::RefIsNull => {
+            Some("(module (func (param funcref) local.get 0 ref.is_null drop))".into())
+        }
+
+        RegInstructionKind::LocalSet
+        | RegInstructionKind::LocalTee
+        | RegInstructionKind::GlobalSet
+        | RegInstructionKind::LocalSpill
+        | RegInstructionKind::GlobalSpill
+        | RegInstructionKind::If
+        | RegInstructionKind::Else
+        | RegInstructionKind::Loop
+        | RegInstructionKind::Br
+        | RegInstructionKind::BrIf
+        | RegInstructionKind::BrTable
+        | RegInstructionKind::Return
+        | RegInstructionKind::Call
+        | RegInstructionKind::CallIndirect
+        | RegInstructionKind::Unreachable
+        | RegInstructionKind::Move
+        | RegInstructionKind::End => None,
+    }
+}
+
+/// The net stack effect the *validator* attributes to each operator of a module's
+/// first function, keyed by variant name.
+///
+/// This is the oracle. It is read from the validator that type-checked the body,
+/// so it is the spec's arity rather than anything this crate believes.
+fn validator_stack_deltas(bytes: &[u8]) -> Vec<(String, i64)> {
+    let mut validator = wasmparser::Validator::new();
+    let mut deltas = vec![];
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = payload.expect("parse");
+
+        if let wasmparser::ValidPayload::Func(to_validate, body) =
+            validator.payload(&payload).expect("validate")
+        {
+            let mut func = to_validate.into_validator(Default::default());
+
+            // the validator needs the body's local declarations before its
+            // operators; the operators reader starts past them
+            func.read_locals(&mut body.get_binary_reader())
+                .expect("locals");
+
+            let mut reader = body.get_operators_reader().expect("operators");
+
+            while !reader.eof() {
+                let (operator, offset) = reader.read_with_offset().expect("operator");
+                let before = func.operand_stack_height() as i64;
+
+                func.op(offset, &operator).expect("operator validates");
+
+                let after = func.operand_stack_height() as i64;
+                // `Debug` renders as `I32Add` or `I32Load { memarg: .. }`; the
+                // variant name is everything up to the first space.
+                let name = format!("{operator:?}");
+                let name = name.split_whitespace().next().unwrap_or_default();
+
+                deltas.push((name.to_string(), after - before));
+            }
+
+            // only the first function is measured
+            break;
+        }
+    }
+
+    deltas
+}
+
+#[test]
+fn every_operator_pops_and_pushes_what_the_spec_says() {
+    for &kind in RegInstructionKind::ALL {
+        let Some(wat) = arity_case(kind) else {
+            continue;
+        };
+
+        let bytes = wat::parse_str(&wat).expect("invalid wat");
+
+        // the kind is named after the operator it lowers, which is what lets the
+        // operator under test be picked out of the `local.get`s feeding it
+        let operator = format!("{kind:?}");
+
+        let expected = validator_stack_deltas(&bytes)
+            .into_iter()
+            .find(|(name, _)| *name == operator)
+            .unwrap_or_else(|| panic!("{operator} does not occur in its own case:\n{wat}"))
+            .1;
+
+        let body = lower(&wat);
+        let (prog, frame) = (&body.0, &body.2);
+
+        // the case is built so the body is exactly this instruction and `end`,
+        // which is what lets the arenas be read as that instruction's operands
+        assert_eq!(
+            prog.len(),
+            2,
+            "{operator}: case must lower to one instruction and `end`:\n{}",
+            RegInstruction::render_body(&body, &[])
+        );
+
+        let pops = frame.input_registers_arena.len() as i64;
+        let pushes = frame.output_registers_arena.len() as i64;
+
+        assert_eq!(
+            pushes - pops,
+            expected,
+            "{operator}: lowered as {pops} -> {pushes}, but the spec says the net \
+             stack effect is {expected}. The `Signature<I, O>` on the variant is \
+             wrong — nothing else records an arity."
+        );
+    }
+}
+
+/// A case filed under the wrong kind would check some other operator's arity and
+/// pass, so each case must lower to the kind it is filed under.
+#[test]
+fn every_case_lowers_to_the_kind_it_is_filed_under() {
+    for &kind in RegInstructionKind::ALL {
+        let Some(wat) = arity_case(kind) else {
+            continue;
+        };
+
+        let (prog, _, _) = lower(&wat);
+
+        assert_eq!(
+            prog[0].kind(),
+            kind,
+            "the case filed under {kind:?} lowers to {:?}:\n{wat}",
+            prog[0].kind()
+        );
+
+        assert!(
+            matches!(prog.last(), Some(RegInstruction::End)),
+            "{kind:?}: the body must end with `end`"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // frame layout
 // ---------------------------------------------------------------------------
 
 #[test]
 fn the_frame_reports_peak_register_use() {
-    let (_, frame) = lower(
+    let (_, _, frame) = lower(
         r#"(module (memory 1) (func (param i32) (result i32)
              local.get 0 i32.load
              local.get 0 i32.load
@@ -2917,7 +3645,7 @@ fn the_frame_reports_peak_register_use() {
 
 #[test]
 fn the_frame_reports_peak_spill_use() {
-    let (_, frame) = lower(
+    let (_, _, frame) = lower(
         r#"(module (func (param i32) (result i32)
              local.get 0 i32.const 1 local.set 0
              local.get 0 i32.const 2 local.set 0
@@ -2932,7 +3660,7 @@ fn the_frame_reports_peak_spill_use() {
 
 #[test]
 fn the_arenas_ship_with_the_body() {
-    let (prog, frame) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
@@ -2954,4 +3682,184 @@ fn the_arenas_ship_with_the_body() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Instruction offsets
+// ---------------------------------------------------------------------------
+//
+// The driver reads `instruction_offsets[pc]` whenever it records a trace record,
+// so a body whose offsets are shorter than its instruction list panics on the
+// first trap deep enough to reach the missing entry. These pin the two properties
+// that makes impossible: the lists stay the same length, and every entry is a real
+// operator offset rather than a plausible-looking number.
+
+/// Every byte offset `wasmparser` reports for an operator of function `n`, in
+/// order — the ground truth both lowering passes record against.
+fn operator_offsets(wat: &str, n: usize) -> Vec<u32> {
+    let bytes = wat::parse_str(wat).expect("invalid wat");
+    let mut bodies = vec![];
+
+    for payload in Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.expect("parse") {
+            bodies.push(body);
+        }
+    }
+
+    let body = bodies.into_iter().nth(n).expect("no such function body");
+    let mut reader = body.get_operators_reader().expect("operators");
+    let mut offsets = vec![];
+
+    while !reader.eof() {
+        let (_operator, offset) = reader.read_with_offset().expect("operator");
+
+        offsets.push(offset as u32);
+    }
+
+    offsets
+}
+
+/// A body covering every shape that emits more than one instruction per operator —
+/// blocks that move block params, an `if`/`else` and a `br_if` that spill live
+/// borrows, a `br_table`, and a call — so the cases where the two lists could most
+/// easily drift apart are all present.
+const OFFSET_PROBE: &str = r#"(module
+    (global $g (mut i32) (i32.const 0))
+    (func $callee (param i32) (result i32) local.get 0)
+    (func $probe (param i32 i32) (result i32) (local i32)
+        local.get 0
+        local.set 2
+        block (result i32)
+            local.get 2
+            global.get $g
+            i32.add
+            local.get 1
+            br_if 0
+            local.get 0
+            i32.const 7
+            i32.mul
+            local.set 2
+            local.get 1
+            br_table 0 0
+        end
+        local.get 2
+        i32.add
+        call $callee
+        local.get 1
+        if (result i32)
+            local.get 2
+            i32.const 1
+            i32.add
+            local.set 2
+            local.get 2
+        else
+            global.get $g
+            local.set 2
+            i32.const 0
+        end
+        i32.add
+        loop (result i32)
+            local.get 2
+            local.set 2
+            local.get 0
+        end
+        i32.add))"#;
+
+#[test]
+fn offsets_and_instructions_stay_the_same_length() {
+    for n in 0..2 {
+        let (instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+
+        assert_eq!(
+            offsets.len(),
+            instructions.len(),
+            "function {n}: the driver indexes offsets by `pc`, so a short list is a panic \
+             waiting for a deep enough trap"
+        );
+    }
+}
+
+#[test]
+fn every_offset_is_a_real_operator_offset() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+        let real = operator_offsets(OFFSET_PROBE, n);
+
+        for offset in &offsets {
+            assert!(
+                real.contains(offset),
+                "function {n}: {offset} is not an operator boundary; \
+                 real offsets are {real:?}"
+            );
+        }
+    }
+}
+
+// Operators are read in order and instructions are only ever appended, so the
+// offsets a body records can repeat — one operator lowering to a spill, a move and
+// then itself — but can never go backwards. A decrease would mean an instruction
+// had been inserted behind one already emitted, which would also silently
+// misattribute every later `pc`.
+#[test]
+fn offsets_never_go_backwards() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+
+        for pair in offsets.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "function {n}: offsets decrease, {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+}
+
+// The register pass emits zero instructions for the operators it handles lazily
+// (`local.get`, `i32.const`) and several for others, so its offset list is neither
+// the operator list nor a permutation of it — but the *distinct* offsets it records
+// must appear in operator order, and must be a subset of the real ones.
+#[test]
+fn distinct_offsets_follow_operator_order() {
+    for n in 0..2 {
+        let (_instructions, offsets, _) = lower_func(OFFSET_PROBE, n);
+        let real = operator_offsets(OFFSET_PROBE, n);
+
+        let mut distinct: Vec<u32> = vec![];
+
+        for offset in offsets {
+            if distinct.last() != Some(&offset) {
+                distinct.push(offset);
+            }
+        }
+
+        let mut next = real.iter();
+
+        for offset in &distinct {
+            assert!(
+                next.any(|candidate| candidate == offset),
+                "function {n}: {offset} is out of operator order in {distinct:?}"
+            );
+        }
+    }
+}
+
+// A body that emits nothing until its final `end` still has to produce one offset
+// for that `end` — the degenerate case where an off-by-one in the wiring would go
+// unnoticed by the probe above.
+#[test]
+fn a_body_that_lowers_to_one_instruction_still_records_its_offset() {
+    let wat = "(module (func))";
+    let (instructions, offsets, _) = lower_func(wat, 0);
+    let real = operator_offsets(wat, 0);
+
+    assert_eq!(instructions.len(), 1, "just the terminating `end`");
+    assert_eq!(offsets.len(), 1);
+
+    assert_eq!(
+        offsets[0],
+        *real.last().expect("the `end` operator"),
+        "the sole instruction is the `end`, so it carries the `end`'s offset"
+    );
 }

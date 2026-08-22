@@ -2,16 +2,18 @@
 //! type-safe [`TypedFunc`] handle for calling its functions.
 
 use crate::{
+    InstrOf, VirtualMachine,
     error::FuncCallError,
     instance::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    memory::Memory,
+    instruction::Instruction,
+    memory::{Memory, MemoryView},
     module::{FuncIndex, Module},
-    vm::{
+    runtime::{
         TraceVM,
-        stack::{DataVal, ElementVal, Stack, TableVal, Val, Value},
+        value::{DataVal, ElementVal, TableVal, Val},
     },
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -21,7 +23,7 @@ pub mod config;
 pub mod traits;
 
 /// A compiled module paired with everything mutable that running it touches: the
-/// operand stack, linear memory, globals, tables, and the [`ImportRegistry`]
+/// frame store, linear memory, globals, tables, and the [`ImportRegistry`]
 /// resolving its imported functions.
 ///
 /// All interpreter state lives here rather than in the driver, so a frame is
@@ -29,38 +31,56 @@ pub mod traits;
 /// nested call costs no allocation.
 ///
 /// Generic over `M`/`I` so embedders choose their own memory backing store and
-/// import implementation. The module is shared via `Arc`, so one compiled module
+/// import implementation, and over `V` so the frame store matches the
+/// machine — see [`VirtualMachine`]. The module is shared via `Arc`, so one compiled module
 /// can back several instances.
-pub struct Instance<M, I> {
+pub struct Instance<M, I, V: VirtualMachine> {
     /// The guest's linear memory.
     pub(crate) memory: M,
-    /// The operand stack, shared by every frame: locals and operands of a call
-    /// chain sit contiguously, and each frame addresses its own region by base
-    /// offset. Reset at the start of each [`TypedFunc::call`], which is what
-    /// leaves an instance usable after a trap.
-    pub(crate) stack: Stack<Value>,
+    /// Live values for every frame in the call chain, laid out however the
+    /// lowering's [`RuntimeFrame`](crate::instruction::RuntimeFrame) chooses —
+    /// an operand stack for the stack machine, a register file for the register
+    /// machine. Either way one store is shared by the whole chain and each frame
+    /// addresses its own region by base offset, so a nested call allocates
+    /// nothing.
+    ///
+    /// Reset at the start of each [`TypedFunc::call`], which is what leaves an
+    /// instance usable after a trap.
+    pub(crate) frame: <InstrOf<V> as Instruction>::RuntimeFrame,
     /// Host functions backing the module's declared imports.
     pub(crate) import_registry: I,
     /// The compiled module this instance was created from.
-    pub(crate) module: Arc<Module>,
+    pub(crate) module: Arc<Module<V>>,
     /// The limits this instance was created under, already narrowed against what
     /// the module declares.
     pub(crate) config: Config,
     /// Global values, imported ones first, indexed by the module's global index
-    /// space. Tagged [`Val`] rather than untagged [`Value`] because a global's
+    /// space. Tagged [`Val`] rather than untagged
+    /// [`Value`](crate::runtime::value::Value) because a global's
     /// type is read at runtime when the host asks for it.
     pub(crate) global_vals: Box<[Val]>,
     /// Materialized tables, indexed by table index.
     pub(crate) table_vals: Box<[TableVal]>,
     /// Element segments, retained so a passive segment can still be applied by a
     /// later `table.init`, and dropped by `elem.drop`.
+    ///
+    /// **Not read yet:** neither machine lowers a table bulk operator, so
+    /// instantiation currently builds this and nothing consumes it — unlike
+    /// [`Self::data_vals`], which `memory.init` and `data.drop` do read. Kept
+    /// because it is what those operators will need, at the cost of the segment
+    /// walk in `instantiate` on every instance.
+    #[allow(
+        dead_code,
+        reason = "groundwork for table.init/elem.drop; an unsilenced warning here \
+                  masks the ones that mean something"
+    )]
     pub(crate) element_vals: Box<[ElementVal]>,
     /// Data segments, retained for `memory.init` and dropped by `data.drop`, for
     /// the same reason as [`Self::element_vals`].
     pub(crate) data_vals: Box<[DataVal]>,
 }
 
-impl<M: Memory, I: ImportRegistry> Instance<M, I> {
+impl<M: Memory, I: ImportRegistry, V: VirtualMachine> Instance<M, I, V> {
     /// Internal constructor assembling an instance from its parts. Crate-private
     /// because it performs no validation; the public path is
     /// [`Module::instantiate`](crate::module::Module::instantiate), which checks
@@ -71,7 +91,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     pub(crate) fn new(
         memory: M,
         import_registry: I,
-        module: Arc<Module>,
+        module: Arc<Module<V>>,
         config: Config,
         global_vals: Box<[Val]>,
         table_vals: Box<[TableVal]>,
@@ -80,7 +100,7 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
     ) -> Self {
         Instance {
             memory,
-            stack: Stack::default(),
+            frame: <InstrOf<V> as Instruction>::RuntimeFrame::default(),
             import_registry,
             module,
             config,
@@ -100,13 +120,23 @@ impl<M: Memory, I: ImportRegistry> Instance<M, I> {
         &self.config
     }
 
-    /// Shared access to the instance's linear [`Memory`].
-    pub fn memory_view(&self) -> &M {
+    /// Read access to the instance's linear memory.
+    ///
+    /// Returned as an opaque [`MemoryView`] rather than as `&M`: that trait is the
+    /// read/write half, so an embedder gets every bounds-checked accessor and none
+    /// of [`Memory`]'s resizing.
+    pub fn memory_view(&self) -> &impl MemoryView {
         &self.memory
     }
 
-    /// Mutable access to the instance's linear [`Memory`].
-    pub fn memory_view_mut(&mut self) -> &mut M {
+    /// Read/write access to the instance's linear memory.
+    ///
+    /// Also an opaque [`MemoryView`], for the reason [`MemoryView`] itself gives:
+    /// growth is reserved to the interpreter, because the limits it must respect —
+    /// the module's declared maximum, narrowed by the instance [`Config`] — live on
+    /// this `Instance` and not on the memory. Handing out `&mut M` would let a host
+    /// call [`Memory::grow`] straight past both.
+    pub fn memory_view_mut(&mut self) -> &mut impl MemoryView {
         &mut self.memory
     }
 }
@@ -148,10 +178,10 @@ impl<P: Params, R: Results> TypedFunc<P, R> {
     /// Params and results are not re-checked here: `TypedFunc<P, R>` is only
     /// handed out after [`Module::get_typed_func`](crate::module::Module::get_typed_func)
     /// has matched `P`/`R` against the module's declared signature.
-    pub fn call<M: Memory, I: ImportRegistry>(
+    pub fn call<M: Memory, I: ImportRegistry, V: VirtualMachine>(
         &self,
         params: P,
-        instance: &mut Instance<M, I>,
+        instance: &mut Instance<M, I, V>,
     ) -> Result<R, FuncCallError> {
         // Marshalled into a stack-allocated `ParamVals` (no heap for <=5 params).
         let params = params.to_vals();

@@ -71,7 +71,7 @@ use std::{fmt, marker::PhantomData};
 /// Rewriting this one field is what redirects every stack slot sharing the entry at
 /// once.
 #[derive(Clone, Copy)]
-pub enum LazyLocation {
+pub(crate) enum LazyLocation {
     /// Read straight from its origin — the local or global at this index. Valid
     /// until something writes that origin.
     Original(u32),
@@ -83,7 +83,7 @@ pub enum LazyLocation {
 }
 
 /// Whether [`LazySlot::decrease_ref_count`] released the last borrow.
-pub enum LazyEntryDropResult {
+pub(crate) enum LazyEntryDropResult {
     /// The last stack slot holding this entry is gone; the caller releases its
     /// resources — clearing the `origin` slot, or freeing the spill slot.
     Dropped,
@@ -95,7 +95,7 @@ pub enum LazyEntryDropResult {
 ///
 /// Not a local or a global as such, but *the value one of them held at one point*.
 /// Two entries for the same origin are alive at once when a write separates them.
-pub struct LazyEntry<T> {
+pub(crate) struct LazyEntry<T> {
     location: LazyLocation,
     /// Live stack slots holding this entry. See [`LazyEntryDropResult`].
     ref_count: u32,
@@ -109,7 +109,7 @@ pub struct LazyEntry<T> {
 ///
 /// `T` is [`Local`] or [`Global`]; it carries no data and exists so the two arenas
 /// and their handles are distinct types.
-pub struct LazyArena<T> {
+pub(crate) struct LazyArena<T> {
     arena: Arena<LazyEntry<T>>,
     /// `origin[i]` is the entry currently forwarding local/global `i`, or `None` if
     /// nothing borrows it.
@@ -170,11 +170,11 @@ impl<T> LazyArena<T> {
 /// `Copy`, and deliberately no more than an index: several stack slots hold the same
 /// handle and must observe the same entry, so the state they share lives in the
 /// arena rather than in the handle.
-pub struct LazySlot<T>(Id<LazyEntry<T>>);
+pub(crate) struct LazySlot<T>(Id<LazyEntry<T>>);
 
 impl<T> Clone for LazySlot<T> {
     fn clone(&self) -> Self {
-        LazySlot(self.0)
+        *self
     }
 }
 
@@ -240,14 +240,14 @@ impl<T> LazySlot<T> {
 }
 
 /// Marker for the globals origin space. Never instantiated.
-pub struct Global;
+pub(crate) struct Global;
 /// Marker for the locals origin space. Never instantiated.
-pub struct Local;
+pub(crate) struct Local;
 
 /// A borrow of a local's value.
-pub type LocalSlot = LazySlot<Local>;
+pub(crate) type LocalSlot = LazySlot<Local>;
 /// A borrow of a global's value.
-pub type GlobalSlot = LazySlot<Global>;
+pub(crate) type GlobalSlot = LazySlot<Global>;
 
 /// The frame's spill area, allocated as a stack of interchangeable slots.
 ///
@@ -300,7 +300,14 @@ impl SpillArena {
 /// either: two live borrows never share a slot, and comparing them would only be
 /// asking which of two distinct slots came first.
 #[derive(Debug, Clone, Copy)]
-pub struct SpillIndex(u32);
+pub(crate) struct SpillIndex(u32);
+
+impl SpillIndex {
+    #[inline(always)]
+    pub fn raw_value(&self) -> u32 {
+        self.0
+    }
+}
 
 impl fmt::Display for SpillIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

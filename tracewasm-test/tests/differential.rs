@@ -29,6 +29,7 @@
 
 #![cfg(not(no_guest_wasm))]
 
+use tracewasm_core::{Register, Stack, VirtualMachine};
 use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 
 // ---------------------------------------------------------------------------
@@ -87,7 +88,12 @@ const ARGS: &[i32] = &[
 ///
 /// Failures report the argument and both values, because "differential mismatch"
 /// without the input is not actionable.
-fn check_i64(guest: &mut Guest, name: &str, native: extern "C" fn(i32) -> i64, args: &[i32]) {
+fn check_i64<V: VirtualMachine>(
+    guest: &mut Guest<V>,
+    name: &str,
+    native: extern "C" fn(i32) -> i64,
+    args: &[i32],
+) {
     for &arg in args {
         let expected = native(arg);
         let actual = guest.i32_i64(name, arg);
@@ -104,7 +110,12 @@ fn check_i64(guest: &mut Guest, name: &str, native: extern "C" fn(i32) -> i64, a
 /// `==` would treat `+0.0` and `-0.0` as equal and every NaN as unequal, so it
 /// cannot verify the sign-of-zero and NaN-payload behaviour these guests exist to
 /// pin down.
-fn check_f64(guest: &mut Guest, name: &str, native: extern "C" fn(i32) -> f64, args: &[i32]) {
+fn check_f64<V: VirtualMachine>(
+    guest: &mut Guest<V>,
+    name: &str,
+    native: extern "C" fn(i32) -> f64,
+    args: &[i32],
+) {
     for &arg in args {
         let expected = native(arg);
         let actual = guest.i32_f64(name, arg);
@@ -126,7 +137,14 @@ fn check_f64(guest: &mut Guest, name: &str, native: extern "C" fn(i32) -> f64, a
 
 #[test]
 fn arithmetic_integer_edges_match_native() {
-    let mut g = Guest::new(guests::ARITHMETIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| arithmetic_integer_edges_match_native_on::<Stack>());
+    with_large_stack(|| arithmetic_integer_edges_match_native_on::<Register>());
+}
+
+fn arithmetic_integer_edges_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::ARITHMETIC);
 
     check_i64(
         &mut g,
@@ -162,7 +180,14 @@ fn arithmetic_integer_edges_match_native() {
 
 #[test]
 fn arithmetic_shifts_match_native() {
-    let mut g = Guest::new(guests::ARITHMETIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| arithmetic_shifts_match_native_on::<Stack>());
+    with_large_stack(|| arithmetic_shifts_match_native_on::<Register>());
+}
+
+fn arithmetic_shifts_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::ARITHMETIC);
 
     // shift counts are taken modulo the width, so small positive arguments are
     // the interesting ones here
@@ -176,7 +201,14 @@ fn arithmetic_shifts_match_native() {
 
 #[test]
 fn arithmetic_float_edges_match_native() {
-    let mut g = Guest::new(guests::ARITHMETIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| arithmetic_float_edges_match_native_on::<Stack>());
+    with_large_stack(|| arithmetic_float_edges_match_native_on::<Register>());
+}
+
+fn arithmetic_float_edges_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::ARITHMETIC);
 
     check_f64(
         &mut g,
@@ -200,7 +232,14 @@ fn arithmetic_float_edges_match_native() {
 
 #[test]
 fn arithmetic_float_specials_match_native() {
-    let mut g = Guest::new(guests::ARITHMETIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| arithmetic_float_specials_match_native_on::<Stack>());
+    with_large_stack(|| arithmetic_float_specials_match_native_on::<Register>());
+}
+
+fn arithmetic_float_specials_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::ARITHMETIC);
 
     check_i64(
         &mut g,
@@ -234,7 +273,14 @@ fn arithmetic_float_specials_match_native() {
 
 #[test]
 fn control_flow_loops_and_branches_match_native() {
-    let mut g = Guest::new(guests::CONTROL_FLOW);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| control_flow_loops_and_branches_match_native_on::<Stack>());
+    with_large_stack(|| control_flow_loops_and_branches_match_native_on::<Register>());
+}
+
+fn control_flow_loops_and_branches_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::CONTROL_FLOW);
 
     // nested triple loops are O(n^3), so keep the arguments small
     check_i64(
@@ -265,7 +311,14 @@ fn control_flow_loops_and_branches_match_native() {
 
 #[test]
 fn control_flow_exits_match_native() {
-    let mut g = Guest::new(guests::CONTROL_FLOW);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| control_flow_exits_match_native_on::<Stack>());
+    with_large_stack(|| control_flow_exits_match_native_on::<Register>());
+}
+
+fn control_flow_exits_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::CONTROL_FLOW);
 
     check_i64(
         &mut g,
@@ -304,8 +357,15 @@ fn control_flow_exits_match_native() {
 // aborts the whole binary rather than failing one test.
 #[test]
 fn control_flow_recursion_matches_native() {
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| control_flow_recursion_matches_native_on::<Stack>());
+    with_large_stack(|| control_flow_recursion_matches_native_on::<Register>());
+}
+
+fn control_flow_recursion_matches_native_on<V: VirtualMachine>() {
     with_large_stack(|| {
-        let mut g = Guest::new(guests::CONTROL_FLOW);
+        let mut g = Guest::<V>::new(guests::CONTROL_FLOW);
 
         check_i64(
             &mut g,
@@ -324,7 +384,14 @@ fn control_flow_recursion_matches_native() {
 
 #[test]
 fn control_flow_iterators_match_native() {
-    let mut g = Guest::new(guests::CONTROL_FLOW);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| control_flow_iterators_match_native_on::<Stack>());
+    with_large_stack(|| control_flow_iterators_match_native_on::<Register>());
+}
+
+fn control_flow_iterators_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::CONTROL_FLOW);
 
     check_i64(
         &mut g,
@@ -346,7 +413,14 @@ fn control_flow_iterators_match_native() {
 
 #[test]
 fn heap_collections_match_native() {
-    let mut g = Guest::new(guests::HEAP);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| heap_collections_match_native_on::<Stack>());
+    with_large_stack(|| heap_collections_match_native_on::<Register>());
+}
+
+fn heap_collections_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::HEAP);
 
     check_i64(&mut g, "heap_vec_growth", g_heap::heap_vec_growth, ARGS);
     check_i64(&mut g, "heap_sort_dedup", g_heap::heap_sort_dedup, ARGS);
@@ -361,7 +435,14 @@ fn heap_collections_match_native() {
 
 #[test]
 fn heap_hashmap_matches_native() {
-    let mut g = Guest::new(guests::HEAP);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| heap_hashmap_matches_native_on::<Stack>());
+    with_large_stack(|| heap_hashmap_matches_native_on::<Register>());
+}
+
+fn heap_hashmap_matches_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::HEAP);
 
     // the guest reduces order-independently, so this is stable despite the two
     // environments seeding their hashers differently
@@ -370,7 +451,14 @@ fn heap_hashmap_matches_native() {
 
 #[test]
 fn heap_strings_match_native() {
-    let mut g = Guest::new(guests::HEAP);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| heap_strings_match_native_on::<Stack>());
+    with_large_stack(|| heap_strings_match_native_on::<Register>());
+}
+
+fn heap_strings_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::HEAP);
 
     check_i64(&mut g, "heap_strings", g_heap::heap_strings, ARGS);
     check_i64(
@@ -383,7 +471,14 @@ fn heap_strings_match_native() {
 
 #[test]
 fn heap_pointers_and_drops_match_native() {
-    let mut g = Guest::new(guests::HEAP);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| heap_pointers_and_drops_match_native_on::<Stack>());
+    with_large_stack(|| heap_pointers_and_drops_match_native_on::<Register>());
+}
+
+fn heap_pointers_and_drops_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::HEAP);
 
     check_i64(
         &mut g,
@@ -401,7 +496,14 @@ fn heap_pointers_and_drops_match_native() {
 
 #[test]
 fn memory_loads_and_stores_match_native() {
-    let mut g = Guest::new(guests::MEMORY);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| memory_loads_and_stores_match_native_on::<Stack>());
+    with_large_stack(|| memory_loads_and_stores_match_native_on::<Register>());
+}
+
+fn memory_loads_and_stores_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     check_i64(
         &mut g,
@@ -415,7 +517,14 @@ fn memory_loads_and_stores_match_native() {
 
 #[test]
 fn memory_bulk_operations_match_native() {
-    let mut g = Guest::new(guests::MEMORY);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| memory_bulk_operations_match_native_on::<Stack>());
+    with_large_stack(|| memory_bulk_operations_match_native_on::<Register>());
+}
+
+fn memory_bulk_operations_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     check_i64(
         &mut g,
@@ -429,7 +538,14 @@ fn memory_bulk_operations_match_native() {
 
 #[test]
 fn memory_large_buffers_match_native() {
-    let mut g = Guest::new(guests::MEMORY);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| memory_large_buffers_match_native_on::<Stack>());
+    with_large_stack(|| memory_large_buffers_match_native_on::<Register>());
+}
+
+fn memory_large_buffers_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::MEMORY);
 
     check_i64(
         &mut g,
@@ -446,7 +562,14 @@ fn memory_large_buffers_match_native() {
 
 #[test]
 fn frames_locals_and_calls_match_native() {
-    let mut g = Guest::new(guests::FRAMES);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| frames_locals_and_calls_match_native_on::<Stack>());
+    with_large_stack(|| frames_locals_and_calls_match_native_on::<Register>());
+}
+
+fn frames_locals_and_calls_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::FRAMES);
 
     check_i64(&mut g, "fr_many_locals", g_frames::fr_many_locals, ARGS);
     check_i64(&mut g, "fr_call_chain", g_frames::fr_call_chain, ARGS);
@@ -455,8 +578,15 @@ fn frames_locals_and_calls_match_native() {
 
 #[test]
 fn frames_recursion_matches_native() {
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| frames_recursion_matches_native_on::<Stack>());
+    with_large_stack(|| frames_recursion_matches_native_on::<Register>());
+}
+
+fn frames_recursion_matches_native_on<V: VirtualMachine>() {
     with_large_stack(|| {
-        let mut g = Guest::new(guests::FRAMES);
+        let mut g = Guest::<V>::new(guests::FRAMES);
 
         // Capped by `MAX_TEST_RECURSION`, which is much lower in debug builds —
         // see its docs. Also stays under the default `max_call_stack_depth`.
@@ -483,7 +613,14 @@ fn frames_recursion_matches_native() {
 
 #[test]
 fn frames_indirect_dispatch_matches_native() {
-    let mut g = Guest::new(guests::FRAMES);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| frames_indirect_dispatch_matches_native_on::<Stack>());
+    with_large_stack(|| frames_indirect_dispatch_matches_native_on::<Register>());
+}
+
+fn frames_indirect_dispatch_matches_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::FRAMES);
 
     check_i64(&mut g, "fr_closure_nest", g_frames::fr_closure_nest, ARGS);
     check_i64(&mut g, "fr_dyn_dispatch", g_frames::fr_dyn_dispatch, ARGS);
@@ -495,7 +632,14 @@ fn frames_indirect_dispatch_matches_native() {
 
 #[test]
 fn exotic_enums_and_options_match_native() {
-    let mut g = Guest::new(guests::EXOTIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| exotic_enums_and_options_match_native_on::<Stack>());
+    with_large_stack(|| exotic_enums_and_options_match_native_on::<Register>());
+}
+
+fn exotic_enums_and_options_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::EXOTIC);
 
     check_i64(&mut g, "ex_enum_payloads", g_exotic::ex_enum_payloads, ARGS);
     check_i64(
@@ -514,7 +658,14 @@ fn exotic_enums_and_options_match_native() {
 
 #[test]
 fn exotic_text_and_casts_match_native() {
-    let mut g = Guest::new(guests::EXOTIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| exotic_text_and_casts_match_native_on::<Stack>());
+    with_large_stack(|| exotic_text_and_casts_match_native_on::<Register>());
+}
+
+fn exotic_text_and_casts_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::EXOTIC);
 
     check_i64(&mut g, "ex_utf8", g_exotic::ex_utf8, ARGS);
     check_i64(&mut g, "ex_casts", g_exotic::ex_casts, ARGS);
@@ -522,7 +673,14 @@ fn exotic_text_and_casts_match_native() {
 
 #[test]
 fn exotic_layouts_and_consts_match_native() {
-    let mut g = Guest::new(guests::EXOTIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| exotic_layouts_and_consts_match_native_on::<Stack>());
+    with_large_stack(|| exotic_layouts_and_consts_match_native_on::<Register>());
+}
+
+fn exotic_layouts_and_consts_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::EXOTIC);
 
     check_i64(&mut g, "ex_repr_layouts", g_exotic::ex_repr_layouts, ARGS);
     check_i64(
@@ -541,7 +699,14 @@ fn exotic_layouts_and_consts_match_native() {
 
 #[test]
 fn exotic_traits_and_ordering_match_native() {
-    let mut g = Guest::new(guests::EXOTIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| exotic_traits_and_ordering_match_native_on::<Stack>());
+    with_large_stack(|| exotic_traits_and_ordering_match_native_on::<Register>());
+}
+
+fn exotic_traits_and_ordering_match_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::EXOTIC);
 
     check_i64(&mut g, "ex_traits", g_exotic::ex_traits, ARGS);
     check_i64(&mut g, "ex_custom_ord", g_exotic::ex_custom_ord, ARGS);
@@ -549,7 +714,14 @@ fn exotic_traits_and_ordering_match_native() {
 
 #[test]
 fn exotic_realistic_program_matches_native() {
-    let mut g = Guest::new(guests::EXOTIC);
+    // On a large stack for both machines: the register machine's debug frame
+    // does not fit a default test thread, which holds only a few dozen.
+    with_large_stack(|| exotic_realistic_program_matches_native_on::<Stack>());
+    with_large_stack(|| exotic_realistic_program_matches_native_on::<Register>());
+}
+
+fn exotic_realistic_program_matches_native_on<V: VirtualMachine>() {
+    let mut g = Guest::<V>::new(guests::EXOTIC);
 
     check_i64(
         &mut g,

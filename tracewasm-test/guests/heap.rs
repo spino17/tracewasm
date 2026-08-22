@@ -13,6 +13,10 @@
 //!
 //! Export names are prefixed `heap_`.
 
+// A value bound to a local before being returned is holding a borrow open to a
+// precise point — inlining it, as clippy suggests, changes drop order and so
+// changes what the guest does.
+#![allow(clippy::let_and_return)]
 #![allow(dead_code)]
 
 use std::cell::RefCell;

@@ -25,8 +25,14 @@ pub trait MemoryView {
     ///
     /// A backing store is normally a whole number of pages, so this is exact;
     /// it rounds down only for a memory built at byte granularity.
-    fn size_in_pages(&self) -> u64 {
-        self.size_in_bytes() as u64 / WASM_MEMORY_PAGE_SIZE
+    ///
+    /// An override must narrow *after* dividing, as this does. A wasm32 memory may
+    /// legally reach 65536 pages, whose byte length is 2^32 — so casting
+    /// [`Self::size_in_bytes`] to `u32` first truncates a full-size memory to 0
+    /// bytes and reports 0 pages, while dividing in `usize` leaves every page count
+    /// in range.
+    fn size_in_pages(&self) -> u32 {
+        (self.size_in_bytes() / WASM_MEMORY_PAGE_SIZE as usize) as u32
     }
 
     /// Copies `len` bytes within this memory from `src` to `dest` (backs
@@ -271,7 +277,7 @@ pub trait MemoryView {
 pub trait Memory: MemoryView {
     /// Creates a memory pre-allocated to `size` in WASM pages.
     /// Per the WebAssembly spec, this should be completely zeroed.
-    fn allocate_initial_memory(size_in_pages: u64) -> Self;
+    fn allocate_initial_memory(size_in_pages: u32) -> Self;
 
     /// Grows the memory by `delta_in_pages`, returning the size in pages *before*
     /// the growth. New pages are zeroed, per the spec.
@@ -287,5 +293,65 @@ pub trait Memory: MemoryView {
     /// trap: `memory.grow` reports failure by pushing `-1`, so a caller
     /// implementing that instruction must map the error to `-1` and continue,
     /// rather than propagating it.
-    fn grow(&mut self, delta_in_pages: u64, max_size_in_pages: u64) -> Result<u64, MemoryError>;
+    fn grow(&mut self, delta_in_pages: u32, max_size_in_pages: u32) -> Result<u32, MemoryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reports a byte length without owning one, so the page conversion in
+    /// [`MemoryView::size_in_pages`] can be exercised at sizes far too large to
+    /// allocate. Every other method is unreachable for these tests.
+    struct SizeOnlyView(usize);
+
+    impl MemoryView for SizeOnlyView {
+        fn size_in_bytes(&self) -> usize {
+            self.0
+        }
+
+        fn copy_within(&mut self, _: usize, _: usize, _: usize) -> Result<(), MemoryError> {
+            unimplemented!("size-only view")
+        }
+
+        fn fill(&mut self, _: usize, _: u32, _: usize) -> Result<(), MemoryError> {
+            unimplemented!("size-only view")
+        }
+
+        fn read(&self, _: usize, _: &mut [u8]) -> Result<(), MemoryError> {
+            unimplemented!("size-only view")
+        }
+
+        fn write(&mut self, _: usize, _: &[u8]) -> Result<(), MemoryError> {
+            unimplemented!("size-only view")
+        }
+    }
+
+    #[test]
+    fn size_in_pages_is_exact_at_the_wasm32_maximum() {
+        // 65536 pages is the largest a wasm32 memory may legally reach, and its
+        // byte length is 2^32 — one past the top of the `u32` this returns.
+        // Narrowing the byte count before dividing would report 0 pages here.
+        let four_gib = 65536usize * WASM_MEMORY_PAGE_SIZE as usize;
+
+        assert_eq!(SizeOnlyView(four_gib).size_in_pages(), 65536);
+        assert_eq!(SizeOnlyView(four_gib - 1).size_in_pages(), 65535);
+        assert_eq!(SizeOnlyView(four_gib + 1).size_in_pages(), 65536);
+    }
+
+    #[test]
+    fn size_in_pages_rounds_down_and_handles_the_small_cases() {
+        assert_eq!(SizeOnlyView(0).size_in_pages(), 0);
+        assert_eq!(SizeOnlyView(1).size_in_pages(), 0);
+
+        assert_eq!(
+            SizeOnlyView(WASM_MEMORY_PAGE_SIZE as usize - 1).size_in_pages(),
+            0
+        );
+
+        assert_eq!(
+            SizeOnlyView(WASM_MEMORY_PAGE_SIZE as usize).size_in_pages(),
+            1
+        );
+    }
 }
