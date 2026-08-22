@@ -25,7 +25,7 @@
 use crate::{
     instruction::{
         CallerBaseData, RuntimeFrame,
-        register::{RegBrTableTarget, RegCallerBaseData, RegFrameLayout},
+        register::{Const, RegBrTableTarget, RegCallerBaseData, RegFrameLayout},
     },
     runtime::{stack::VM_STACK_INITIAL_ALLOCATION_SIZE, value::Value},
 };
@@ -132,8 +132,9 @@ impl RuntimeFrame for RegFrame {
         let base_register_index = caller_base_data.base_offset() as usize;
         let locals_count = locals_ty.len();
         let params_count = params_count as usize;
-        let total_register_capacity =
-            base_register_index + (frame_layout.registers + frame_layout.spills) as usize;
+        let total_register_capacity = base_register_index
+            + (frame_layout.registers + frame_layout.spills) as usize
+            + frame_layout.consts.len();
 
         if self.registers.len() < total_register_capacity {
             self.registers
@@ -144,6 +145,22 @@ impl RuntimeFrame for RegFrame {
             let ty = locals_ty[i + params_count];
 
             self.registers[base_register_index + params_count + i] = Value::zero_of_ty(ty);
+        }
+
+        for i in 0..frame_layout.consts.len() {
+            let val = frame_layout.consts[i];
+
+            let val = match val {
+                Const::I32(v) => Value::from_i32(v),
+                Const::I64(v) => Value::from_i64(v),
+                Const::F32(v) => Value::from_f32(v.into()),
+                Const::F64(v) => Value::from_f64(v.into()),
+                Const::Ref(r) => Value::from_ref(r),
+            };
+
+            self.registers[base_register_index
+                + (frame_layout.registers + frame_layout.spills) as usize
+                + i] = val;
         }
 
         debug_assert!(frame_layout.locals_count == locals_ty.len() as u32);

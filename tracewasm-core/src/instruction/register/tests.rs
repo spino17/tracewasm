@@ -57,10 +57,10 @@ fn resolve_spills(s: &mut SimulatedStack) {
 /// carries it as a `SpillIndex` and backpatches the arena at the end. Before that
 /// point there is no frame index to print, so it renders as `spillN` — which is what
 /// these tests assert against.
-fn render_operand(o: &SlotOrSpill, locals_count: u32, registers: u32) -> String {
+fn render_operand(o: &SlotOrBackPatchedEntry, locals_count: u32, registers: u32) -> String {
     match o {
-        SlotOrSpill::Spill(i) => format!("spill{i}"),
-        SlotOrSpill::Slot(s) => s.render(locals_count, registers),
+        SlotOrBackPatchedEntry::Spill(i) => format!("spill{i}"),
+        SlotOrBackPatchedEntry::Slot(s) => s.render(locals_count, registers),
     }
 }
 
@@ -860,21 +860,23 @@ impl Frame {
 
     /// [`Self::read`] for an already-resolved arena entry.
     fn read_slot(&self, slot: &Slot) -> i64 {
-        self.read(&SlotOrSpill::Slot(*slot))
+        self.read(&SlotOrBackPatchedEntry::Slot(*slot))
     }
 
-    fn read(&self, slot: &SlotOrSpill) -> i64 {
+    fn read(&self, slot: &SlotOrBackPatchedEntry) -> i64 {
         match slot {
-            SlotOrSpill::Spill(i) => self.spills[spill_slot(i)],
-            SlotOrSpill::Slot(Slot::Const(Const::I32(v))) => *v as i64,
-            SlotOrSpill::Slot(Slot::Global(n)) => self.globals[*n as usize],
-            SlotOrSpill::Slot(Slot::RegisterFrame(n)) if (*n as usize) < self.locals.len() => {
+            SlotOrBackPatchedEntry::Spill(i) => self.spills[spill_slot(i)],
+            SlotOrBackPatchedEntry::Slot(Slot::Const(Const::I32(v))) => *v as i64,
+            SlotOrBackPatchedEntry::Slot(Slot::Global(n)) => self.globals[*n as usize],
+            SlotOrBackPatchedEntry::Slot(Slot::RegisterFrame(n))
+                if (*n as usize) < self.locals.len() =>
+            {
                 self.locals[*n as usize]
             }
-            SlotOrSpill::Slot(Slot::RegisterFrame(_)) => {
+            SlotOrBackPatchedEntry::Slot(Slot::RegisterFrame(_)) => {
                 unreachable!("these tests emit no register writes")
             }
-            SlotOrSpill::Slot(Slot::Const(_)) => unreachable!("i32 constants only"),
+            SlotOrBackPatchedEntry::Slot(Slot::Const(_)) => unreachable!("i32 constants only"),
         }
     }
 
