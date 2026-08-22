@@ -423,7 +423,12 @@ impl RuntimeFrame for Stack<Value> {
     /// land at the height the arguments occupied. Using the operand base instead
     /// would strand this frame's locals on the stack under the caller's next push,
     /// which is the confusion the two names exist to prevent.
-    fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData) {
+    fn exit_frame(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+        _frame_layout: &StackFrameLayout,
+    ) {
         self.truncate_by_preserving_arity(caller_base_data.base_height, results_count);
     }
 }
