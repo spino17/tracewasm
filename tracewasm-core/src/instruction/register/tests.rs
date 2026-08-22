@@ -29,9 +29,18 @@ use wasmparser::Parser;
 // values, which also keeps assertions reading like the emitted code.
 // ---------------------------------------------------------------------------
 
+/// The locals count a [`SimulatedStack`] was built with.
+///
+/// Needed to render a [`Slot::RegisterFrame`]: the same frame index is a local below
+/// this and an operand register at or above it. The lazy-locals arena is sized by it
+/// and never resized, so it is the stable place to read it back from.
+fn locals_of(s: &SimulatedStack) -> u32 {
+    s.lazy_locals.origin.len() as u32
+}
+
 /// Renders a run of operands.
-fn slots(xs: &[Slot]) -> Vec<String> {
-    xs.iter().map(|x| x.render()).collect()
+fn slots(xs: &[Slot], locals_count: u32) -> Vec<String> {
+    xs.iter().map(|x| x.render(locals_count)).collect()
 }
 
 /// Renders what `set_lazy` returned: `Some("spill0")` when it rescued a borrow.
@@ -65,7 +74,7 @@ fn lower_func(wat: &str, n: usize) -> RegLoweredFuncBody {
 /// A `call_indirect` stores only a `ty_index`, so how many of the operands in its
 /// arena run are arguments is recoverable only through the types. Rendering one
 /// therefore needs exactly what executing one will need.
-fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncType>) {
+fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncType>, u32) {
     let bytes = wat::parse_str(wat).expect("invalid wat");
 
     // `wat::parse_str` assembles without type-checking, so an ill-typed body
@@ -151,7 +160,7 @@ fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncTy
     )
     .expect("lowering failed");
 
-    (body, types)
+    (body, types, locals_count)
 }
 
 /// Asserts a lowered body renders exactly as `expected`, ignoring leading
@@ -162,8 +171,8 @@ fn assert_lowers_to(wat: &str, expected: &str) {
 
 /// [`assert_lowers_to`] for a body that is not function 0 — a caller, typically.
 fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
-    let (body, types) = lower_func_with_types(wat, n);
-    let got = RegInstruction::render_body(&body, &types);
+    let (body, types, locals_count) = lower_func_with_types(wat, n);
+    let got = RegInstruction::render_body(&body, &types, locals_count);
 
     let norm = |s: &str| {
         s.lines()
@@ -212,7 +221,19 @@ fn func_ty(params: usize, results: usize) -> FuncType {
 
 /// `(slot height, register index)` — the two heights the pass tracks separately.
 fn heights(s: &SimulatedStack) -> (u32, usize) {
-    (s.stack.height(), s.curr_register_index)
+    (
+        s.stack.height(),
+        s.curr_register_index - locals_of(s) as usize,
+    )
+}
+
+/// Operand registers allocated at the peak, with the locals below them discounted.
+///
+/// `max_registers` is the frame's total width — it starts at `locals_count` and
+/// counts up — but these tests are about how many *operand* registers a body needs,
+/// so the locals are subtracted here rather than in each expectation.
+fn peak_registers(s: &SimulatedStack) -> u32 {
+    s.max_registers - locals_of(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +260,7 @@ fn borrows_of_one_local_share_a_single_spill() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
+        slots(add.input.registers(&s.input_registers), locals_of(&s)),
         ["spill0", "spill0"],
         "both operands redirect"
     );
@@ -289,7 +310,7 @@ fn successive_writes_produce_independent_snapshots() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
+        slots(add.input.registers(&s.input_registers), locals_of(&s)),
         ["spill0", "spill1"],
         "each operand keeps its own snapshot"
     );
@@ -333,7 +354,11 @@ fn tee_spills_before_reading_the_top() {
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
-    assert_eq!(operand.render(), "spill0", "tee must observe the redirect");
+    assert_eq!(
+        operand.render(locals_of(&s)),
+        "spill0",
+        "tee must observe the redirect"
+    );
 
     assert_eq!(s.stack.height(), 1, "tee peeks, it does not consume");
 }
@@ -398,11 +423,9 @@ fn a_reference_is_stored_in_place() {
     assert_func_lowers_to(
         &ref_module("(func (local funcref) ref.func 0 local.set 0)"),
         1,
-        "
-          0  local.set    local0 <- (0)ref
-          1  end
-             frame: 0 registers, 0 spills
-        ",
+        "  0  local.set    local0 <- (0)ref
+  1  end
+     frame: 1 registers, 0 spills",
     );
 }
 
@@ -415,10 +438,12 @@ fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
     let funcref = RegInstruction::render_body(
         &lower("(module (func (result funcref) ref.null func))"),
         &[],
+        0,
     );
     let externref = RegInstruction::render_body(
         &lower("(module (func (result externref) ref.null extern))"),
         &[],
+        0,
     );
 
     assert_eq!(funcref, externref);
@@ -443,12 +468,10 @@ fn ref_is_null_reads_its_operand_in_place() {
 
     assert_lowers_to(
         "(module (func (param funcref) (result i32) local.get 0 ref.is_null))",
-        "
-          0  ref.is_null  local0 -> r0
-          1  move         r0 -> r0
-          2  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  ref.is_null  local0 -> r0
+  1  move         r0 -> r0
+  2  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -466,15 +489,13 @@ fn ref_is_null_feeds_a_branch_directly() {
                drop
                i32.const 2
              end))"#,
-        "
-          0  ref.is_null  local0 -> r0
-          1  br_if        r0 -> 3  move 1 -> r0
-          2  move         2 -> r0
-          3  end
-          4  move         r0 -> r0
-          5  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  ref.is_null  local0 -> r0
+  1  br_if        r0 -> 3  move 1 -> r0
+  2  move         2 -> r0
+  3  end
+  4  move         r0 -> r0
+  5  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -547,8 +568,8 @@ fn block_entry_layouts_hold_for_every_block_type() {
 
             assert_eq!(
                 s.curr_register_index,
-                1 + params as usize,
-                "params sit above the live register"
+                4 + 1 + params as usize,
+                "params sit above the live register, itself above the 4 locals"
             );
         }
     }
@@ -620,8 +641,8 @@ fn branch_destinations_are_based_at_the_target_label() {
     let to_inner = s.br_truncation_registers(inner, 1);
     let to_outer = s.br_truncation_registers(outer, 1);
 
-    assert_eq!(to_inner.output_registers(&s.output_registers), &[1]);
-    assert_eq!(to_outer.output_registers(&s.output_registers), &[0]);
+    assert_eq!(to_inner.output_registers(&s.output_registers), &[5]);
+    assert_eq!(to_outer.output_registers(&s.output_registers), &[4]);
 
     assert_eq!(
         to_inner.input_registers(&s.input_registers).len(),
@@ -651,9 +672,11 @@ fn branch_destinations_count_towards_the_frame() {
         .max()
         .unwrap();
 
+    // `highest` is a frame index, so it is bounded by the frame's *total* width
+    // rather than by its operand-register count.
     assert!(
         highest <= s.max_registers,
-        "frame sized {} but the move writes up to r{}",
+        "frame sized {} but the move writes up to frame index {}",
         s.max_registers,
         highest - 1
     );
@@ -798,10 +821,10 @@ impl Frame {
     fn read(&self, slot: &Slot) -> i64 {
         match slot {
             Slot::Const(Const::I32(v)) => *v as i64,
-            Slot::Local(n) => self.locals[*n as usize],
             Slot::Global(n) => self.globals[*n as usize],
             Slot::Spilled(i) => self.spills[spill_slot(i)],
-            Slot::Register(_) => unreachable!("these tests emit no register writes"),
+            Slot::RegisterFrame(n) if (*n as usize) < self.locals.len() => self.locals[*n as usize],
+            Slot::RegisterFrame(_) => unreachable!("these tests emit no register writes"),
             Slot::Const(_) => unreachable!("i32 constants only"),
         }
     }
@@ -916,7 +939,7 @@ fn a_conditional_arm_cannot_own_the_spill() {
             frame.read(&consumer),
             42,
             "{tag}: <use> reads {}, which that path never wrote",
-            consumer.render()
+            consumer.render(locals_of(&s))
         );
     }
 }
@@ -1167,7 +1190,7 @@ fn global_borrows_behave_like_local_ones() {
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
+        slots(add.input.registers(&s.input_registers), locals_of(&s)),
         ["spill0", "spill0"]
     );
 }
@@ -1192,8 +1215,16 @@ fn a_local_and_a_global_of_the_same_index_are_independent() {
         "local 0's borrow must survive a write to global 0"
     );
 
-    assert_eq!(s.pop().render(), "spill0", "the global was rescued");
-    assert_eq!(s.pop().render(), "local0", "the local still forwards");
+    assert_eq!(
+        s.pop().render(locals_of(&s)),
+        "spill0",
+        "the global was rescued"
+    );
+    assert_eq!(
+        s.pop().render(locals_of(&s)),
+        "local0",
+        "the local still forwards"
+    );
 }
 
 #[test]
@@ -1226,9 +1257,9 @@ fn writing_one_local_leaves_other_borrows_alone() {
     let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(s.pop().render(), "local2", "untouched above");
-    assert_eq!(s.pop().render(), "spill0", "rescued");
-    assert_eq!(s.pop().render(), "local0", "untouched below");
+    assert_eq!(s.pop().render(locals_of(&s)), "local2", "untouched above");
+    assert_eq!(s.pop().render(locals_of(&s)), "spill0", "rescued");
+    assert_eq!(s.pop().render(locals_of(&s)), "local0", "untouched below");
 }
 
 #[test]
@@ -1259,7 +1290,11 @@ fn three_borrows_share_one_entry() {
     );
 
     for _ in 0..3 {
-        assert_eq!(s.pop().render(), "spill0", "all three redirect");
+        assert_eq!(
+            s.pop().render(locals_of(&s)),
+            "spill0",
+            "all three redirect"
+        );
     }
 
     // the pool only reclaims once the last of them is gone
@@ -1278,7 +1313,7 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
     // `local.tee 0` on a value read from local 0: correct, if redundant
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(operand.render(), "spill0");
+    assert_eq!(operand.render(locals_of(&s)), "spill0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1298,7 +1333,7 @@ fn drop_releases_a_register() {
     s.pop();
 
     assert_eq!(heights(&s), (0, 0), "the register comes back");
-    assert_eq!(s.max_registers, 1, "but the peak is remembered");
+    assert_eq!(peak_registers(&s), 1, "but the peak is remembered");
 }
 
 #[test]
@@ -1340,7 +1375,7 @@ fn operands_are_recorded_deepest_first() {
     let select = s.registers_for::<3, 1>();
 
     assert_eq!(
-        slots(select.input.registers(&s.input_registers)),
+        slots(select.input.registers(&s.input_registers), locals_of(&s)),
         ["local0", "local1", "local2"],
         "select reads a, b, cond in that order"
     );
@@ -1356,7 +1391,7 @@ fn store_records_address_then_value() {
     let store = s.registers_for::<2, 0>();
 
     assert_eq!(
-        slots(store.input.registers(&s.input_registers)),
+        slots(store.input.registers(&s.input_registers), locals_of(&s)),
         ["local0", "9"]
     );
 }
@@ -1376,11 +1411,12 @@ fn a_result_reuses_an_operands_register() {
     let inputs = add.input.registers(&s.input_registers);
     let output = add.output.registers(&s.output_registers)[0];
 
-    assert_eq!(slots(inputs), ["r0", "r1"]);
+    assert_eq!(slots(inputs, locals_of(&s)), ["r0", "r1"]);
 
     assert_eq!(
-        output, 0,
-        "the destination aliases an operand — an executor must read both first"
+        output, 4,
+        "the destination aliases an operand (frame index 4, the first above 4 locals) \
+         — an executor must read both first"
     );
 }
 
@@ -1396,7 +1432,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
         let _ = s.registers_for::<1, 0>();
     }
 
-    assert_eq!(s.max_registers, 1, "serial values reuse one register");
+    assert_eq!(peak_registers(&s), 1, "serial values reuse one register");
 
     // two loads live at once
     let mut s = sim(4, 0);
@@ -1407,7 +1443,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
         let _ = s.registers_for::<1, 1>();
     }
 
-    assert_eq!(s.max_registers, 2);
+    assert_eq!(peak_registers(&s), 2);
 }
 
 #[test]
@@ -1520,7 +1556,8 @@ fn a_branch_carrying_several_values_lands_them_contiguously() {
 
     let mov = s.br_truncation_registers(base, 3);
 
-    assert_eq!(mov.output_registers(&s.output_registers), &[0, 1, 2]);
+    // frame indices: 4 locals, so the block's three destinations are 4, 5, 6
+    assert_eq!(mov.output_registers(&s.output_registers), &[4, 5, 6]);
     assert_eq!(mov.input_registers(&s.input_registers).len(), 3);
 }
 
@@ -1756,7 +1793,8 @@ fn br_table_arms_survive_lowering() {
         .map(|t| t.mov.output_registers(&frame.output_registers_arena))
         .collect();
 
-    assert_eq!(dests, vec![&[1u32][..], &[0u32][..], &[1u32][..]]);
+    // frame indices: 4 locals, so the two labels' destinations are 4 and 5
+    assert_eq!(dests, vec![&[5u32][..], &[4u32][..], &[5u32][..]]);
 }
 
 #[test]
@@ -1810,12 +1848,10 @@ fn a_straight_line_body_copies_nothing() {
              local.get 0
              local.get 1
              i32.add))"#,
-        "
-          0  i32.add      local0, local1 -> r0
-          1  move         r0 -> r0
-          2  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  i32.add      local0, local1 -> r0
+  1  move         r0 -> r0
+  2  end
+     frame: 3 registers, 0 spills",
     );
 }
 
@@ -1828,12 +1864,10 @@ fn constants_and_globals_are_read_in_place() {
                global.get 0
                i32.const 7
                i32.add))"#,
-        "
-          0  i32.add      global0, 7 -> r0
-          1  move         r0 -> r0
-          2  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  i32.add      global0, 7 -> r0
+  1  move         r0 -> r0
+  2  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -1843,12 +1877,10 @@ fn a_load_produces_the_only_register_a_body_needs() {
         r#"(module (memory 1) (func (param i32) (result i32)
              local.get 0
              i32.load))"#,
-        "
-          0  i32.load     [local0]+0 -> r0
-          1  move         r0 -> r0
-          2  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  i32.load     [local0]+0 -> r0
+  1  move         r0 -> r0
+  2  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -1865,14 +1897,12 @@ fn writing_a_borrowed_local_rescues_it_first() {
              local.set 0
              local.get 0
              i32.add))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.set    local0 <- 5
-          2  i32.add      spill0, local0 -> r0
-          3  move         r0 -> r0
-          4  end
-             frame: 1 registers, 1 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  local.set    local0 <- 5
+  2  i32.add      spill0, local0 -> r0
+  3  move         r0 -> r0
+  4  end
+     frame: 2 registers, 1 spills",
     );
 }
 
@@ -1902,12 +1932,10 @@ fn a_block_emits_nothing_of_its_own() {
         r#"(module (func (param i32) (result i32)
              (block (nop))
              local.get 0))"#,
-        "
-          0  end
-          1  move         local0 -> r0
-          2  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  end
+  1  move         local0 -> r0
+  2  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -1917,17 +1945,15 @@ fn an_if_else_wires_both_arms_to_one_end() {
         r#"(module (func (param i32) (result i32)
              local.get 0
              if (result i32) i32.const 1 else i32.const 2 end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  if           spill0 else=3 end=5
-          2  move         1 -> r0
-          3  else         end=5
-          4  move         2 -> r0
-          5  end
-          6  move         r0 -> r0
-          7  end
-             frame: 1 registers, 1 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  if           spill0 else=3 end=5
+  2  move         1 -> r0
+  3  else         end=5
+  4  move         2 -> r0
+  5  end
+  6  move         r0 -> r0
+  7  end
+     frame: 2 registers, 1 spills",
     );
 }
 
@@ -2057,17 +2083,15 @@ fn a_loop_back_edge_skips_the_entry_spill() {
                local.get 1
                br_if 0
              end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  loop
-          2  local.set    local0 <- 5
-          3  local.spill  local1 -> spill1
-          4  br_if        spill1 -> 1
-          5  end
-          6  move         spill0 -> r0
-          7  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  loop
+  2  local.set    local0 <- 5
+  3  local.spill  local1 -> spill1
+  4  br_if        spill1 -> 1
+  5  end
+  6  move         spill0 -> r0
+  7  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2174,11 +2198,12 @@ fn br_table_arms_resolve_to_their_own_labels() {
 
 #[test]
 fn each_br_table_arm_carries_its_own_move() {
-    let (prog, _, frame) = lower(
+    let ((prog, _, frame), _, locals) = lower_func_with_types(
         r#"(module (func (param i32) (result i32)
              block (result i32) block (result i32)
                i32.const 9 local.get 0 br_table 0 1 0
              end end))"#,
+        0,
     );
 
     let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
@@ -2197,7 +2222,10 @@ fn each_br_table_arm_carries_its_own_move() {
 
     for arm in arms {
         assert_eq!(
-            slots(arm.mov.input_registers(&frame.input_registers_arena)),
+            slots(
+                arm.mov.input_registers(&frame.input_registers_arena),
+                locals
+            ),
             ["9"],
             "every arm transfers the same value"
         );
@@ -2228,16 +2256,14 @@ fn the_if_arm_hoists_the_spill_above_the_branch() {
              local.get 0
              local.get 1
              if i32.const 5 local.set 0 end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.spill  local1 -> spill1
-          2  if           spill1 else=- end=4
-          3  local.set    local0 <- 5
-          4  end
-          5  move         spill0 -> r0
-          6  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  local.spill  local1 -> spill1
+  2  if           spill1 else=- end=4
+  3  local.set    local0 <- 5
+  4  end
+  5  move         spill0 -> r0
+  6  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2254,16 +2280,14 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.spill  local1 -> spill1
-          2  br_if        spill1 -> 4
-          3  local.set    local0 <- 5
-          4  end
-          5  move         spill0 -> r0
-          6  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  local.spill  local1 -> spill1
+  2  br_if        spill1 -> 4
+  3  local.set    local0 <- 5
+  4  end
+  5  move         spill0 -> r0
+  6  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2323,17 +2347,15 @@ fn the_loop_hoist_lowers_exactly() {
                local.get 1
                br_if 0
              end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  loop
-          2  local.set    local0 <- 5
-          3  local.spill  local1 -> spill1
-          4  br_if        spill1 -> 1
-          5  end
-          6  move         spill0 -> r0
-          7  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  loop
+  2  local.set    local0 <- 5
+  3  local.spill  local1 -> spill1
+  4  br_if        spill1 -> 1
+  5  end
+  6  move         spill0 -> r0
+  7  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2351,15 +2373,13 @@ fn the_br_table_arm_hoists_the_spill_above_the_branch() {
                i32.const 5
                local.set 0
              end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.spill  local1 -> spill1
-          2  br_table     spill1 ->3 ->3
-          3  end
-          4  move         spill0 -> r0
-          5  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  local.spill  local1 -> spill1
+  2  br_table     spill1 ->3 ->3
+  3  end
+  4  move         spill0 -> r0
+  5  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2376,13 +2396,11 @@ fn a_return_transfers_results_to_the_function_frame() {
         r#"(module (func (param i32) (result i32)
              local.get 0
              return))"#,
-        "
-          0  move         local0 -> r0
-          1  return       -> 3
-          2  move         r0 -> r0
-          3  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  move         local0 -> r0
+  1  return       -> 3
+  2  move         r0 -> r0
+  3  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -2391,11 +2409,9 @@ fn a_return_with_no_results_transfers_nothing() {
     assert_lowers_to(
         r#"(module (func (param i32)
              return))"#,
-        "
-          0  return       -> 1
-          1  end
-             frame: 0 registers, 0 spills
-        ",
+        "  0  return       -> 1
+  1  end
+     frame: 1 registers, 0 spills",
     );
 }
 
@@ -2460,18 +2476,16 @@ fn a_return_reads_the_snapshot_the_hoist_preserved() {
                local.set 0
              end
              return))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  local.spill  local1 -> spill1
-          2  if           spill1 else=- end=4
-          3  local.set    local0 <- 5
-          4  end
-          5  move         spill0 -> r0
-          6  return       -> 8
-          7  move         r0 -> r0
-          8  end
-             frame: 1 registers, 2 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  local.spill  local1 -> spill1
+  2  if           spill1 else=- end=4
+  3  local.set    local0 <- 5
+  4  end
+  5  move         spill0 -> r0
+  6  return       -> 8
+  7  move         r0 -> r0
+  8  end
+     frame: 3 registers, 2 spills",
     );
 }
 
@@ -2513,7 +2527,7 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 
 /// Two callers of the same function, differing only in what sits below the call.
 fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
-    let (prog, _, frame) = lower_func(wat, 1);
+    let ((prog, _, frame), _, locals) = lower_func_with_types(wat, 1);
     let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
     let RegInstruction::Call { caller_base, .. } = &prog[at] else {
@@ -2524,9 +2538,10 @@ fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
     let reader = prog[at + 1..]
         .iter()
         .find_map(|i| match i {
-            RegInstruction::I32Add(sig) => {
-                Some(slots(sig.input.registers(&frame.input_registers_arena)))
-            }
+            RegInstruction::I32Add(sig) => Some(slots(
+                sig.input.registers(&frame.input_registers_arena),
+                locals,
+            )),
             _ => None,
         })
         .expect("something must read the result");
@@ -2547,7 +2562,8 @@ fn caller_base_is_a_register_index_not_a_slot_height() {
                i32.add))"#
     ));
 
-    assert_eq!(base, 1);
+    // frame index: 1 local below it, so the deepest argument sits at 2
+    assert_eq!(base, 2);
 
     assert!(
         reader.contains(&"r1".to_string()),
@@ -2564,7 +2580,7 @@ fn caller_base_is_a_register_index_not_a_slot_height() {
                i32.add))"#
     ));
 
-    assert_eq!(base, 0, "a const below the call consumes no register");
+    assert_eq!(base, 1, "a const below the call consumes no register");
 
     assert!(
         reader.contains(&"r0".to_string()),
@@ -2580,7 +2596,7 @@ fn caller_base_is_a_register_index_not_a_slot_height() {
                i32.add i32.add))"#
     ));
 
-    assert_eq!(base, 0);
+    assert_eq!(base, 1);
 
     // a mixture: only the register counts
     let (base, reader) = caller_base_of(&format!(
@@ -2593,7 +2609,7 @@ fn caller_base_is_a_register_index_not_a_slot_height() {
                i32.add i32.add i32.add))"#
     ));
 
-    assert_eq!(base, 1, "const and local below consume no registers");
+    assert_eq!(base, 2, "const and local below consume no registers");
     assert!(reader.contains(&"r1".to_string()), "{reader:?}");
 }
 
@@ -2615,8 +2631,9 @@ fn registers_passed_as_arguments_do_not_raise_the_base() {
     ));
 
     assert_eq!(
-        base, 0,
-        "the register argument sits *at* the base, not below it"
+        base, 1,
+        "the register argument sits *at* the base (frame index 1, above the one local), \
+         not below it"
     );
 
     assert!(reader.contains(&"r0".to_string()), "{reader:?}");
@@ -2632,7 +2649,7 @@ fn registers_passed_as_arguments_do_not_raise_the_base() {
                i32.add))"#
     ));
 
-    assert_eq!(base, 1, "only the value below the arguments counts");
+    assert_eq!(base, 2, "only the value below the arguments counts");
     assert!(reader.contains(&"r1".to_string()), "{reader:?}");
 
     // both arguments are registers
@@ -2646,7 +2663,7 @@ fn registers_passed_as_arguments_do_not_raise_the_base() {
                i32.add))"#
     ));
 
-    assert_eq!(base, 0);
+    assert_eq!(base, 1);
 }
 
 #[test]
@@ -2660,7 +2677,7 @@ fn a_zero_param_call_still_reports_its_result_base() {
 
     assert_eq!(
         base, 0,
-        "nothing is popped, so the base is the current index"
+        "nothing is popped, so the base is the current frame index"
     );
     assert!(reader.contains(&"r0".to_string()), "{reader:?}");
 
@@ -2670,7 +2687,7 @@ fn a_zero_param_call_still_reports_its_result_base() {
                local.get 0 i32.load call 0 i32.add))"#
     ));
 
-    assert_eq!(base, 1);
+    assert_eq!(base, 2);
     assert!(reader.contains(&"r1".to_string()), "{reader:?}");
 }
 
@@ -2778,14 +2795,12 @@ fn call_indirect_stages_its_arguments_at_the_caller_base() {
                  local.get 0 i32.load
                  call_indirect (type 0))"#,
         ),
-        "
-          0  i32.load     [local0]+0 -> r0
-          1  i32.load     [local0]+0 -> r1
-          2  call_indirect [r1] ty0 table0 caller_base=0  move r0, local0, 9 -> r0, r1, r2
-          3  move         r0 -> r0
-          4  end
-             frame: 3 registers, 0 spills
-        ",
+        "  0  i32.load     [local0]+0 -> r0
+  1  i32.load     [local0]+0 -> r1
+  2  call_indirect [r1] ty0 table0 caller_base=1  move r0, local0, 9 -> r0, r1, r2
+  3  move         r0 -> r0
+  4  end
+     frame: 4 registers, 0 spills",
     );
 }
 
@@ -2804,15 +2819,13 @@ fn the_callee_index_is_popped_with_the_arguments() {
                  call_indirect (type 0)
                  i32.add)"#,
         ),
-        "
-          0  i32.load     [local0]+0 -> r0
-          1  i32.load     [local0]+0 -> r1
-          2  call_indirect [3] ty0 table0 caller_base=1  move r1 -> r1
-          3  i32.add      r0, r1 -> r0
-          4  move         r0 -> r0
-          5  end
-             frame: 2 registers, 0 spills
-        ",
+        "  0  i32.load     [local0]+0 -> r0
+  1  i32.load     [local0]+0 -> r1
+  2  call_indirect [3] ty0 table0 caller_base=2  move r1 -> r1
+  3  i32.add      r0, r1 -> r0
+  4  move         r0 -> r0
+  5  end
+     frame: 3 registers, 0 spills",
     );
 }
 
@@ -2862,8 +2875,9 @@ fn caller_base_counts_past_the_index_to_the_deepest_argument() {
                  i32.const 3
                  call_indirect (type 0))"#,
         )),
-        0,
-        "a register argument does not raise the base"
+        1,
+        "a register argument does not raise the base — it sits at frame index 1, \
+         directly above the one local"
     );
 
     // one register below the call, one holding the argument
@@ -2877,7 +2891,7 @@ fn caller_base_counts_past_the_index_to_the_deepest_argument() {
                  call_indirect (type 0)
                  i32.add)"#,
         )),
-        1,
+        2,
         "only the value below the arguments counts"
     );
 }
@@ -2899,13 +2913,11 @@ fn staging_the_arguments_may_clobber_the_callee_index_register() {
                  local.get 0 i32.load
                  call_indirect (type 0))"#,
         ),
-        "
-          0  i32.load     [local0]+0 -> r0
-          1  call_indirect [r0] ty0 table0 caller_base=0  move 7 -> r0
-          2  move         r0 -> r0
-          3  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  i32.load     [local0]+0 -> r0
+  1  call_indirect [r0] ty0 table0 caller_base=1  move 7 -> r0
+  2  move         r0 -> r0
+  3  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -2921,13 +2933,11 @@ fn results_come_back_at_the_caller_base() {
                  call_indirect (type 0)
                  i32.add)"#,
         ),
-        "
-          0  call_indirect [3] ty0 table0 caller_base=0  move local0 -> r0
-          1  i32.add      r0, r1 -> r0
-          2  move         r0 -> r0
-          3  end
-             frame: 2 registers, 0 spills
-        ",
+        "  0  call_indirect [3] ty0 table0 caller_base=1  move local0 -> r0
+  1  i32.add      r0, r1 -> r0
+  2  move         r0 -> r0
+  3  end
+     frame: 3 registers, 0 spills",
     );
 }
 
@@ -2970,14 +2980,12 @@ fn a_call_indirect_leaves_its_block_balanced() {
                    call_indirect (type 0)
                  end)"#,
         ),
-        "
-          0  call_indirect [3] ty0 table0 caller_base=0  move local0 -> r0
-          1  move         r0 -> r0
-          2  end
-          3  move         r0 -> r0
-          4  end
-             frame: 1 registers, 0 spills
-        ",
+        "  0  call_indirect [3] ty0 table0 caller_base=1  move local0 -> r0
+  1  move         r0 -> r0
+  2  end
+  3  move         r0 -> r0
+  4  end
+     frame: 2 registers, 0 spills",
     );
 }
 
@@ -3069,7 +3077,7 @@ fn code_after_an_unreachable_is_dropped() {
     assert!(
         index_of(&body.0, |i| i.kind() == RegInstructionKind::I32Add).is_none(),
         "the operators after the trap cannot execute:\n{}",
-        RegInstruction::render_body(&body, &[]),
+        RegInstruction::render_body(&body, &[], 0),
     );
 }
 
@@ -3085,18 +3093,16 @@ fn an_unreachable_arm_does_not_kill_the_other_arm() {
              else
                i32.const 1
              end))"#,
-        "
-          0  local.spill  local0 -> spill0
-          1  if           spill0 else=4 end=6
-          2  unreachable
-          3  move         r0 -> r0
-          4  else         end=6
-          5  move         1 -> r0
-          6  end
-          7  move         r0 -> r0
-          8  end
-             frame: 1 registers, 1 spills
-        ",
+        "  0  local.spill  local0 -> spill0
+  1  if           spill0 else=4 end=6
+  2  unreachable
+  3  move         r0 -> r0
+  4  else         end=6
+  5  move         1 -> r0
+  6  end
+  7  move         r0 -> r0
+  8  end
+     frame: 2 registers, 1 spills",
     );
 }
 
@@ -3586,7 +3592,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             prog.len(),
             2,
             "{operator}: case must lower to one instruction and `end`:\n{}",
-            RegInstruction::render_body(&body, &[])
+            RegInstruction::render_body(&body, &[], 0)
         );
 
         let pops = frame.input_registers_arena.len() as i64;
@@ -3640,7 +3646,8 @@ fn the_frame_reports_peak_register_use() {
              i32.add))"#,
     );
 
-    assert_eq!(frame.registers, 2, "two loads are live at once");
+    // total frame width: 1 param + the 2 operand registers the loads need
+    assert_eq!(frame.registers, 3, "two loads are live at once");
 }
 
 #[test]

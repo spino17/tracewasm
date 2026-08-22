@@ -142,8 +142,7 @@ impl RuntimeFrame for RegFrame {
         let base_register_index = caller_base_data.base_offset() as usize;
         let locals_count = locals_ty.len();
         let params_count = params_count as usize;
-        let total_register_capacity =
-            base_register_index + locals_count + frame_layout.registers as usize;
+        let total_register_capacity = base_register_index + frame_layout.registers as usize;
 
         if self.registers.len() < total_register_capacity {
             self.registers
@@ -156,17 +155,16 @@ impl RuntimeFrame for RegFrame {
             self.registers[base_register_index + params_count + i] = Value::zero_of_ty(ty);
         }
 
+        caller_base_data.locals_count = locals_ty.len() as u32;
+
         let spills_base_index = self.spills.len();
 
-        caller_base_data.set_spills_base_index(spills_base_index as u32);
+        caller_base_data.spills_base_index = spills_base_index as u32;
 
         self.spills.resize(
             spills_base_index + frame_layout.spills as usize,
             Value::default(),
         );
-
-        caller_base_data.callee_frame_base_register_index =
-            caller_base_data.base_register_index + locals_ty.len() as u32;
     }
 
     /// Moves the callee's results down over its locals, so they land where the
@@ -195,7 +193,7 @@ impl RuntimeFrame for RegFrame {
     fn exit_frame(&mut self, results_count: u32, caller_base_data: &RegCallerBaseData) {
         let mut temp: SmallVec<[Value; 3]> = smallvec![];
         let base_register_index = caller_base_data.base_register_index as usize;
-        let callee_frame_base_index = caller_base_data.callee_frame_base_register_index as usize;
+        let callee_frame_base_index = base_register_index + caller_base_data.locals_count as usize;
 
         for i in 0..results_count as usize {
             temp.push(self.registers[callee_frame_base_index + i]);
@@ -234,6 +232,11 @@ mod tests {
     /// A layout declaring `registers` operand registers and nothing else. The
     /// arenas are what lowering fills for the *instructions* to index; sizing never
     /// reads them.
+    /// `registers` is the frame's **total** width — its locals *and* its operand
+    /// registers — because that is what `enter_frame` reserves and what the lowering
+    /// records: `max_registers` starts at `locals_count` and counts up from there.
+    /// The `enter*` helpers below take an operand count and add the locals, so a test
+    /// can still say "this body needs two registers" and mean it.
     fn layout(registers: u32) -> RegFrameLayout {
         RegFrameLayout {
             registers,
@@ -256,7 +259,7 @@ mod tests {
 
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
-            callee_frame_base_register_index: u32::MAX,
+            locals_count: u32::MAX,
             spills_base_index: u32::MAX,
         };
 
@@ -264,7 +267,7 @@ mod tests {
             params.len() as u32,
             &locals_ty,
             &mut caller_base_data,
-            &layout(registers),
+            &layout(locals_ty.len() as u32 + registers),
         );
 
         frame.registers.len()
@@ -284,11 +287,11 @@ mod tests {
 
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
-            callee_frame_base_register_index: u32::MAX,
+            locals_count: u32::MAX,
             spills_base_index: u32::MAX,
         };
 
-        let mut frame_layout = layout(registers);
+        let mut frame_layout = layout(locals_ty.len() as u32 + registers);
 
         frame_layout.spills = spills;
 
