@@ -41,7 +41,7 @@ fn main() -> Result<(), anyhow::Error> {
     let func = module.get_typed_func::<(i32,), (i32,)>(ENTRY)?;
     let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
 
-    let res = func.call((-1,), &mut instance);
+    let res = func.call((10,), &mut instance);
 
     match res {
         Ok(val) => println!("{}", val.0),
