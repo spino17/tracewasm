@@ -16,6 +16,7 @@ gimli = { workspace = true }
 phf = { version = "0.14.0", features = ["macros"] }
 id-arena = "2.3.0"
 anyhow = { workspace = true }
+ordered-float = "5.5.0"
 
 [dev-dependencies]
 wat = "1.254.0"

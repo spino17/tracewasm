@@ -25,9 +25,12 @@
 use crate::{
     instruction::{
         CallerBaseData, RuntimeFrame,
-        register::{RegBrTableTarget, RegCallerBaseData, RegFrameLayout},
+        register::{Const, RegBrTableTarget, RegCallerBaseData, RegFrameLayout},
     },
-    runtime::{stack::VM_STACK_INITIAL_ALLOCATION_SIZE, value::Value},
+    runtime::{
+        stack::VM_STACK_INITIAL_ALLOCATION_SIZE,
+        value::{Val, Value},
+    },
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -47,21 +50,12 @@ pub(crate) struct RegFrame {
     /// by `push`, so they only land at register 0 — where
     /// [`CallerBaseData::initial_data`] says they are — while this is empty.
     pub registers: Vec<Value>,
-    /// The spill area, one region per live frame, based at
-    /// [`RegCallerBaseData::spills_base_index`].
-    ///
-    /// Kept apart from `inner` so a spill index stays independent of a register
-    /// index. The cost is that its base is this vector's length rather than a
-    /// position derived from the caller, so a frame's region is only released by
-    /// `exit_frame` truncating to the recorded base.
-    pub spills: Vec<Value>,
 }
 
 impl Default for RegFrame {
     fn default() -> Self {
         RegFrame {
             registers: Vec::with_capacity(VM_STACK_INITIAL_ALLOCATION_SIZE),
-            spills: vec![],
         }
     }
 }
@@ -128,7 +122,6 @@ impl RuntimeFrame for RegFrame {
     /// would push every later frame's base up for the life of the instance.
     fn reset(&mut self) {
         self.registers.clear();
-        self.spills.clear();
     }
 
     fn enter_frame(
@@ -142,8 +135,9 @@ impl RuntimeFrame for RegFrame {
         let base_register_index = caller_base_data.base_offset() as usize;
         let locals_count = locals_ty.len();
         let params_count = params_count as usize;
-        let total_register_capacity =
-            base_register_index + locals_count + frame_layout.registers as usize;
+        let total_register_capacity = base_register_index
+            + (frame_layout.registers + frame_layout.spills) as usize
+            + frame_layout.consts.len();
 
         if self.registers.len() < total_register_capacity {
             self.registers
@@ -156,17 +150,17 @@ impl RuntimeFrame for RegFrame {
             self.registers[base_register_index + params_count + i] = Value::zero_of_ty(ty);
         }
 
-        let spills_base_index = self.spills.len();
+        for i in 0..frame_layout.consts.len() {
+            let const_val = frame_layout.consts[i];
 
-        caller_base_data.set_spills_base_index(spills_base_index as u32);
-
-        self.spills.resize(
-            spills_base_index + frame_layout.spills as usize,
-            Value::default(),
-        );
-
-        caller_base_data.callee_frame_base_register_index =
-            caller_base_data.base_register_index + locals_ty.len() as u32;
+            self.registers[base_register_index + locals_count + i] = match const_val {
+                Const::I32(val) => Value::from_i32(val),
+                Const::I64(val) => Value::from_i64(val),
+                Const::F32(val) => Value::from_f32(val.into()),
+                Const::F64(val) => Value::from_f64(val.into()),
+                Const::Ref(r) => Value::from_ref(r),
+            };
+        }
     }
 
     /// Moves the callee's results down over its locals, so they land where the
@@ -192,23 +186,25 @@ impl RuntimeFrame for RegFrame {
     ///
     /// Nothing is reclaimed: a positional machine has no pointer to move, so the
     /// space above the results is simply reused by the next call.
-    fn exit_frame(&mut self, results_count: u32, caller_base_data: &RegCallerBaseData) {
+    fn exit_frame(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &RegCallerBaseData,
+        frame_layout: &RegFrameLayout,
+    ) {
         let mut temp: SmallVec<[Value; 3]> = smallvec![];
         let base_register_index = caller_base_data.base_register_index as usize;
-        let callee_frame_base_index = caller_base_data.callee_frame_base_register_index as usize;
+        let locals_count = frame_layout.locals_count as usize;
+        let consts_len = frame_layout.consts.len();
+        let spills = frame_layout.spills as usize;
 
         for i in 0..results_count as usize {
-            temp.push(self.registers[callee_frame_base_index + i]);
+            temp.push(self.registers[base_register_index + locals_count + consts_len + spills + i]);
         }
 
         for i in 0..results_count as usize {
             self.registers[base_register_index + i] = temp[i];
         }
-
-        self.spills.resize(
-            caller_base_data.spills_base_index as usize,
-            Value::default(),
-        );
     }
 }
 

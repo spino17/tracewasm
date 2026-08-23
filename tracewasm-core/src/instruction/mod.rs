@@ -180,7 +180,12 @@ pub(crate) trait RuntimeFrame {
     /// Drops a returning callee's frame and leaves its results where the caller
     /// expects them — the counterpart of [`Self::enter_frame`] at the other end of
     /// a call.
-    fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData);
+    fn exit_frame(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+        frame_layout: &Self::FrameLayout,
+    );
 }
 
 /// The per-function storage plan a lowering produces alongside its instructions.
