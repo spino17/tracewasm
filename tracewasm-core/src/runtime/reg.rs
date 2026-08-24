@@ -27,10 +27,7 @@ use crate::{
         CallerBaseData, RuntimeFrame,
         register::{Const, RegBrTableTarget, RegCallerBaseData, RegFrameLayout},
     },
-    runtime::{
-        stack::VM_STACK_INITIAL_ALLOCATION_SIZE,
-        value::{Val, Value},
-    },
+    runtime::{stack::VM_STACK_INITIAL_ALLOCATION_SIZE, value::Value},
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -208,224 +205,348 @@ impl RuntimeFrame for RegFrame {
     }
 }
 
-/// Tests for the register file's sizing.
+/// Tests for the register file's layout and sizing.
 ///
-/// A frame spans `[base, base + locals_count + registers)` — params, then declared
-/// locals, then the operand registers numbered from the operand base. Getting that
-/// span wrong is not caught by anything else: the lowering never sees the file, and
-/// the fault surfaces as an out-of-bounds index deep in an unrelated instruction,
-/// or not at all when a deeper call has already grown the file past the mistake.
+/// A frame is four consecutive regions, in this order:
 ///
-/// So these assert the **length directly** rather than exercising a frame and
-/// waiting for a panic. Each also checks the exact length, so over-allocating is a
-/// failure too — the file is shared by the whole call chain, and slack in every
-/// frame compounds with depth.
+/// ```text
+///   base + 0                                   locals (params first)
+///   base + locals                              constants
+///   base + locals + consts                     spills
+///   base + locals + consts + spills            operand registers
+///   base + registers + consts + spills         end of frame
+/// ```
+///
+/// Two facts make that arithmetic easy to get wrong, so both are pinned below rather
+/// than left to a reader of `enter_frame`:
+///
+/// - [`RegFrameLayout::registers`] **includes the locals**: lowering starts both
+///   `curr_register_index` and `max_registers` at `locals_count`. So the frame's
+///   width is `registers + spills + consts`, *not* `locals + registers + ...`.
+/// - Constants and spills sit *below* the operand registers, which is what lets a
+///   callee be based at its caller's `caller_base` without destroying them. Placing
+///   them above the registers — where a `caller_base` points below them — is what
+///   produced garbage addresses like `0xFFFF0000` at execution.
+///
+/// Getting the span wrong is caught by nothing else: the lowering never sees the
+/// file, and the fault surfaces as an out-of-bounds index deep in an unrelated
+/// instruction, or not at all when a deeper call already grew the file past the
+/// mistake. So these assert lengths and **absolute indices** directly. Each length
+/// is exact, so over-allocating fails too — the file is shared by the whole call
+/// chain, and slack in every frame compounds with depth.
 #[cfg(test)]
 mod tests {
-    use std::u32;
-
     use super::*;
     use crate::{module::ValType, runtime::value::Val};
 
-    /// A layout declaring `registers` operand registers and nothing else. The
-    /// arenas are what lowering fills for the *instructions* to index; sizing never
-    /// reads them.
-    fn layout(registers: u32) -> RegFrameLayout {
+    /// A layout for a frame with `locals` locals, `operands` operand registers,
+    /// `spills` spill slots and `consts` constants.
+    ///
+    /// `operands` is the count *above* the locals; this adds `locals` to it to get
+    /// the `registers` field, so a test reads in the units lowering thinks in while
+    /// the field keeps the meaning the runtime expects. The arenas are what lowering
+    /// fills for the *instructions* to index; sizing never reads them.
+    fn layout(locals: u32, operands: u32, spills: u32, consts: &[Const]) -> RegFrameLayout {
         RegFrameLayout {
-            registers,
-            spills: 0,
+            registers: locals + operands,
+            spills,
+            locals_count: locals,
+            consts: consts.to_vec().into_boxed_slice(),
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
             br_targets_arena: Box::new([]),
         }
     }
 
-    /// Enters a frame based at `base`, and reports the resulting file length.
+    /// The absolute index of each region's first slot, from the same formula
+    /// `enter_frame` and `exit_frame` use.
+    fn consts_base(base: u32, locals: u32) -> usize {
+        (base + locals) as usize
+    }
+
+    fn spills_base(base: u32, locals: u32, consts: u32) -> usize {
+        (base + locals + consts) as usize
+    }
+
+    fn operand_base(base: u32, locals: u32, consts: u32, spills: u32) -> usize {
+        (base + locals + consts + spills) as usize
+    }
+
+    /// Enters a frame based at `base`, returning the resulting file length.
     fn enter(
         frame: &mut RegFrame,
         base: u32,
         params: &[ValType],
         declared: &[ValType],
-        registers: u32,
+        operands: u32,
+        spills: u32,
+        consts: &[Const],
     ) -> usize {
         let locals_ty: Vec<ValType> = params.iter().chain(declared).copied().collect();
-
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: base,
-            callee_frame_base_register_index: u32::MAX,
-            spills_base_index: u32::MAX,
         };
 
         frame.enter_frame(
             params.len() as u32,
             &locals_ty,
             &mut caller_base_data,
-            &layout(registers),
+            &layout(locals_ty.len() as u32, operands, spills, consts),
         );
 
         frame.registers.len()
     }
 
-    /// [`enter`], handing back the base data so a test can read the bases
-    /// `enter_frame` recorded into it, or pass it to `exit_frame`.
-    fn enter_full(
-        frame: &mut RegFrame,
-        base: u32,
-        params: &[ValType],
-        declared: &[ValType],
-        registers: u32,
-        spills: u32,
-    ) -> RegCallerBaseData {
-        let locals_ty: Vec<ValType> = params.iter().chain(declared).copied().collect();
-
-        let mut caller_base_data = RegCallerBaseData {
-            base_register_index: base,
-            callee_frame_base_register_index: u32::MAX,
-            spills_base_index: u32::MAX,
-        };
-
-        let mut frame_layout = layout(registers);
-
-        frame_layout.spills = spills;
-
-        frame.enter_frame(
-            params.len() as u32,
-            &locals_ty,
-            &mut caller_base_data,
-            &frame_layout,
-        );
-
-        caller_base_data
-    }
-
+    /// A frame with no constants and no spills: width is `locals + operands`, and
+    /// the operand region begins immediately above the locals.
     #[test]
-    fn a_frames_spill_region_is_appended_and_its_base_recorded() {
-        let mut frame = RegFrame::default();
-        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
-
-        assert_eq!(
-            base_data.spills_base_index, 0,
-            "the first frame's spills start at 0"
-        );
-        assert_eq!(frame.spills.len(), 2, "its two slots are appended");
-    }
-
-    #[test]
-    fn a_nested_frames_spills_sit_above_its_callers() {
-        let mut frame = RegFrame::default();
-        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
-        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
-
-        assert_eq!(caller.spills_base_index, 0);
-
-        assert_eq!(
-            callee.spills_base_index, 2,
-            "the callee's region starts where the caller's ended"
-        );
-
-        assert_eq!(frame.spills.len(), 5, "2 + 3 slots are live at this depth");
-    }
-
-    /// Unlike the register file — whose base comes from the caller's position and so
-    /// reuses space naturally — a spill base is `spills.len()`, which only moves up.
-    /// Truncating on exit is therefore what keeps a loop of calls from growing it
-    /// without bound.
-    #[test]
-    fn exiting_a_frame_releases_its_spill_region() {
-        let mut frame = RegFrame::default();
-        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 2);
-        let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 3);
-
-        assert_eq!(frame.spills.len(), 5);
-
-        // a callee with no results, so only the spill half of the teardown runs
-        frame.exit_frame(0, &callee);
-
-        assert_eq!(
-            frame.spills.len(),
-            2,
-            "the callee's region is released, the caller's survives"
-        );
-
-        frame.exit_frame(0, &caller);
-
-        assert_eq!(frame.spills.len(), 0, "and the caller's in turn");
-    }
-
-    #[test]
-    fn repeated_calls_at_the_same_depth_reuse_the_same_spill_base() {
-        let mut frame = RegFrame::default();
-        let caller = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 1);
-        let mut bases = vec![];
-
-        for _ in 0..4 {
-            let callee = enter_full(&mut frame, 2, &[ValType::I32], &[], 1, 2);
-
-            bases.push(callee.spills_base_index);
-            frame.exit_frame(0, &callee);
-        }
-
-        assert!(
-            bases.windows(2).all(|w| w[0] == w[1]),
-            "every call at this depth must get the same base, not a fresh one: {bases:?}"
-        );
-
-        assert_eq!(frame.spills.len(), 1, "only the caller's region is left");
-
-        let _ = caller;
-    }
-
-    #[test]
-    fn a_frame_with_no_spills_still_records_a_base() {
-        let mut frame = RegFrame::default();
-        let base_data = enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 0);
-
-        assert_eq!(
-            base_data.spills_base_index, 0,
-            "the base must be recorded even when the region is empty, since \
-             `exit_frame` truncates to it"
-        );
-
-        assert_eq!(frame.spills.len(), 0);
-    }
-
-    #[test]
-    fn reset_clears_the_spill_area_too() {
-        let mut frame = RegFrame::default();
-
-        enter_full(&mut frame, 0, &[ValType::I32], &[], 1, 3);
-
-        assert_eq!(frame.spills.len(), 3);
-
-        // a trap unwinds without reaching `exit_frame`, so the next call's reset is
-        // what releases the region — otherwise every spill base above it shifts up
-        // for the life of the instance
-        frame.reset();
-
-        assert_eq!(frame.spills.len(), 0, "spills are released");
-        assert_eq!(frame.registers.len(), 0, "and the register file with them");
-    }
-
-    #[test]
-    fn a_frame_reaches_its_highest_register() {
-        // the shape that caught the off-by-`params_count`: one param, one declared
-        // local, two registers — so the file must reach index 3
+    fn a_plain_frame_is_locals_then_operand_registers() {
         let mut frame = RegFrame::default();
 
         frame.set_initial_params(&[Val::I32(7)]);
 
-        let len = enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
+        // 1 param + 1 declared local + 2 operand registers
+        let len = enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2, 0, &[]);
 
-        assert_eq!(len, 4, "1 param + 1 local + 2 registers");
-
-        // the operand base is above the locals, so the last register is the last slot
-        let operand_base = 2;
-
-        assert!(
-            operand_base + 2 <= len,
-            "register 1 at index {} must be in bounds of {len}",
-            operand_base + 1
+        assert_eq!(len, 4, "1 param + 1 local + 2 operand registers");
+        assert_eq!(
+            operand_base(0, 2, 0, 0),
+            2,
+            "operands start above the locals"
         );
+    }
+
+    /// The width formula is `registers + spills + consts`, and `registers` already
+    /// carries the locals. Adding `locals` again — the shape the old layout implied —
+    /// would over-allocate by exactly `locals_count`.
+    #[test]
+    fn the_registers_count_already_includes_the_locals() {
+        let mut frame = RegFrame::default();
+
+        // registers == locals_count exactly, i.e. a body that needs no operand
+        // register at all. The frame is then just wide enough for its locals.
+        let mut caller_base_data = RegCallerBaseData {
+            base_register_index: 0,
+        };
+        let frame_layout = RegFrameLayout {
+            registers: 3,
+            spills: 0,
+            locals_count: 3,
+            consts: Box::new([]),
+            input_registers_arena: Box::new([]),
+            output_registers_arena: Box::new([]),
+            br_targets_arena: Box::new([]),
+        };
+
+        frame.enter_frame(
+            0,
+            &[ValType::I32, ValType::I32, ValType::I32],
+            &mut caller_base_data,
+            &frame_layout,
+        );
+
+        assert_eq!(
+            frame.registers.len(),
+            3,
+            "width is `registers + spills + consts`, not `locals + registers`"
+        );
+    }
+
+    /// All four regions at once, with every boundary asserted as an absolute index.
+    #[test]
+    fn the_four_regions_are_laid_out_in_order() {
+        let mut frame = RegFrame::default();
+
+        frame.set_initial_params(&[Val::I32(11)]);
+
+        // 1 param + 1 declared local | 2 consts | 1 spill | 3 operand registers
+        let len = enter(
+            &mut frame,
+            0,
+            &[ValType::I32],
+            &[ValType::I32],
+            3,
+            1,
+            &[Const::I32(101), Const::I32(102)],
+        );
+
+        // registers = locals(2) + operands(3) = 5; width = 5 + spills(1) + consts(2)
+        assert_eq!(len, 8, "registers(5) + spills(1) + consts(2)");
+
+        assert_eq!(consts_base(0, 2), 2);
+        assert_eq!(spills_base(0, 2, 2), 4);
+        assert_eq!(operand_base(0, 2, 2, 1), 5);
+
+        // the regions do not overlap and cover the frame exactly
+        assert_eq!(operand_base(0, 2, 2, 1) + 3, len, "operands reach the end");
+
+        assert_eq!(frame.registers[0].as_i32(), 11, "param at the frame base");
+        assert_eq!(frame.registers[1].as_i32(), 0, "declared local zeroed");
+        assert_eq!(frame.registers[2].as_i32(), 101, "const 0 at consts_base");
+        assert_eq!(frame.registers[3].as_i32(), 102, "const 1 above it");
+    }
+
+    /// Constants are materialised on every entry, at `base + locals_count + id` —
+    /// the same index the lowering's constant backpatch produces.
+    #[test]
+    fn constants_are_materialised_at_the_const_region() {
+        let mut frame = RegFrame::default();
+
+        let len = enter(
+            &mut frame,
+            0,
+            &[],
+            &[ValType::I64],
+            1,
+            0,
+            &[Const::I64(-7), Const::I64(1 << 40), Const::I64(0)],
+        );
+
+        // registers = locals(1) + operands(1) = 2; width = 2 + 0 + consts(3)
+        assert_eq!(len, 5);
+
+        let cb = consts_base(0, 1);
+
+        assert_eq!(cb, 1);
+        assert_eq!(frame.registers[cb].as_i64(), -7);
+        assert_eq!(frame.registers[cb + 1].as_i64(), 1 << 40);
+        assert_eq!(frame.registers[cb + 2].as_i64(), 0);
+    }
+
+    /// The regression test for the clobbering bug.
+    ///
+    /// A callee is based at its caller's `caller_base`, which lowering guarantees is
+    /// at or above the caller's operand base. Every region the caller needs to
+    /// survive the call — its locals, constants and spills — therefore sits strictly
+    /// below the callee's frame. When constants lived *above* the registers instead,
+    /// the callee's frame overlapped them and the caller resumed reading whatever the
+    /// callee had left behind.
+    #[test]
+    fn a_nested_frame_cannot_reach_its_callers_constants() {
+        let mut frame = RegFrame::default();
+
+        frame.set_initial_params(&[Val::I32(11)]);
+
+        // caller: 2 locals | 2 consts | 1 spill | 3 operands  =>  width 8
+        let caller_len = enter(
+            &mut frame,
+            0,
+            &[ValType::I32],
+            &[ValType::I32],
+            3,
+            1,
+            &[Const::I32(101), Const::I32(102)],
+        );
+
+        assert_eq!(caller_len, 8);
+
+        // A legal `caller_base`: at or above the caller's own operand base, which is
+        // what the register backpatch's `+ spills + consts_len` shift guarantees.
+        let callee_base = operand_base(0, 2, 2, 1) as u32;
+
+        assert_eq!(callee_base, 5);
+
+        // callee: 1 local | 1 const | 0 spills | 2 operands
+        enter(
+            &mut frame,
+            callee_base,
+            &[ValType::I32],
+            &[],
+            2,
+            0,
+            &[Const::I32(999)],
+        );
+
+        // the callee's own constant landed in the callee's region...
+        assert_eq!(
+            frame.registers[consts_base(callee_base, 1)].as_i32(),
+            999,
+            "the callee's constant is materialised in the callee's frame"
+        );
+
+        // ...and the caller's constants are still there.
+        assert_eq!(
+            frame.registers[consts_base(0, 2)].as_i32(),
+            101,
+            "the caller's first constant must survive the call"
+        );
+        assert_eq!(
+            frame.registers[consts_base(0, 2) + 1].as_i32(),
+            102,
+            "the caller's second constant must survive the call"
+        );
+
+        // and so are its locals
+        assert_eq!(
+            frame.registers[0].as_i32(),
+            11,
+            "the caller's param survives"
+        );
+    }
+
+    /// `exit_frame` copies results down from the callee's *operand* base to the
+    /// frame base, so they land exactly where the caller staged the arguments.
+    #[test]
+    fn exit_frame_moves_results_from_the_operand_base_to_the_frame_base() {
+        let mut frame = RegFrame::default();
+
+        // 2 locals | 1 const | 1 spill | 2 operands  =>  operand base at 4, width 6
+        let len = enter(
+            &mut frame,
+            0,
+            &[],
+            &[ValType::I32, ValType::I32],
+            2,
+            1,
+            &[Const::I32(55)],
+        );
+
+        assert_eq!(len, 6);
+
+        let ob = operand_base(0, 2, 1, 1);
+
+        assert_eq!(ob, 4);
+
+        // the body's `end` materialises its results into the first operand registers
+        frame.registers[ob] = Value::from_i32(71);
+        frame.registers[ob + 1] = Value::from_i32(72);
+
+        let caller_base_data = RegCallerBaseData {
+            base_register_index: 0,
+        };
+
+        frame.exit_frame(2, &caller_base_data, &layout(2, 2, 1, &[Const::I32(55)]));
+
+        assert_eq!(
+            frame.registers[0].as_i32(),
+            71,
+            "result 0 at the frame base"
+        );
+        assert_eq!(frame.registers[1].as_i32(), 72, "result 1 above it");
+    }
+
+    /// A callee with no locals, constants or spills makes the operand base the frame
+    /// base, so the result copy is a self-copy — which must be a no-op, not a shift.
+    #[test]
+    fn exit_frame_is_a_no_op_when_the_operand_base_is_the_frame_base() {
+        let mut frame = RegFrame::default();
+
+        let len = enter(&mut frame, 0, &[], &[], 2, 0, &[]);
+
+        assert_eq!(len, 2);
+        assert_eq!(operand_base(0, 0, 0, 0), 0);
+
+        frame.registers[0] = Value::from_i32(5);
+        frame.registers[1] = Value::from_i32(6);
+
+        let caller_base_data = RegCallerBaseData {
+            base_register_index: 0,
+        };
+
+        frame.exit_frame(2, &caller_base_data, &layout(0, 2, 0, &[]));
+
+        assert_eq!(frame.registers[0].as_i32(), 5);
+        assert_eq!(frame.registers[1].as_i32(), 6);
     }
 
     #[test]
@@ -436,13 +557,13 @@ mod tests {
 
         frame.set_initial_params(&[Val::I32(1), Val::I32(2)]);
 
-        let len = enter(&mut frame, 0, &[ValType::I32, ValType::I32], &[], 3);
+        let len = enter(&mut frame, 0, &[ValType::I32, ValType::I32], &[], 3, 0, &[]);
 
-        assert_eq!(len, 5, "2 params + 0 locals + 3 registers");
+        assert_eq!(len, 5, "2 params + 3 operand registers");
     }
 
     #[test]
-    fn a_frame_with_no_registers_is_sized_for_its_locals() {
+    fn a_frame_with_no_operand_registers_is_sized_for_its_locals() {
         let mut frame = RegFrame::default();
 
         let len = enter(
@@ -451,19 +572,42 @@ mod tests {
             &[ValType::I64],
             &[ValType::I64, ValType::I64],
             0,
+            0,
+            &[],
         );
 
-        assert_eq!(len, 3, "1 param + 2 locals + 0 registers");
+        assert_eq!(len, 3, "1 param + 2 locals, no operands");
     }
 
     #[test]
     fn a_nested_frame_is_sized_from_its_own_base() {
-        // a callee based at 4 needs the file to reach 4 + locals + registers, not
-        // just its own span — the caller's frame below it stays live
+        // a callee based at 4 needs the file to reach its own end, not just its own
+        // width — the caller's frame below it stays live
         let mut frame = RegFrame::default();
-        let len = enter(&mut frame, 4, &[ValType::I32], &[ValType::I32], 2);
+        let len = enter(&mut frame, 4, &[ValType::I32], &[ValType::I32], 2, 0, &[]);
 
-        assert_eq!(len, 8, "base 4 + 1 param + 1 local + 2 registers");
+        assert_eq!(len, 8, "base 4 + registers(4)");
+    }
+
+    /// The spill and constant regions widen a nested frame too, so a callee based at
+    /// `b` reaches `b + registers + spills + consts` — the case that would catch the
+    /// capacity computation dropping either term.
+    #[test]
+    fn a_nested_frames_consts_and_spills_widen_it() {
+        let mut frame = RegFrame::default();
+
+        let len = enter(
+            &mut frame,
+            10,
+            &[ValType::I32],
+            &[],
+            2,
+            2,
+            &[Const::I32(1), Const::I32(2), Const::I32(3)],
+        );
+
+        // registers = locals(1) + operands(2) = 3; width = 3 + spills(2) + consts(3)
+        assert_eq!(len, 18, "base 10 + registers(3) + spills(2) + consts(3)");
     }
 
     #[test]
@@ -473,11 +617,11 @@ mod tests {
         // in `enter_frame` is what prevents that, and this is the case that would
         // catch its removal.
         let mut frame = RegFrame::default();
-        let deep = enter(&mut frame, 16, &[ValType::I32], &[ValType::I32], 4);
+        let deep = enter(&mut frame, 16, &[ValType::I32], &[ValType::I32], 4, 0, &[]);
 
         assert_eq!(deep, 22);
 
-        let shallow = enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
+        let shallow = enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2, 0, &[]);
 
         assert_eq!(
             shallow, deep,
@@ -495,7 +639,7 @@ mod tests {
 
         frame.set_initial_params(&[Val::I32(7)]);
 
-        enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2);
+        enter(&mut frame, 0, &[ValType::I32], &[ValType::I32], 2, 0, &[]);
 
         assert_eq!(
             frame.registers[0].as_i32(),
@@ -516,6 +660,26 @@ mod tests {
         );
     }
 
+    /// A trap unwinds without reaching `exit_frame`, so the next call's reset is what
+    /// releases the file — otherwise every base above it stays shifted up for the
+    /// life of the instance.
+    #[test]
+    fn reset_empties_the_register_file() {
+        let mut frame = RegFrame::default();
+
+        enter(&mut frame, 0, &[ValType::I32], &[], 3, 2, &[Const::I32(1)]);
+
+        assert_eq!(
+            frame.registers.len(),
+            7,
+            "registers(4) + spills(2) + consts(1)"
+        );
+
+        frame.reset();
+
+        assert_eq!(frame.registers.len(), 0);
+    }
+
     #[test]
     fn declared_locals_are_zeroed_and_params_are_left_alone() {
         // the sibling arithmetic: the zeroing loop runs over `locals_count -
@@ -531,6 +695,8 @@ mod tests {
             &[ValType::I64],
             &[ValType::I64, ValType::I64],
             1,
+            0,
+            &[],
         );
 
         assert_eq!(
@@ -540,5 +706,48 @@ mod tests {
         );
         assert_eq!(frame.registers[1].as_i64(), 0, "declared local 0 is zeroed");
         assert_eq!(frame.registers[2].as_i64(), 0, "declared local 1 is zeroed");
+    }
+
+    /// Zeroing the declared locals must not reach into the constant region above
+    /// them: a stale local left behind by a previous, deeper frame has to be cleared,
+    /// while the constants written after it must survive.
+    #[test]
+    fn zeroing_locals_stops_below_the_constants() {
+        let mut frame = RegFrame::default();
+
+        // dirty the file so the zeroing has something to actually clear
+        let deep = enter(&mut frame, 0, &[], &[], 8, 0, &[]);
+
+        assert_eq!(deep, 8);
+
+        for i in 0..8 {
+            frame.registers[i] = Value::from_i32(-1);
+        }
+
+        enter(
+            &mut frame,
+            0,
+            &[],
+            &[ValType::I32, ValType::I32],
+            1,
+            0,
+            &[Const::I32(77)],
+        );
+
+        assert_eq!(
+            frame.registers[0].as_i32(),
+            0,
+            "declared local 0 is cleared"
+        );
+        assert_eq!(
+            frame.registers[1].as_i32(),
+            0,
+            "declared local 1 is cleared"
+        );
+        assert_eq!(
+            frame.registers[consts_base(0, 2)].as_i32(),
+            77,
+            "the constant above them is written, not zeroed"
+        );
     }
 }

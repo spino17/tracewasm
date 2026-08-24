@@ -131,7 +131,7 @@ use crate::{
 use ordered_float::OrderedFloat;
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
-use std::{marker::PhantomData, u32, vec};
+use std::{marker::PhantomData, vec};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -170,7 +170,7 @@ enum BlockVariant {
 }
 
 /// An immediate operand, carried inline because it has no home to be read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Hash)]
 pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
@@ -196,6 +196,50 @@ pub(crate) enum Const {
     /// while references are `Option<FuncIndex>` end to end.
     Ref(Option<FuncIndex>),
 }
+
+impl PartialEq for Const {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Const::I32(first) => {
+                if let Const::I32(second) = other {
+                    *first as u32 == *second as u32
+                } else {
+                    false
+                }
+            }
+            Const::I64(first) => {
+                if let Const::I64(second) = other {
+                    *first as u64 == *second as u64
+                } else {
+                    false
+                }
+            }
+            Const::F32(first) => {
+                if let Const::F32(second) = other {
+                    first.into_inner().to_bits() == second.into_inner().to_bits()
+                } else {
+                    false
+                }
+            }
+            Const::F64(first) => {
+                if let Const::F64(second) = other {
+                    first.into_inner().to_bits() == second.into_inner().to_bits()
+                } else {
+                    false
+                }
+            }
+            Const::Ref(first) => {
+                if let Const::Ref(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+impl Eq for Const {}
 
 #[derive(Debug, Clone, Copy)]
 struct ConstId(u32);
@@ -225,6 +269,23 @@ impl ConstInterner {
     }
 }
 
+impl Const {
+    /// The value as it appears in a rendered instruction.
+    ///
+    /// Suffixed by width for everything but `i32`, so a rendering says which
+    /// immediate it is without the reader inferring it from the operator.
+    fn render(&self) -> String {
+        match self {
+            Const::I32(v) => format!("{v}"),
+            Const::I64(v) => format!("{v}i64"),
+            Const::F32(v) => format!("{v}f32"),
+            Const::F64(v) => format!("{v}f64"),
+            Const::Ref(Some(f)) => format!("({})ref", f.0),
+            Const::Ref(None) => "(null)ref".to_string(),
+        }
+    }
+}
+
 /// Where an instruction reads one operand from.
 ///
 /// This is the resolved, executable form: the lowering pass has already decided that
@@ -243,18 +304,49 @@ impl Slot {
     /// the simulated stack's two heights. See the module docs.
     fn is_register(&self, locals_count: u32) -> bool {
         if let Slot::RegisterFrame(frame_index) = self {
-            if *frame_index >= locals_count {
-                true
-            } else {
-                false
-            }
+            *frame_index >= locals_count
         } else {
             false
         }
     }
 
+    /// Names the location this operand reads, by the region its frame index falls in.
+    ///
+    /// The whole layout is needed because the index alone carries no tag: the four
+    /// regions are `locals | consts | spills | registers`, and only their sizes say
+    /// which one an index names. Execution never does this — it adds the index to the
+    /// frame base and loads — so this exists for rendering and for tests.
     fn render(&self, frame_layout: &RegFrameLayout) -> String {
-        todo!()
+        let frame_index = match self {
+            Slot::Global(n) => return format!("global{n}"),
+            Slot::RegisterFrame(frame_index) => *frame_index,
+        };
+
+        // The placeholder the pass emits for a spill or constant before the
+        // end-of-body backpatch resolves it. Rendering one means it escaped.
+        if frame_index == u32::MAX {
+            return "<unresolved>".to_string();
+        }
+
+        let locals_count = frame_layout.locals_count;
+        let spills_base = locals_count + frame_layout.consts.len() as u32;
+        let registers_base = spills_base + frame_layout.spills;
+
+        if frame_index < locals_count {
+            format!("local{frame_index}")
+        } else if frame_index < spills_base {
+            match frame_layout
+                .consts
+                .get((frame_index - locals_count) as usize)
+            {
+                Some(c) => c.render(),
+                None => format!("<const {} past the pool>", frame_index - locals_count),
+            }
+        } else if frame_index < registers_base {
+            format!("spill{}", frame_index - spills_base)
+        } else {
+            format!("r{}", frame_index - registers_base)
+        }
     }
 }
 

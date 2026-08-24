@@ -11,15 +11,28 @@ impl RegInstruction {
         let outs = &frame.output_registers_arena;
 
         let sig1 = |i: &Registers<1, Slot>| i.registers(ins)[0].render(frame);
-        let list =
-            |xs: &[Slot]| xs.iter().map(|x| x.render(frame)).collect::<Vec<_>>().join(", ");
-
-        let regs = |xs: &[u32]| {
+        let list = |xs: &[Slot]| {
             xs.iter()
-                .map(|r| format!("r{r}"))
+                .map(|x| x.render(frame))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+
+        // A destination is a frame index like any operand, so it is named through
+        // the same region lookup rather than printed raw — otherwise a register
+        // renders as its absolute index and reads as a different register.
+        let regs = |xs: &[u32]| {
+            xs.iter()
+                .map(|r| Slot::RegisterFrame(*r).render(frame))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        // `caller_base` is a frame index too, and it is read alongside the `r0`,
+        // `r1` … above, so it is shown in the same numbering rather than as the
+        // absolute index the runtime uses.
+        let operand_base = frame.locals_count + frame.consts.len() as u32 + frame.spills;
+        let as_operand = |frame_index: u32| frame_index - operand_base;
 
         // Every pure value operator renders alike, so the arms below carry no body of
         // their own. They are split by arity because an or-pattern binds one type, and
@@ -391,7 +404,7 @@ impl RegInstruction {
                 end_index,
             } => format!(
                 "if           {} else={} end={}",
-                sig1(&cond),
+                sig1(cond),
                 else_index
                     .map(|i| i.to_string())
                     .unwrap_or_else(|| "-".into()),
@@ -448,7 +461,11 @@ impl RegInstruction {
             RegInstruction::Call {
                 func_index,
                 caller_base,
-            } => format!("call         f{} caller_base={caller_base}", func_index.0),
+            } => format!(
+                "call         f{} caller_base={}",
+                func_index.0,
+                as_operand(*caller_base)
+            ),
             RegInstruction::CallIndirect {
                 ty_index,
                 table_index,
@@ -466,10 +483,11 @@ impl RegInstruction {
                 let dsts: Vec<u32> = (0..params as u32).map(|i| caller_base + i).collect();
 
                 format!(
-                    "call_indirect [{}] ty{} table{} caller_base={caller_base}{}",
+                    "call_indirect [{}] ty{} table{} caller_base={}{}",
                     sig1(slot),
                     ty_index.0,
                     table_index.0,
+                    as_operand(*caller_base),
                     if params == 0 {
                         String::new()
                     } else {
@@ -498,9 +516,13 @@ impl RegInstruction {
             out.push_str(&format!("{pc:>3}  {line}\n"));
         }
 
+        // `registers` counts from the frame base, so it includes the locals; the
+        // operand count is what a reader of the body above is looking for, since
+        // that is what `r0`, `r1` … are numbered against.
         out.push_str(&format!(
             "     frame: {} registers, {} spills\n",
-            frame.registers, frame.spills
+            frame.registers - frame.locals_count,
+            frame.spills
         ));
 
         out

@@ -635,7 +635,7 @@ impl TraceVM {
                 instance.frame.exit_frame(
                     frame.callee_results_count,
                     &caller_base_data,
-                    &frame_layout,
+                    frame_layout,
                 );
 
                 // reset the state of the frame which executed call instruction
@@ -650,7 +650,7 @@ impl TraceVM {
 
         instance
             .frame
-            .exit_frame(results_count, &caller_base_data, &frame_layout);
+            .exit_frame(results_count, &caller_base_data, frame_layout);
 
         Ok(())
     }
