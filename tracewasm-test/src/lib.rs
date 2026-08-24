@@ -146,7 +146,7 @@ pub fn try_call<V: VirtualMachine, R: Results>(
 
 /// Whether the guest programs were built. `false` when the wasm target is absent.
 ///
-/// Read by [`guests_were_built`], whose whole job is to make a `false` here visible
+/// Read by `guests_were_built`, whose whole job is to make a `false` here visible
 /// in the test output.
 pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
 
@@ -361,7 +361,7 @@ where
 /// invariant — a ratio, an ordering, a count — not an absolute duration.
 ///
 /// The suite's other numeric test, `tests/perf_report.rs`, does not go through
-/// here. A [`Row`] summarises a whole batch as one mean, which is the right
+/// here. A [`metrics::Row`] summarises a whole batch as one mean, which is the right
 /// shape for a regression check and the wrong one for the distributions and
 /// percentiles that report is built around, so it keeps its own statistics.
 pub mod metrics {

@@ -57,9 +57,14 @@ pub mod stack;
 pub(crate) trait CallerBaseData {
     /// The base data for an outermost activation, where there is no caller.
     ///
-    /// Both machines start at offset 0 with the callee-locals boundary unset;
-    /// [`RuntimeFrame::enter_frame`] fills it in once the entry function's body is
-    /// known, which is before its first instruction runs.
+    /// Both machines start at offset 0, which is why
+    /// [`RuntimeFrame::reset`] has to empty the storage before every call rather than
+    /// only after a trap — the entry frame's arguments land at 0 only while it is
+    /// empty.
+    ///
+    /// The stack machine additionally leaves its callee-locals boundary unset here,
+    /// for [`RuntimeFrame::enter_frame`] to fill in once the entry function's locals
+    /// are known. The register machine has no second base to set.
     fn initial_data() -> Self;
     /// The callee's frame base, in whatever unit the machine counts.
     ///
@@ -156,19 +161,21 @@ pub(crate) trait RuntimeFrame {
     /// already in place: the caller staged them where the callee's params belong,
     /// or [`Self::set_initial_params`] seeded them for the entry function.
     ///
-    /// `frame_layout` is what a positional machine sizes its storage from — the
-    /// frame spans the params, the declared locals, and then the layout's operand
-    /// registers. A stack machine grows as it pushes and ignores it.
+    /// `frame_layout` is what a positional machine sizes its storage from, and it
+    /// describes more than operand registers: the register machine's frame is
+    /// `locals | constants | spills | operand registers`, so entering one also
+    /// materialises the body's constant pool. A stack machine grows as it pushes and
+    /// ignores the layout entirely.
     ///
-    /// **An implementation must record the callee's locals boundary into
-    /// `caller_base_data` before returning** — the height or index at which this
-    /// frame's operands begin, which is `base_offset() + locals_ty.len()` in whatever
-    /// unit the machine counts. Every height-sensitive control operation resolves its
-    /// target against it, and [`CallerBaseData::initial_data`] leaves it unset, so a
-    /// frame entered without it runs its first branch against a sentinel.
-    ///
-    /// That is why the argument is `&mut`, and why this is the only place the
-    /// boundary is written: a driver cannot enter a frame and forget to fix it.
+    /// **A machine with a second base must record it into `caller_base_data` before
+    /// returning.** The stack machine has one — the height at which this frame's
+    /// operands begin, `base_offset() + locals_ty.len()` — which every
+    /// height-sensitive control operation resolves against, and which
+    /// [`CallerBaseData::initial_data`] leaves unset; a frame entered without it runs
+    /// its first branch against a sentinel. That is why the argument is `&mut`, and
+    /// why this is the only place it is written: a driver cannot enter a frame and
+    /// forget to fix it. The register machine derives its operand base from the
+    /// layout instead and writes nothing back.
     fn enter_frame(
         &mut self,
         params_count: u32,
@@ -180,6 +187,17 @@ pub(crate) trait RuntimeFrame {
     /// Drops a returning callee's frame and leaves its results where the caller
     /// expects them — the counterpart of [`Self::enter_frame`] at the other end of
     /// a call.
+    ///
+    /// Both machines leave the results in the slots the arguments occupied, so a
+    /// caller does nothing after a call returns, but they get there differently: the
+    /// stack machine truncates to the frame base preserving the top `results_count`
+    /// values, while the register machine copies them down from its operand region and
+    /// reclaims nothing — the space is simply reused by the next call at that depth.
+    ///
+    /// `frame_layout` must be the **callee's**. The register machine needs it to find
+    /// the operand region the results were materialised into
+    /// (`base + locals + consts + spills`); passing the caller's would read them from
+    /// the wrong offset and quietly return the wrong values.
     fn exit_frame(
         &mut self,
         results_count: u32,
@@ -190,8 +208,9 @@ pub(crate) trait RuntimeFrame {
 
 /// The per-function storage plan a lowering produces alongside its instructions.
 ///
-/// What a layout holds differs sharply — the stack machine needs little beyond a
-/// peak height, the register machine carries operand arenas and register counts —
+/// What a layout holds differs sharply — the stack machine carries only its
+/// `br_table` arms, the register machine its operand arenas, region sizes and
+/// constant pool —
 /// so only the part the driver reads uniformly is named here.
 pub(crate) trait FrameLayout {
     /// This machine's resolved `br_table` arm.

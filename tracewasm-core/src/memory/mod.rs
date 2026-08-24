@@ -275,7 +275,7 @@ pub trait MemoryView {
 /// interpreter, which is the only party that knows the module's declared maximum
 /// and the instance's configured cap.
 pub trait Memory: MemoryView {
-    /// Creates a memory pre-allocated to `size` in WASM pages.
+    /// Creates a memory pre-allocated to `size_in_pages` WASM pages.
     /// Per the WebAssembly spec, this should be completely zeroed.
     fn allocate_initial_memory(size_in_pages: u32) -> Self;
 

@@ -1,3 +1,21 @@
+//! Human-readable rendering of a lowered register-machine body.
+//!
+//! Exists for tests and for reading a lowering by eye, so it prefers legibility over
+//! fidelity to the encoding in two ways.
+//!
+//! **Operands are named, not numbered.** A [`Slot`] is an absolute frame index, so
+//! `4` could be a local, a constant, a spill or a register depending on the region
+//! sizes. [`Slot::render`] resolves that against the [`RegFrameLayout`] and prints
+//! `local0`, `7`, `spill0` or `r1`.
+//!
+//! **Registers are numbered from the operand base**, not from the frame base. `r0` is
+//! the frame's first operand register, which is the frame index
+//! `locals_count + consts + spills` — the numbering the lowering reasons in. The same
+//! offset is applied to a `caller_base`, so a call reads in the same units as the
+//! registers around it.
+//!
+//! Both are conversions *out* of the executable form; nothing here runs at execution.
+
 use crate::{
     instruction::register::{
         RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot, mnemonic,
@@ -6,6 +24,11 @@ use crate::{
 };
 
 impl RegInstruction {
+    /// Renders one instruction, with its operands resolved through `frame`.
+    ///
+    /// `types` is needed because a `call_indirect` stores only a type index, so how
+    /// many of its arena operands are arguments is recoverable only from the module's
+    /// type section — the same thing executing one has to do.
     pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
         let ins = &frame.input_registers_arena;
         let outs = &frame.output_registers_arena;
@@ -347,11 +370,9 @@ impl RegInstruction {
                 list(sig.input.registers(ins)),
                 regs(sig.output.registers(outs))
             ),
-            // Three operands and no result, so there is nothing to point an arrow
-            // at. `memory.copy` reads destination, source, length; `memory.fill`
-            // reads destination, byte, length.
             // The segment it reads from is an immediate, so it leads: the three
-            // operands after it are destination, source offset, length.
+            // operands after it are destination, source offset, length. No result, so
+            // there is nothing to point an arrow at.
             RegInstruction::MemoryInit {
                 data_index,
                 operands,
@@ -365,6 +386,9 @@ impl RegInstruction {
             RegInstruction::DataDrop(data_index) => {
                 format!("{:<12} data{data_index}", mnemonic(self.kind()))
             }
+            // Three operands and no result, so there is nothing to point an arrow at.
+            // `memory.copy` reads destination, source, length; `memory.fill` reads
+            // destination, byte, length.
             RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => {
                 format!(
                     "{:<12} {}",

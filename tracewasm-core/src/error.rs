@@ -117,6 +117,12 @@ pub enum TraceWasmError {
     /// not appear in this crate's public API.
     #[error("error occured while parsing: {0}")]
     Parsing(String),
+    /// A host-supplied import failed. Raised for any imported *item*, not just a
+    /// call: reading an imported global takes this path too, since both arrive
+    /// through the blanket [`From<anyhow::Error>`] below.
+    ///
+    /// Field: whatever the host returned, carried opaquely — an embedder's error type
+    /// is its own business.
     #[error("call to imported item returned error: {0}")]
     CallToImportedItemReturnedError(anyhow::Error),
 }
@@ -284,11 +290,12 @@ pub enum InstructionExecutionError {
     #[error("{0}")]
     Memory(MemoryError),
     /// An integer division trapped: a zero divisor, or the signed overflow case
-    /// `MIN / -1`. Fields: the rendered dividend and divisor.
+    /// `MIN / -1`. Fields: `num` is the rendered dividend, `deno` the divisor.
     #[error("division failed: {num}/{deno}")]
     Division { num: String, deno: String },
     /// An integer remainder trapped, which only happens on a zero divisor —
-    /// `MIN % -1` is defined as `0`. Fields: the rendered operands.
+    /// `MIN % -1` is defined as `0`. Fields: `left` is the rendered dividend, `right`
+    /// the divisor.
     #[error("remainder failed: {left} % {right}")]
     Remainder { left: String, right: String },
     /// A `trunc` conversion could not represent its operand in the target integer

@@ -33,11 +33,10 @@
 //! names an instruction, so parameterising it would spread the machine across
 //! every `Result` in the crate to describe something the errors do not hold.
 //!
-//! Two things stay concrete on purpose. **Constant expressions are always lowered
+//! One thing stays concrete on purpose: **constant expressions are always lowered
 //! for the stack machine** whatever the module's own, since they run once at
 //! instantiation and never on a hot path; a lowered one is opaque as
-//! [`module::ConstExpr`]. And execution currently accepts only a [`Stack`]
-//! instance, because the register machine's execution is still being written.
+//! [`module::ConstExpr`].
 //!
 //! ## Scope
 //!

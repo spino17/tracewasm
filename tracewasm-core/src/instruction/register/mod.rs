@@ -4,28 +4,66 @@
 //! bookkeeping: `local.get; local.get; i32.add` describes two pushes and two pops
 //! that a register machine does not need. This pass consumes the same operator
 //! stream as [`crate::instruction::stack`] and produces
-//! [`RegInstruction`]s whose operands name where a value *is* — a constant, a local,
-//! a global, a spill slot, or a register — so nothing moves unless it has to.
+//! [`RegInstruction`]s whose operands name where a value *is* — a frame slot, or a
+//! global — so nothing moves unless it has to.
 //!
 //! The stack pass remains the reference for tracing fidelity; this one is for
 //! running the same module quickly.
 //!
-//! ## The simulated stack
+//! ## The frame: four regions, one index space
 //!
-//! Lowering walks the operators once, maintaining a `SimulatedStack`: a stack of
-//! `StackSlot`s standing for the operands wasm would have pushed. Nothing is
-//! emitted for `local.get` or `i32.const` — they push a slot describing where the
-//! value lives. An instruction that consumes operands pops the slots and records
-//! them as its inputs, so the consumer reads the original locations directly.
+//! A [`Slot`] operand carries one absolute frame index and no tag, so an execution
+//! reads it as `registers[frame_base + index]` — one add, one load. What the index
+//! names depends only on which range of the frame it falls in:
+//!
+//! ```text
+//!   0                                    locals — params first, then declared
+//!   locals_count                         consts — the body's interned pool
+//!   locals_count + consts                spills
+//!   locals_count + consts + spills       operand registers
+//!   registers + consts + spills          end of frame
+//! ```
+//!
+//! The sizes travel with the body in [`RegFrameLayout`], which is what lets
+//! [`Slot::render`] name a region again and what the runtime uses to place the
+//! constant pool at frame entry. Note that [`RegFrameLayout::registers`] counts from
+//! the frame base and so *includes* the locals.
+//!
+//! The order is deliberate. A callee's frame is based at its caller's `caller_base`,
+//! which is an operand register index, so putting the constants and spills *below*
+//! the operand registers is what stops a callee from overwriting them — see
+//! [`runtime::reg`](crate::runtime::reg) for the runtime half.
+//!
+//! ## Provisional indices, and the pass that resolves them
+//!
+//! Those region sizes are not known until the body ends: how many constants get
+//! interned, and how many spill slots are needed, both depend on operators not yet
+//! seen. So lowering works in a **provisional** index space and fixes it up once.
+//!
+//! While walking the body, an operand register index counts from the frame base but
+//! ignores the constant and spill regions — `curr_register_index` starts at
+//! `locals_count` and rises from there. Locals and globals are already final, since
+//! neither region can move. But a constant, a spill, or an operand register cannot
+//! be given a frame index yet, so each is emitted as a `Slot::RegisterFrame(u32::MAX)`
+//! placeholder in the input arena plus an entry in one of `const_backpatches`,
+//! `spill_backpatches` or `register_backpatches`, keyed by its arena position. That
+//! is what [`BackPatchableSlot`] represents.
+//!
+//! At the end of the body all three lists are drained in one pass: a constant lands
+//! at `locals_count + id`, a spill at `locals_count + consts + slot`, and every
+//! provisional register index — along with every destination in
+//! `output_registers` and every `caller_base` — shifts up by `consts + spills`. The
+//! register shift carries no `locals_count` term, because a provisional register
+//! index already includes it.
 //!
 //! **Two heights, and they are not the same number.** `stack.height()` counts
-//! simulated slots; `curr_register_index` counts only the slots that occupy a
-//! machine register. A `Const`, `Local`, `Global`, or `Spilled` slot occupies a
-//! stack position and no register. Anything restoring the stack to a label's entry
-//! state must use the slot height; anything naming a destination register must use
-//! the register index. Both are recorded per block — the slot height in
-//! `Block::recorded_height`, the register index derived by counting register slots
-//! back down to it.
+//! simulated slots; `curr_register_index` is a provisional frame index, so it rises
+//! only for the slots that occupy an operand register. A slot naming a constant, a
+//! local, a global or a spill occupies a stack position and no register. Anything
+//! restoring the stack to a label's entry state must use the slot height; anything
+//! naming a destination register must use the register index. Both are recorded per
+//! block — the slot height in `Block::recorded_height`, the register index derived
+//! by counting register slots back down to it.
 //!
 //! ## Lazily forwarded locals and globals
 //!
@@ -169,7 +207,21 @@ enum BlockVariant {
     Func,
 }
 
-/// An immediate operand, carried inline because it has no home to be read from.
+/// A constant the body uses, interned into a per-body pool.
+///
+/// An immediate has no origin to be read from, so it is given one: the pool becomes
+/// the frame's constant region, and an operand naming constant `i` is just the frame
+/// slot `locals_count + i`. Reading one therefore costs exactly what reading a local
+/// costs, and no instruction has to carry a value inline.
+///
+/// Identity is by **variant and bit pattern**, not by numeric equality — see the
+/// hand-written [`PartialEq`] below for why that is not merely pedantic.
+///
+/// The float arms hold `OrderedFloat` because `f32`/`f64` are not `Hash`, and the
+/// derived `Hash` uses its canonicalising implementation. That is sound but not
+/// exact: it hashes `-0.0` as `+0.0` and every NaN alike, so those pairs collide.
+/// They are unequal, so the map separates them on comparison; the collision costs
+/// one extra comparison and nothing else.
 #[derive(Debug, Clone, Copy, Hash)]
 pub(crate) enum Const {
     /// A 32-bit integer immediate.
@@ -182,9 +234,9 @@ pub(crate) enum Const {
     F64(OrderedFloat<f64>),
     /// A function reference, `None` being null.
     ///
-    /// `ref.func` and `ref.null` are immediates like any other: the operator
-    /// describes the whole value, so nothing is emitted for one and it is read in
-    /// place by whatever consumes it.
+    /// `ref.func` and `ref.null` are constants like any other: the operator
+    /// describes the whole value, so nothing is emitted for one and it is read out of
+    /// the frame's constant region by whatever consumes it.
     ///
     /// The heap type `ref.null` names is deliberately not carried, matching
     /// [`StackInstruction::RefNull`](crate::instruction::stack::StackInstruction::RefNull) in
@@ -197,6 +249,19 @@ pub(crate) enum Const {
     Ref(Option<FuncIndex>),
 }
 
+/// Two constants are the same constant only if they are the same *type* and the same
+/// *bits*. Both halves are load-bearing, because this is the interner's dedup key and
+/// a merge means two operands sharing one frame slot.
+///
+/// **Same type.** A slot holds one value, and the runtime materialises it by matching
+/// the variant — so merging an `i32` with an `f64` that happens to share a bit
+/// pattern would write the wrong kind of value into the slot the other one reads.
+///
+/// **Same bits, not numerically equal.** Numeric equality would merge `+0.0` with
+/// `-0.0`, and every NaN with every other, silently dropping a sign or a payload that
+/// `f64.min`, `copysign` and plain arithmetic all propagate. Comparing bits is also
+/// what makes the [`Eq`] impl below sound: a NaN constant has to equal itself, or the
+/// pool could neither find nor dedup it.
 impl PartialEq for Const {
     fn eq(&self, other: &Self) -> bool {
         match self {
@@ -241,16 +306,35 @@ impl PartialEq for Const {
 
 impl Eq for Const {}
 
+/// A constant's index in its body's pool.
+///
+/// Not yet a frame index: it becomes one when the end-of-body pass adds
+/// `locals_count`, which is the only place the two spaces meet.
 #[derive(Debug, Clone, Copy)]
 struct ConstId(u32);
 
+/// The constants one body uses, deduplicated.
+///
+/// Dedup matters twice over: it keeps the frame's constant region as small as the
+/// body's *distinct* constants rather than its uses, and it makes two operands naming
+/// the same constant name the same slot.
 #[derive(Default)]
 struct ConstInterner {
+    /// The pool in [`ConstId`] order, shipped as [`RegFrameLayout::consts`]. Constant
+    /// `i` lives at frame slot `locals_count + i`.
     consts: Vec<Const>,
+    /// Reverse index for the dedup, keyed by [`Const`]'s variant-and-bits equality.
     reverse_map: FxHashMap<Const, ConstId>,
 }
 
 impl ConstInterner {
+    /// Returns the id for `val`, adding it to the pool if this is its first use.
+    ///
+    /// Ids are handed out in first-appearance order, which is the order the runtime
+    /// materialises the region in — so nothing has to sort the pool later.
+    ///
+    /// Identity is bitwise, so the same NaN interned twice is one slot while `+0.0`
+    /// and `-0.0` are two.
     fn intern(&mut self, val: Const) -> ConstId {
         if let Some(id) = self.reverse_map.get(&val) {
             *id
@@ -264,6 +348,16 @@ impl ConstInterner {
         }
     }
 
+    /// The constant `id` names.
+    ///
+    /// Panics on an id minted by a different body's interner, which is why one never
+    /// leaves the lowering of the body that produced it.
+    #[allow(
+        dead_code,
+        reason = "the pool is read through RegFrameLayout::consts at execution; this \
+                  is the lowering-side accessor, kept so an id can be resolved \
+                  before the layout exists"
+    )]
     fn const_val(&self, id: &ConstId) -> &Const {
         &self.consts[id.0 as usize]
     }
@@ -288,20 +382,57 @@ impl Const {
 
 /// Where an instruction reads one operand from.
 ///
-/// This is the resolved, executable form: the lowering pass has already decided that
-/// this operand needs no copy and can be read in place. Only [`Self::Register`]
-/// values were produced by a preceding instruction; the rest are read straight out of
-/// the frame's constants, locals, globals, or spill area.
+/// The resolved, executable form: the lowering pass has already decided that this
+/// operand needs no copy and can be read in place. There are only two places to
+/// read from — the frame, and the globals table — so a constant, a local, a spill
+/// and an operand register are all [`Self::RegisterFrame`], told apart only by which
+/// range of the frame their index falls in.
+///
+/// The lowering-time counterpart is [`BackPatchableSlot`], which additionally has to
+/// represent operands whose frame index is not known yet.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Slot {
-    /// Read global `n` in place, on the same terms as [`Self::Local`].
+    /// Read global `n` from the instance's globals table.
+    ///
+    /// The one operand that is not a frame slot. Valid on the same terms as a frame
+    /// read: nothing writes that global between the `global.get` and this
+    /// instruction, because a write would have spilled it first.
     Global(u32),
+    /// Read frame slot `n`, counted from the activation's base — `registers[base + n]`
+    /// at execution.
+    ///
+    /// One index, no tag, covering all four regions of the frame:
+    ///
+    /// ```text
+    ///   n < locals_count                          a param or declared local
+    ///   n < locals_count + consts                 a constant from the pool
+    ///   n < locals_count + consts + spills        a spill slot
+    ///   otherwise                                 an operand register
+    /// ```
+    ///
+    /// Execution never needs to tell them apart, which is the point — every operand
+    /// read is one add and one load. Only [`Slot::render`] recovers the distinction,
+    /// from the sizes in [`RegFrameLayout`].
+    ///
+    /// `u32::MAX` is the placeholder the pass emits before the end-of-body pass
+    /// assigns a real index; see [`BackPatchableSlot`].
     RegisterFrame(u32),
 }
 
 impl Slot {
-    /// Whether this operand occupies a machine register — the distinction between
-    /// the simulated stack's two heights. See the module docs.
+    /// Whether this operand is an operand register rather than a local or global.
+    ///
+    /// **Only meaningful on a provisional index**, i.e. during lowering, before the
+    /// end-of-body pass shifts registers above the constant and spill regions. On a
+    /// resolved [`Slot`] a constant and a spill also satisfy `>= locals_count`, so
+    /// the answer would be wrong; use the region boundaries in [`RegFrameLayout`]
+    /// instead, as [`Slot::render`] does.
+    #[allow(
+        dead_code,
+        reason = "the live register-height test is BackPatchableSlot::is_register, \
+                  which discriminates by variant; this is the range test, kept for \
+                  the provisional indices the lowering works in"
+    )]
     fn is_register(&self, locals_count: u32) -> bool {
         if let Slot::RegisterFrame(frame_index) = self {
             *frame_index >= locals_count
@@ -362,20 +493,41 @@ impl Default for Slot {
     }
 }
 
+/// An operand as lowering knows it, before the frame layout is final.
+///
+/// The provisional counterpart of [`Slot`]. Three of the four cases cannot be turned
+/// into a frame index while the body is still being walked, because the constant and
+/// spill region sizes are not yet known — so they travel as what they *are* and are
+/// resolved in the end-of-body pass (see the module docs). The fourth is already
+/// final: a local or a global cannot move.
 enum BackPatchableSlot {
+    /// An operand register, as a *provisional* frame index — counted from the frame
+    /// base, so at or above `locals_count`, but not yet clear of the constant and
+    /// spill regions. Resolved by shifting up `consts + spills`.
     Register(u32),
+    /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
     Spill(SpillIndex),
+    /// An interned constant, by pool id. Resolved to `locals_count + id`.
     Const(ConstId),
+    /// An operand whose location is already final: a local, or a global.
     Slot(Slot),
 }
 
 impl BackPatchableSlot {
+    /// Whether this operand occupies an operand register.
+    ///
+    /// A variant test, so it is correct at any point in lowering — unlike
+    /// [`Slot::is_register`], which compares an index against `locals_count` and so
+    /// only holds while indices are provisional. This is the one the register-height
+    /// bookkeeping uses.
     fn is_register(&self) -> bool {
         matches!(self, BackPatchableSlot::Register(_))
     }
 }
 
 impl From<Slot> for BackPatchableSlot {
+    /// Adopts an already-resolved operand — a local or a global, the two that need
+    /// no backpatch.
     fn from(value: Slot) -> Self {
         BackPatchableSlot::Slot(value)
     }
@@ -684,10 +836,21 @@ pub(crate) struct RegBrTableTarget {
 struct SimulatedStack {
     /// The operand stack, one [`StackSlot`] per value wasm would have pushed.
     stack: Stack<StackSlot>,
-    /// How many machine registers are live. Distinct from `stack.height()`: only
-    /// [`StackSlot::Register`] entries consume one. See the module docs.
+    /// The next operand register to allocate, as a *provisional* frame index.
+    ///
+    /// Seeded to `locals_count` and moved only by [`StackSlot::Register`] entries, so
+    /// it is the locals count plus the number of live operand registers — an index,
+    /// not a count. Distinct from `stack.height()`, which counts every simulated slot
+    /// including those that occupy no register. See the module docs.
+    ///
+    /// Provisional because it does not yet clear the constant and spill regions; the
+    /// end-of-body pass shifts every index derived from it.
     curr_register_index: usize,
-    /// Peak [`Self::curr_register_index`], i.e. the register count the frame needs.
+    /// Peak [`Self::curr_register_index`], i.e. one past the highest operand register
+    /// the body reaches.
+    ///
+    /// Ships verbatim as [`RegFrameLayout::registers`], so it **includes the locals**
+    /// and the frame is `max_registers + spills + consts` slots wide.
     max_registers: u32,
     /// Lazy borrows of locals; see [`lazy`].
     lazy_locals: LazyArena<Local>,
@@ -696,18 +859,41 @@ struct SimulatedStack {
     /// Frame slots holding locals and globals materialized ahead of a write.
     spills: SpillArena,
     /// Flat arena of every instruction's input operands, indexed by
-    /// [`Registers`]/[`DynSignature`] and shipped in [`FrameLayout`].
+    /// [`Registers`]/[`DynSignature`] and shipped in [`RegFrameLayout`].
+    ///
+    /// Entries are not final while the body is being walked: a constant, spill or
+    /// operand register is written here as `Slot::RegisterFrame(u32::MAX)` and
+    /// resolved by the end-of-body pass.
     input_registers: Vec<Slot>,
     /// Flat arena of every instruction's destination registers, on the same terms.
+    ///
+    /// Every entry is a provisional operand-register index — a destination is never a
+    /// constant, local or global — so the whole arena takes one uniform shift at the
+    /// end of the body.
     output_registers: Vec<u32>,
     /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
     /// Flat arena of `br_table` arms, indexed by
     /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
     br_targets: Vec<RegBrTableTarget>,
+    /// Operands awaiting a frame index, each as `(position in
+    /// [`Self::input_registers`], provisional register index)`.
+    ///
+    /// Resolved to `index + consts + spills` — no `locals_count` term, because a
+    /// provisional register index already counts from the frame base.
     register_backpatches: Vec<(usize, u32)>,
+    /// Operands awaiting a frame index, each as `(position in
+    /// [`Self::input_registers`], spill slot)`.
+    ///
+    /// Resolved to `locals_count + consts + slot`.
     spill_backpatches: Vec<(usize, SpillIndex)>,
+    /// Operands awaiting a frame index, each as `(position in
+    /// [`Self::input_registers`], pool id)`.
+    ///
+    /// Resolved to `locals_count + id`.
     const_backpatches: Vec<(usize, ConstId)>,
+    /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
+    /// one of the two terms every register index is shifted by.
     const_interner: ConstInterner,
 }
 
@@ -716,9 +902,15 @@ impl SimulatedStack {
     ///
     /// The two counts size the lazy origin tables, which are indexed by local and
     /// global index without bounds checks — so `locals_count` must include the
-    /// params, not just the declared locals. Everything else starts empty and grows
-    /// as the body is walked; the control stack in particular is empty here, and the
-    /// caller pushes the function frame onto it.
+    /// params, not just the declared locals. The arenas and the control stack start
+    /// empty and grow as the body is walked; the caller pushes the function frame onto
+    /// the control stack.
+    ///
+    /// The two register counters do **not** start at zero. Seeding both to
+    /// `locals_count` is what puts locals and operand registers in one index space,
+    /// which is what lets an operand be a bare frame index with no tag: below
+    /// `locals_count` it is a local, at or above it an operand register. It is also
+    /// why [`RegFrameLayout::registers`] includes the locals.
     fn new(locals_count: u32, globals_count: u32) -> Self {
         SimulatedStack {
             stack: Stack::new_with_capacity(0),
@@ -742,9 +934,13 @@ impl SimulatedStack {
         self.lazy_locals.origin.len() as u32
     }
 
-    /// Allocates one register, keeping [`Self::max_registers`] a true high-water
-    /// mark. Every path that allocates a register must come through here, or the
-    /// frame will be sized smaller than the registers instructions actually write.
+    /// Allocates one register, keeping [`Self::max_registers`] a true high-water mark.
+    ///
+    /// Every path that allocates a register must either come through here or fold its
+    /// destinations into `max_registers` by hand, or the frame will be sized smaller
+    /// than the registers instructions actually write. `br_truncation_registers` is
+    /// the one that does it by hand, because its destinations are not allocated by
+    /// pushing.
     fn advanced_register_index(&mut self) {
         self.curr_register_index += 1;
 
@@ -791,7 +987,7 @@ impl SimulatedStack {
             BlockVariant::Block => BlockKind::Block,
             BlockVariant::If => BlockKind::If {
                 index: if params != 0 {
-                    instr_len + 1 // move instruction is emitted if params != 0 so the actuall instruction lands at `len + 1`
+                    instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
                 } else {
                     instr_len
                 } as u32,
@@ -1011,8 +1207,12 @@ impl SimulatedStack {
     /// location, so a spill occurring before it is read still reaches it. A register
     /// allocates one.
     ///
-    /// [`Slot::Spilled`] is rejected: a spill is a *transition* of an existing
-    /// borrow, applied through [`Self::set_lazy`], never a value pushed from nothing.
+    /// The two are told apart by `frame_index < locals_count`, which works only
+    /// because register indices are provisional here: a resolved index in that range
+    /// could also be a constant or a spill.
+    ///
+    /// A spill is never pushed. It is a *transition* of an existing borrow, applied
+    /// through [`Self::set_lazy`], not a value that arrives from nothing.
     fn push(&mut self, val: Slot) {
         let slot = match val {
             Slot::RegisterFrame(frame_index) => {
@@ -1370,42 +1570,66 @@ impl SimulatedStack {
     }
 }
 
-/// The storage one lowered body needs, in slot counts.
+/// The storage one lowered body needs, and the region sizes that give an operand
+/// index its meaning.
 ///
-/// [`Self::registers`] and [`Self::spills`] are high-water marks over the whole
-/// body rather than counts at any one point, so a frame sized to them never has to
-/// grow mid-execution.
+/// # The four regions
 ///
-/// **They size two separate regions, not one.** The runtime keeps the register file
-/// and the spill area in different allocations, so a spill index stays independent
-/// of a register index and neither count has to be added to the other. Within a
-/// frame, the register file holds the params, then the declared locals, then
-/// `registers` operand slots; the spill area holds `spills` slots of its own.
+/// A frame is one contiguous run of slots, divided as:
 ///
-/// **Operands only.** Locals are not counted in either field: like the stack pass's
-/// [`max_height`](crate::instruction::stack), `registers` is measured from the
-/// frame's operand base, which sits above the locals.
+/// ```text
+///   0                                    locals — params first, then declared
+///   locals_count                         consts — the interned pool, in id order
+///   locals_count + consts                spills
+///   locals_count + consts + spills       operand registers
+///   registers + consts + spills          end of frame
+/// ```
+///
+/// [`Self::registers`] and [`Self::spills`] are high-water marks over the whole body
+/// rather than counts at any one point, so a frame sized to them never has to grow
+/// mid-execution.
+///
+/// **[`Self::registers`] counts from the frame base, so it includes the locals.**
+/// The lowering seeds its register index at `locals_count` — that is what lets a
+/// local and an operand register share one index space — so the frame is
+/// `registers + spills + consts` slots wide, *not* `locals + registers + …`.
+///
+/// # Why these counts ship with the body
+///
+/// A [`Slot`] carries one absolute frame index and no tag, so execution never needs
+/// to know which region an index names: it adds the index to the frame base and
+/// loads. The region *sizes* are the only thing that can recover the distinction,
+/// which is what [`Slot::render`] uses them for, and what the runtime uses to place
+/// the constant pool and the spill region at frame entry.
 pub(crate) struct RegFrameLayout {
-    /// Operand registers, i.e. the peak `curr_register_index`.
+    /// Peak frame index the body's operand registers reach, one past the last.
     ///
-    /// Numbered from the frame's operand base, so register `r` of a frame whose
-    /// operands begin at `b` is the runtime's `b + r`.
+    /// **Includes the locals**, since the lowering's register index starts at
+    /// [`Self::locals_count`] — so the operand registers themselves are the range
+    /// `[locals_count + consts + spills, registers + consts + spills)`.
     pub registers: u32,
     /// Spill slots holding locals and globals rescued from a later write by
     /// [`RegInstruction::LocalSpill`] / [`RegInstruction::GlobalSpill`].
     ///
     /// Zero for a body that never overwrites a lazily-forwarded local or global,
-    /// which is the common case — and then the frame's spill region is empty rather
-    /// than absent, since the runtime still records a base to release on exit.
+    /// which is the common case — and then the region is simply empty, closing the
+    /// gap between the constants and the operand registers.
     pub spills: u32,
     /// Every instruction's input operands, concatenated in lowering order.
     ///
     /// [`Signature::input`] and [`DynSignature::input_registers`] name runs here.
     /// Shipped with the body because every one of those indices is meaningless
     /// without it.
+    ///
+    /// Every entry is a *final* frame index: the end-of-body pass in
+    /// [`RegInstruction::emit_instructions_for_func`] has already resolved the
+    /// placeholders that constants, spills and operand registers were emitted as. A
+    /// surviving `u32::MAX` is a bug, which is why [`Slot::render`] names one
+    /// `<unresolved>` rather than indexing the pool with it.
     pub input_registers_arena: Box<[Slot]>,
     /// Every instruction's destination registers, on the same terms as
-    /// [`Self::input_registers_arena`].
+    /// [`Self::input_registers_arena`] — final frame indices, always in the operand
+    /// region.
     pub output_registers_arena: Box<[u32]>,
     /// Every `br_table`'s arms, concatenated in lowering order.
     ///
@@ -1413,7 +1637,17 @@ pub(crate) struct RegFrameLayout {
     /// `(targets_start, targets_len)`, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[RegBrTableTarget]>,
+    /// Params plus declared locals, i.e. the width of the frame's first region.
+    ///
+    /// Doubles as the base of the constant region, and as the boundary that tells a
+    /// local index from an operand register index during lowering.
     pub locals_count: u32,
+    /// The body's interned constants, in [`ConstId`] order.
+    ///
+    /// Constant `i` occupies frame slot `locals_count + i`, and
+    /// [`RuntimeFrame::enter_frame`](crate::instruction::RuntimeFrame::enter_frame)
+    /// writes the whole pool there on every frame entry. Its length is one of the two
+    /// terms the end-of-body pass shifts operand registers by.
     pub consts: Box<[Const]>,
 }
 
@@ -1475,9 +1709,16 @@ pub(crate) enum RegInstruction {
     /// Arity is `<1, 0>` rather than `<1, 1>` because the value stays where it
     /// already is — no destination register is allocated.
     LocalTee {
+        /// The local written.
         index: LocalIndex,
+        /// The value to write, left on the simulated stack for the consumer.
         input: Registers<1, Slot>,
     },
+    /// `loop`: a branch target and nothing else.
+    ///
+    /// Carries no operands and does no work — a `br` to this label is already an
+    /// absolute jump to it. It exists so the label occupies an instruction index for
+    /// a back-edge to name, and so a body renders with its structure visible.
     Loop,
     /// `if`: fall through when the condition is non-zero, otherwise jump past
     /// `else_index` to the else-arm — or to `end_index` when there is none.
@@ -1495,9 +1736,7 @@ pub(crate) enum RegInstruction {
     /// else-arm: control jumps straight to `end_index`.
     ///
     /// A false condition never lands here — [`Self::If`] jumps past it.
-    Else {
-        end_index: u32,
-    },
+    Else { end_index: u32 },
     /// `br`: jump to a label unconditionally.
     ///
     /// Carries no operands. Values transferred to the label were materialized by a
@@ -2019,8 +2258,13 @@ pub(crate) enum RegInstruction {
     Call {
         /// The callee, in the module's function index space.
         func_index: FuncIndex,
-        /// Frame-relative register index the callee's frame is based at: where its
-        /// arguments were staged, and where its results come back to.
+        /// Frame index the callee's frame is based at: where its arguments were
+        /// staged, and where its results come back to.
+        ///
+        /// `u32::MAX` until the end-of-body pass resolves it, like every other
+        /// operand-register index. Once resolved it is always at or above
+        /// `locals_count + consts + spills`, so the callee's frame — which starts
+        /// here — cannot overwrite this frame's locals, constants or spills.
         caller_base: u32,
     },
     /// `call_indirect`: resolve a callee through a table at execution and call it.
@@ -2064,8 +2308,9 @@ pub(crate) enum RegInstruction {
         /// `ty_index` signature's param count, in wasm push order, and are moved to
         /// `caller_base`, `caller_base + 1`, ... one apiece.
         operands: u32,
-        /// Frame-relative register index the callee's frame is based at, on the
-        /// same terms as [`Self::Call`]'s.
+        /// Frame index the callee's frame is based at, on the same terms as
+        /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
+        /// satisfying.
         caller_base: u32,
     },
     /// `ref.is_null`: `1` if the reference is null, else `0`.
@@ -2098,9 +2343,9 @@ pub(crate) enum RegInstruction {
     ///
     /// Two things rule out `copy_within` or any single-pass loop:
     ///
-    /// * The inputs are not all registers. A [`Slot`] reads from a constant, the
-    ///   locals array, the globals table, the spill area, or the register file, so
-    ///   this gathers from five places into one contiguous destination range rather
+    /// * The inputs are not all registers. A [`Slot`] may name any region of the
+    ///   frame — a constant, a local, a spill — or a global, which is not in the
+    ///   frame at all, so this gathers into one contiguous destination range rather
     ///   than moving a block within one slice.
     ///
     /// * The register-sourced inputs *overlap* the destinations, and the two callers
@@ -2225,7 +2470,7 @@ impl RegInstruction {
     /// A borrow of a local or global reads its origin in place (see [`lazy`]), and
     /// stays valid only until something writes that origin. The write emits a spill
     /// that copies the old value aside, and the borrow is redirected to it — so from
-    /// then on the operand resolves to [`Slot::Spilled`] *for every path*, because
+    /// then on the operand resolves to that spill slot *for every path*, because
     /// lowering resolves it once.
     ///
     /// That is only sound if the copy satisfies two properties. Emitting it at the
@@ -2361,11 +2606,24 @@ impl RegInstruction {
     }
 }
 
+/// Where the running frame begins in the instance's register file.
+///
+/// One field, because a positional machine needs one base: every [`Slot`] index is
+/// added to it, and the four regions are found by offsetting from it with sizes taken
+/// from [`RegFrameLayout`]. There is no second base to record, unlike the stack
+/// machine's operand height.
+///
+/// A callee's is its caller's plus the calling instruction's `caller_base`.
 pub(crate) struct RegCallerBaseData {
+    /// Absolute index of the frame's first slot — its local 0 — in
+    /// [`RegFrame::registers`](crate::runtime::reg::RegFrame).
     pub base_register_index: u32,
 }
 
 impl CallerBaseData for RegCallerBaseData {
+    /// The outermost frame starts at 0, the bottom of an empty register file — which
+    /// is what [`RuntimeFrame::reset`](crate::instruction::RuntimeFrame::reset)
+    /// guarantees before every call.
     fn initial_data() -> Self {
         RegCallerBaseData {
             base_register_index: 0,
@@ -3370,34 +3628,65 @@ impl Instruction for RegInstruction {
             }
         }
 
-        // backpatching
+        // ---- Resolving the frame layout -------------------------------------
+        //
+        // Only now are all three region sizes known, so only now can an operand be
+        // given a frame index. Walking the body could not do it: a constant or spill
+        // sits below the operand registers, so placing either needs the *final*
+        // count of both, and a register index has to clear both regions, so placing
+        // one needs their totals too. Every such operand was therefore emitted as a
+        // `Slot::RegisterFrame(u32::MAX)` placeholder plus an entry in one of the
+        // three lists resolved below, keyed by its position in the input arena.
+        //
+        // The frame these produce is:
+        //
+        //   | locals | consts | spills | registers ... |
+        //
         let locals_count = simulated_stack.lazy_locals.origin.len() as u32;
         let spills = simulated_stack.spills.allocation_len();
         let consts_len = simulated_stack.const_interner.consts.len() as u32;
 
-        // runtime format of register frame: | locals | consts | spills | registers ...
-
+        // Constants come first above the locals, in interner order — matching the
+        // order `enter_frame` writes the pool in.
         for (input_index, const_id) in simulated_stack.const_backpatches {
             simulated_stack.input_registers[input_index] =
                 Slot::RegisterFrame(const_id.0 + locals_count);
         }
 
+        // Then the spills. `set_value_to_spills` computes this same address when a
+        // `LocalSpill`/`GlobalSpill` writes one, and the two must agree exactly or a
+        // spill is read from a slot nothing wrote.
         for (input_index, spill_index) in simulated_stack.spill_backpatches {
             simulated_stack.input_registers[input_index] =
                 Slot::RegisterFrame(spill_index.raw_value() + locals_count + consts_len);
         }
 
+        // Operand registers sit above both regions, so each provisional index moves
+        // up by their combined width.
+        //
+        // There is deliberately no `locals_count` term here, unlike the two loops
+        // above: a provisional register index is already counted from the frame base,
+        // because `curr_register_index` starts at `locals_count`. Adding it again
+        // would push every register past the end of the frame.
         for (input_index, index) in simulated_stack.register_backpatches {
             simulated_stack.input_registers[input_index] =
                 Slot::RegisterFrame(index + spills + consts_len)
         }
 
+        // Destinations live in the same provisional space, so they take the identical
+        // shift — unconditionally, since every entry is an operand register. A
+        // constant, local or global can be read but never written.
         simulated_stack.output_registers = simulated_stack
             .output_registers
             .iter()
             .map(|x| x + spills + consts_len)
             .collect();
 
+        // A `caller_base` is an operand register index too — the one the arguments
+        // were staged at — so it takes the same shift. The consequence is the
+        // invariant the whole layout rests on: `caller_base` ends up at or above
+        // `locals_count + consts + spills`, so a callee's frame, which begins there,
+        // starts above everything its caller must keep across the call.
         for (instr_index, relative_caller_base) in call_instr_backpatches {
             let instr = &mut instructions.inner[instr_index];
 
@@ -3421,10 +3710,16 @@ impl Instruction for RegInstruction {
             }
         }
 
-        // Both counts are already high-water marks — `max_registers` is maintained
-        // by `advanced_register_index` and `allocation_len` only grows when no
-        // freed spill slot can be reused — so they are read off directly here
-        // rather than recomputed from the instruction list.
+        // Both counts are already high-water marks — `max_registers` is raised by
+        // `advanced_register_index` and by `br_truncation_registers`, and
+        // `allocation_len` only grows when no freed spill slot can be reused — so they
+        // are read off directly rather than recomputed from the instruction list.
+        //
+        // `registers` goes across verbatim, still counting from the frame base and so
+        // still including the locals. That is what makes the frame
+        // `registers + spills + consts` wide, and `locals_count` and `consts` travel
+        // with it because they are what invert the shifts above: given an index, they
+        // are the only way to say which region it names.
         let frame = RegFrameLayout {
             registers: simulated_stack.max_registers,
             spills,
@@ -6425,7 +6720,16 @@ impl Instruction for RegInstruction {
     }
 }
 
+/// Frame and memory accessors shared by the `execute` arms.
+///
+/// All of them resolve an index against `caller_base_data.base_register_index`, the
+/// absolute base of the running frame. Only [`Self::set_value_to_spills`] has to know
+/// anything about the layout's regions; every other frame access is one add, which is
+/// the whole point of a single untagged index space.
 impl RegInstruction {
+    /// Reads local `index`.
+    ///
+    /// The locals are the frame's first region, so a local index *is* a frame index.
     #[inline(always)]
     fn local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
@@ -6435,6 +6739,7 @@ impl RegInstruction {
         instance.frame.registers[(caller_base_data.base_register_index + index.0) as usize]
     }
 
+    /// Writes local `index`, on the same terms as [`Self::local`].
     #[inline(always)]
     fn set_local<M: Memory, I: ImportRegistry>(
         index: LocalIndex,
@@ -6445,6 +6750,12 @@ impl RegInstruction {
         instance.frame.registers[(caller_base_data.base_register_index + index.0) as usize] = val;
     }
 
+    /// Reads one operand.
+    ///
+    /// The function the whole operand design exists for: a constant, a local, a spill
+    /// and an operand register are all one indexed load, because they share one frame
+    /// index space and the index needs no tag to say which. Only a global is
+    /// elsewhere, and that is the one branch here.
     #[inline(always)]
     fn slot_value<M: Memory, I: ImportRegistry>(
         slot: Slot,
@@ -6459,6 +6770,11 @@ impl RegInstruction {
         }
     }
 
+    /// Writes a frame slot named by an already-resolved index.
+    ///
+    /// Named for its usual caller — an instruction's destination register — but it
+    /// writes any frame index, which is how `Call` and `CallIndirect` stage their
+    /// arguments at `caller_base`.
     #[inline(always)]
     fn set_value_to_register<M: Memory, I: ImportRegistry>(
         relative_index: u32,
@@ -6470,6 +6786,17 @@ impl RegInstruction {
             [(caller_base_data.base_register_index + relative_index) as usize] = val;
     }
 
+    /// Writes spill slot `relative_index`.
+    ///
+    /// The one accessor that computes a region base at execution, because a
+    /// `LocalSpill`/`GlobalSpill` carries a spill-pool index rather than a frame
+    /// index. The spill region begins above the locals and the constants, hence
+    /// `locals_count + consts.len()`.
+    ///
+    /// **This must match the spill backpatch in `emit_instructions_for_func` term for
+    /// term.** That pass resolves a spill *operand* to the same address; if the two
+    /// disagree, a spill is written to one slot and read from another, and the read
+    /// returns whatever was left there.
     #[inline(always)]
     fn set_value_to_spills<M: Memory, I: ImportRegistry>(
         relative_index: u32,

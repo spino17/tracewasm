@@ -4166,7 +4166,7 @@ impl StackInstruction {
             instance.frame.stack.len()
         );
 
-        // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
+        // SAFETY: `slot < stack.len()`, which needs four separate facts. Only the
         // first belongs to `wasmparser`; the other three are this crate's own and
         // are the ones that can rot:
         //
@@ -4181,15 +4181,15 @@ impl StackInstruction {
         //    `<Stack<Value> as RuntimeFrame>::enter_frame`. Equality holds the instant
         //    setup finishes; operands pushed during the body only raise
         //    `stack_pointer`, which is why the bound below needs `>=` and not `==`.
-        // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
+        // 3. `stack_pointer <= stack.len()` — the operand-stack invariant documented
         //    in `runtime::stack`.
-        // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
+        // 4. `stack.len()` never shrinks. Nothing truncates, clears, resizes or
         //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
         //    any such call would break this.
         //
         // Together, with (1) giving `index.0 < locals_count`:
         // `caller_base_height + index.0 < caller_base_height + locals_count <=
-        // stack_pointer <= inner.len()`.
+        // stack_pointer <= stack.len()`.
         //
         // Constant expressions cannot reach here at all — they run on the much
         // smaller `Stack::for_const_expr_evaluation`, and

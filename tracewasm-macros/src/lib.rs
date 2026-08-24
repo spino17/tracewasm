@@ -1,7 +1,7 @@
 //! Procedural macros for TraceWasm.
 //!
 //! The [`macro@imports`] attribute turns an `impl` block of host functions into
-//! a generated [`ImportRegistry`] implementation, so embedders only write the
+//! a generated `ImportRegistry` implementation, so embedders only write the
 //! function bodies.
 //!
 //! ```ignore
@@ -39,7 +39,7 @@
 //! leave it off. A `&mut` parameter anywhere else is rejected, since it would
 //! shift the wasm arguments.
 //!
-//! The bound is [`MemoryView`], not [`Memory`]: the generated `execute` is
+//! The bound is `MemoryView`, not `Memory`: the generated `execute` is
 //! `fn execute<V: MemoryView>(..)`, so a method bounded on the wider `Memory`
 //! does not type-check against it. That is the intended capability, not a
 //! limitation — `MemoryView` reads and writes but cannot resize, and only the
@@ -66,7 +66,7 @@
 //! a `Result` the only options are to panic the embedder or fabricate a value.
 //!
 //! A `#[global("...")]`-tagged method instead declares an importable global: it
-//! takes `&self`, returns a single [`WasmTy`] value, and its method name is the
+//! takes `&self`, returns a single `WasmTy` value, and its method name is the
 //! global name. The macro routes it through `ImportRegistry::get_global` and
 //! counts it in `ImportRegistry::global_count`.
 //!

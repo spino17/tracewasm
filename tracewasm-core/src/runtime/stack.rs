@@ -13,10 +13,10 @@
 //! [`crate::instruction`]: a branch resets the stack to a known height in O(1)
 //! by moving the pointer, never by freeing elements.
 //!
-//! The invariant is `stack_pointer <= inner.len()`. Popping and truncating only
+//! The invariant is `stack_pointer <= stack.len()`. Popping and truncating only
 //! lower `stack_pointer`, leaving the popped slots allocated; a later push
 //! overwrites a stale slot in place instead of reallocating. Consequently the
-//! live region is always `inner[..stack_pointer]`, and `inner.len()` reflects
+//! live region is always `stack[..stack_pointer]`, and `stack.len()` reflects
 //! the high-water mark, not the current height. The backing storage is reserved
 //! once (`VM_STACK_INITIAL_ALLOCATION_SIZE`) so steady-state execution does not
 //! reallocate.
@@ -36,7 +36,7 @@
 //!
 //! ## Ordering conventions
 //!
-//! The stack grows upward: `inner[stack_pointer - 1]` is the top. Bulk pops come
+//! The stack grows upward: `stack[stack_pointer - 1]` is the top. Bulk pops come
 //! in two flavors that differ only in the order of the returned `Vec`:
 //! `pops` returns top-first (the former top at `v[0]`), `pops_and_reverse`
 //! returns push order (deepest-first). Both are currently test-only utilities;
@@ -76,11 +76,11 @@ use smallvec::{SmallVec, smallvec};
 /// Generic over the element type so the same machinery can hold runtime `Val`s
 /// during execution and be unit-tested with simpler types.
 pub(crate) struct Stack<T> {
-    /// Backing storage. Only `inner[..stack_pointer]` is live; slots at or above
+    /// Backing storage. Only `stack[..stack_pointer]` is live; slots at or above
     /// `stack_pointer` are stale leftovers kept to avoid reallocation.
     pub(crate) stack: Vec<T>,
     /// Logical height: index one past the top value. The top is
-    /// `inner[stack_pointer - 1]`. Always `<= inner.len()`.
+    /// `stack[stack_pointer - 1]`. Always `<= stack.len()`.
     stack_pointer: usize, // points to the top of the stack
 }
 
@@ -123,7 +123,7 @@ impl<T: Clone> Stack<T> {
     ///
     /// Precondition: the stack is non-empty, as for [`Self::pop`].
     ///
-    /// Bounded by `stack_pointer`, not by `inner.len()` — the backing vector
+    /// Bounded by `stack_pointer`, not by `stack.len()` — the backing vector
     /// extends past the live region (see the module docs), so slots at or above
     /// the height hold stale values from earlier pops rather than being absent.
     /// Deriving the index from `stack_pointer` is what keeps this a read of the
@@ -142,7 +142,7 @@ impl<T: Clone> Stack<T> {
     /// Empties the stack in O(1) by moving the pointer back to 0.
     ///
     /// The backing storage is left untouched, so both the allocation and the
-    /// high-water mark (`inner.len()`) survive. That is what keeps
+    /// high-water mark (`stack.len()`) survive. That is what keeps
     /// [`Self::push_grow`] rare across the life of an instance rather than rare
     /// only within a single call.
     pub fn reset(&mut self) {
@@ -156,7 +156,7 @@ impl<T: Clone> Stack<T> {
 
     /// Pushes `val` onto the top of the stack.
     ///
-    /// Reuses a stale slot when the pointer is below `inner.len()` (i.e. after a
+    /// Reuses a stale slot when the pointer is below `stack.len()` (i.e. after a
     /// prior pop/truncate), only growing the backing vector when the pointer is
     /// already at the high-water mark. Either way `stack_pointer` advances by one.
     ///
@@ -184,7 +184,7 @@ impl<T: Clone> Stack<T> {
     ///
     /// Runs at most once per stack slot over the life of the stack. Since the stack
     /// lives on the [`Instance`](crate::instance::Instance) and [`Self::reset`]
-    /// leaves `inner` alone, that is once per slot per instance rather than per
+    /// leaves `stack` alone, that is once per slot per instance rather than per
     /// call — on the order of tens of calls against hundreds of thousands of pushes.
     ///
     /// Kept out of line so [`Self::push`] stays cheap; see the note there.
@@ -304,7 +304,7 @@ impl<T: Clone> Stack<T> {
     /// message names a nonsensical index — the caller is expected to have derived
     /// `depth` from an arity the lowering pass already knows.
     ///
-    /// Bounded by `stack_pointer` rather than `inner.len()`, for the reason
+    /// Bounded by `stack_pointer` rather than `stack.len()`, for the reason
     /// [`Self::top`] gives.
     pub fn peek_from_top(&self, depth: u32) -> &T {
         &self.stack[(self.height() - 1 - depth) as usize]
@@ -476,7 +476,7 @@ mod tests {
         }
     }
 
-    /// The logically-live portion of the stack (`inner[..sp]`), bottom-to-top.
+    /// The logically-live portion of the stack (`stack[..sp]`), bottom-to-top.
     /// Slots above `stack_pointer` are stale and intentionally excluded.
     fn live<T: Clone>(s: &Stack<T>) -> Vec<T> {
         s.stack[..s.stack_pointer].to_vec()
@@ -523,13 +523,13 @@ mod tests {
 
         s.push(1);
         s.push(2);
-        s.push(3); // inner.len() == 3
+        s.push(3); // stack.len() == 3
 
         s.pop(); // sp == 2, but backing vec is still length 3
 
         assert_eq!(s.stack.len(), 3);
 
-        s.push(9); // sp (2) < len (3) => overwrite inner[2], do NOT grow
+        s.push(9); // sp (2) < len (3) => overwrite stack[2], do NOT grow
 
         assert_eq!(s.stack_pointer, 3);
         assert_eq!(s.stack.len(), 3, "push after pop must reuse the freed slot");
@@ -609,7 +609,7 @@ mod tests {
         s.push(30);
         s.pop();
 
-        // 30 is still sitting in `inner`, above the live region
+        // 30 is still sitting in `stack`, above the live region
         assert!(s.stack.len() > s.stack_pointer);
         assert_eq!(*s.top(), 20);
     }
@@ -630,7 +630,7 @@ mod tests {
         s.push(1);
         s.pop();
 
-        // `stack_pointer` is 0 but `inner` still holds the 1
+        // `stack_pointer` is 0 but `stack` still holds the 1
         let _ = s.top();
     }
 
@@ -765,7 +765,7 @@ mod tests {
         }
 
         s.truncate(2); // sp == 2, inner still [1,2,3,4,5]
-        s.push(99); // overwrites inner[2]
+        s.push(99); // overwrites stack[2]
 
         assert_eq!(s.stack_pointer, 3);
         assert_eq!(live(&s), vec![1, 2, 99]);

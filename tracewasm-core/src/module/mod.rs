@@ -643,8 +643,9 @@ pub(crate) struct FuncBody<Instr: Instruction> {
     /// lowering's job to uphold it — see
     /// [`emit_instructions_for_func`](crate::instruction::Instruction::emit_instructions_for_func).
     pub instruction_offsets: Box<[u32]>,
-    /// Whatever else this lowering needs to run the body: `br_table` arms for
-    /// both machines, plus register and spill counts for the register machine.
+    /// Whatever else this lowering needs to run the body: `br_table` arms for both
+    /// machines, and for the register machine its operand arenas, the sizes of the
+    /// frame's four regions, and the body's constant pool.
     pub(crate) frame_layout: Instr::FrameLayout,
 }
 

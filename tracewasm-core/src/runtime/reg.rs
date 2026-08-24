@@ -8,19 +8,57 @@
 //! machine's convention on both counts, which the
 //! [`RuntimeFrame`] trait docs spell out.
 //!
-//! Two regions, each a stack of per-frame slices with its own base:
+//! # A frame's four regions
 //!
-//! * the **register file**, holding a frame's params, declared locals and operand
-//!   registers contiguously. Its base comes from the caller's position, so the
-//!   space a returning frame occupied is reused without being reclaimed.
-//! * the **spill area**, holding the locals and globals a frame materialised ahead
-//!   of a write (see [`lazy`](crate::instruction::register::lazy)). Its base is the
-//!   area's current length, so unlike the register file it *has* to be truncated on
-//!   frame exit — nothing else would ever hand a slot back.
+//! One `Vec<Value>` holds everything, and a frame is four consecutive regions of
+//! it. Their order is what makes the layout work, so it is fixed:
 //!
-//! **Unfinished.** The register backend is not yet executable: `RegInstruction`'s
-//! `execute` is unimplemented, so nothing yet reads a spill slot or a register
-//! back out.
+//! ```text
+//!   base + 0                                  locals — params first, then declared
+//!   base + locals_count                       constants — the body's interned pool
+//!   base + locals_count + consts              spills
+//!   base + locals_count + consts + spills     operand registers
+//!   base + registers + consts + spills        end of frame
+//! ```
+//!
+//! An operand carries one absolute frame index and no tag, so a read is
+//! `registers[base + index]` — a single add, whichever region the index falls in.
+//! Only the region *sizes* say which one that is, which is what
+//! [`Slot::render`](crate::instruction::register::Slot) consults and what nothing on
+//! the execution path needs to.
+//!
+//! Note that [`RegFrameLayout::registers`] counts from the frame base and so
+//! **includes the locals**: a frame is `registers + spills + consts` slots wide, not
+//! `locals + registers + …`.
+//!
+//! # Why constants and spills sit below the registers
+//!
+//! A callee is based at its caller's `caller_base`, which is an *operand register*
+//! index — so the callee's frame begins at or above the start of the caller's
+//! operand region. Everything the caller needs to survive the call therefore has to
+//! live below that point:
+//!
+//! * its **locals**, which the body reads after the call returns;
+//! * its **constants**, which are read wherever they appear in the body;
+//! * its **spills**, whose entire purpose is holding a local or global that a later
+//!   write or call would otherwise have clobbered (see
+//!   [`lazy`](crate::instruction::register::lazy)).
+//!
+//! Ordering them below the operand registers makes that hold by construction rather
+//! than by arithmetic: no callee frame can reach them, because no `caller_base` is
+//! that low.
+//!
+//! It also keeps a call free of copies. The caller stages the arguments at
+//! `caller_base` and they *are* the callee's first locals, so
+//! [`RuntimeFrame::enter_frame`] leaves them where they are — it only zeroes the
+//! declared locals above them and writes the constant pool above those.
+//!
+//! # Reuse without reclamation
+//!
+//! A frame's base comes from the caller's position, not from the file's length, so
+//! the space a returning frame occupied is reused by the next call at that depth
+//! without anything being truncated. [`RuntimeFrame::exit_frame`] therefore only
+//! moves results down; it does not shrink the file.
 
 use crate::{
     instruction::{
@@ -33,14 +71,16 @@ use smallvec::{SmallVec, smallvec};
 
 /// One instance's value storage, shared by every activation in a call chain.
 ///
-/// Both regions are sized by [`RuntimeFrame::enter_frame`] from the callee's
-/// [`RegFrameLayout`], and both are emptied by [`RuntimeFrame::reset`] at the start
-/// of every call — which is what makes an instance reusable after a trap, since a
-/// trap unwinds without reaching [`RuntimeFrame::exit_frame`].
+/// Sized by [`RuntimeFrame::enter_frame`] from the callee's [`RegFrameLayout`], and
+/// emptied by [`RuntimeFrame::reset`] at the start of every call — which is what
+/// makes an instance reusable after a trap, since a trap unwinds without reaching
+/// [`RuntimeFrame::exit_frame`].
 pub(crate) struct RegFrame {
-    /// The register file. Register `n` of an activation based at `b` is
-    /// `inner[b + n]`, where the frame spans its params, its declared locals, and
-    /// then the layout's operand registers.
+    /// Every live value in the call chain, one frame's four regions after another's.
+    ///
+    /// Slot `n` of an activation based at `b` is `registers[b + n]`, where `n` ranges
+    /// over the frame's locals, constants, spills and operand registers in that
+    /// order — see the module docs for the boundaries.
     ///
     /// `reset` must clear it, not merely truncate to a base:
     /// [`RuntimeFrame::set_initial_params`] positions the entry function's params
@@ -62,12 +102,20 @@ impl RuntimeFrame for RegFrame {
     type BrTableTarget = RegBrTableTarget;
     type FrameLayout = RegFrameLayout;
 
+    /// Stages the entry function's arguments, which `reset` has just made slots
+    /// `0..params.len()` — where [`CallerBaseData::initial_data`] says the outermost
+    /// frame is based.
     fn set_initial_params(&mut self, params: &[super::value::Val]) {
         for param in params {
             self.registers.push(param.into());
         }
     }
 
+    /// Reads an imported callee's arguments, which the caller staged at
+    /// `caller_base` exactly as it would for a local call.
+    ///
+    /// Indexed from the frame *base*, not the operand region: the arguments are the
+    /// callee's first locals, so they sit at the bottom of its frame.
     fn get_params_for_import_call(
         &mut self,
         params_count: u32,
@@ -83,6 +131,10 @@ impl RuntimeFrame for RegFrame {
         s
     }
 
+    /// Writes a host function's results back over the arguments it was given.
+    ///
+    /// The same slots [`Self::exit_frame`] would have moved a local callee's results
+    /// down to, so the caller reads an imported call's results the same way.
     fn set_results_from_import_call<R: IntoIterator<Item = super::value::Val>>(
         &mut self,
         results: R,
@@ -110,17 +162,32 @@ impl RuntimeFrame for RegFrame {
         s
     }
 
-    /// Empties both regions, so the next call starts from a base of 0 in each.
+    /// Empties the file, so the next call starts from a base of 0.
     ///
     /// Needed on every call, not only after a trap: `set_initial_params` pushes, so
     /// the entry frame's params land at register 0 only while the file is empty.
-    /// The spill area additionally *has* to be cleared here, because a trap returns
-    /// without reaching `exit_frame` and its base is a length — an orphaned region
-    /// would push every later frame's base up for the life of the instance.
     fn reset(&mut self) {
         self.registers.clear();
     }
 
+    /// Prepares the callee's frame: sizes the file for it, zeroes its declared
+    /// locals, and materialises its constant pool.
+    ///
+    /// The arguments are **not** touched. The caller staged them contiguously at
+    /// `caller_base`, which is this frame's base, so they are already the callee's
+    /// params — slots `0..params_count`. That is what makes a call copy-free, and it
+    /// is why the zeroing loop starts at `params_count` rather than 0.
+    ///
+    /// Above the locals comes the constant pool. It is rewritten on every entry
+    /// because these are frame slots like any other: the body may reuse the region
+    /// across a recursive call, and a previous activation at this depth left its own
+    /// values behind.
+    ///
+    /// The spill region needs nothing here — a spill is written before it is read, by
+    /// the [`LocalSpill`](crate::instruction::register::RegInstruction::LocalSpill) or
+    /// [`GlobalSpill`](crate::instruction::register::RegInstruction::GlobalSpill) that
+    /// the lowering placed above every path that reads it — so entry only has to
+    /// reserve room for it.
     fn enter_frame(
         &mut self,
         params_count: u32,
@@ -128,25 +195,33 @@ impl RuntimeFrame for RegFrame {
         caller_base_data: &mut RegCallerBaseData,
         frame_layout: &RegFrameLayout,
     ) {
-        // base_register_index, base_register_index+1...base_register_index + params_count - 1 is filled with params
         let base_register_index = caller_base_data.base_offset() as usize;
         let locals_count = locals_ty.len();
         let params_count = params_count as usize;
+
+        // `registers` counts from the frame base, so it already covers the locals;
+        // the two other regions are what widen the frame beyond it.
         let total_register_capacity = base_register_index
             + (frame_layout.registers + frame_layout.spills) as usize
             + frame_layout.consts.len();
 
+        // Only grow. A deeper call may have pushed the file past this frame's end,
+        // and those slots belong to frames still live below the deepest one.
         if self.registers.len() < total_register_capacity {
             self.registers
                 .resize(total_register_capacity, Value::default());
         }
 
+        // Wasm requires declared locals to start at zero, and the slots may hold
+        // whatever a previous activation at this depth left in them.
         for i in 0..(locals_count - params_count) {
             let ty = locals_ty[i + params_count];
 
             self.registers[base_register_index + params_count + i] = Value::zero_of_ty(ty);
         }
 
+        // Constant `i` is at `locals_count + i`, matching the frame index the
+        // lowering's constant backpatch resolved each operand to.
         for i in 0..frame_layout.consts.len() {
             let const_val = frame_layout.consts[i];
 
@@ -160,26 +235,25 @@ impl RuntimeFrame for RegFrame {
         }
     }
 
-    /// Moves the callee's results down over its locals, so they land where the
+    /// Moves the callee's results down to its frame base, so they land where the
     /// caller staged the arguments.
     ///
-    /// The two bases bracket the frame. Results are produced in the callee's
-    /// *operand* region, which begins at `callee_frame_base_register_index`
-    /// (`base + locals`), because
-    /// [`RegFrameLayout`] numbers
-    /// registers from the operand base — register `r` is `inner[operand_base + r]`,
-    /// and a body's `end` materialises its results into registers `0..results`.
-    /// They are copied to `base_register_index`, which is the absolute position of
-    /// the `caller_base` the calling
+    /// A body's `end` materialises its results into its first operand registers, so
+    /// they are read from the top region — `base + locals + consts + spills` — and
+    /// written to `base`, the absolute position the calling
     /// [`RegInstruction::Call`](crate::instruction::register::RegInstruction::Call)
-    /// staged its arguments at — so the caller needs to do nothing when the call
-    /// returns.
+    /// staged its arguments at. That is why the caller needs to do nothing when a
+    /// call returns: the results are already in the slots it will read them from.
+    ///
+    /// The layout is needed to locate the operand region, and it must be the
+    /// *callee's* — passing the caller's would read the results from the wrong
+    /// offset and silently return the wrong values.
     ///
     /// Gathered into a temporary before being written back, since the two ranges
-    /// overlap whenever the callee has fewer locals than results. The copy only
-    /// ever moves *downward* (operands sit above locals), so a plain forward loop
-    /// would also be safe today — the temporary keeps that from being load-bearing.
-    /// A callee with no locals makes this a self-copy, which is a harmless no-op.
+    /// overlap whenever a frame has fewer locals, constants and spills than results.
+    /// The copy only ever moves *downward*, so a plain forward loop would also be
+    /// safe today — the temporary keeps that from being load-bearing. A frame with
+    /// none of those three regions makes this a self-copy, which is a harmless no-op.
     ///
     /// Nothing is reclaimed: a positional machine has no pointer to move, so the
     /// space above the results is simply reused by the next call.
