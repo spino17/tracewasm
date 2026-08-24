@@ -438,7 +438,9 @@ impl TraceVM {
         // preserving the results on top. They therefore land in exactly the slots
         // the caller's arguments occupied, which is what lets the caller do
         // nothing at all after a `Call` returns.
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, &func_body.frame_layout);
 
         Ok(())
     }
@@ -628,9 +630,13 @@ impl TraceVM {
                 // pop the frame!
                 let frame = frames.pop().unwrap(); // safe to unwrap as checked above!
 
-                instance
-                    .frame
-                    .exit_frame(frame.callee_results_count, &caller_base_data);
+                // `frame_layout` still describes the callee here — it is replaced with
+                // the caller's below, once its results have been moved down.
+                instance.frame.exit_frame(
+                    frame.callee_results_count,
+                    &caller_base_data,
+                    &frame_layout,
+                );
 
                 // reset the state of the frame which executed call instruction
                 func_index = frame.func_index;
@@ -642,7 +648,9 @@ impl TraceVM {
             }
         }
 
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, &frame_layout);
 
         Ok(())
     }

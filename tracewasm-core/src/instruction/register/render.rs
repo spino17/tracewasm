@@ -10,8 +10,9 @@ impl RegInstruction {
         let ins = &frame.input_registers_arena;
         let outs = &frame.output_registers_arena;
 
-        let sig1 = |i: &Registers<1, Slot>| i.registers(ins)[0].render();
-        let list = |xs: &[Slot]| xs.iter().map(|x| x.render()).collect::<Vec<_>>().join(", ");
+        let sig1 = |i: &Registers<1, Slot>| i.registers(ins)[0].render(frame);
+        let list =
+            |xs: &[Slot]| xs.iter().map(|x| x.render(frame)).collect::<Vec<_>>().join(", ");
 
         let regs = |xs: &[u32]| {
             xs.iter()
@@ -27,7 +28,7 @@ impl RegInstruction {
             format!(
                 "{:<12} [{}]+{offset} -> {}",
                 mnemonic(kind),
-                inputs[0].render(),
+                inputs[0].render(frame),
                 regs(outputs)
             )
         };
@@ -36,8 +37,8 @@ impl RegInstruction {
             format!(
                 "{:<12} [{}]+{offset} <- {}",
                 mnemonic(kind),
-                inputs[0].render(),
-                inputs[1].render()
+                inputs[0].render(frame),
+                inputs[1].render(frame)
             )
         };
 
@@ -310,17 +311,17 @@ impl RegInstruction {
             RegInstruction::LocalSet { index, input } => format!(
                 "local.set    local{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(frame)
             ),
             RegInstruction::LocalTee { index, input } => format!(
                 "local.tee    local{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(frame)
             ),
             RegInstruction::GlobalSet { index, input } => format!(
                 "global.set   global{} <- {}",
                 index.0,
-                input.registers(ins)[0].render()
+                input.registers(ins)[0].render(frame)
             ),
             RegInstruction::LocalSpill { index, spill_index } => {
                 format!("local.spill  local{} -> spill{spill_index}", index.0)
