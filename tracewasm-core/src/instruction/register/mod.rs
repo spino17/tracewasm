@@ -154,9 +154,12 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
-        register::lazy::{
-            LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot, SpillArena,
-            SpillIndex,
+        register::{
+            arena::{Arena, Id},
+            lazy::{
+                LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
+                SpillArena, SpillIndex,
+            },
         },
     },
     memory::Memory,
@@ -179,6 +182,7 @@ use std::{marker::PhantomData, vec};
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
+pub mod arena;
 pub mod lazy;
 pub mod render;
 
@@ -813,6 +817,47 @@ pub(crate) struct RegBrTableTarget {
     pub target_index: u32,
 }
 
+#[derive(Debug)]
+pub(crate) struct IfOperands {
+    cond: Registers<1, Slot>,
+    /// Index of the matching [`Self::Else`], backpatched at `end`.
+    else_index: Option<u32>,
+    /// Index of the matching `end`, backpatched.
+    end_index: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct CallIndirectOperands {
+    /// Index into the module's type section of the signature this call site
+    /// expects.
+    ///
+    /// Two jobs: the callee's own type is checked structurally against it at
+    /// execution — a mismatch traps — and its param count is how many of the
+    /// operands at `operands` are arguments.
+    ty_index: TyIndex,
+    /// The table the callee index is resolved through, and what a trap out of
+    /// this call reports.
+    table_index: TableIndex,
+    /// Where the callee index is read from. Resolved *before* the move is
+    /// performed; see the note above.
+    slot: Registers<1, Slot>,
+    /// Start of this call's arguments in the input arena. They run for the
+    /// `ty_index` signature's param count, in wasm push order, and are moved to
+    /// `caller_base`, `caller_base + 1`, ... one apiece.
+    operands: u32,
+    /// Frame index the callee's frame is based at, on the same terms as
+    /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
+    /// satisfying.
+    caller_base: u16,
+}
+
+#[derive(Debug)]
+pub(crate) struct BrIfOperands {
+    cond: Registers<1, Slot>,
+    mov: DynSignature,
+    target_index: u32,
+}
+
 /// The whole lowering state for one function body.
 ///
 /// "Simulated" because [`Self::stack`] holds descriptions of operands rather than
@@ -859,6 +904,9 @@ struct SimulatedStack {
     /// Flat arena of `br_table` arms, indexed by
     /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
     br_targets: Vec<RegBrTableTarget>,
+    if_arena: Arena<IfOperands>,
+    br_if_arena: Arena<BrIfOperands>,
+    call_indirect_arena: Arena<CallIndirectOperands>,
     /// Operands awaiting a frame index, each as `(position in
     /// [`Self::input_registers`], provisional register index)`.
     ///
@@ -905,6 +953,9 @@ impl SimulatedStack {
             output_registers: vec![],
             control_stack: ControlStack::default(),
             br_targets: vec![],
+            if_arena: Arena::default(),
+            br_if_arena: Arena::default(),
+            call_indirect_arena: Arena::default(),
             register_backpatches: vec![],
             spill_backpatches: vec![],
             const_backpatches: vec![],
@@ -1626,6 +1677,9 @@ pub(crate) struct RegFrameLayout {
     /// `(targets_start, targets_len)`, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[RegBrTableTarget]>,
+    pub if_arena: Arena<IfOperands>,
+    pub br_if_arena: Arena<BrIfOperands>,
+    pub call_indirect_arena: Arena<CallIndirectOperands>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
@@ -1727,13 +1781,7 @@ pub(crate) enum RegInstruction {
     ///
     /// Block params, if any, were materialized by a [`Self::Move`] emitted just
     /// before this instruction.
-    If {
-        cond: Registers<1, Slot>,
-        /// Index of the matching [`Self::Else`], backpatched at `end`.
-        else_index: Option<u32>,
-        /// Index of the matching `end`, backpatched.
-        end_index: u32,
-    },
+    If(Id<IfOperands>),
     /// Reached only by falling out of a taken then-branch, which must skip the
     /// else-arm: control jumps straight to `end_index`.
     ///
@@ -1758,11 +1806,7 @@ pub(crate) enum RegInstruction {
     ///
     /// The condition is read before the move is performed, so a move whose
     /// destinations include the condition's register is harmless.
-    BrIf {
-        cond: Registers<1, Slot>,
-        mov: DynSignature,
-        target_index: u32,
-    },
+    BrIf(Id<BrIfOperands>),
     /// `br_table`: jump to the arm selected by the operand, or to the default when it
     /// is out of range.
     ///
@@ -2292,29 +2336,7 @@ pub(crate) enum RegInstruction {
     /// [`Self::BrIf`] has with its condition.
     ///
     /// [`Self::ty_index`]: RegInstruction::CallIndirect::ty_index
-    CallIndirect {
-        /// Index into the module's type section of the signature this call site
-        /// expects.
-        ///
-        /// Two jobs: the callee's own type is checked structurally against it at
-        /// execution — a mismatch traps — and its param count is how many of the
-        /// operands at `operands` are arguments.
-        ty_index: TyIndex,
-        /// The table the callee index is resolved through, and what a trap out of
-        /// this call reports.
-        table_index: TableIndex,
-        /// Where the callee index is read from. Resolved *before* the move is
-        /// performed; see the note above.
-        slot: Registers<1, Slot>,
-        /// Start of this call's arguments in the input arena. They run for the
-        /// `ty_index` signature's param count, in wasm push order, and are moved to
-        /// `caller_base`, `caller_base + 1`, ... one apiece.
-        operands: u32,
-        /// Frame index the callee's frame is based at, on the same terms as
-        /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
-        /// satisfying.
-        caller_base: u16,
-    },
+    CallIndirect(Id<CallIndirectOperands>),
     /// `ref.is_null`: `1` if the reference is null, else `0`.
     ///
     /// The result is an `i32`, not a reference — like [`Self::I32Eqz`] this is a
@@ -2459,8 +2481,8 @@ pub(crate) enum RegInstruction {
 // index the variant already carries (as `CallIndirect` does with its `ty_index` in the
 // stack pass), or store an explicit `len` and drop something else to pay for it.
 const _: () = assert!(
-    size_of::<RegInstruction>() <= 24,
-    "RegInstruction grew past 24 bytes. Need to keep it compact."
+    size_of::<RegInstruction>() <= 16,
+    "RegInstruction grew past 16 bytes. Need to keep it compact."
 );
 
 impl RegInstruction {
@@ -3208,12 +3230,14 @@ impl Instruction for RegInstruction {
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
+                    let cond = simulated_stack.registers_for::<1, 0>()?.input;
+
                     instructions.push(
-                        RegInstruction::If {
-                            cond: simulated_stack.registers_for::<1, 0>()?.input,
+                        RegInstruction::If(simulated_stack.if_arena.alloc(IfOperands {
+                            cond,
                             else_index: None,
                             end_index: u32::MAX,
-                        },
+                        })),
                         offset,
                     );
                 }
@@ -3339,11 +3363,11 @@ impl Instruction for RegInstruction {
                         };
 
                     instructions.push(
-                        RegInstruction::BrIf {
+                        RegInstruction::BrIf(simulated_stack.br_if_arena.alloc(BrIfOperands {
                             cond,
                             mov: move_registers,
                             target_index,
-                        },
+                        })),
                         offset,
                     );
                 }
@@ -3488,13 +3512,15 @@ impl Instruction for RegInstruction {
                     call_instr_backpatches.push((instructions.len(), caller_base));
 
                     instructions.push(
-                        RegInstruction::CallIndirect {
-                            ty_index: TyIndex(type_index),
-                            table_index: TableIndex(table_index),
-                            slot,
-                            operands: move_registers.input,
-                            caller_base: u16::MAX,
-                        },
+                        RegInstruction::CallIndirect(simulated_stack.call_indirect_arena.alloc(
+                            CallIndirectOperands {
+                                ty_index: TyIndex(type_index),
+                                table_index: TableIndex(table_index),
+                                slot,
+                                operands: move_registers.input,
+                                caller_base: u16::MAX,
+                            },
+                        )),
                         offset,
                     );
 
@@ -3532,12 +3558,10 @@ impl Instruction for RegInstruction {
                             RegInstruction::Br { target_index } => {
                                 *target_index = index;
                             }
-                            RegInstruction::BrIf {
-                                cond: _,
-                                mov: _,
-                                target_index,
-                            } => {
-                                *target_index = index;
+                            RegInstruction::BrIf(id) => {
+                                let entry = simulated_stack.br_if_arena.get_mut(*id);
+
+                                entry.target_index = index;
                             }
                             RegInstruction::BrTable { .. } => {
                                 // `br_targets_index` is already absolute, so the table's own
@@ -3564,19 +3588,17 @@ impl Instruction for RegInstruction {
                             else_index: ei,
                         } => {
                             // Fill the `if`'s `else_index` and `end_index` ...
-                            let RegInstruction::If {
-                                cond: _,
-                                else_index,
-                                end_index,
-                            } = &mut instructions.inner[if_index as usize]
+                            let RegInstruction::If(id) = &mut instructions.inner[if_index as usize]
                             else {
                                 unreachable!(
                                     "hitting this means TraceWasm has a bug recording the instructions"
                                 )
                             };
 
-                            *else_index = ei;
-                            *end_index = index;
+                            let entry = simulated_stack.if_arena.get_mut(*id);
+
+                            entry.else_index = ei;
+                            entry.end_index = index;
 
                             // ... and point the `else` (if present) at this same `end`, so a then-branch
                             // that falls through into `else` knows where the construct closes.
@@ -3684,14 +3706,10 @@ impl Instruction for RegInstruction {
                     func_index: _,
                     caller_base,
                 } => *caller_base = relative_caller_base + spills + consts_len,
-                RegInstruction::CallIndirect {
-                    ty_index: _,
-                    table_index: _,
-                    slot: _,
-                    operands: _,
-                    caller_base,
-                } => {
-                    *caller_base = relative_caller_base + spills + consts_len;
+                RegInstruction::CallIndirect(id) => {
+                    let entry = simulated_stack.call_indirect_arena.get_mut(*id);
+
+                    entry.caller_base = relative_caller_base + spills + consts_len;
                 }
                 _ => unreachable!(
                     "instruction backpatching is inserted only for call and call_indirect instruction!"
@@ -3715,6 +3733,9 @@ impl Instruction for RegInstruction {
             input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
             output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),
             br_targets_arena: simulated_stack.br_targets.into_boxed_slice(),
+            if_arena: simulated_stack.if_arena,
+            br_if_arena: simulated_stack.br_if_arena,
+            call_indirect_arena: simulated_stack.call_indirect_arena,
             locals_count,
             consts: simulated_stack.const_interner.consts.into_boxed_slice(),
         };
@@ -3794,13 +3815,10 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::Loop => Step::Next,
-            RegInstruction::If {
-                cond,
-                else_index,
-                end_index,
-            } => {
+            RegInstruction::If(id) => {
+                let entry = frame_layout.if_arena.get(*id);
                 let cond = Self::slot_value(
-                    cond.registers(&frame_layout.input_registers_arena)[0],
+                    entry.cond.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -3809,31 +3827,29 @@ impl Instruction for RegInstruction {
                 if cond != 0 {
                     Step::Next
                 } else {
-                    if let Some(else_index) = else_index {
-                        Step::JumpTo(*else_index + 1) // first instruction of the else branch
+                    if let Some(else_index) = entry.else_index {
+                        Step::JumpTo(else_index + 1) // first instruction of the else branch
                     } else {
-                        Step::JumpTo(*end_index)
+                        Step::JumpTo(entry.end_index)
                     }
                 }
             }
             RegInstruction::Else { end_index } => Step::JumpTo(*end_index),
             RegInstruction::Br { target_index } => Step::JumpTo(*target_index),
-            RegInstruction::BrIf {
-                cond,
-                mov,
-                target_index,
-            } => {
+            RegInstruction::BrIf(id) => {
+                let entry = frame_layout.br_if_arena.get(*id);
+
                 let cond = Self::slot_value(
-                    cond.registers(&frame_layout.input_registers_arena)[0],
+                    entry.cond.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
                 .as_i32();
 
                 if cond != 0 {
-                    Self::execute_mov(mov, caller_base_data, frame_layout, instance);
+                    Self::execute_mov(&entry.mov, caller_base_data, frame_layout, instance);
 
-                    Step::JumpTo(*target_index)
+                    Step::JumpTo(entry.target_index)
                 } else {
                     Step::Next
                 }
@@ -6503,17 +6519,12 @@ impl Instruction for RegInstruction {
                     Step::Next
                 }
             }
-            RegInstruction::CallIndirect {
-                ty_index,
-                table_index,
-                slot,
-                operands,
-                caller_base,
-            } => {
-                let table = &instance.table_vals[table_index.0 as usize];
+            RegInstruction::CallIndirect(id) => {
+                let entry = frame_layout.call_indirect_arena.get(*id);
+                let table = &instance.table_vals[entry.table_index.0 as usize];
 
                 let slot = Self::slot_value(
-                    slot.registers(&frame_layout.input_registers_arena)[0],
+                    entry.slot.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )
@@ -6521,19 +6532,19 @@ impl Instruction for RegInstruction {
 
                 let Some(func_ref) = table.table.get(slot).copied() else {
                     return Err(Box::new(InstructionExecutionError::CallIndirect(
-                        *table_index,
+                        entry.table_index,
                         CallIndirectError::TableSlotOutOfBounds,
                     )));
                 };
 
                 let Some(callee_func_index) = func_ref else {
                     return Err(Box::new(InstructionExecutionError::CallIndirect(
-                        *table_index,
+                        entry.table_index,
                         CallIndirectError::NullElementInTable,
                     )));
                 };
 
-                let func_ty = &module.types[ty_index.0 as usize];
+                let func_ty = &module.types[entry.ty_index.0 as usize];
                 let params = &func_ty.params;
                 let results = &func_ty.results;
                 let func = &module.func_decls[callee_func_index.0 as usize];
@@ -6545,7 +6556,7 @@ impl Instruction for RegInstruction {
                     || results.as_ref() != declared_results.as_ref()
                 {
                     return Err(Box::new(signature_mismatch(
-                        *table_index,
+                        entry.table_index,
                         declared_params,
                         declared_results,
                         params,
@@ -6553,7 +6564,7 @@ impl Instruction for RegInstruction {
                     )));
                 }
 
-                let input_start = *operands as usize;
+                let input_start = entry.operands as usize;
                 let param_slots = &frame_layout.input_registers_arena
                     [input_start..(input_start + declared_params.len())];
 
@@ -6565,7 +6576,7 @@ impl Instruction for RegInstruction {
 
                 for (i, val) in tmp.into_iter().enumerate() {
                     Self::set_value_to_register(
-                        *caller_base + i as u16,
+                        entry.caller_base + i as u16,
                         val,
                         caller_base_data,
                         instance,
@@ -6573,21 +6584,22 @@ impl Instruction for RegInstruction {
                 }
 
                 let callee_caller_base_data = RegCallerBaseData {
-                    base_register_index: *caller_base as u32 + caller_base_data.base_register_index,
+                    base_register_index: entry.caller_base as u32
+                        + caller_base_data.base_register_index,
                 };
 
                 if callee_func_index.0 >= imported_func_count {
                     Step::Call {
                         func_index: callee_func_index,
                         caller_base_data: callee_caller_base_data,
-                        is_indirect: Some(*table_index),
+                        is_indirect: Some(entry.table_index),
                     }
                 } else {
                     crate::runtime::TraceVM::call_imported::<M, I, Self::Vm>(
                         callee_func_index,
                         module,
                         instance,
-                        Some(*table_index),
+                        Some(entry.table_index),
                         &callee_caller_base_data,
                     )?;
 

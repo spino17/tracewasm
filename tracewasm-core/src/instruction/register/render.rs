@@ -424,37 +424,39 @@ impl RegInstruction {
                 list(sig.input_registers(ins)),
                 regs(sig.output_registers(outs))
             ),
-            RegInstruction::If {
-                cond,
-                else_index,
-                end_index,
-            } => format!(
-                "if           {} else={} end={}",
-                sig1(cond),
-                else_index
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|| "-".into()),
-                end_index
-            ),
+            RegInstruction::If(id) => {
+                let entry = frame.if_arena.get(*id);
+
+                format!(
+                    "if           {} else={} end={}",
+                    sig1(&entry.cond),
+                    entry
+                        .else_index
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    entry.end_index
+                )
+            }
             RegInstruction::Else { end_index } => format!("else         end={end_index}"),
             RegInstruction::Br { target_index } => format!("br           -> {target_index}"),
-            RegInstruction::BrIf {
-                cond,
-                mov,
-                target_index,
-            } => format!(
-                "br_if        {} -> {target_index}{}",
-                sig1(cond),
-                if mov.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "  move {} -> {}",
-                        list(mov.input_registers(ins)),
-                        regs(mov.output_registers(outs))
-                    )
-                }
-            ),
+            RegInstruction::BrIf(id) => {
+                let entry = frame.br_if_arena.get(*id);
+                let target_index = entry.target_index;
+
+                format!(
+                    "br_if        {} -> {target_index}{}",
+                    sig1(&entry.cond),
+                    if entry.mov.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "  move {} -> {}",
+                            list(entry.mov.input_registers(ins)),
+                            regs(entry.mov.output_registers(outs))
+                        )
+                    }
+                )
+            }
             RegInstruction::BrTable {
                 index,
                 targets_start,
@@ -492,28 +494,24 @@ impl RegInstruction {
                 func_index.0,
                 as_operand(*caller_base)
             ),
-            RegInstruction::CallIndirect {
-                ty_index,
-                table_index,
-                slot,
-                operands,
-                caller_base,
-            } => {
+            RegInstruction::CallIndirect(id) => {
+                let entry = frame.call_indirect_arena.get(*id);
+
                 // Both runs are implicit: the arguments are the `params` operands
                 // starting at `operands`, and their destinations are the same many
                 // registers based at `caller_base`. Rendering them the way the
                 // executor has to reconstruct them is the point — a test that read
                 // them any other way would not notice the two disagreeing.
-                let params = types[ty_index.0 as usize].params.len();
-                let args = &ins[*operands as usize..*operands as usize + params];
-                let dsts: Vec<u16> = (0..params as u16).map(|i| caller_base + i).collect();
+                let params = types[entry.ty_index.0 as usize].params.len();
+                let args = &ins[entry.operands as usize..entry.operands as usize + params];
+                let dsts: Vec<u16> = (0..params as u16).map(|i| entry.caller_base + i).collect();
 
                 format!(
                     "call_indirect [{}] ty{} table{} caller_base={}{}",
-                    sig1(slot),
-                    ty_index.0,
-                    table_index.0,
-                    as_operand(*caller_base),
+                    sig1(&entry.slot),
+                    entry.ty_index.0,
+                    entry.table_index.0,
+                    as_operand(entry.caller_base),
                     if params == 0 {
                         String::new()
                     } else {

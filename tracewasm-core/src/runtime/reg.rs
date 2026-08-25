@@ -311,7 +311,7 @@ impl RuntimeFrame for RegFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{module::ValType, runtime::value::Val};
+    use crate::{instruction::register::arena::Arena, module::ValType, runtime::value::Val};
 
     /// A layout for a frame with `locals` locals, `operands` operand registers,
     /// `spills` spill slots and `consts` constants.
@@ -329,6 +329,9 @@ mod tests {
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
             br_targets_arena: Box::new([]),
+            if_arena: Arena::default(),
+            br_if_arena: Arena::default(),
+            call_indirect_arena: Arena::default(),
         }
     }
 
@@ -410,6 +413,9 @@ mod tests {
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
             br_targets_arena: Box::new([]),
+            if_arena: Arena::default(),
+            br_if_arena: Arena::default(),
+            call_indirect_arena: Arena::default(),
         };
 
         frame.enter_frame(

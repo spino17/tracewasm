@@ -65,6 +65,9 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         input_registers_arena: Box::new([]),
         output_registers_arena: Box::new([]),
         br_targets_arena: Box::new([]),
+        if_arena: Arena::default(),
+        br_if_arena: Arena::default(),
+        call_indirect_arena: Arena::default(),
     }
 }
 
@@ -1997,6 +2000,9 @@ fn br_table_arms_survive_lowering() {
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
         br_targets_arena: s.br_targets.into_boxed_slice(),
+        if_arena: s.if_arena,
+        br_if_arena: s.br_if_arena,
+        call_indirect_arena: s.call_indirect_arena,
     };
 
     assert_eq!(
@@ -2037,6 +2043,9 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
         br_targets_arena: s.br_targets.into_boxed_slice(),
+        if_arena: s.if_arena,
+        br_if_arena: s.br_if_arena,
+        call_indirect_arena: s.call_indirect_arena,
     };
 
     assert!(frame.br_targets_arena.is_empty());
@@ -2203,7 +2212,7 @@ fn an_if_else_wires_both_arms_to_one_end() {
 
 #[test]
 fn an_if_without_an_else_jumps_straight_to_the_end() {
-    let (prog, _, _) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              local.get 0
              if i32.const 5 local.set 0 end))"#,
@@ -2212,11 +2221,11 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
     let at = index_of_kind(&prog, RegInstructionKind::If).unwrap();
 
     let (else_index, end_index) = match &prog[at] {
-        RegInstruction::If {
-            else_index,
-            end_index,
-            ..
-        } => (*else_index, *end_index),
+        RegInstruction::If(id) => {
+            let entry = frame.if_arena.get(*id);
+
+            (entry.else_index, entry.end_index)
+        }
         _ => unreachable!(),
     };
 
@@ -2353,15 +2362,17 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
     let br = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
-    let RegInstruction::BrIf {
-        mov, target_index, ..
-    } = &prog[br]
-    else {
+    let RegInstruction::BrIf(id) = &prog[br] else {
         unreachable!()
     };
 
+    let entry = frame.br_if_arena.get(*id);
+
     assert_eq!(
-        mov.input_registers(&frame.input_registers_arena).len(),
+        entry
+            .mov
+            .input_registers(&frame.input_registers_arena)
+            .len(),
         1,
         "a back-edge transfers the loop's params, not its results"
     );
@@ -2373,14 +2384,14 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
     assert_eq!(br, 3, "the back-edge's own index");
 
     assert_eq!(
-        *target_index, 1,
+        entry.target_index, 1,
         "the loop header's index, past the entry move"
     );
 
     assert!(
-        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        matches!(prog[entry.target_index as usize], RegInstruction::Loop),
         "the target must be the `loop` itself, found {:?}",
-        prog[*target_index as usize].kind()
+        prog[entry.target_index as usize].kind()
     );
 
     assert!(
@@ -2390,7 +2401,7 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
     // And the destination the back-edge writes is the same register the header move
     // fills, which is what makes skipping the header correct rather than lossy.
-    let back_edge_dst = mov.output_registers(&frame.output_registers_arena);
+    let back_edge_dst = entry.mov.output_registers(&frame.output_registers_arena);
     let RegInstruction::Move(header) = &prog[0] else {
         unreachable!()
     };
@@ -2545,7 +2556,7 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
 
 #[test]
 fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
-    let (prog, _, _) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              loop
@@ -2558,19 +2569,21 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
 
     let back_edge = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
-    let RegInstruction::BrIf { target_index, .. } = &prog[back_edge] else {
+    let RegInstruction::BrIf(id) = &prog[back_edge] else {
         unreachable!()
     };
+
+    let entry = frame.br_if_arena.get(*id);
 
     // The exact numbers, not just their order: local 0's rescue is instruction 0, the
     // repeated region starts at 1, and the back-edge is instruction 4.
     assert_eq!(back_edge, 4, "the back-edge's own index");
-    assert_eq!(*target_index, 1, "the loop header's index");
+    assert_eq!(entry.target_index, 1, "the loop header's index");
 
     assert!(
-        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        matches!(prog[entry.target_index as usize], RegInstruction::Loop),
         "a back-edge must land on the `loop` itself, not on a body instruction: found {:?}",
-        prog[*target_index as usize].kind()
+        prog[entry.target_index as usize].kind()
     );
 
     let rescues: Vec<usize> = prog
@@ -3140,15 +3153,17 @@ fn a_zero_argument_call_indirect_still_pops_its_index() {
 #[test]
 fn caller_base_counts_past_the_index_to_the_deepest_argument() {
     let base_of = |wat: &str| {
-        let (prog, _, frame) = lower_func(wat, 0);
+        let (prog, _, mut frame) = lower_func(wat, 0);
         let at = index_of_kind(&prog, RegInstructionKind::CallIndirect).unwrap();
 
-        let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
+        let RegInstruction::CallIndirect(id) = &prog[at] else {
             unreachable!()
         };
 
+        let entry = frame.call_indirect_arena.get_mut(*id);
+
         // operand-relative, as the renderings above report it
-        *caller_base - operand_base_of(&frame)
+        entry.caller_base - operand_base_of(&frame)
     };
 
     // the only register is the argument itself: it sits *at* the base
