@@ -2399,10 +2399,8 @@ impl Instruction for StackInstruction {
                 let func_ty = &module.types[ty_index.0 as usize];
                 let params = &func_ty.params;
                 let results = &func_ty.results;
-
                 let func = &module.func_decls[callee_func_index.0 as usize];
                 let ty = &module.types[func.ty.0 as usize];
-
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;
 

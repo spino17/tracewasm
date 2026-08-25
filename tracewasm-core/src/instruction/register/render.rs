@@ -354,6 +354,11 @@ impl RegInstruction {
                 index.0,
                 input.registers(ins)[0].render(frame)
             ),
+            RegInstruction::GlobalGet { index, output } => format!(
+                "global.get   global{} -> {}",
+                index.0,
+                regs(output.registers(outs))
+            ),
             RegInstruction::GlobalSet { index, input } => format!(
                 "global.set   global{} <- {}",
                 index.0,
@@ -361,9 +366,6 @@ impl RegInstruction {
             ),
             RegInstruction::LocalSpill { index, spill_index } => {
                 format!("local.spill  local{} -> spill{spill_index}", index.0)
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                format!("global.spill global{} -> spill{spill_index}", index.0)
             }
             RegInstruction::RefIsNull(sig) => format!(
                 "ref.is_null  {} -> {}",

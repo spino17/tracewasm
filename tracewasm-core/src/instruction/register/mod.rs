@@ -42,8 +42,8 @@
 //!
 //! While walking the body, an operand register index counts from the frame base but
 //! ignores the constant and spill regions — `curr_register_index` starts at
-//! `locals_count` and rises from there. Locals and globals are already final, since
-//! neither region can move. But a constant, a spill, or an operand register cannot
+//! `locals_count` and rises from there. A local is already final, since the locals
+//! region never moves. But a constant, a spill, or an operand register cannot
 //! be given a frame index yet, so each is emitted as a `Slot::RegisterFrame(u32::MAX)`
 //! placeholder in the input arena plus an entry in one of `const_backpatches`,
 //! `spill_backpatches` or `register_backpatches`, keyed by its arena position. That
@@ -65,13 +65,18 @@
 //! block — the slot height in `Block::recorded_height`, the register index derived
 //! by counting register slots back down to it.
 //!
-//! ## Lazily forwarded locals and globals
+//! ## Lazily forwarded locals
 //!
-//! A slot naming a local or global is only valid while that origin still holds the
-//! value; a later write has to materialize every operand still reading it. That is
-//! [`lazy`]'s job — see its module docs for how one shared entry per borrowed value
-//! makes multiple simultaneous borrows, and multiple live snapshots of the same
-//! local, fall out of the representation.
+//! A slot naming a local is only valid while that local still holds the value; a
+//! later write has to materialize every operand still reading it. That is [`lazy`]'s
+//! job — see its module docs for how one shared entry per borrowed value makes
+//! multiple simultaneous borrows, and multiple live snapshots of the same local, fall
+//! out of the representation.
+//!
+//! Globals are *not* forwarded. [`RegInstruction::GlobalGet`] reads one into a
+//! register eagerly, which is what lets an operand be a bare frame index — a global
+//! lives in the instance, not the frame, so it could never be one — and which means
+//! no write and no call can invalidate a value already read.
 //!
 //! ## Operands live in flat side tables
 //!
@@ -150,8 +155,8 @@ use crate::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
         register::lazy::{
-            Global, GlobalSlot, LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local,
-            LocalSlot, SpillArena, SpillIndex,
+            LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot, SpillArena,
+            SpillIndex,
         },
     },
     memory::Memory,
@@ -392,12 +397,6 @@ impl Const {
 /// represent operands whose frame index is not known yet.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Slot {
-    /// Read global `n` from the instance's globals table.
-    ///
-    /// The one operand that is not a frame slot. Valid on the same terms as a frame
-    /// read: nothing writes that global between the `global.get` and this
-    /// instruction, because a write would have spilled it first.
-    Global(u32),
     /// Read frame slot `n`, counted from the activation's base — `registers[base + n]`
     /// at execution.
     ///
@@ -420,7 +419,7 @@ pub(crate) enum Slot {
 }
 
 impl Slot {
-    /// Whether this operand is an operand register rather than a local or global.
+    /// Whether this operand is an operand register rather than a local.
     ///
     /// **Only meaningful on a provisional index**, i.e. during lowering, before the
     /// end-of-body pass shifts registers above the constant and spill regions. On a
@@ -449,7 +448,6 @@ impl Slot {
     /// frame base and loads — so this exists for rendering and for tests.
     fn render(&self, frame_layout: &RegFrameLayout) -> String {
         let frame_index = match self {
-            Slot::Global(n) => return format!("global{n}"),
             Slot::RegisterFrame(frame_index) => *frame_index,
         };
 
@@ -550,8 +548,6 @@ enum StackSlot {
     /// A borrow of a local, resolving to the local itself or to the spill slot it
     /// was rescued into, whichever holds the value when this is finally read.
     Local(LocalSlot),
-    /// [`Self::Local`] for a global.
-    Global(GlobalSlot),
 }
 
 /// A fixed-length run of `L` entries in one of the flat arenas, named by its start.
@@ -854,9 +850,7 @@ struct SimulatedStack {
     max_registers: u32,
     /// Lazy borrows of locals; see [`lazy`].
     lazy_locals: LazyArena<Local>,
-    /// Lazy borrows of globals; see [`lazy`].
-    lazy_globals: LazyArena<Global>,
-    /// Frame slots holding locals and globals materialized ahead of a write.
+    /// Frame slots holding locals materialized ahead of a write.
     spills: SpillArena,
     /// Flat arena of every instruction's input operands, indexed by
     /// [`Registers`]/[`DynSignature`] and shipped in [`RegFrameLayout`].
@@ -911,13 +905,12 @@ impl SimulatedStack {
     /// which is what lets an operand be a bare frame index with no tag: below
     /// `locals_count` it is a local, at or above it an operand register. It is also
     /// why [`RegFrameLayout::registers`] includes the locals.
-    fn new(locals_count: u32, globals_count: u32) -> Self {
+    fn new(locals_count: u32) -> Self {
         SimulatedStack {
             stack: Stack::new_with_capacity(0),
             curr_register_index: locals_count as usize,
             max_registers: locals_count,
             lazy_locals: LazyArena::new(locals_count),
-            lazy_globals: LazyArena::new(globals_count),
             spills: SpillArena::default(),
             input_registers: vec![],
             output_registers: vec![],
@@ -1069,7 +1062,7 @@ impl SimulatedStack {
         &mut self.control_stack.stack[index]
     }
 
-    /// Releases one borrow of a lazily forwarded local or global and reports where
+    /// Releases one borrow of a lazily forwarded local and reports where
     /// its value was.
     ///
     /// The location is read *before* the reference count drops, because the answer
@@ -1097,7 +1090,7 @@ impl SimulatedStack {
         location
     }
 
-    /// Starts or joins a lazy borrow of one local or global.
+    /// Starts or joins a lazy borrow of one local.
     ///
     /// If something already borrows this origin, the new stack slot shares that
     /// entry, so a later spill redirects both at once. Otherwise a fresh entry is
@@ -1145,14 +1138,6 @@ impl SimulatedStack {
                     LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
                 }
             }
-            StackSlot::Global(slot) => {
-                let location = Self::pop_lazy(slot, &mut self.lazy_globals, &mut self.spills);
-
-                match location {
-                    LazyLocation::Original(global_index) => Slot::Global(global_index).into(),
-                    LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
-                }
-            }
         }
     }
 
@@ -1190,20 +1175,12 @@ impl SimulatedStack {
                     LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
                 }
             }
-            StackSlot::Global(slot) => {
-                let location = slot.location(&self.lazy_globals);
-
-                match location {
-                    LazyLocation::Original(global_index) => Slot::Global(global_index).into(),
-                    LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
-                }
-            }
         }
     }
 
     /// Pushes one operand onto the simulated stack.
     ///
-    /// A local or global becomes a shared lazy borrow rather than a resolved
+    /// A local becomes a shared lazy borrow rather than a resolved
     /// location, so a spill occurring before it is read still reaches it. A register
     /// allocates one.
     ///
@@ -1225,11 +1202,6 @@ impl SimulatedStack {
 
                     StackSlot::Register(frame_index)
                 }
-            }
-            Slot::Global(index) => {
-                let slot = Self::push_lazy(index, &mut self.lazy_globals);
-
-                StackSlot::Global(slot)
             }
         };
 
@@ -1254,10 +1226,6 @@ impl SimulatedStack {
                 LazyLocation::Original(local_index) => Slot::RegisterFrame(local_index).into(),
                 LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
             },
-            StackSlot::Global(slot) => match slot.location(&self.lazy_globals) {
-                LazyLocation::Original(global_index) => Slot::Global(global_index).into(),
-                LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
-            },
         }
     }
 
@@ -1272,12 +1240,6 @@ impl SimulatedStack {
     /// local intervenes and spills it first.
     fn push_local(&mut self, index: u32) {
         self.push(Slot::RegisterFrame(index));
-    }
-
-    /// `global.get`: [`Self::push_local`] for a global. Also spilled by a call,
-    /// which may write any global.
-    fn push_global(&mut self, index: u32) {
-        self.push(Slot::Global(index));
     }
 
     /// Applies an instruction's stack effect and records its operands in the arenas.
@@ -1520,8 +1482,7 @@ impl SimulatedStack {
     /// Rescues every operand still forwarding to `location`, ahead of a write to it.
     ///
     /// Returns the spill slot the caller must emit a
-    /// [`LocalSpill`](RegInstruction::LocalSpill) /
-    /// [`GlobalSpill`](RegInstruction::GlobalSpill) into — *before* the writing
+    /// [`LocalSpill`](RegInstruction::LocalSpill) into — *before* the writing
     /// instruction, so the copy captures the pre-write value — or `None` when nothing
     /// borrows the origin and no rescue is needed.
     ///
@@ -1608,12 +1569,12 @@ pub(crate) struct RegFrameLayout {
     /// [`Self::locals_count`] — so the operand registers themselves are the range
     /// `[locals_count + consts + spills, registers + consts + spills)`.
     pub registers: u32,
-    /// Spill slots holding locals and globals rescued from a later write by
-    /// [`RegInstruction::LocalSpill`] / [`RegInstruction::GlobalSpill`].
+    /// Spill slots holding locals rescued from a later write by
+    /// [`RegInstruction::LocalSpill`].
     ///
-    /// Zero for a body that never overwrites a lazily-forwarded local or global,
-    /// which is the common case — and then the region is simply empty, closing the
-    /// gap between the constants and the operand registers.
+    /// Zero for a body that never overwrites a lazily-forwarded local, which is the
+    /// common case — and then the region is simply empty, closing the gap between the
+    /// constants and the operand registers.
     pub spills: u32,
     /// Every instruction's input operands, concatenated in lowering order.
     ///
@@ -1679,18 +1640,31 @@ type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 /// visited in full — see the derive's docs for why both halves matter.
 #[derive(Debug, tracewasm_macros::Kind)]
 pub(crate) enum RegInstruction {
+    /// `global.get`: read a global into an operand register.
+    ///
+    /// Unlike `local.get`, which forwards lazily and is read in place by whatever
+    /// consumes it, this materialises **eagerly** — and that is what makes the
+    /// operand encoding possible. An operand is a bare frame index with no tag, so a
+    /// global, which lives in the instance rather than the frame, cannot be one. It
+    /// also means nothing can invalidate the value afterwards: a later `global.set`,
+    /// or a call that writes any global, leaves this register alone, so globals need
+    /// no rescue machinery of the kind [`Self::LocalSpill`] provides for locals.
+    ///
+    /// The register survives a call because it sits below the `caller_base` any call
+    /// in this body is based at.
+    GlobalGet {
+        /// The global read, in the module's global index space.
+        index: GlobalIndex,
+        /// The register the value is written to.
+        output: Registers<1, u32>,
+    },
     /// `global.set`: write the operand into a global.
     ///
-    /// Any operand still forwarding to this global was rescued by a preceding
-    /// [`Self::GlobalSpill`].
+    /// Needs no rescue of earlier reads: [`Self::GlobalGet`] already materialised
+    /// each one into a register, so this cannot invalidate an operand.
     GlobalSet {
         index: GlobalIndex,
         input: Registers<1, Slot>,
-    },
-    /// [`Self::LocalSpill`] for a global.
-    GlobalSpill {
-        index: GlobalIndex,
-        spill_index: SpillIndex,
     },
     /// `local.set`: write the operand into a local. See [`Self::GlobalSet`] on
     /// rescues.
@@ -2467,7 +2441,7 @@ impl RegInstruction {
     ///
     /// # Why a rescue cannot live at the write
     ///
-    /// A borrow of a local or global reads its origin in place (see [`lazy`]), and
+    /// A borrow of a local reads its origin in place (see [`lazy`]), and
     /// stays valid only until something writes that origin. The write emits a spill
     /// that copies the old value aside, and the borrow is redirected to it — so from
     /// then on the operand resolves to that spill slot *for every path*, because
@@ -2539,9 +2513,9 @@ impl RegInstruction {
 
     /// Rescues every live local borrow ahead of a diverging or repeating construct.
     ///
-    /// See [`Self::spill_lazy`] for why the rescue cannot be left at the write, and
-    /// [`Self::spill_live_globals`] for the other half — a construct needs both, and
-    /// a call site that makes only one of them leaves the other origin space exposed.
+    /// See [`Self::spill_lazy`] for why the rescue cannot be left at the write. Locals
+    /// are the only origin space that needs this: a global is read into a register by
+    /// [`Self::GlobalGet`], so no construct can strand a borrow of one.
     ///
     /// `offset` is the construct's own byte offset, so a spill hoisted above it
     /// traces back to the operator that forced it rather than to the write it
@@ -2559,28 +2533,6 @@ impl RegInstruction {
 
         Self::spill_lazy(
             &mut simulated_stack.lazy_locals,
-            &mut simulated_stack.spills,
-            instructions,
-            instruction_emitter,
-            offset,
-        );
-    }
-
-    /// [`Self::spill_live_locals`] for globals, which use their own arena but share
-    /// the frame's spill pool.
-    fn spill_live_globals(
-        simulated_stack: &mut SimulatedStack,
-        instructions: &mut Instructions,
-        offset: u32,
-    ) {
-        let instruction_emitter =
-            |spill_index: SpillIndex, index: u32| RegInstruction::GlobalSpill {
-                index: GlobalIndex(index),
-                spill_index,
-            };
-
-        Self::spill_lazy(
-            &mut simulated_stack.lazy_globals,
             &mut simulated_stack.spills,
             instructions,
             instruction_emitter,
@@ -2709,7 +2661,7 @@ impl Instruction for RegInstruction {
         globals_count: u32,
     ) -> Result<RegLoweredFuncBody, TraceWasmError> {
         let mut instructions = Instructions::default();
-        let mut simulated_stack = SimulatedStack::new(locals_count, globals_count);
+        let mut simulated_stack = SimulatedStack::new(locals_count);
         let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
         let mut call_instr_backpatches: Vec<(usize, u32)> = vec![];
 
@@ -2756,23 +2708,17 @@ impl Instruction for RegInstruction {
 
             match operator {
                 Operator::GlobalGet { global_index } => {
-                    simulated_stack.push_global(global_index);
+                    let registers = simulated_stack.registers_for::<0, 1>().output;
+
+                    instructions.push(
+                        RegInstruction::GlobalGet {
+                            index: GlobalIndex(global_index),
+                            output: registers,
+                        },
+                        offset,
+                    );
                 }
                 Operator::GlobalSet { global_index } => {
-                    if let Some(spill_index) = SimulatedStack::set_lazy(
-                        global_index,
-                        &mut simulated_stack.lazy_globals,
-                        &mut simulated_stack.spills,
-                    ) {
-                        instructions.push(
-                            RegInstruction::GlobalSpill {
-                                index: GlobalIndex(global_index),
-                                spill_index,
-                            },
-                            offset,
-                        );
-                    }
-
                     let registers = simulated_stack.registers_for::<1, 0>().input;
 
                     instructions.push(
@@ -3184,7 +3130,6 @@ impl Instruction for RegInstruction {
                     // the back-edge and capture what the previous iteration wrote.
                     // Hoisting it above the header runs it exactly once, on entry.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let (block_params, _) = simulated_stack.add_block(
                         BlockVariant::Loop,
@@ -3206,7 +3151,6 @@ impl Instruction for RegInstruction {
                     // Control diverges here, and a write in either arm would leave
                     // the other path reading a spill slot nothing wrote.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
                     // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
@@ -3330,7 +3274,6 @@ impl Instruction for RegInstruction {
                     // Taking the branch skips everything after it, including any
                     // write that would have rescued a borrow still live here.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let block_index =
                         simulated_stack.control_stack.len() - 1 - relative_depth as usize;
@@ -3373,7 +3316,6 @@ impl Instruction for RegInstruction {
                     // As for `br_if`: every arm jumps away, so a later write cannot
                     // be relied on to have rescued anything.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
 
                     let targets_start = simulated_stack.br_targets.len() as u32;
                     let mut targets_len = 0;
@@ -3464,8 +3406,6 @@ impl Instruction for RegInstruction {
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Call { function_index } => {
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
-
                     let func_decl = &func_decls[function_index as usize];
                     let func_ty = &types[func_decl.ty.0 as usize];
                     let params = func_ty.params.len() as u32;
@@ -3497,8 +3437,6 @@ impl Instruction for RegInstruction {
                     type_index,
                     table_index,
                 } => {
-                    Self::spill_live_globals(&mut simulated_stack, &mut instructions, offset);
-
                     let ty = &types[type_index as usize];
                     let params = ty.params.len() as u32;
                     let results = ty.results.len() as u32;
@@ -3654,7 +3592,7 @@ impl Instruction for RegInstruction {
         }
 
         // Then the spills. `set_value_to_spills` computes this same address when a
-        // `LocalSpill`/`GlobalSpill` writes one, and the two must agree exactly or a
+        // `LocalSpill` writes one, and the two must agree exactly or a
         // spill is read from a slot nothing wrote.
         for (input_index, spill_index) in simulated_stack.spill_backpatches {
             simulated_stack.input_registers[input_index] =
@@ -3743,6 +3681,16 @@ impl Instruction for RegInstruction {
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
         let res = match self {
+            RegInstruction::GlobalGet { index, output } => {
+                Self::set_value_to_register(
+                    output.registers(&frame_layout.output_registers_arena)[0],
+                    instance.global_vals[index.0 as usize].into(),
+                    caller_base_data,
+                    instance,
+                );
+
+                Step::Next
+            }
             RegInstruction::GlobalSet { index, input } => {
                 let ty = module.globals[index.0 as usize].ty.content_type();
 
@@ -3752,17 +3700,6 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .into_val(&ty);
-
-                Step::Next
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                Self::set_value_to_spills(
-                    spill_index.raw_value(),
-                    instance.global_vals[index.0 as usize].into(),
-                    caller_base_data,
-                    frame_layout,
-                    instance,
-                );
 
                 Step::Next
             }
@@ -3904,6 +3841,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i8(effective_offset)? as i32;
 
                 Self::set_value_to_register(
@@ -3922,6 +3860,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_u8(effective_offset)? as i32;
 
                 Self::set_value_to_register(
@@ -3940,6 +3879,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i16(effective_offset)? as i32;
 
                 Self::set_value_to_register(
@@ -3958,6 +3898,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_u16(effective_offset)? as i32;
 
                 Self::set_value_to_register(
@@ -4130,6 +4071,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f32() as f64;
+
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 Self::set_value_to_register(
@@ -4149,6 +4091,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f32() as f64;
+
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 // The result is the `u32` bit pattern held in an `i32`, so values
@@ -4169,6 +4112,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f64();
+
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 Self::set_value_to_register(
@@ -4187,6 +4131,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f64();
+
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 Self::set_value_to_register(
@@ -4671,6 +4616,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i64(effective_offset)?;
 
                 Self::set_value_to_register(
@@ -4689,6 +4635,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i8(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -4707,6 +4654,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_u8(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -4725,6 +4673,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i16(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -4743,6 +4692,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_u16(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -4761,6 +4711,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_i32(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -4779,6 +4730,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_u32(effective_offset)? as i64;
 
                 Self::set_value_to_register(
@@ -5011,6 +4963,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f32() as f64;
+
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 Self::set_value_to_register(
@@ -5030,6 +4983,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f32() as f64;
+
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 // As with the `i32` forms, the result is the unsigned bit pattern
@@ -5050,6 +5004,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f64();
+
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 Self::set_value_to_register(
@@ -5068,6 +5023,7 @@ impl Instruction for RegInstruction {
                     instance,
                 )
                 .as_f64();
+
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 Self::set_value_to_register(
@@ -5991,6 +5947,7 @@ impl Instruction for RegInstruction {
                     caller_base_data,
                     instance,
                 )?;
+
                 let val = instance.memory.read_f64(effective_offset)?;
 
                 Self::set_value_to_register(
@@ -6528,10 +6485,8 @@ impl Instruction for RegInstruction {
                 let func_ty = &module.types[ty_index.0 as usize];
                 let params = &func_ty.params;
                 let results = &func_ty.results;
-
                 let func = &module.func_decls[callee_func_index.0 as usize];
                 let ty = &module.types[func.ty.0 as usize];
-
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;
 
@@ -6763,7 +6718,6 @@ impl RegInstruction {
         instance: &Instance<M, I, crate::Register>,
     ) -> Value {
         match slot {
-            Slot::Global(index) => instance.global_vals[index as usize].into(),
             Slot::RegisterFrame(index) => {
                 instance.frame.registers[(caller_base_data.base_register_index + index) as usize]
             }
@@ -6789,7 +6743,7 @@ impl RegInstruction {
     /// Writes spill slot `relative_index`.
     ///
     /// The one accessor that computes a region base at execution, because a
-    /// `LocalSpill`/`GlobalSpill` carries a spill-pool index rather than a frame
+    /// `LocalSpill` carries a spill-pool index rather than a frame
     /// index. The spill region begins above the locals and the constants, hence
     /// `locals_count + consts.len()`.
     ///

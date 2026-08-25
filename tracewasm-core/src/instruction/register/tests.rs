@@ -48,12 +48,7 @@ fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
 /// what pins the layout — a region boundary off by one renders identically for every
 /// slot but the ones that cross it.
 fn frame_indices(xs: &[Slot]) -> Vec<u32> {
-    xs.iter()
-        .map(|x| match x {
-            Slot::RegisterFrame(i) => *i,
-            Slot::Global(n) => panic!("expected a frame slot, got global{n}"),
-        })
-        .collect()
+    xs.iter().map(|Slot::RegisterFrame(i)| *i).collect()
 }
 
 /// A [`RegFrameLayout`] describing `s` as it stands, for rendering resolved slots.
@@ -88,11 +83,10 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u32) -> String {
         BackPatchableSlot::Register(n) => format!("r{}", n - locals_count),
         BackPatchableSlot::Spill(i) => format!("spill{i}"),
         BackPatchableSlot::Const(id) => format!("const{}", id.0),
-        BackPatchableSlot::Slot(slot) => match slot {
-            Slot::Global(n) => format!("global{n}"),
-            Slot::RegisterFrame(n) if *n < locals_count => format!("local{n}"),
-            Slot::RegisterFrame(n) => format!("r{}", n - locals_count),
-        },
+        BackPatchableSlot::Slot(Slot::RegisterFrame(n)) if *n < locals_count => {
+            format!("local{n}")
+        }
+        BackPatchableSlot::Slot(Slot::RegisterFrame(n)) => format!("r{}", n - locals_count),
     }
 }
 
@@ -303,8 +297,8 @@ fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
 
 /// A stack with the implicit function frame already pushed, as
 /// `emit_instructions_for_func` sets up.
-fn sim(locals: u32, globals: u32) -> SimulatedStack {
-    let mut s = SimulatedStack::new(locals, globals);
+fn sim(locals: u32) -> SimulatedStack {
+    let mut s = SimulatedStack::new(locals);
 
     s.control_stack.stack.push(Block {
         kind: BlockKind::Func,
@@ -377,7 +371,7 @@ fn output_operands(xs: &[u32], s: &SimulatedStack) -> Vec<u32> {
 
 #[test]
 fn borrows_of_one_local_share_a_single_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.push_local(0);
@@ -405,7 +399,7 @@ fn borrows_of_one_local_share_a_single_spill() {
 
 #[test]
 fn a_consumed_borrow_is_not_spilled() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
 
@@ -423,7 +417,7 @@ fn a_consumed_borrow_is_not_spilled() {
 
 #[test]
 fn successive_writes_produce_independent_snapshots() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.push_const(Const::I32(1));
@@ -457,7 +451,7 @@ fn successive_writes_produce_independent_snapshots() {
 
 #[test]
 fn dropping_the_last_borrow_releases_its_spill_slot() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.push_const(Const::I32(1));
@@ -483,7 +477,7 @@ fn dropping_the_last_borrow_releases_its_spill_slot() {
 
 #[test]
 fn tee_spills_before_reading_the_top() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(3);
 
@@ -642,21 +636,22 @@ fn ref_is_null_feeds_a_branch_directly() {
     );
 }
 
-/// References take part in lazy forwarding like any other value: a `funcref`
-/// global borrowed across a call is rescued, and `ref.is_null` reads the spill.
+/// A reference is a value like any other, so a `funcref` global is read into a
+/// register and `ref.is_null` reads that register — no rescue, whatever the call does
+/// to the global.
 #[test]
-fn a_reference_borrowed_across_a_call_is_rescued() {
+fn a_reference_read_from_a_global_crosses_a_call_in_a_register() {
     assert_func_lowers_to(
         r#"(module (global (mut funcref) (ref.null func)) (func)
              (func (result i32) global.get 0 call 0 ref.is_null))"#,
         1,
         "
-          0  global.spill global0 -> spill0
-          1  call         f0 caller_base=0
-          2  ref.is_null  spill0 -> r0
+          0  global.get   global0 -> r0
+          1  call         f0 caller_base=1
+          2  ref.is_null  r0 -> r0
           3  move         r0 -> r0
           4  end
-             frame: 1 registers, 1 spills
+             frame: 1 registers, 0 spills
         ",
     );
 }
@@ -677,7 +672,7 @@ fn block_entry_layouts_hold_for_every_block_type() {
             BlockType::Type(wasmparser::ValType::I32),
             BlockType::FuncType(0),
         ] {
-            let mut s = sim(4, 0);
+            let mut s = sim(4);
 
             s.push_local(0);
 
@@ -733,7 +728,7 @@ fn variant_of(v: &BlockVariant) -> BlockVariant {
 
 #[test]
 fn branch_lowering_does_not_disturb_the_stack() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -764,7 +759,7 @@ fn branch_lowering_does_not_disturb_the_stack() {
 
 #[test]
 fn branch_destinations_are_based_at_the_target_label() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -803,7 +798,7 @@ fn branch_destinations_are_based_at_the_target_label() {
 
 #[test]
 fn branch_destinations_count_towards_the_frame() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1008,19 +1003,16 @@ impl Frame {
     }
 
     fn read(&self, slot: &Slot) -> i64 {
-        match slot {
-            Slot::Global(n) => self.globals[*n as usize],
-            Slot::RegisterFrame(i) => {
-                assert_ne!(
-                    *i,
-                    u32::MAX,
-                    "an unresolved placeholder reached execution — \
-                     `resolve_backpatches` did not run"
-                );
+        let Slot::RegisterFrame(i) = slot;
 
-                self.registers[*i as usize]
-            }
-        }
+        assert_ne!(
+            *i,
+            u32::MAX,
+            "an unresolved placeholder reached execution — \
+             `resolve_backpatches` did not run"
+        );
+
+        self.registers[*i as usize]
     }
 
     fn exec(&mut self, instruction: &RegInstruction, ins: &[Slot]) {
@@ -1029,11 +1021,6 @@ impl Frame {
                 let at = self.spill_at(spill_index);
 
                 self.registers[at] = self.registers[index.0 as usize];
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                let at = self.spill_at(spill_index);
-
-                self.registers[at] = self.globals[index.0 as usize];
             }
             RegInstruction::LocalSet { index, input } => {
                 self.registers[index.0 as usize] = self.read(&input.registers(ins)[0]);
@@ -1080,14 +1067,13 @@ fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame)
 /// that invalidates it happens on one arm only.
 #[test]
 fn a_conditional_arm_cannot_own_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
     s.push_local(1); // the condition
 
     RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(
         !prog.is_empty(),
@@ -1146,67 +1132,13 @@ fn a_conditional_arm_cannot_own_the_spill() {
     }
 }
 
-/// The same shape for a global, which uses the other arena.
-#[test]
-fn a_conditional_arm_cannot_own_a_global_spill() {
-    let mut s = sim(1, 2);
-    let mut prog: Instructions = Instructions::default();
-
-    s.push_global(1);
-    s.push_local(0); // the condition
-
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
-
-    s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
-
-    let _cond = s.registers_for::<1, 0>();
-
-    let arm = prog.len()..{
-        s.push_const(Const::I32(5));
-
-        assert!(SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills).is_none());
-
-        let input = s.registers_for::<1, 0>().input;
-
-        prog.push(
-            RegInstruction::GlobalSet {
-                index: GlobalIndex(1),
-                input,
-            },
-            0,
-        );
-
-        prog.len()
-    };
-
-    let recorded = s.get_curr_block().recorded_height;
-    let params = s.get_curr_block().params;
-
-    s.pops_and_pushes(s.stack.height() - recorded, params);
-
-    let consumer = s.pop();
-
-    resolve_backpatches(&mut s);
-
-    let consumer = resolve(&s, &consumer);
-
-    for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
-        let mut frame = Frame::new(&s, &[1], &[0, 42]);
-
-        run(&prog, &s.input_registers, skip, &mut frame);
-
-        assert_eq!(frame.read(&consumer), 42, "{tag}");
-    }
-}
-
 /// `local.get 0 ; block ; br_if 0 ; i32.const 5 ; local.set 0 ; end ; <use>`
 ///
 /// Here the *taken* path is the one that skips the write, so the polarity is the
 /// opposite of the `if` case.
 #[test]
 fn a_taken_br_if_cannot_skip_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow
@@ -1217,7 +1149,6 @@ fn a_taken_br_if_cannot_skip_the_spill() {
     s.push_const(Const::I32(1)); // the condition
 
     RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let _cond = s.registers_for::<1, 0>();
     let _mov = s.br_truncation_registers(base, 0);
@@ -1262,13 +1193,12 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 /// the back-edge and capture the value the previous iteration wrote.
 #[test]
 fn a_loop_body_cannot_own_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
     s.push_local(0); // the borrow, below the loop
 
     RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     let entry = 0..prog.len();
 
@@ -1347,7 +1277,7 @@ fn a_loop_body_cannot_own_the_spill() {
 /// already dominates its readers and runs once.
 #[test]
 fn a_block_does_not_hoist_spills() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
@@ -1365,7 +1295,7 @@ fn a_block_does_not_hoist_spills() {
 /// which is the common case for anything rustc produces.
 #[test]
 fn hoisting_costs_nothing_when_no_borrow_is_live() {
-    let mut s = sim(8, 4);
+    let mut s = sim(8);
     let mut prog: Instructions = Instructions::default();
 
     s.push_local(0);
@@ -1375,7 +1305,6 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
     s.push_const(Const::I32(1)); // a condition
 
     RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
 
     assert!(prog.is_empty(), "no live borrows, no instructions");
     assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
@@ -1384,79 +1313,118 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 // ---------------------------------------------------------------------------
 // globals
 //
-// Globals run through the same machinery as locals but a separate arena, so the
-// asymmetries are worth pinning rather than assuming.
+// A global is *not* lazily forwarded. `global.get` emits a real read into a
+// register, which is what lets an operand be a bare frame index — a global lives in
+// the instance, not the frame — and it means no later write can invalidate a value
+// already read. These pin that: the read happens, and none of the rescue machinery
+// locals need is emitted for it.
 // ---------------------------------------------------------------------------
 
+const GLOBAL_MODULE: &str = r#"(module
+    (global (mut i32) (i32.const 0))
+    (global (mut i32) (i32.const 0))
+    (func (param i32) (result i32) local.get 0)
+    "#;
+
 #[test]
-fn global_borrows_behave_like_local_ones() {
-    let mut s = sim(2, 2);
-
-    s.push_global(1);
-    s.push_global(1);
-    s.push_const(Const::I32(5));
-
-    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills);
-
-    let _set = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
-
-    assert_eq!(spilled_to(spill), Some("spill0".into()));
-
-    resolve_backpatches(&mut s);
-
-    assert_eq!(
-        slots(add.input.registers(&s.input_registers), &layout_of(&s)),
-        ["spill0", "spill0"]
+fn a_global_read_is_materialised_into_a_register() {
+    assert_func_lowers_to(
+        &format!("{GLOBAL_MODULE} (func (result i32) global.get 0 i32.const 1 i32.add))"),
+        1,
+        "
+          0  global.get   global0 -> r0
+          1  i32.add      r0, 1 -> r0
+          2  move         r0 -> r0
+          3  end
+             frame: 1 registers, 0 spills
+        ",
     );
 }
 
+/// The property the deleted global-spill machinery used to provide: a write cannot
+/// reach a value that has already been read into a register, so nothing is rescued
+/// and the frame needs no spill slot.
 #[test]
-fn a_local_and_a_global_of_the_same_index_are_independent() {
-    let mut s = sim(2, 2);
+fn a_global_write_does_not_rescue_an_earlier_read() {
+    let (prog, _, frame) = lower_func(
+        &format!(
+            "{GLOBAL_MODULE} (func (result i32) \
+               global.get 0 i32.const 9 global.set 0 i32.const 1 i32.add))"
+        ),
+        1,
+    );
 
-    s.push_local(0);
-    s.push_global(0);
-    s.push_const(Const::I32(7));
-
-    // writing global 0 must not disturb the borrow of local 0
-    let global_spill = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
-
-    let _set = s.registers_for::<1, 0>();
-
-    assert_eq!(spilled_to(global_spill), Some("spill0".into()));
+    assert_eq!(
+        frame.spills, 0,
+        "an eager read needs no rescue, so no spill slot is allocated"
+    );
 
     assert!(
-        s.lazy_locals.origin[0].is_some(),
-        "local 0's borrow must survive a write to global 0"
+        !prog
+            .iter()
+            .any(|i| i.kind() == RegInstructionKind::LocalSpill),
+        "and nothing is spilled, but the body emits: {:?}",
+        prog.iter().map(|i| i.kind()).collect::<Vec<_>>()
     );
-
-    assert_eq!(s.pop_render(), "spill0", "the global was rescued");
-    assert_eq!(s.pop_render(), "local0", "the local still forwards");
 }
 
+/// The case a *call* used to force a rescue for, because a callee may write any
+/// global. It cannot reach a register.
 #[test]
-fn locals_and_globals_draw_from_one_spill_pool() {
-    let mut s = sim(2, 2);
-
-    s.push_local(0);
-    s.push_global(0);
-
-    let l = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
-    let g = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
-
-    assert_eq!(
-        (spilled_to(l), spilled_to(g)),
-        (Some("spill0".into()), Some("spill1".into())),
-        "distinct slots from the shared pool"
+fn a_global_read_survives_a_call() {
+    let (prog, _, frame) = lower_func(
+        &format!(
+            "{GLOBAL_MODULE} (func (result i32) \
+               global.get 0 i32.const 7 call 0 i32.add))"
+        ),
+        1,
     );
 
-    assert_eq!(s.spills.allocation_len(), 2);
+    assert_eq!(frame.spills, 0, "a call cannot invalidate a register");
+
+    let at = index_of_kind(&prog, RegInstructionKind::I32Add).unwrap();
+
+    let RegInstruction::I32Add(sig) = &prog[at] else {
+        unreachable!()
+    };
+
+    // both operands are operand registers — the global read, and the call's result
+    let operand_base = operand_base_of(&frame);
+
+    for (i, index) in frame_indices(sig.input.registers(&frame.input_registers_arena))
+        .iter()
+        .enumerate()
+    {
+        assert!(
+            *index >= operand_base,
+            "operand {i} is slot {index}, below the operand region at {operand_base} \
+             — a global read across a call must be a register"
+        );
+    }
+}
+
+/// Locals still forward lazily, so a write to one *is* rescued — the asymmetry with
+/// globals is the point.
+#[test]
+fn writing_a_global_does_not_disturb_a_local_borrow() {
+    let mut s = sim(2);
+
+    s.push_local(0);
+
+    // A global write emits nothing that touches the lazy locals arena, so the
+    // borrow of local 0 is still live and still reads its origin.
+    assert!(
+        s.lazy_locals.origin[0].is_some(),
+        "local 0's borrow is live"
+    );
+
+    assert_eq!(s.spills.allocation_len(), 0, "and nothing is spilled");
+    assert_eq!(s.pop_render(), "local0", "so it still forwards");
 }
 
 #[test]
 fn writing_one_local_leaves_other_borrows_alone() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(0);
     s.push_local(1);
@@ -1472,7 +1440,7 @@ fn writing_one_local_leaves_other_borrows_alone() {
 
 #[test]
 fn writing_an_unborrowed_local_emits_nothing() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(0);
 
@@ -1482,7 +1450,7 @@ fn writing_an_unborrowed_local_emits_nothing() {
 
 #[test]
 fn three_borrows_share_one_entry() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.push_local(0);
@@ -1507,7 +1475,7 @@ fn three_borrows_share_one_entry() {
 
 #[test]
 fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
 
@@ -1526,7 +1494,7 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
 #[test]
 fn drop_releases_a_register() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
 
@@ -1542,7 +1510,7 @@ fn drop_releases_a_register() {
 
 #[test]
 fn drop_releases_a_borrow_but_only_the_last_one() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.push_local(0);
@@ -1553,7 +1521,7 @@ fn drop_releases_a_borrow_but_only_the_last_one() {
         "one borrow survives, so a write still has to rescue it"
     );
 
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
     s.pop();
@@ -1570,7 +1538,7 @@ fn drop_releases_a_borrow_but_only_the_last_one() {
 
 #[test]
 fn operands_are_recorded_deepest_first() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(0); // a
     s.push_local(1); // b
@@ -1587,7 +1555,7 @@ fn operands_are_recorded_deepest_first() {
 
 #[test]
 fn store_records_address_then_value() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(0); // address
     s.push_const(Const::I32(9)); // value
@@ -1623,7 +1591,7 @@ fn store_records_address_then_value() {
 
 #[test]
 fn a_result_reuses_an_operands_register() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_local(0);
 
@@ -1654,7 +1622,7 @@ fn a_result_reuses_an_operands_register() {
 #[test]
 fn max_registers_tracks_the_peak_not_the_total() {
     // two loads, each consumed before the next
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     for l in 0..2 {
         s.push_local(l);
@@ -1666,7 +1634,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
     assert_eq!(peak_operands(&s), 1, "serial values reuse one register");
 
     // two loads live at once
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     for l in 0..2 {
         s.push_local(l);
@@ -1679,11 +1647,11 @@ fn max_registers_tracks_the_peak_not_the_total() {
 
 #[test]
 fn non_register_operands_occupy_stack_but_not_registers() {
-    let mut s = sim(4, 2);
+    let mut s = sim(4);
 
     s.push_const(Const::I32(1));
     s.push_local(0);
-    s.push_global(0);
+    s.push_local(1);
 
     assert_eq!(
         heights(&s),
@@ -1701,7 +1669,7 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
     let types = vec![func_ty(1, 1)];
 
     // no params: no entry move, so the body starts where the loop was seen
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Loop, &BlockType::Empty, &types, 7);
 
@@ -1711,7 +1679,7 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
     ));
 
     // with params: an entry move occupies index 7, body starts at 8
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_const(Const::I32(1));
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 7);
@@ -1725,7 +1693,7 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
 #[test]
 fn an_if_records_the_index_of_the_if_itself() {
     let types = vec![func_ty(1, 1)];
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_const(Const::I32(1)); // condition
     s.add_block(BlockVariant::If, &BlockType::Empty, &types, 7);
@@ -1735,7 +1703,7 @@ fn an_if_records_the_index_of_the_if_itself() {
         BlockKind::If { index: 7, .. }
     ));
 
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_const(Const::I32(9)); // param
     s.push_const(Const::I32(1)); // condition
@@ -1753,7 +1721,7 @@ fn an_if_records_the_index_of_the_if_itself() {
 
 #[test]
 fn a_branch_to_the_function_frame_unwinds_to_zero() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
     s.push_local(0);
@@ -1772,7 +1740,7 @@ fn a_branch_to_the_function_frame_unwinds_to_zero() {
 
 #[test]
 fn a_branch_carrying_several_values_lands_them_contiguously() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1800,7 +1768,7 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     // loop's label type is its params; a block's is its results. Validation only
     // requires the types to match, so the arities agree while the bases differ.
     let types = vec![func_ty(1, 1)];
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.push_const(Const::I32(0)); // the loop's param
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
@@ -1836,7 +1804,7 @@ fn a_br_table_may_mix_loop_and_block_targets() {
 
 #[test]
 fn every_br_table_arm_sees_the_same_stack() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1862,7 +1830,7 @@ fn every_br_table_arm_sees_the_same_stack() {
 
 #[test]
 fn a_branch_carrying_nothing_emits_no_move() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1880,7 +1848,7 @@ fn a_branch_carrying_nothing_emits_no_move() {
 
 #[test]
 fn br_if_consumes_only_its_condition() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1980,7 +1948,7 @@ fn deeply_nested_dead_constructs_unwind_in_order() {
 
 #[test]
 fn br_table_arms_survive_lowering() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -2040,7 +2008,7 @@ fn br_table_arms_survive_lowering() {
 
 #[test]
 fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
     s.push_local(0);
 
@@ -2100,8 +2068,13 @@ fn a_straight_line_body_copies_nothing() {
     );
 }
 
+/// A constant is read in place; a global is not.
+///
+/// The asymmetry is the encoding's: an operand is a bare frame index, and the
+/// constant pool *is* part of the frame while a global lives in the instance. So
+/// `i32.const 7` emits nothing and `global.get 0` emits a read.
 #[test]
-fn constants_and_globals_are_read_in_place() {
+fn a_constant_is_read_in_place_but_a_global_is_materialised() {
     assert_lowers_to(
         r#"(module
              (global i32 (i32.const 0))
@@ -2110,9 +2083,10 @@ fn constants_and_globals_are_read_in_place() {
                i32.const 7
                i32.add))"#,
         "
-          0  i32.add      global0, 7 -> r0
-          1  move         r0 -> r0
-          2  end
+          0  global.get   global0 -> r0
+          1  i32.add      r0, 7 -> r0
+          2  move         r0 -> r0
+          3  end
              frame: 1 registers, 0 spills
         ",
     );
@@ -2574,6 +2548,7 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
     // repeated region starts at 1, and the back-edge is instruction 4.
     assert_eq!(back_edge, 4, "the back-edge's own index");
     assert_eq!(*target_index, 1, "the loop header's index");
+
     assert!(
         matches!(prog[*target_index as usize], RegInstruction::Loop),
         "a back-edge must land on the `loop` itself, not on a body instruction: found {:?}",
@@ -3000,10 +2975,14 @@ fn arguments_are_staged_at_the_caller_base() {
     );
 }
 
-/// A callee may write any global, so a borrow that outlives the call has to be
-/// rescued first. Locals are safe — the callee has its own frame.
+/// A callee may write any global, but it cannot reach a value already read into a
+/// register — so nothing is rescued, and the two reads straddling the call are simply
+/// two reads.
+///
+/// The second `global.get` is a *separate* read and so sees whatever the callee left,
+/// which is what wasm requires: `global.get` reads at the point it appears.
 #[test]
-fn a_global_read_across_a_call_is_rescued() {
+fn a_global_read_across_a_call_needs_no_rescue() {
     assert_func_lowers_to(
         r#"(module
              (global (mut i32) (i32.const 0))
@@ -3015,12 +2994,13 @@ fn a_global_read_across_a_call_is_rescued() {
                i32.add))"#,
         1,
         "
-          0  global.spill global0 -> spill0
-          1  call         f0 caller_base=0
-          2  i32.add      spill0, global0 -> r0
-          3  move         r0 -> r0
-          4  end
-             frame: 1 registers, 1 spills
+          0  global.get   global0 -> r0
+          1  call         f0 caller_base=1
+          2  global.get   global0 -> r1
+          3  i32.add      r0, r1 -> r0
+          4  move         r0 -> r0
+          5  end
+             frame: 2 registers, 0 spills
         ",
     );
 }
@@ -3231,10 +3211,10 @@ fn results_come_back_at_the_caller_base() {
     );
 }
 
-/// The callee is not known until execution, so it may write any global: a borrow
-/// that outlives the call is rescued exactly as it is for a direct one.
+/// The callee is not known until execution, so it may write any global — and, as for
+/// a direct call, that cannot reach a value already in a register.
 #[test]
-fn a_global_read_across_a_call_indirect_is_rescued() {
+fn a_global_read_across_a_call_indirect_needs_no_rescue() {
     assert_lowers_to(
         &format!(
             "(module (global (mut i32) (i32.const 0)) (type (func (result i32))) (table 4 funcref)
@@ -3246,12 +3226,12 @@ fn a_global_read_across_a_call_indirect_is_rescued() {
                  i32.add)"#
         ),
         "
-          0  global.spill global0 -> spill0
-          1  call_indirect [3] ty0 table0 caller_base=0
-          2  i32.add      spill0, r0 -> r0
+          0  global.get   global0 -> r0
+          1  call_indirect [3] ty0 table0 caller_base=1
+          2  i32.add      r0, r1 -> r0
           3  move         r0 -> r0
           4  end
-             frame: 1 registers, 1 spills
+             frame: 2 registers, 0 spills
         ",
     );
 }
@@ -3429,18 +3409,18 @@ fn an_unreachable_block_does_not_disturb_the_enclosing_block() {
 #[test]
 fn a_spill_live_across_an_unreachable_survives_it() {
     assert_lowers_to(
-        r#"(module (global (mut i32) (i32.const 0)) (func (result i32)
-             global.get 0
+        r#"(module (func (param i32) (result i32)
+             local.get 0
              i32.const 5
-             global.set 0
+             local.set 0
              block
                unreachable
              end
              i32.const 1
              i32.add))"#,
         "
-          0  global.spill global0 -> spill0
-          1  global.set   global0 <- 5
+          0  local.spill  local0 -> spill0
+          1  local.set    local0 <- 5
           2  unreachable
           3  end
           4  i32.add      spill0, 1 -> r0
@@ -3797,9 +3777,9 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
 
         RegInstructionKind::LocalSet
         | RegInstructionKind::LocalTee
+        | RegInstructionKind::GlobalGet
         | RegInstructionKind::GlobalSet
         | RegInstructionKind::LocalSpill
-        | RegInstructionKind::GlobalSpill
         | RegInstructionKind::If
         | RegInstructionKind::Else
         | RegInstructionKind::Loop
@@ -4314,6 +4294,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
         pos64.0, neg64.0,
         "f64 +0.0 and -0.0 are different constants"
     );
+
     assert_ne!(
         pos32.0, neg32.0,
         "f32 +0.0 and -0.0 are different constants"

@@ -184,9 +184,8 @@ impl RuntimeFrame for RegFrame {
     /// values behind.
     ///
     /// The spill region needs nothing here — a spill is written before it is read, by
-    /// the [`LocalSpill`](crate::instruction::register::RegInstruction::LocalSpill) or
-    /// [`GlobalSpill`](crate::instruction::register::RegInstruction::GlobalSpill) that
-    /// the lowering placed above every path that reads it — so entry only has to
+    /// the [`LocalSpill`](crate::instruction::register::RegInstruction::LocalSpill)
+    /// that the lowering placed above every path that reads it — so entry only has to
     /// reserve room for it.
     fn enter_frame(
         &mut self,

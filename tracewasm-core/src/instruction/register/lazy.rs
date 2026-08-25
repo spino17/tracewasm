@@ -1,4 +1,8 @@
-//! Lazy forwarding of locals and globals, and the spill slots that rescue them.
+//! Lazy forwarding of locals, and the spill slots that rescue them.
+//!
+//! Globals are not forwarded — [`RegInstruction::GlobalGet`](super::RegInstruction)
+//! materialises one into a register, so nothing can invalidate it and there is
+//! nothing to rescue. Only locals are read in place.
 //!
 //! ## Lazy operands
 //!
@@ -15,7 +19,7 @@
 //!
 //! ## One entry, many borrows
 //!
-//! A [`LazyEntry`] represents *the value* one local or global held at one point,
+//! A [`LazyEntry`] represents *the value* one local held at one point,
 //! and every stack slot reading that value holds a [`LazySlot`] handle to the same
 //! entry. Two properties fall out of that sharing, and both are needed:
 //!
@@ -72,13 +76,12 @@ use std::{fmt, marker::PhantomData};
 /// once.
 #[derive(Clone, Copy)]
 pub(crate) enum LazyLocation {
-    /// Read straight from its origin — the local or global at this index. Valid
-    /// until something writes that origin.
+    /// Read straight from its origin — the local at this index. Valid until
+    /// something writes that origin.
     Original(u32),
     /// Materialized into this frame spill slot by a
-    /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) or
-    /// [`GlobalSpill`](super::RegInstruction::GlobalSpill) emitted just before the
-    /// write that ended the forwarding.
+    /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) emitted just
+    /// before the write that ended the forwarding.
     Spilled(SpillIndex),
 }
 
@@ -104,15 +107,16 @@ pub(crate) struct LazyEntry<T> {
     phantom: PhantomData<T>,
 }
 
-/// The lazy entries for one origin space — all locals, or all globals, of a
-/// function body — plus the index that finds the live entry for a given origin.
+/// The lazy entries for one origin space — the locals of a function body — plus the
+/// index that finds the live entry for a given origin.
 ///
-/// `T` is [`Local`] or [`Global`]; it carries no data and exists so the two arenas
-/// and their handles are distinct types.
+/// `T` is the origin-space marker, currently only [`Local`]. It carries no data and
+/// exists so an arena and its handles are a distinct type from any other origin
+/// space's, should one be added.
 pub(crate) struct LazyArena<T> {
     arena: Arena<LazyEntry<T>>,
-    /// `origin[i]` is the entry currently forwarding local/global `i`, or `None` if
-    /// nothing borrows it.
+    /// `origin[i]` is the entry currently forwarding local `i`, or `None` if nothing
+    /// borrows it.
     ///
     /// Public because lowering both reads it — to decide whether a write needs a
     /// spill — and clears it, when a borrow is released or spilled. An entry stored
@@ -239,19 +243,15 @@ impl<T> LazySlot<T> {
     }
 }
 
-/// Marker for the globals origin space. Never instantiated.
-pub(crate) struct Global;
 /// Marker for the locals origin space. Never instantiated.
 pub(crate) struct Local;
 
 /// A borrow of a local's value.
 pub(crate) type LocalSlot = LazySlot<Local>;
-/// A borrow of a global's value.
-pub(crate) type GlobalSlot = LazySlot<Global>;
 
 /// The frame's spill area, allocated as a stack of interchangeable slots.
 ///
-/// A spill slot holds one materialized local or global for as long as some stack
+/// A spill slot holds one materialized local for as long as some stack
 /// slot still reads it. Slots carry no identity beyond their index, so a freed one
 /// is handed straight back out.
 #[derive(Default)]
@@ -293,7 +293,7 @@ impl SpillArena {
     }
 }
 
-/// A slot in the frame's spill area, holding one materialized local or global.
+/// A slot in the frame's spill area, holding one materialized local.
 ///
 /// The inner index is private and only `SpillArena::reserve_slot` can mint one,
 /// so an index that exists is one the arena handed out. There is no `PartialEq`
