@@ -71,7 +71,7 @@ use crate::error::TraceWasmError;
 use id_arena::{Arena, Id};
 use std::{fmt, marker::PhantomData};
 
-const MAX_SPILLS: u16 = 50000;
+const MAX_SPILLS: u16 = u16::MAX;
 
 /// Where the value behind a [`LazyEntry`] currently lives.
 ///

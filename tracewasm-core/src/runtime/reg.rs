@@ -201,7 +201,8 @@ impl RuntimeFrame for RegFrame {
         // `registers` counts from the frame base, so it already covers the locals;
         // the two other regions are what widen the frame beyond it.
         let total_register_capacity = base_register_index
-            + (frame_layout.registers + frame_layout.spills) as usize
+            + frame_layout.registers as usize
+            + frame_layout.spills as usize
             + frame_layout.consts.len();
 
         // Only grow. A deeper call may have pushed the file past this frame's end,

@@ -2371,15 +2371,18 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
     // at 1. Targeting 0 would re-run that move on every iteration and pin the params
     // to their entry values, which is the bug this number rules out.
     assert_eq!(br, 3, "the back-edge's own index");
+
     assert_eq!(
         *target_index, 1,
         "the loop header's index, past the entry move"
     );
+
     assert!(
         matches!(prog[*target_index as usize], RegInstruction::Loop),
         "the target must be the `loop` itself, found {:?}",
         prog[*target_index as usize].kind()
     );
+
     assert!(
         matches!(prog[0], RegInstruction::Move(_)),
         "instruction 0 is the entry move the back-edge must skip"
@@ -4331,6 +4334,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     let c = interner.intern(Const::F64(other_payload.into())).unwrap();
 
     assert_ne!(a.0, b.0, "a NaN and its negation are different constants");
+
     assert_ne!(
         a.0, c.0,
         "NaNs with different payloads are different constants"
@@ -4358,5 +4362,241 @@ fn the_pool_still_dedups_equal_constants() {
         interner.consts.len(),
         3,
         "three distinct constants interned four times each"
+    );
+}
+
+// ===========================================================================
+// implementation limits
+//
+// An operand is a 16-bit frame index, so a body needing a wider frame than that can
+// name is refused. The wasm spec sets no such bound, so these modules are *valid* —
+// which is exactly why the failure has to be a reported error and not a wrong answer
+// or a panic.
+//
+// Each case below is checked against `wasmparser`'s own validator first, so a test
+// that stopped exercising the limit — because the wat drifted, or because the
+// operator sequence stopped creating the pressure it was meant to — fails loudly
+// rather than passing vacuously.
+// ===========================================================================
+
+/// Asserts `wat` is a valid module, then hands back what the register pass made of it.
+fn compile_register(wat: &str) -> Result<(), TraceWasmError> {
+    let bytes = wat::parse_str(wat).expect("invalid wat");
+
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .expect("the point of these tests is that the module is VALID wasm");
+
+    crate::module::Module::<crate::Register>::compile(&bytes).map(|_| ())
+}
+
+/// A memory offset is a `u32` by spec — validation only bounds it below `2^32` for a
+/// 32-bit memory — so the whole range has to survive lowering intact.
+///
+/// This is the one limit that is *not* ours to set: narrowing the field would
+/// miscompute an address rather than refuse a module, and silently.
+#[test]
+fn a_memory_offset_keeps_its_full_u32_range() {
+    for offset in [
+        0u32,
+        255,
+        256,
+        u16::MAX as u32,
+        u16::MAX as u32 + 1,
+        u32::MAX,
+    ] {
+        let wat = format!(
+            r#"(module (memory 1)
+                 (func (param i32) (result i32) local.get 0 i32.load offset={offset}))"#
+        );
+
+        let (prog, _, _) = lower(&wat);
+        let at = index_of_kind(&prog, RegInstructionKind::I32Load).unwrap();
+
+        let RegInstruction::I32Load { offset: stored, .. } = &prog[at] else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            *stored, offset,
+            "a load's offset must round-trip exactly; {offset} came back as {stored}"
+        );
+    }
+}
+
+/// The same for a store, which carries the offset on a different variant.
+#[test]
+fn a_store_offset_keeps_its_full_u32_range() {
+    for offset in [0u32, u16::MAX as u32 + 1, u32::MAX] {
+        let wat = format!(
+            r#"(module (memory 1)
+                 (func (param i32) local.get 0 i32.const 1 i32.store offset={offset}))"#
+        );
+
+        let (prog, _, _) = lower(&wat);
+        let at = index_of_kind(&prog, RegInstructionKind::I32Store).unwrap();
+
+        let RegInstruction::I32Store { offset: stored, .. } = &prog[at] else {
+            unreachable!()
+        };
+
+        assert_eq!(*stored, offset, "a store's offset must round-trip exactly");
+    }
+}
+
+/// Validation caps a function at `MAX_WASM_FUNCTION_LOCALS` (50,000), which is below
+/// what a 16-bit index can name — so the locals region can never be the thing that
+/// makes a frame too wide, and a body at the ceiling must still lower.
+#[test]
+fn a_function_at_the_locals_ceiling_still_lowers() {
+    // 49,999 declared locals plus one param. `local.get` of the highest one forces
+    // the pass to name it, so this fails if a local index is narrowed unsafely.
+    let wat = format!(
+        "(module (func (param i32) (result i32) (local {}) local.get 49999))",
+        "i32 ".repeat(49_999).trim()
+    );
+
+    assert!(
+        compile_register(&wat).is_ok(),
+        "a function at the validator's own locals limit must lower"
+    );
+}
+
+/// More distinct constants than the pool can name.
+///
+/// The pool is bounded only by the body's byte length, so this is well within what
+/// wasm allows.
+#[test]
+fn too_many_constants_is_reported_not_truncated() {
+    let mut wat = String::from("(module (func (result i32)\n");
+
+    for i in 0..(MAX_CONSTS as u32 + 10) {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    wat.push_str("  i32.const 7))");
+
+    let err = compile_register(&wat).expect_err("the pool cannot name this many");
+
+    assert!(
+        matches!(
+            err,
+            TraceWasmError::RegisterFrameTooLarge {
+                what: "constants",
+                ..
+            }
+        ),
+        "expected the constants limit, got: {err}"
+    );
+}
+
+/// More simultaneously-live operand registers than can be named.
+///
+/// Each `local.get 0; i32.load` pair leaves one more register live — a run of
+/// identical `i32.const`s would *not*, since they intern to one pool entry and the
+/// adds keep only one register live.
+#[test]
+fn too_many_live_registers_is_reported_not_truncated() {
+    let n = MAX_REGISTER_SLOTS as u32 + 10;
+    let mut wat = String::from("(module (memory 1) (func (param i32) (result i32)\n");
+
+    for _ in 0..n {
+        wat.push_str("  local.get 0 i32.load\n");
+    }
+
+    for _ in 0..(n - 1) {
+        wat.push_str("  i32.add\n");
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("that many registers cannot be named");
+
+    assert!(
+        matches!(
+            err,
+            TraceWasmError::RegisterFrameTooLarge {
+                what: "locals and operand registers",
+                ..
+            }
+        ),
+        "expected the register limit, got: {err}"
+    );
+}
+
+/// Two regions each **under** their own limit whose sum is still unaddressable.
+///
+/// The per-region limits cannot catch this — the frame is the four regions laid end
+/// to end — so this is the case that the end-of-body check exists for, and the one a
+/// future change to those limits would most easily break.
+#[test]
+fn a_frame_whose_regions_sum_past_the_limit_is_reported() {
+    let n = 40_000u32;
+
+    assert!(
+        n < MAX_CONSTS as u32 && n < MAX_REGISTER_SLOTS as u32,
+        "each region must be individually legal for this to test the sum"
+    );
+
+    assert!(
+        n as u64 * 2 > u16::MAX as u64,
+        "and their sum must not be addressable"
+    );
+
+    let mut wat = String::from("(module (memory 1) (func (param i32) (result i32)\n");
+
+    for _ in 0..n {
+        wat.push_str("  local.get 0 i32.load\n");
+    }
+
+    for i in 0..n {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    for _ in 0..(n - 1) {
+        wat.push_str("  i32.add\n");
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the regions sum past the limit");
+
+    assert!(
+        matches!(
+            err,
+            TraceWasmError::RegisterFrameTooLarge {
+                what: "the whole frame",
+                ..
+            }
+        ),
+        "expected the whole-frame limit, got: {err}"
+    );
+}
+
+/// Every module the register machine refuses, the stack machine still runs.
+///
+/// The limit is the register encoding's, not TraceWasm's, and nothing else in the
+/// crate states that — so a change that made the stack pass share the ceiling would
+/// otherwise go unnoticed.
+#[test]
+fn a_frame_too_large_for_the_register_machine_still_lowers_for_the_stack_machine() {
+    let mut wat = String::from("(module (func (result i32)\n");
+
+    for i in 0..(MAX_CONSTS as u32 + 10) {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    wat.push_str("  i32.const 7))");
+
+    let bytes = wat::parse_str(&wat).expect("invalid wat");
+
+    assert!(
+        crate::module::Module::<crate::Register>::compile(&bytes).is_err(),
+        "the register machine must refuse it"
+    );
+
+    assert!(
+        crate::module::Module::<crate::Stack>::compile(&bytes).is_ok(),
+        "and the stack machine must not"
     );
 }

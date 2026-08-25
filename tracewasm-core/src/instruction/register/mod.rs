@@ -185,8 +185,8 @@ pub mod render;
 #[cfg(test)]
 mod tests;
 
-const MAX_CONSTS: u16 = 50000;
-const MAX_REGISTER_SLOTS: u16 = 50000;
+const MAX_CONSTS: u16 = u16::MAX;
+const MAX_REGISTER_SLOTS: u16 = u16::MAX;
 
 /// Which kind of label a block opens, before its instruction index is known.
 ///
@@ -931,7 +931,7 @@ impl SimulatedStack {
     fn advanced_register_index(&mut self) -> Result<(), TraceWasmError> {
         self.curr_register_index += 1;
 
-        if self.curr_register_index as u16 > self.max_registers {
+        if self.curr_register_index > self.max_registers as usize {
             if self.max_registers >= MAX_REGISTER_SLOTS {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",

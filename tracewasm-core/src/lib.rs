@@ -61,6 +61,13 @@
 //! The interpreter itself lives in a crate-internal `runtime` module and is not
 //! part of the public API.
 
+// A discarded `Result` is a swallowed failure, and the lowering pass is full of them
+// now that a frame too wide for a 16-bit operand index is reported rather than
+// panicked on. Making a function fallible does not make its callers handle it — nine
+// call sites dropped the error the first time this was wired up — so the lint that
+// catches that has to fail the build, not decorate it.
+#![deny(unused_must_use)]
+
 /// Re-exported so implementors of
 /// [`ImportRegistry`](instance::traits::ImportRegistry) — and the code
 /// `#[imports]` generates for them — can name the error type its methods return
