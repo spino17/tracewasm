@@ -70,6 +70,8 @@
 use id_arena::{Arena, Id};
 use std::{fmt, marker::PhantomData};
 
+const MAX_SPILLS: u16 = 50000;
+
 /// Where the value behind a [`LazyEntry`] currently lives.
 ///
 /// Rewriting this one field is what redirects every stack slot sharing the entry at
@@ -78,7 +80,7 @@ use std::{fmt, marker::PhantomData};
 pub(crate) enum LazyLocation {
     /// Read straight from its origin — the local at this index. Valid until
     /// something writes that origin.
-    Original(u32),
+    Original(u16),
     /// Materialized into this frame spill slot by a
     /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) emitted just
     /// before the write that ended the forwarding.
@@ -141,7 +143,7 @@ impl<T> LazyArena<T> {
     ///
     /// Recording it in [`Self::origin`] is the caller's job; the two happen together
     /// only on the first borrow of an origin.
-    pub fn allocate(&mut self, location: u32) -> LazySlot<T> {
+    pub fn allocate(&mut self, location: u16) -> LazySlot<T> {
         LazySlot(self.arena.alloc(LazyEntry {
             location: LazyLocation::Original(location),
             ref_count: 1,
@@ -256,8 +258,8 @@ pub(crate) type LocalSlot = LazySlot<Local>;
 /// is handed straight back out.
 #[derive(Default)]
 pub(crate) struct SpillArena {
-    allocation_len: u32,
-    free_slots: Vec<u32>,
+    allocation_len: u16,
+    free_slots: Vec<u16>,
 }
 
 impl SpillArena {
@@ -270,6 +272,10 @@ impl SpillArena {
 
         let slot = self.allocation_len;
         self.allocation_len += 1;
+
+        if self.allocation_len > MAX_SPILLS {
+            todo!() // RAISE ERROR!
+        }
 
         SpillIndex(slot)
     }
@@ -288,7 +294,7 @@ impl SpillArena {
     /// of spills emitted: [`Self::reserve_slot`] reuses a freed slot before
     /// growing, so the count only advances when every existing slot is live at
     /// once — which is exactly what the frame has to hold.
-    pub fn allocation_len(&self) -> u32 {
+    pub fn allocation_len(&self) -> u16 {
         self.allocation_len
     }
 }
@@ -300,11 +306,11 @@ impl SpillArena {
 /// either: two live borrows never share a slot, and comparing them would only be
 /// asking which of two distinct slots came first.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpillIndex(u32);
+pub(crate) struct SpillIndex(u16);
 
 impl SpillIndex {
     #[inline(always)]
-    pub fn raw_value(&self) -> u32 {
+    pub fn raw_value(&self) -> u16 {
         self.0
     }
 }

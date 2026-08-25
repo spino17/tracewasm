@@ -185,6 +185,9 @@ pub mod render;
 #[cfg(test)]
 mod tests;
 
+const MAX_CONSTS: u16 = 50000;
+const MAX_REGISTER_SLOTS: u16 = 50000;
+
 /// Which kind of label a block opens, before its instruction index is known.
 ///
 /// [`SimulatedStack::add_block`] turns this into a [`BlockKind`], filling in the
@@ -316,7 +319,7 @@ impl Eq for Const {}
 /// Not yet a frame index: it becomes one when the end-of-body pass adds
 /// `locals_count`, which is the only place the two spaces meet.
 #[derive(Debug, Clone, Copy)]
-struct ConstId(u32);
+struct ConstId(u16);
 
 /// The constants one body uses, deduplicated.
 ///
@@ -344,7 +347,11 @@ impl ConstInterner {
         if let Some(id) = self.reverse_map.get(&val) {
             *id
         } else {
-            let id = ConstId(self.consts.len() as u32);
+            if self.consts.len() as u16 > MAX_CONSTS {
+                todo!() // RAISE ERROR!
+            }
+
+            let id = ConstId(self.consts.len() as u16);
 
             self.consts.push(val);
             self.reverse_map.insert(val, id);
@@ -396,27 +403,7 @@ impl Const {
 /// The lowering-time counterpart is [`BackPatchableSlot`], which additionally has to
 /// represent operands whose frame index is not known yet.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Slot {
-    /// Read frame slot `n`, counted from the activation's base — `registers[base + n]`
-    /// at execution.
-    ///
-    /// One index, no tag, covering all four regions of the frame:
-    ///
-    /// ```text
-    ///   n < locals_count                          a param or declared local
-    ///   n < locals_count + consts                 a constant from the pool
-    ///   n < locals_count + consts + spills        a spill slot
-    ///   otherwise                                 an operand register
-    /// ```
-    ///
-    /// Execution never needs to tell them apart, which is the point — every operand
-    /// read is one add and one load. Only [`Slot::render`] recovers the distinction,
-    /// from the sizes in [`RegFrameLayout`].
-    ///
-    /// `u32::MAX` is the placeholder the pass emits before the end-of-body pass
-    /// assigns a real index; see [`BackPatchableSlot`].
-    RegisterFrame(u32),
-}
+pub(crate) struct Slot(u16);
 
 impl Slot {
     /// Whether this operand is an operand register rather than a local.
@@ -432,12 +419,8 @@ impl Slot {
                   which discriminates by variant; this is the range test, kept for \
                   the provisional indices the lowering works in"
     )]
-    fn is_register(&self, locals_count: u32) -> bool {
-        if let Slot::RegisterFrame(frame_index) = self {
-            *frame_index >= locals_count
-        } else {
-            false
-        }
+    fn is_register(&self, locals_count: u16) -> bool {
+        self.0 >= locals_count
     }
 
     /// Names the location this operand reads, by the region its frame index falls in.
@@ -447,18 +430,16 @@ impl Slot {
     /// which one an index names. Execution never does this — it adds the index to the
     /// frame base and loads — so this exists for rendering and for tests.
     fn render(&self, frame_layout: &RegFrameLayout) -> String {
-        let frame_index = match self {
-            Slot::RegisterFrame(frame_index) => *frame_index,
-        };
+        let frame_index = self.0;
 
         // The placeholder the pass emits for a spill or constant before the
         // end-of-body backpatch resolves it. Rendering one means it escaped.
-        if frame_index == u32::MAX {
+        if frame_index == u16::MAX {
             return "<unresolved>".to_string();
         }
 
         let locals_count = frame_layout.locals_count;
-        let spills_base = locals_count + frame_layout.consts.len() as u32;
+        let spills_base = locals_count + frame_layout.consts.len() as u16;
         let registers_base = spills_base + frame_layout.spills;
 
         if frame_index < locals_count {
@@ -487,7 +468,7 @@ impl Default for Slot {
     /// written before anything reads it, so the value only has to be cheap and
     /// harmless — a constant reads nothing and names no location.
     fn default() -> Self {
-        Slot::RegisterFrame(0)
+        Slot(0)
     }
 }
 
@@ -502,7 +483,7 @@ enum BackPatchableSlot {
     /// An operand register, as a *provisional* frame index — counted from the frame
     /// base, so at or above `locals_count`, but not yet clear of the constant and
     /// spill regions. Resolved by shifting up `consts + spills`.
-    Register(u32),
+    Register(u16),
     /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
     Spill(SpillIndex),
     /// An interned constant, by pool id. Resolved to `locals_count + id`.
@@ -544,7 +525,7 @@ enum StackSlot {
     Const(ConstId),
     /// A value an earlier instruction produced, in the register named here. The
     /// only variant [`SimulatedStack::curr_register_index`] counts.
-    Register(u32),
+    Register(u16),
     /// A borrow of a local, resolving to the local itself or to the spill slot it
     /// was rescued into, whichever holds the value when this is finally read.
     Local(LocalSlot),
@@ -588,7 +569,7 @@ pub(crate) struct Signature<const I: usize, const O: usize> {
     /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
     pub input: Registers<I, Slot>,
     /// Destination registers, in the order results are pushed.
-    pub output: Registers<O, u32>,
+    pub output: Registers<O, u16>,
 }
 
 /// The operands of an instruction whose arity is only known at lowering time — a
@@ -618,7 +599,7 @@ impl DynSignature {
 
     /// The destination registers, positionally matched to
     /// [`Self::input_registers`].
-    pub fn output_registers<'a>(&self, arena: &'a [u32]) -> &'a [u32] {
+    pub fn output_registers<'a>(&self, arena: &'a [u16]) -> &'a [u16] {
         let start = self.output as usize;
 
         &arena[start..(start + self.len as usize)]
@@ -847,7 +828,7 @@ struct SimulatedStack {
     ///
     /// Ships verbatim as [`RegFrameLayout::registers`], so it **includes the locals**
     /// and the frame is `max_registers + spills + consts` slots wide.
-    max_registers: u32,
+    max_registers: u16,
     /// Lazy borrows of locals; see [`lazy`].
     lazy_locals: LazyArena<Local>,
     /// Frame slots holding locals materialized ahead of a write.
@@ -864,7 +845,7 @@ struct SimulatedStack {
     /// Every entry is a provisional operand-register index — a destination is never a
     /// constant, local or global — so the whole arena takes one uniform shift at the
     /// end of the body.
-    output_registers: Vec<u32>,
+    output_registers: Vec<u16>,
     /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
     /// Flat arena of `br_table` arms, indexed by
@@ -875,7 +856,7 @@ struct SimulatedStack {
     ///
     /// Resolved to `index + consts + spills` — no `locals_count` term, because a
     /// provisional register index already counts from the frame base.
-    register_backpatches: Vec<(usize, u32)>,
+    register_backpatches: Vec<(usize, u16)>,
     /// Operands awaiting a frame index, each as `(position in
     /// [`Self::input_registers`], spill slot)`.
     ///
@@ -909,7 +890,7 @@ impl SimulatedStack {
         SimulatedStack {
             stack: Stack::new_with_capacity(0),
             curr_register_index: locals_count as usize,
-            max_registers: locals_count,
+            max_registers: locals_count as u16,
             lazy_locals: LazyArena::new(locals_count),
             spills: SpillArena::default(),
             input_registers: vec![],
@@ -923,8 +904,8 @@ impl SimulatedStack {
         }
     }
 
-    fn locals_count(&self) -> u32 {
-        self.lazy_locals.origin.len() as u32
+    fn locals_count(&self) -> u16 {
+        self.lazy_locals.origin.len() as u16
     }
 
     /// Allocates one register, keeping [`Self::max_registers`] a true high-water mark.
@@ -937,8 +918,12 @@ impl SimulatedStack {
     fn advanced_register_index(&mut self) {
         self.curr_register_index += 1;
 
-        if self.curr_register_index as u32 > self.max_registers {
+        if self.curr_register_index as u16 > self.max_registers {
             self.max_registers += 1;
+
+            if self.max_registers > MAX_REGISTER_SLOTS {
+                todo!() // RAISE ERROR!
+            }
         }
     }
 
@@ -1095,7 +1080,7 @@ impl SimulatedStack {
     /// If something already borrows this origin, the new stack slot shares that
     /// entry, so a later spill redirects both at once. Otherwise a fresh entry is
     /// allocated and recorded as the origin's live borrow.
-    fn push_lazy<T>(location: u32, arena: &mut LazyArena<T>) -> LazySlot<T> {
+    fn push_lazy<T>(location: u16, arena: &mut LazyArena<T>) -> LazySlot<T> {
         match arena.origin[location as usize] {
             Some(slot) => {
                 slot.advanced_ref_count(arena);
@@ -1134,7 +1119,7 @@ impl SimulatedStack {
                 let location = Self::pop_lazy(slot, &mut self.lazy_locals, &mut self.spills);
 
                 match location {
-                    LazyLocation::Original(local_index) => Slot::RegisterFrame(local_index).into(),
+                    LazyLocation::Original(local_index) => Slot(local_index).into(),
                     LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
                 }
             }
@@ -1171,7 +1156,7 @@ impl SimulatedStack {
                 let location = slot.location(&self.lazy_locals);
 
                 match location {
-                    LazyLocation::Original(local_index) => Slot::RegisterFrame(local_index).into(),
+                    LazyLocation::Original(local_index) => Slot(local_index).into(),
                     LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
                 }
             }
@@ -1190,19 +1175,15 @@ impl SimulatedStack {
     ///
     /// A spill is never pushed. It is a *transition* of an existing borrow, applied
     /// through [`Self::set_lazy`], not a value that arrives from nothing.
-    fn push(&mut self, val: Slot) {
-        let slot = match val {
-            Slot::RegisterFrame(frame_index) => {
-                if frame_index < self.locals_count() {
-                    let slot = Self::push_lazy(frame_index, &mut self.lazy_locals);
+    fn push(&mut self, slot: Slot) {
+        let slot = if slot.0 < self.locals_count() {
+            let slot = Self::push_lazy(slot.0, &mut self.lazy_locals);
 
-                    StackSlot::Local(slot)
-                } else {
-                    self.advanced_register_index();
+            StackSlot::Local(slot)
+        } else {
+            self.advanced_register_index();
 
-                    StackSlot::Register(frame_index)
-                }
-            }
+            StackSlot::Register(slot.0)
         };
 
         self.stack.push(slot);
@@ -1223,7 +1204,7 @@ impl SimulatedStack {
             StackSlot::Const(val) => BackPatchableSlot::Const(*val),
             StackSlot::Register(index) => BackPatchableSlot::Register(*index),
             StackSlot::Local(slot) => match slot.location(&self.lazy_locals) {
-                LazyLocation::Original(local_index) => Slot::RegisterFrame(local_index).into(),
+                LazyLocation::Original(local_index) => Slot(local_index).into(),
                 LazyLocation::Spilled(spill_index) => BackPatchableSlot::Spill(spill_index),
             },
         }
@@ -1238,8 +1219,8 @@ impl SimulatedStack {
     /// `local.get`: starts or joins a lazy borrow of the local, emitting nothing.
     /// The value is read in place by whatever consumes it, unless a write to the
     /// local intervenes and spills it first.
-    fn push_local(&mut self, index: u32) {
-        self.push(Slot::RegisterFrame(index));
+    fn push_local(&mut self, index: u16) {
+        self.push(Slot(index));
     }
 
     /// Applies an instruction's stack effect and records its operands in the arenas.
@@ -1268,19 +1249,19 @@ impl SimulatedStack {
                     self.const_backpatches
                         .push((input_start + pops - 1 - i, id));
 
-                    Slot::RegisterFrame(u32::MAX) // will be backpatched
+                    Slot(u16::MAX) // will be backpatched
                 }
                 BackPatchableSlot::Register(index) => {
                     self.register_backpatches
                         .push((input_start + pops - 1 - i, index));
 
-                    Slot::RegisterFrame(u32::MAX) // will be backpatched
+                    Slot(u16::MAX) // will be backpatched
                 }
                 BackPatchableSlot::Spill(index) => {
                     self.spill_backpatches
                         .push((input_start + pops - 1 - i, index));
 
-                    Slot::RegisterFrame(u32::MAX) // will be backpatched
+                    Slot(u16::MAX) // will be backpatched
                 }
             }
         }
@@ -1288,8 +1269,8 @@ impl SimulatedStack {
         self.output_registers.resize(output_start + pushes, 0);
 
         for i in 0..pushes {
-            self.output_registers[output_start + i] = self.curr_register_index as u32;
-            let out = Slot::RegisterFrame(self.curr_register_index as u32);
+            self.output_registers[output_start + i] = self.curr_register_index as u16;
+            let out = Slot(self.curr_register_index as u16);
 
             self.push(out);
         }
@@ -1320,7 +1301,7 @@ impl SimulatedStack {
         }
 
         for _ in 0..pushes {
-            let out = Slot::RegisterFrame(self.curr_register_index as u32);
+            let out = Slot(self.curr_register_index as u16);
 
             self.push(out);
         }
@@ -1422,7 +1403,7 @@ impl SimulatedStack {
         let arity_to_preserve = arity_to_preserve as usize;
         let curr_stack_height = self.stack.height();
         let popped_count = (curr_stack_height - base_height) as usize;
-        let mut register_index = self.curr_register_index as u32;
+        let mut register_index = self.curr_register_index as u16;
 
         self.input_registers
             .resize(input_start + arity_to_preserve, Slot::default());
@@ -1444,19 +1425,19 @@ impl SimulatedStack {
                         self.const_backpatches
                             .push((input_start + arity_to_preserve - 1 - i, id));
 
-                        Slot::RegisterFrame(u32::MAX) // will be backpatched
+                        Slot(u16::MAX) // will be backpatched
                     }
                     BackPatchableSlot::Register(index) => {
                         self.register_backpatches
                             .push((input_start + arity_to_preserve - 1 - i, index));
 
-                        Slot::RegisterFrame(u32::MAX) // will be backpatched
+                        Slot(u16::MAX) // will be backpatched
                     }
                     BackPatchableSlot::Spill(index) => {
                         self.spill_backpatches
                             .push((input_start + arity_to_preserve - 1 - i, index));
 
-                        Slot::RegisterFrame(u32::MAX) // will be backpatched
+                        Slot(u16::MAX) // will be backpatched
                     }
                 }
             }
@@ -1470,6 +1451,10 @@ impl SimulatedStack {
 
         if register_index > self.max_registers {
             self.max_registers = register_index;
+
+            if self.max_registers > MAX_REGISTER_SLOTS {
+                todo!() // RAISE ERROR!
+            }
         }
 
         DynSignature {
@@ -1568,14 +1553,14 @@ pub(crate) struct RegFrameLayout {
     /// **Includes the locals**, since the lowering's register index starts at
     /// [`Self::locals_count`] — so the operand registers themselves are the range
     /// `[locals_count + consts + spills, registers + consts + spills)`.
-    pub registers: u32,
+    pub registers: u16,
     /// Spill slots holding locals rescued from a later write by
     /// [`RegInstruction::LocalSpill`].
     ///
     /// Zero for a body that never overwrites a lazily-forwarded local, which is the
     /// common case — and then the region is simply empty, closing the gap between the
     /// constants and the operand registers.
-    pub spills: u32,
+    pub spills: u16,
     /// Every instruction's input operands, concatenated in lowering order.
     ///
     /// [`Signature::input`] and [`DynSignature::input_registers`] name runs here.
@@ -1591,7 +1576,7 @@ pub(crate) struct RegFrameLayout {
     /// Every instruction's destination registers, on the same terms as
     /// [`Self::input_registers_arena`] — final frame indices, always in the operand
     /// region.
-    pub output_registers_arena: Box<[u32]>,
+    pub output_registers_arena: Box<[u16]>,
     /// Every `br_table`'s arms, concatenated in lowering order.
     ///
     /// A [`RegInstruction::BrTable`] owns the contiguous run named by its
@@ -1602,7 +1587,7 @@ pub(crate) struct RegFrameLayout {
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
     /// local index from an operand register index during lowering.
-    pub locals_count: u32,
+    pub locals_count: u16,
     /// The body's interned constants, in [`ConstId`] order.
     ///
     /// Constant `i` occupies frame slot `locals_count + i`, and
@@ -1656,7 +1641,7 @@ pub(crate) enum RegInstruction {
         /// The global read, in the module's global index space.
         index: GlobalIndex,
         /// The register the value is written to.
-        output: Registers<1, u32>,
+        output: Registers<1, u16>,
     },
     /// `global.set`: write the operand into a global.
     ///
@@ -2239,7 +2224,7 @@ pub(crate) enum RegInstruction {
         /// operand-register index. Once resolved it is always at or above
         /// `locals_count + consts + spills`, so the callee's frame — which starts
         /// here — cannot overwrite this frame's locals, constants or spills.
-        caller_base: u32,
+        caller_base: u16,
     },
     /// `call_indirect`: resolve a callee through a table at execution and call it.
     ///
@@ -2285,7 +2270,7 @@ pub(crate) enum RegInstruction {
         /// Frame index the callee's frame is based at, on the same terms as
         /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
         /// satisfying.
-        caller_base: u32,
+        caller_base: u16,
     },
     /// `ref.is_null`: `1` if the reference is null, else `0`.
     ///
@@ -2367,7 +2352,7 @@ pub(crate) enum RegInstruction {
     ///
     /// The only variant here with no inputs, so it carries a bare output run rather
     /// than a [`Signature`].
-    MemorySize(Registers<1, u32>),
+    MemorySize(Registers<1, u16>),
     /// `memory.grow`: grow the memory by the page delta in the input, writing the
     /// size *before* the growth to the output.
     ///
@@ -2663,7 +2648,7 @@ impl Instruction for RegInstruction {
         let mut instructions = Instructions::default();
         let mut simulated_stack = SimulatedStack::new(locals_count);
         let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
-        let mut call_instr_backpatches: Vec<(usize, u32)> = vec![];
+        let mut call_instr_backpatches: Vec<(usize, u16)> = vec![];
 
         simulated_stack.control_stack.stack.push(Block {
             kind: BlockKind::Func,
@@ -2730,7 +2715,7 @@ impl Instruction for RegInstruction {
                     );
                 }
                 Operator::LocalGet { local_index } => {
-                    simulated_stack.push_local(local_index);
+                    simulated_stack.push_local(local_index as u16);
                 }
                 Operator::LocalSet { local_index } => {
                     if let Some(spill_index) = SimulatedStack::set_lazy(
@@ -2780,19 +2765,19 @@ impl Instruction for RegInstruction {
                         BackPatchableSlot::Const(id) => {
                             simulated_stack.const_backpatches.push((input_start, id));
 
-                            Slot::RegisterFrame(u32::MAX) // will be backpatched
+                            Slot(u16::MAX) // will be backpatched
                         }
                         BackPatchableSlot::Register(index) => {
                             simulated_stack
                                 .register_backpatches
                                 .push((input_start, index));
 
-                            Slot::RegisterFrame(u32::MAX) // will be backpatched
+                            Slot(u16::MAX) // will be backpatched
                         }
                         BackPatchableSlot::Spill(index) => {
                             simulated_stack.spill_backpatches.push((input_start, index));
 
-                            Slot::RegisterFrame(u32::MAX) // will be backpatched
+                            Slot(u16::MAX) // will be backpatched
                         }
                     });
 
@@ -3411,7 +3396,7 @@ impl Instruction for RegInstruction {
                     let params = func_ty.params.len() as u32;
                     let results = func_ty.results.len() as u32;
                     let recorded_height = simulated_stack.stack.height() - params;
-                    let caller_base = simulated_stack.register_index_at_depth(params) as u32;
+                    let caller_base = simulated_stack.register_index_at_depth(params) as u16;
 
                     if params != 0 {
                         let move_registers =
@@ -3425,7 +3410,7 @@ impl Instruction for RegInstruction {
                     instructions.push(
                         RegInstruction::Call {
                             func_index: FuncIndex(function_index),
-                            caller_base: u32::MAX, // will be backpatched!
+                            caller_base: u16::MAX, // will be backpatched!
                         },
                         offset,
                     );
@@ -3441,7 +3426,7 @@ impl Instruction for RegInstruction {
                     let params = ty.params.len() as u32;
                     let results = ty.results.len() as u32;
                     let recorded_height = simulated_stack.stack.height() - params - 1;
-                    let caller_base = simulated_stack.register_index_at_depth(params + 1) as u32;
+                    let caller_base = simulated_stack.register_index_at_depth(params + 1) as u16;
 
                     let slot = simulated_stack.registers_for::<1, 0>().input;
 
@@ -3456,7 +3441,7 @@ impl Instruction for RegInstruction {
                             table_index: TableIndex(table_index),
                             slot,
                             operands: move_registers.input,
-                            caller_base: u32::MAX,
+                            caller_base: u16::MAX,
                         },
                         offset,
                     );
@@ -3580,15 +3565,14 @@ impl Instruction for RegInstruction {
         //
         //   | locals | consts | spills | registers ... |
         //
-        let locals_count = simulated_stack.lazy_locals.origin.len() as u32;
+        let locals_count = simulated_stack.lazy_locals.origin.len() as u16;
         let spills = simulated_stack.spills.allocation_len();
-        let consts_len = simulated_stack.const_interner.consts.len() as u32;
+        let consts_len = simulated_stack.const_interner.consts.len() as u16;
 
         // Constants come first above the locals, in interner order — matching the
         // order `enter_frame` writes the pool in.
         for (input_index, const_id) in simulated_stack.const_backpatches {
-            simulated_stack.input_registers[input_index] =
-                Slot::RegisterFrame(const_id.0 + locals_count);
+            simulated_stack.input_registers[input_index] = Slot(const_id.0 + locals_count);
         }
 
         // Then the spills. `set_value_to_spills` computes this same address when a
@@ -3596,7 +3580,7 @@ impl Instruction for RegInstruction {
         // spill is read from a slot nothing wrote.
         for (input_index, spill_index) in simulated_stack.spill_backpatches {
             simulated_stack.input_registers[input_index] =
-                Slot::RegisterFrame(spill_index.raw_value() + locals_count + consts_len);
+                Slot(spill_index.raw_value() + locals_count + consts_len);
         }
 
         // Operand registers sit above both regions, so each provisional index moves
@@ -3607,8 +3591,7 @@ impl Instruction for RegInstruction {
         // because `curr_register_index` starts at `locals_count`. Adding it again
         // would push every register past the end of the frame.
         for (input_index, index) in simulated_stack.register_backpatches {
-            simulated_stack.input_registers[input_index] =
-                Slot::RegisterFrame(index + spills + consts_len)
+            simulated_stack.input_registers[input_index] = Slot(index + spills + consts_len)
         }
 
         // Destinations live in the same provisional space, so they take the identical
@@ -6431,7 +6414,7 @@ impl Instruction for RegInstruction {
                 caller_base,
             } => {
                 let callee_caller_base_data = RegCallerBaseData {
-                    base_register_index: *caller_base + caller_base_data.base_register_index,
+                    base_register_index: *caller_base as u32 + caller_base_data.base_register_index,
                 };
 
                 if callee_func_index.0 >= imported_func_count {
@@ -6514,7 +6497,7 @@ impl Instruction for RegInstruction {
 
                 for (i, val) in tmp.into_iter().enumerate() {
                     Self::set_value_to_register(
-                        *caller_base + i as u32,
+                        *caller_base + i as u16,
                         val,
                         caller_base_data,
                         instance,
@@ -6522,7 +6505,7 @@ impl Instruction for RegInstruction {
                 }
 
                 let callee_caller_base_data = RegCallerBaseData {
-                    base_register_index: *caller_base + caller_base_data.base_register_index,
+                    base_register_index: *caller_base as u32 + caller_base_data.base_register_index,
                 };
 
                 if callee_func_index.0 >= imported_func_count {
@@ -6717,11 +6700,7 @@ impl RegInstruction {
         caller_base_data: &RegCallerBaseData,
         instance: &Instance<M, I, crate::Register>,
     ) -> Value {
-        match slot {
-            Slot::RegisterFrame(index) => {
-                instance.frame.registers[(caller_base_data.base_register_index + index) as usize]
-            }
-        }
+        instance.frame.registers[(caller_base_data.base_register_index + slot.0 as u32) as usize]
     }
 
     /// Writes a frame slot named by an already-resolved index.
@@ -6731,13 +6710,13 @@ impl RegInstruction {
     /// arguments at `caller_base`.
     #[inline(always)]
     fn set_value_to_register<M: Memory, I: ImportRegistry>(
-        relative_index: u32,
+        relative_index: u16,
         val: Value,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
         instance.frame.registers
-            [(caller_base_data.base_register_index + relative_index) as usize] = val;
+            [(caller_base_data.base_register_index + relative_index as u32) as usize] = val;
     }
 
     /// Writes spill slot `relative_index`.
@@ -6753,15 +6732,15 @@ impl RegInstruction {
     /// returns whatever was left there.
     #[inline(always)]
     fn set_value_to_spills<M: Memory, I: ImportRegistry>(
-        relative_index: u32,
+        relative_index: u16,
         val: Value,
         caller_base_data: &RegCallerBaseData,
         frame_layout: &RegFrameLayout,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
-        instance.frame.registers[(caller_base_data.base_register_index
-            + relative_index
-            + frame_layout.locals_count) as usize
+        instance.frame.registers[caller_base_data.base_register_index as usize
+            + relative_index as usize
+            + frame_layout.locals_count as usize
             + frame_layout.consts.len()] = val;
     }
 

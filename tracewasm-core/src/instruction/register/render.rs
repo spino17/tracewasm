@@ -44,9 +44,9 @@ impl RegInstruction {
         // A destination is a frame index like any operand, so it is named through
         // the same region lookup rather than printed raw — otherwise a register
         // renders as its absolute index and reads as a different register.
-        let regs = |xs: &[u32]| {
+        let regs = |xs: &[u16]| {
             xs.iter()
-                .map(|r| Slot::RegisterFrame(*r).render(frame))
+                .map(|r| Slot(*r).render(frame))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -54,13 +54,13 @@ impl RegInstruction {
         // `caller_base` is a frame index too, and it is read alongside the `r0`,
         // `r1` … above, so it is shown in the same numbering rather than as the
         // absolute index the runtime uses.
-        let operand_base = frame.locals_count + frame.consts.len() as u32 + frame.spills;
-        let as_operand = |frame_index: u32| frame_index - operand_base;
+        let operand_base = frame.locals_count + frame.consts.len() as u16 + frame.spills;
+        let as_operand = |frame_index: u16| frame_index - operand_base;
 
         // Every pure value operator renders alike, so the arms below carry no body of
         // their own. They are split by arity because an or-pattern binds one type, and
         // then by family, so they scan in the order the enum declares them.
-        let load_op = |kind, offset: u32, inputs: &[Slot], outputs: &[u32]| {
+        let load_op = |kind, offset: u32, inputs: &[Slot], outputs: &[u16]| {
             format!(
                 "{:<12} [{}]+{offset} -> {}",
                 mnemonic(kind),
@@ -78,7 +78,7 @@ impl RegInstruction {
             )
         };
 
-        let value_op = |kind, inputs: &[Slot], outputs: &[u32]| {
+        let value_op = |kind, inputs: &[Slot], outputs: &[u16]| {
             format!(
                 "{:<12} {} -> {}",
                 mnemonic(kind),
@@ -506,7 +506,7 @@ impl RegInstruction {
                 // them any other way would not notice the two disagreeing.
                 let params = types[ty_index.0 as usize].params.len();
                 let args = &ins[*operands as usize..*operands as usize + params];
-                let dsts: Vec<u32> = (0..params as u32).map(|i| caller_base + i).collect();
+                let dsts: Vec<u16> = (0..params as u16).map(|i| caller_base + i).collect();
 
                 format!(
                     "call_indirect [{}] ty{} table{} caller_base={}{}",

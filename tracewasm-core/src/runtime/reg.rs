@@ -319,7 +319,7 @@ mod tests {
     /// the `registers` field, so a test reads in the units lowering thinks in while
     /// the field keeps the meaning the runtime expects. The arenas are what lowering
     /// fills for the *instructions* to index; sizing never reads them.
-    fn layout(locals: u32, operands: u32, spills: u32, consts: &[Const]) -> RegFrameLayout {
+    fn layout(locals: u16, operands: u16, spills: u16, consts: &[Const]) -> RegFrameLayout {
         RegFrameLayout {
             registers: locals + operands,
             spills,
@@ -351,8 +351,8 @@ mod tests {
         base: u32,
         params: &[ValType],
         declared: &[ValType],
-        operands: u32,
-        spills: u32,
+        operands: u16,
+        spills: u16,
         consts: &[Const],
     ) -> usize {
         let locals_ty: Vec<ValType> = params.iter().chain(declared).copied().collect();
@@ -364,7 +364,7 @@ mod tests {
             params.len() as u32,
             &locals_ty,
             &mut caller_base_data,
-            &layout(locals_ty.len() as u32, operands, spills, consts),
+            &layout(locals_ty.len() as u16, operands, spills, consts),
         );
 
         frame.registers.len()

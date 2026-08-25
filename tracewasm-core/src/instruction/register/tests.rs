@@ -47,8 +47,8 @@ fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
 /// Renderings say which *region* an operand is in; these say exactly where, which is
 /// what pins the layout — a region boundary off by one renders identically for every
 /// slot but the ones that cross it.
-fn frame_indices(xs: &[Slot]) -> Vec<u32> {
-    xs.iter().map(|Slot::RegisterFrame(i)| *i).collect()
+fn frame_indices(xs: &[Slot]) -> Vec<u16> {
+    xs.iter().map(|Slot(i)| *i).collect()
 }
 
 /// A [`RegFrameLayout`] describing `s` as it stands, for rendering resolved slots.
@@ -75,7 +75,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
 /// `spill0`, `const0` — rather than by where they will land. These are the
 /// assertions about what the pass *decided*; the resolved renderings are the
 /// assertions about the layout it produced.
-fn render_provisional(o: &BackPatchableSlot, locals_count: u32) -> String {
+fn render_provisional(o: &BackPatchableSlot, locals_count: u16) -> String {
     match o {
         // A provisional register index counts from the frame base, since lowering
         // starts `curr_register_index` at `locals_count` — so it is offset back to
@@ -83,10 +83,10 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u32) -> String {
         BackPatchableSlot::Register(n) => format!("r{}", n - locals_count),
         BackPatchableSlot::Spill(i) => format!("spill{i}"),
         BackPatchableSlot::Const(id) => format!("const{}", id.0),
-        BackPatchableSlot::Slot(Slot::RegisterFrame(n)) if *n < locals_count => {
+        BackPatchableSlot::Slot(Slot(n)) if *n < locals_count => {
             format!("local{n}")
         }
-        BackPatchableSlot::Slot(Slot::RegisterFrame(n)) => format!("r{}", n - locals_count),
+        BackPatchableSlot::Slot(Slot(n)) => format!("r{}", n - locals_count),
     }
 }
 
@@ -99,19 +99,19 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u32) -> String {
 /// `locals` — moves up past both regions by `consts + spills`.
 fn resolve_backpatches(s: &mut SimulatedStack) {
     let locals_count = s.locals_count();
-    let consts_len = s.const_interner.consts.len() as u32;
+    let consts_len = s.const_interner.consts.len() as u16;
     let spills = s.spills.allocation_len();
 
     for (i, id) in std::mem::take(&mut s.const_backpatches) {
-        s.input_registers[i] = Slot::RegisterFrame(id.0 + locals_count);
+        s.input_registers[i] = Slot(id.0 + locals_count);
     }
 
     for (i, spill) in std::mem::take(&mut s.spill_backpatches) {
-        s.input_registers[i] = Slot::RegisterFrame(spill.raw_value() + locals_count + consts_len);
+        s.input_registers[i] = Slot(spill.raw_value() + locals_count + consts_len);
     }
 
     for (i, index) in std::mem::take(&mut s.register_backpatches) {
-        s.input_registers[i] = Slot::RegisterFrame(index + spills + consts_len);
+        s.input_registers[i] = Slot(index + spills + consts_len);
     }
 
     s.output_registers = s
@@ -125,16 +125,12 @@ fn resolve_backpatches(s: &mut SimulatedStack) {
 /// arena, for a test holding a slot it popped off the simulated stack.
 fn resolve(s: &SimulatedStack, o: &BackPatchableSlot) -> Slot {
     let locals_count = s.locals_count();
-    let consts_len = s.const_interner.consts.len() as u32;
+    let consts_len = s.const_interner.consts.len() as u16;
 
     match o {
-        BackPatchableSlot::Const(id) => Slot::RegisterFrame(id.0 + locals_count),
-        BackPatchableSlot::Spill(i) => {
-            Slot::RegisterFrame(i.raw_value() + locals_count + consts_len)
-        }
-        BackPatchableSlot::Register(n) => {
-            Slot::RegisterFrame(n + s.spills.allocation_len() + consts_len)
-        }
+        BackPatchableSlot::Const(id) => Slot(id.0 + locals_count),
+        BackPatchableSlot::Spill(i) => Slot(i.raw_value() + locals_count + consts_len),
+        BackPatchableSlot::Register(n) => Slot(n + s.spills.allocation_len() + consts_len),
         BackPatchableSlot::Slot(slot) => *slot,
     }
 }
@@ -337,12 +333,12 @@ fn operands_in_use(s: &SimulatedStack) -> usize {
 }
 
 /// The peak operand-register count, i.e. what the frame needs above its locals.
-fn peak_operands(s: &SimulatedStack) -> u32 {
+fn peak_operands(s: &SimulatedStack) -> u16 {
     s.max_registers - s.locals_count()
 }
 
 /// [`peak_operands`] for a finished layout.
-fn peak_operands_of(frame: &RegFrameLayout) -> u32 {
+fn peak_operands_of(frame: &RegFrameLayout) -> u16 {
     frame.registers - frame.locals_count
 }
 
@@ -352,8 +348,8 @@ fn peak_operands_of(frame: &RegFrameLayout) -> u32 {
 /// A `caller_base` is an operand register index, so it is at or above this — which is
 /// exactly what keeps a callee's frame from overlapping its caller's constants and
 /// spills. Subtracting it recovers the operand-relative base the pass reasons about.
-fn operand_base_of(frame: &RegFrameLayout) -> u32 {
-    frame.locals_count + frame.consts.len() as u32 + frame.spills
+fn operand_base_of(frame: &RegFrameLayout) -> u16 {
+    frame.locals_count + frame.consts.len() as u16 + frame.spills
 }
 
 /// A run of destination registers, offset back to operand-relative numbering.
@@ -361,7 +357,7 @@ fn operand_base_of(frame: &RegFrameLayout) -> u32 {
 /// Reads the *provisional* arena — before [`resolve_backpatches`] shifts registers
 /// up past the constant and spill regions — so the operand base is just the locals
 /// count.
-fn output_operands(xs: &[u32], s: &SimulatedStack) -> Vec<u32> {
+fn output_operands(xs: &[u16], s: &SimulatedStack) -> Vec<u16> {
     xs.iter().map(|r| r - s.locals_count()).collect()
 }
 
@@ -953,8 +949,8 @@ fn dead_nested_blocks_keep_the_control_stack_balanced() {
 struct Frame {
     registers: Vec<i64>,
     globals: Vec<i64>,
-    locals_count: u32,
-    consts_len: u32,
+    locals_count: u16,
+    consts_len: u16,
 }
 
 const POISON: i64 = i64::MIN;
@@ -967,7 +963,7 @@ impl Frame {
     /// instructions carry are frame indices only after that.
     fn new(s: &SimulatedStack, locals: &[i64], globals: &[i64]) -> Self {
         let locals_count = s.locals_count();
-        let consts_len = s.const_interner.consts.len() as u32;
+        let consts_len = s.const_interner.consts.len() as u16;
         let spills = s.spills.allocation_len();
         let width = (s.max_registers + spills) as usize + consts_len as usize;
 
@@ -1003,11 +999,11 @@ impl Frame {
     }
 
     fn read(&self, slot: &Slot) -> i64 {
-        let Slot::RegisterFrame(i) = slot;
+        let Slot(i) = slot;
 
         assert_ne!(
             *i,
-            u32::MAX,
+            u16::MAX,
             "an unresolved placeholder reached execution — \
              `resolve_backpatches` did not run"
         );
@@ -1977,7 +1973,7 @@ fn br_table_arms_survive_lowering() {
     let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
-        locals_count: s.lazy_locals.origin.len() as u32,
+        locals_count: s.lazy_locals.origin.len() as u16,
         consts: s.const_interner.consts.into_boxed_slice(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
@@ -1991,7 +1987,7 @@ fn br_table_arms_survive_lowering() {
     );
 
     // and each one still resolves against the arenas it was recorded in
-    let dests: Vec<Vec<u32>> = frame
+    let dests: Vec<Vec<u16>> = frame
         .br_targets_arena
         .iter()
         .map(|t| {
@@ -2017,7 +2013,7 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
     let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
-        locals_count: s.lazy_locals.origin.len() as u32,
+        locals_count: s.lazy_locals.origin.len() as u16,
         consts: s.const_interner.consts.into_boxed_slice(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
@@ -2231,7 +2227,7 @@ fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
              if (result i32) i32.const 1 else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u32>> = prog
+    let dests: Vec<Vec<u16>> = prog
         .iter()
         .filter_map(|i| match i {
             RegInstruction::Move(sig) => {
@@ -2689,7 +2685,7 @@ fn a_conditional_return_shares_the_functions_result_register() {
              if (result i32) i32.const 1 return else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u32>> = prog
+    let dests: Vec<Vec<u16>> = prog
         .iter()
         .filter_map(|i| match i {
             RegInstruction::Move(sig) => {
@@ -2771,7 +2767,7 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 // ---------------------------------------------------------------------------
 
 /// Two callers of the same function, differing only in what sits below the call.
-fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
+fn caller_base_of(wat: &str) -> (u16, Vec<String>) {
     let (prog, _, frame) = lower_func(wat, 1);
     let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
@@ -4253,7 +4249,7 @@ fn const_hash_agrees_with_equality() {
 fn the_pool_keeps_same_bits_of_different_types_apart() {
     let all = same_bits_different_types();
     let mut interner = ConstInterner::default();
-    let ids: Vec<(&str, u32)> = all
+    let ids: Vec<(&str, u16)> = all
         .iter()
         .map(|(name, c)| (*name, interner.intern(*c).0))
         .collect();
