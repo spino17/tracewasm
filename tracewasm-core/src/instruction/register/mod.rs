@@ -802,6 +802,22 @@ impl UnreachableTrackingControlStack {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct IfOperands {
+    cond: Registers<1, Slot>,
+    /// Index of the matching [`Self::Else`], backpatched at `end`.
+    else_index: Option<u32>,
+    /// Index of the matching `end`, backpatched.
+    end_index: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct BrIfOperands {
+    cond: Registers<1, Slot>,
+    mov: DynSignature,
+    target_index: u32,
+}
+
 /// One resolved arm of a [`RegInstruction::BrTable`].
 ///
 /// Each arm carries its own move and jump target because a single `br_table` may mix
@@ -822,15 +838,6 @@ pub(crate) struct RegBrTableTarget {
 pub(crate) struct BrTableOperands {
     index: Registers<1, Slot>,
     br_targets: Vec<RegBrTableTarget>,
-}
-
-#[derive(Debug)]
-pub(crate) struct IfOperands {
-    cond: Registers<1, Slot>,
-    /// Index of the matching [`Self::Else`], backpatched at `end`.
-    else_index: Option<u32>,
-    /// Index of the matching `end`, backpatched.
-    end_index: u32,
 }
 
 #[derive(Debug)]
@@ -856,13 +863,6 @@ pub(crate) struct CallIndirectOperands {
     /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
     /// satisfying.
     caller_base: u16,
-}
-
-#[derive(Debug)]
-pub(crate) struct BrIfOperands {
-    cond: Registers<1, Slot>,
-    mov: DynSignature,
-    target_index: u32,
 }
 
 /// The whole lowering state for one function body.

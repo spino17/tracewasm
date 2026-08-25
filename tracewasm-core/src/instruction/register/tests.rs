@@ -1982,15 +1982,24 @@ fn br_table_arms_survive_lowering() {
 
     s.push_local(1).unwrap();
 
-    // two arms plus a default, as the BrTable arm records them
+    // two arms plus a default, as the BrTable arm records them. They now live on
+    // the `BrTableOperands` entry rather than in an arena of their own, so the
+    // instruction carries one id and the arms hang off it.
+    let mut br_targets = vec![];
+
     for base in [inner, outer, inner] {
         let mov = s.br_truncation_registers(base, 1).unwrap();
 
-        s.br_targets.push(RegBrTableTarget {
+        br_targets.push(RegBrTableTarget {
             mov,
             target_index: u32::MAX,
         });
     }
+
+    let index = s.registers_for::<1, 0>().unwrap().input;
+    let id = s
+        .br_table_arena
+        .alloc(BrTableOperands { index, br_targets });
 
     let frame = RegFrameLayout {
         registers: s.max_registers,
@@ -2005,15 +2014,17 @@ fn br_table_arms_survive_lowering() {
         call_indirect_arena: s.call_indirect_arena,
     };
 
+    let entry = frame.br_table_arena.get(id);
+
     assert_eq!(
-        frame.br_targets_arena.len(),
+        entry.br_targets.len(),
         3,
-        "arms must ship with the body"
+        "arms must ship with the body, reachable from the instruction's id"
     );
 
-    // and each one still resolves against the arenas it was recorded in
-    let dests: Vec<Vec<u16>> = frame
-        .br_targets_arena
+    // and each one still resolves against the operand arenas it was recorded in
+    let dests: Vec<Vec<u16>> = entry
+        .br_targets
         .iter()
         .map(|t| {
             t.mov
@@ -2027,28 +2038,22 @@ fn br_table_arms_survive_lowering() {
     assert_eq!(dests, vec![vec![1], vec![0], vec![1]]);
 }
 
+/// A body with no `br_table` allocates no arms.
+///
+/// There is no longer an arm arena to be empty — the arms hang off the entry a
+/// `BrTable` instruction points at — so the observable property is that no such
+/// instruction, and therefore no entry, is produced at all.
 #[test]
-fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
-    let mut s = sim(2);
+fn a_body_without_a_br_table_allocates_no_arms() {
+    let (prog, _, _) = lower(
+        r#"(module (func (param i32) (result i32)
+             local.get 0 i32.const 1 i32.add))"#,
+    );
 
-    s.push_local(0).unwrap();
-
-    let _ = s.registers_for::<1, 1>().unwrap();
-
-    let frame = RegFrameLayout {
-        registers: s.max_registers,
-        spills: s.spills.allocation_len(),
-        locals_count: s.lazy_locals.origin.len() as u16,
-        consts: s.const_interner.consts.into_boxed_slice(),
-        input_registers_arena: s.input_registers.into_boxed_slice(),
-        output_registers_arena: s.output_registers.into_boxed_slice(),
-        if_arena: s.if_arena,
-        br_if_arena: s.br_if_arena,
-        br_table_arena: s.br_table_arena,
-        call_indirect_arena: s.call_indirect_arena,
-    };
-
-    assert!(frame.br_targets_arena.is_empty());
+    assert!(
+        index_of_kind(&prog, RegInstructionKind::BrTable).is_none(),
+        "nothing here branches on a table"
+    );
 }
 
 // ===========================================================================
@@ -2427,7 +2432,6 @@ fn br_table_arms_resolve_to_their_own_labels() {
     };
 
     let entry = frame.br_table_arena.get(*id);
-
     let arms = &entry.br_targets;
     let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
 
@@ -3974,19 +3978,35 @@ fn the_arenas_ship_with_the_body() {
     );
 
     assert!(!frame.input_registers_arena.is_empty(), "operands");
-    assert!(!frame.br_targets_arena.is_empty(), "br_table arms");
 
-    // and every index in the program resolves against them
+    // and every id in the program resolves against the arena it indexes
+    let mut tables = 0;
+
     for instruction in &prog {
         if let RegInstruction::BrTable(id) = instruction {
             let entry = frame.br_table_arena.get(*id);
 
+            tables += 1;
+
             assert!(
-                (targets_start + targets_len) as usize <= frame.br_targets_arena.len(),
-                "arm range runs past the arena"
+                !entry.br_targets.is_empty(),
+                "a br_table with no arms cannot pick a destination"
             );
+
+            // every arm's move resolves against the operand arenas
+            for arm in &entry.br_targets {
+                let outs = arm.mov.output_registers(&frame.output_registers_arena);
+
+                assert_eq!(
+                    outs.len(),
+                    arm.mov.input_registers(&frame.input_registers_arena).len(),
+                    "an arm's move must name as many destinations as sources"
+                );
+            }
         }
     }
+
+    assert_eq!(tables, 1, "the body has exactly one br_table");
 }
 
 // ---------------------------------------------------------------------------
@@ -4274,6 +4294,7 @@ fn const_hash_agrees_with_equality() {
 fn the_pool_keeps_same_bits_of_different_types_apart() {
     let all = same_bits_different_types();
     let mut interner = ConstInterner::default();
+
     let ids: Vec<(&str, u16)> = all
         .iter()
         .map(|(name, c)| (*name, interner.intern(*c).unwrap().0))
@@ -4305,7 +4326,6 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 #[test]
 fn the_pool_keeps_bit_distinct_floats_apart() {
     let mut interner = ConstInterner::default();
-
     let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
     let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
     let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
