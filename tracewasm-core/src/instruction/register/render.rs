@@ -457,13 +457,9 @@ impl RegInstruction {
                     }
                 )
             }
-            RegInstruction::BrTable {
-                index,
-                targets_start,
-                targets_len,
-            } => {
-                let arms = &frame.br_targets_arena
-                    [*targets_start as usize..(targets_start + targets_len) as usize];
+            RegInstruction::BrTable(id) => {
+                let entry = frame.br_table_arena.get(*id);
+                let arms = &entry.br_targets;
 
                 let rendered: Vec<String> = arms
                     .iter()
@@ -481,7 +477,7 @@ impl RegInstruction {
                     })
                     .collect();
 
-                format!("br_table     {} {}", sig1(index), rendered.join(" "))
+                format!("br_table     {} {}", sig1(&entry.index), rendered.join(" "))
             }
             RegInstruction::Return { target_index } => {
                 format!("return       -> {target_index}")

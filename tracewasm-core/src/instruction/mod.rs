@@ -215,13 +215,6 @@ pub(crate) trait RuntimeFrame {
 pub(crate) trait FrameLayout {
     /// This machine's resolved `br_table` arm.
     type BrTableTarget;
-
-    /// Every `br_table` arm in the body, concatenated in lowering order.
-    ///
-    /// A branch-table instruction owns a contiguous `(start, len)` run of this
-    /// slice rather than an inline list, which is what keeps the instruction
-    /// small enough to stay within its size budget.
-    fn br_table_targets(&self) -> &[Self::BrTableTarget];
 }
 
 type LoweredFuncBody<T: Instruction> = (Vec<T>, Vec<u32>, T::FrameLayout);

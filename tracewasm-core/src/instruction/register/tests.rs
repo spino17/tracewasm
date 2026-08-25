@@ -64,9 +64,9 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         consts: s.const_interner.consts.clone().into_boxed_slice(),
         input_registers_arena: Box::new([]),
         output_registers_arena: Box::new([]),
-        br_targets_arena: Box::new([]),
         if_arena: Arena::default(),
         br_if_arena: Arena::default(),
+        br_table_arena: Arena::default(),
         call_indirect_arena: Arena::default(),
     }
 }
@@ -1999,9 +1999,9 @@ fn br_table_arms_survive_lowering() {
         consts: s.const_interner.consts.into_boxed_slice(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
-        br_targets_arena: s.br_targets.into_boxed_slice(),
         if_arena: s.if_arena,
         br_if_arena: s.br_if_arena,
+        br_table_arena: s.br_table_arena,
         call_indirect_arena: s.call_indirect_arena,
     };
 
@@ -2042,9 +2042,9 @@ fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
         consts: s.const_interner.consts.into_boxed_slice(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
-        br_targets_arena: s.br_targets.into_boxed_slice(),
         if_arena: s.if_arena,
         br_if_arena: s.br_if_arena,
+        br_table_arena: s.br_table_arena,
         call_indirect_arena: s.call_indirect_arena,
     };
 
@@ -2422,17 +2422,13 @@ fn br_table_arms_resolve_to_their_own_labels() {
 
     let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
-    let RegInstruction::BrTable {
-        targets_start,
-        targets_len,
-        ..
-    } = &prog[table]
-    else {
+    let RegInstruction::BrTable(id) = &prog[table] else {
         unreachable!()
     };
 
-    let arms =
-        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+    let entry = frame.br_table_arena.get(*id);
+
+    let arms = &entry.br_targets;
     let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
 
     // The exact arms, not just their relationships. Depth 0 is the inner block,
@@ -2467,17 +2463,12 @@ fn each_br_table_arm_carries_its_own_move() {
 
     let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
-    let RegInstruction::BrTable {
-        targets_start,
-        targets_len,
-        ..
-    } = &prog[table]
-    else {
+    let RegInstruction::BrTable(id) = &prog[table] else {
         unreachable!()
     };
 
-    let arms =
-        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+    let entry = frame.br_table_arena.get(*id);
+    let arms = &entry.br_targets;
 
     for arm in arms {
         assert_eq!(
@@ -3987,12 +3978,9 @@ fn the_arenas_ship_with_the_body() {
 
     // and every index in the program resolves against them
     for instruction in &prog {
-        if let RegInstruction::BrTable {
-            targets_start,
-            targets_len,
-            ..
-        } = instruction
-        {
+        if let RegInstruction::BrTable(id) = instruction {
+            let entry = frame.br_table_arena.get(*id);
+
             assert!(
                 (targets_start + targets_len) as usize <= frame.br_targets_arena.len(),
                 "arm range runs past the arena"

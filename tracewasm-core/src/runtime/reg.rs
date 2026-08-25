@@ -328,9 +328,9 @@ mod tests {
             consts: consts.to_vec().into_boxed_slice(),
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
-            br_targets_arena: Box::new([]),
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
+            br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
         }
     }
@@ -412,9 +412,9 @@ mod tests {
             consts: Box::new([]),
             input_registers_arena: Box::new([]),
             output_registers_arena: Box::new([]),
-            br_targets_arena: Box::new([]),
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
+            br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
         };
 

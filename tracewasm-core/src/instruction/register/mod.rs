@@ -808,6 +808,7 @@ impl UnreachableTrackingControlStack {
 /// loop and non-loop labels: validation only requires the label *types* to match, so
 /// the arities agree but the unwind heights — and therefore the destination registers
 /// — differ per arm.
+#[derive(Debug)]
 pub(crate) struct RegBrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
@@ -815,6 +816,12 @@ pub(crate) struct RegBrTableTarget {
     /// Absolute jump target: a loop's start for a back-edge, otherwise the label's
     /// `end`, backpatched when that `end` is reached.
     pub target_index: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct BrTableOperands {
+    index: Registers<1, Slot>,
+    br_targets: Vec<RegBrTableTarget>,
 }
 
 #[derive(Debug)]
@@ -901,11 +908,9 @@ struct SimulatedStack {
     output_registers: Vec<u16>,
     /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
-    /// Flat arena of `br_table` arms, indexed by
-    /// [`RegInstruction::BrTable`]'s `(targets_start, targets_len)` range.
-    br_targets: Vec<RegBrTableTarget>,
     if_arena: Arena<IfOperands>,
     br_if_arena: Arena<BrIfOperands>,
+    br_table_arena: Arena<BrTableOperands>,
     call_indirect_arena: Arena<CallIndirectOperands>,
     /// Operands awaiting a frame index, each as `(position in
     /// [`Self::input_registers`], provisional register index)`.
@@ -952,9 +957,9 @@ impl SimulatedStack {
             input_registers: vec![],
             output_registers: vec![],
             control_stack: ControlStack::default(),
-            br_targets: vec![],
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
+            br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
             register_backpatches: vec![],
             spill_backpatches: vec![],
@@ -1671,14 +1676,9 @@ pub(crate) struct RegFrameLayout {
     /// [`Self::input_registers_arena`] — final frame indices, always in the operand
     /// region.
     pub output_registers_arena: Box<[u16]>,
-    /// Every `br_table`'s arms, concatenated in lowering order.
-    ///
-    /// A [`RegInstruction::BrTable`] owns the contiguous run named by its
-    /// `(targets_start, targets_len)`, with the default arm last. Empty, and
-    /// unallocated, for the common case of a body with no `br_table`.
-    pub br_targets_arena: Box<[RegBrTableTarget]>,
     pub if_arena: Arena<IfOperands>,
     pub br_if_arena: Arena<BrIfOperands>,
+    pub br_table_arena: Arena<BrTableOperands>,
     pub call_indirect_arena: Arena<CallIndirectOperands>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
@@ -1696,10 +1696,6 @@ pub(crate) struct RegFrameLayout {
 
 impl FrameLayout for RegFrameLayout {
     type BrTableTarget = RegBrTableTarget;
-
-    fn br_table_targets(&self) -> &[Self::BrTableTarget] {
-        &self.br_targets_arena
-    }
 }
 
 /// The three parallel outputs of lowering one function body into register form: the
@@ -1813,11 +1809,7 @@ pub(crate) enum RegInstruction {
     /// Arms are a contiguous run of `BrTarget` in the body's target arena; the
     /// default is the last element. Each arm carries its own move and target, since
     /// the labels may sit at different heights even though their arities agree.
-    BrTable {
-        index: Registers<1, Slot>,
-        targets_start: u32,
-        targets_len: u32,
-    },
+    BrTable(Id<BrTableOperands>),
     // The numeric instructions, grouped by the type they are named for and then
     // by shape: loads, stores, unary, binary. Same order as the lowering match, so
     // the two read side by side.
@@ -3376,9 +3368,7 @@ impl Instruction for RegInstruction {
                     // be relied on to have rescued anything.
                     Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset)?;
 
-                    let targets_start = simulated_stack.br_targets.len() as u32;
-                    let mut targets_len = 0;
-
+                    let mut br_targets = vec![];
                     let targets = table.targets();
                     let mut targets = targets.collect::<Result<Vec<_>, _>>()?;
 
@@ -3409,7 +3399,7 @@ impl Instruction for RegInstruction {
                             simulated_stack
                                 .get_block_mut(block_index)
                                 .attached_breaks
-                                .push((instructions.len() as u32, targets_start + i as u32));
+                                .push((instructions.len() as u32, i as u32));
 
                             (move_registers, u32::MAX)
                         };
@@ -3419,17 +3409,16 @@ impl Instruction for RegInstruction {
                             target_index,
                         };
 
-                        simulated_stack.br_targets.push(br_target);
-
-                        targets_len += 1;
+                        br_targets.push(br_target);
                     }
 
                     instructions.push(
-                        RegInstruction::BrTable {
-                            index: table_index,
-                            targets_start,
-                            targets_len,
-                        },
+                        RegInstruction::BrTable(simulated_stack.br_table_arena.alloc(
+                            BrTableOperands {
+                                index: table_index,
+                                br_targets,
+                            },
+                        )),
                         offset,
                     );
 
@@ -3563,11 +3552,11 @@ impl Instruction for RegInstruction {
 
                                 entry.target_index = index;
                             }
-                            RegInstruction::BrTable { .. } => {
+                            RegInstruction::BrTable(id) => {
+                                let entry = simulated_stack.br_table_arena.get_mut(*id);
                                 // `br_targets_index` is already absolute, so the table's own
                                 // range is not needed here.
-                                simulated_stack.br_targets[*br_targets_index as usize]
-                                    .target_index = index;
+                                entry.br_targets[*br_targets_index as usize].target_index = index;
                             }
                             RegInstruction::Return { target_index } => {
                                 *target_index = index;
@@ -3732,9 +3721,9 @@ impl Instruction for RegInstruction {
             spills,
             input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
             output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),
-            br_targets_arena: simulated_stack.br_targets.into_boxed_slice(),
             if_arena: simulated_stack.if_arena,
             br_if_arena: simulated_stack.br_if_arena,
+            br_table_arena: simulated_stack.br_table_arena,
             call_indirect_arena: simulated_stack.call_indirect_arena,
             locals_count,
             consts: simulated_stack.const_interner.consts.into_boxed_slice(),
@@ -3854,17 +3843,12 @@ impl Instruction for RegInstruction {
                     Step::Next
                 }
             }
-            RegInstruction::BrTable {
-                index,
-                targets_start,
-                targets_len,
-            } => {
-                let br_table_targets = frame_layout.br_table_targets();
-                let start = *targets_start as usize;
-                let targets = &br_table_targets[start..start + *targets_len as usize];
+            RegInstruction::BrTable(id) => {
+                let entry = frame_layout.br_table_arena.get(*id);
+                let targets = &entry.br_targets;
 
                 let index = Self::slot_value(
-                    index.registers(&frame_layout.input_registers_arena)[0],
+                    entry.index.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
                 )

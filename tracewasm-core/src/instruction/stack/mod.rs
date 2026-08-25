@@ -930,12 +930,14 @@ pub(crate) struct StackFrameLayout {
     pub br_targets_arena: Box<[StackBrTableTarget]>,
 }
 
-impl FrameLayout for StackFrameLayout {
-    type BrTableTarget = StackBrTableTarget;
-
-    fn br_table_targets(&self) -> &[Self::BrTableTarget] {
+impl StackFrameLayout {
+    fn br_table_targets(&self) -> &[StackBrTableTarget] {
         &self.br_targets_arena
     }
+}
+
+impl FrameLayout for StackFrameLayout {
+    type BrTableTarget = StackBrTableTarget;
 }
 
 /// The three parallel outputs of lowering one function body: the instruction list,
@@ -2336,7 +2338,7 @@ impl Instruction for StackInstruction {
         &self,
         module: &crate::module::Module<Self::Vm>,
         instance: &mut crate::instance::Instance<M, I, crate::Stack>,
-        frame_layout: &Self::FrameLayout,
+        frame_layout: &StackFrameLayout,
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
