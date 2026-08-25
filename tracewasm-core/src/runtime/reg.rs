@@ -332,6 +332,8 @@ mod tests {
             br_if_arena: Arena::default(),
             br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
+            select_arena: Arena::default(),
+            memory_init_arena: Arena::default(),
         }
     }
 
@@ -405,6 +407,7 @@ mod tests {
         let mut caller_base_data = RegCallerBaseData {
             base_register_index: 0,
         };
+
         let frame_layout = RegFrameLayout {
             registers: 3,
             spills: 0,
@@ -416,6 +419,8 @@ mod tests {
             br_if_arena: Arena::default(),
             br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
+            select_arena: Arena::default(),
+            memory_init_arena: Arena::default(),
         };
 
         frame.enter_frame(

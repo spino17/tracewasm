@@ -375,14 +375,16 @@ impl RegInstruction {
             // The segment it reads from is an immediate, so it leads: the three
             // operands after it are destination, source offset, length. No result, so
             // there is nothing to point an arrow at.
-            RegInstruction::MemoryInit {
-                data_index,
-                operands,
-            } => format!(
-                "{:<12} data{data_index} {}",
-                mnemonic(self.kind()),
-                list(operands.registers(ins))
-            ),
+            RegInstruction::MemoryInit(id) => {
+                let entry = frame.memory_init_arena.get(*id);
+                let data_index = entry.data_index;
+
+                format!(
+                    "{:<12} data{data_index} {}",
+                    mnemonic(self.kind()),
+                    list(entry.operands.registers(ins))
+                )
+            }
             // No operands and no result — the segment it releases is the whole
             // instruction.
             RegInstruction::DataDrop(data_index) => {
@@ -414,11 +416,15 @@ impl RegInstruction {
                     regs(output.registers(outs))
                 )
             }
-            RegInstruction::Select(sig) => format!(
-                "select       {} -> {}",
-                list(sig.input.registers(ins)),
-                regs(sig.output.registers(outs))
-            ),
+            RegInstruction::Select(sig) => {
+                let entry = frame.select_arena.get(*sig);
+
+                format!(
+                    "select       {} -> {}",
+                    list(entry.0.input.registers(ins)),
+                    regs(entry.0.output.registers(outs))
+                )
+            }
             RegInstruction::Move(sig) => format!(
                 "move         {} -> {}",
                 list(sig.input_registers(ins)),

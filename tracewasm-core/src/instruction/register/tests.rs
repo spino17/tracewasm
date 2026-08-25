@@ -68,6 +68,8 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         br_if_arena: Arena::default(),
         br_table_arena: Arena::default(),
         call_indirect_arena: Arena::default(),
+        select_arena: Arena::default(),
+        memory_init_arena: Arena::default(),
     }
 }
 
@@ -2012,6 +2014,8 @@ fn br_table_arms_survive_lowering() {
         br_if_arena: s.br_if_arena,
         br_table_arena: s.br_table_arena,
         call_indirect_arena: s.call_indirect_arena,
+        select_arena: s.select_arena,
+        memory_init_arena: s.memory_init_arena,
     };
 
     let entry = frame.br_table_arena.get(id);

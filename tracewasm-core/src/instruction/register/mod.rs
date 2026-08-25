@@ -152,7 +152,7 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        self, Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
         register::{
             arena::{Arena, Id},
@@ -543,6 +543,73 @@ enum StackSlot {
     Local(LocalSlot),
 }
 
+pub(crate) struct InlinedRegisters<const L: usize, T> {
+    registers: [T; L],
+}
+
+impl<const L: usize, T> InlinedRegisters<L, T> {
+    #[inline(always)]
+    fn registers(&self) -> &[T; L] {
+        &self.registers
+    }
+}
+
+pub(crate) struct InlinedSignature<const I: usize, const O: usize> {
+    inputs: InlinedRegisters<I, Slot>,
+    outputs: InlinedRegisters<O, u16>,
+}
+
+impl<const I: usize, const O: usize> InlinedSignature<I, O> {
+    #[inline(always)]
+    fn input_registers(&self) -> &[Slot; I] {
+        self.inputs.registers()
+    }
+
+    #[inline(always)]
+    fn output_registers(&self) -> &[u16; O] {
+        self.outputs.registers()
+    }
+}
+
+/// What an instruction's fields may occupy for [`RegInstruction`] to be 8 bytes.
+///
+/// The discriminant takes the rest. Asserting against the *payload* rather than
+/// against 8 is what makes a failure name the shape that does not fit.
+const INLINE_PAYLOAD_BUDGET: usize = 6;
+
+// Every `(I, O)` arity `RegInstruction` uses, so a shape that cannot be inlined is a
+// compile error naming itself rather than a surprise in `size_of`.
+//
+// These bound a variant whose payload is *only* the signature. One carrying anything
+// else — a load's `offset`, `MemoryInit`'s `data_index` — has less than the whole
+// budget to spend, which no assertion here can see.
+const _: () = assert!(
+    size_of::<InlinedSignature<1, 1>>() <= INLINE_PAYLOAD_BUDGET,
+    "InlinedSignature<1, 1> (unary ops, loads) does not fit an 8-byte instruction"
+);
+const _: () = assert!(
+    size_of::<InlinedSignature<2, 0>>() <= INLINE_PAYLOAD_BUDGET,
+    "InlinedSignature<2, 0> (stores) does not fit an 8-byte instruction"
+);
+const _: () = assert!(
+    size_of::<InlinedSignature<2, 1>>() <= INLINE_PAYLOAD_BUDGET,
+    "InlinedSignature<2, 1> (binary ops) does not fit an 8-byte instruction"
+);
+const _: () = assert!(
+    size_of::<InlinedSignature<3, 1>>() <= INLINE_PAYLOAD_BUDGET + 2,
+    "InlinedSignature<3, 1> (`select`) does not fit an 8-byte instruction — move it \
+     to an arena, or pin its result to an operand for a two-address form"
+);
+const _: () = assert!(
+    size_of::<InlinedRegisters<1, Slot>>() <= INLINE_PAYLOAD_BUDGET,
+    "InlinedRegisters<1, Slot> does not fit an 8-byte instruction"
+);
+const _: () = assert!(
+    size_of::<InlinedRegisters<3, Slot>>() <= INLINE_PAYLOAD_BUDGET,
+    "InlinedRegisters<3, Slot> (`memory.copy`/`memory.fill`) does not fit an 8-byte \
+     instruction"
+);
+
 /// A fixed-length run of `L` entries in one of the flat arenas, named by its start.
 ///
 /// `T` is [`Slot`] for input runs and `u32` for output-register runs; the parameter
@@ -865,6 +932,17 @@ pub(crate) struct CallIndirectOperands {
     caller_base: u16,
 }
 
+#[derive(Debug)]
+pub(crate) struct SelectOperands(Signature<3, 1>);
+
+#[derive(Debug)]
+pub(crate) struct MemoryInitOperands {
+    /// Index of the data segment to copy from.
+    data_index: u32,
+    /// `dest`, `src`, `len`.
+    operands: Registers<3, Slot>,
+}
+
 /// The whole lowering state for one function body.
 ///
 /// "Simulated" because [`Self::stack`] holds descriptions of operands rather than
@@ -912,6 +990,8 @@ struct SimulatedStack {
     br_if_arena: Arena<BrIfOperands>,
     br_table_arena: Arena<BrTableOperands>,
     call_indirect_arena: Arena<CallIndirectOperands>,
+    select_arena: Arena<SelectOperands>,
+    memory_init_arena: Arena<MemoryInitOperands>,
     /// Operands awaiting a frame index, each as `(position in
     /// [`Self::input_registers`], provisional register index)`.
     ///
@@ -961,6 +1041,8 @@ impl SimulatedStack {
             br_if_arena: Arena::default(),
             br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
+            select_arena: Arena::default(),
+            memory_init_arena: Arena::default(),
             register_backpatches: vec![],
             spill_backpatches: vec![],
             const_backpatches: vec![],
@@ -1680,6 +1762,8 @@ pub(crate) struct RegFrameLayout {
     pub br_if_arena: Arena<BrIfOperands>,
     pub br_table_arena: Arena<BrTableOperands>,
     pub call_indirect_arena: Arena<CallIndirectOperands>,
+    pub select_arena: Arena<SelectOperands>,
+    pub memory_init_arena: Arena<MemoryInitOperands>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
@@ -2274,7 +2358,7 @@ pub(crate) enum RegInstruction {
     /// `f64.sub`.
     F64Sub(Signature<2, 1>),
     /// `select`: `input[2] != 0 ? input[0] : input[1]`.
-    Select(Signature<3, 1>),
+    Select(Id<SelectOperands>),
     /// `return`: leave the function, carrying its results.
     ///
     /// Lowered as a branch to the outermost label, so it behaves like any other
@@ -2435,12 +2519,7 @@ pub(crate) enum RegInstruction {
     /// Traps if the source range exceeds the segment or the destination exceeds
     /// memory. A segment already released by [`Self::DataDrop`] reads as empty, so a
     /// zero-length init still succeeds where any non-empty one traps.
-    MemoryInit {
-        /// Index of the data segment to copy from.
-        data_index: u32,
-        /// `dest`, `src`, `len`.
-        operands: Registers<3, Slot>,
-    },
+    MemoryInit(Id<MemoryInitOperands>),
     /// `data.drop`: release a passive data segment's bytes. The field is the segment
     /// index.
     ///
@@ -2890,12 +2969,17 @@ impl Instruction for RegInstruction {
                 Operator::MemoryInit { data_index, mem } => {
                     check_memory_index(mem)?;
 
-                    emit!(|sig: Signature<3, 0>| {
-                        RegInstruction::MemoryInit {
-                            data_index,
-                            operands: sig.input,
-                        }
-                    })
+                    let registers = simulated_stack.registers_for::<3, 0>()?.input;
+
+                    instructions.push(
+                        RegInstruction::MemoryInit(simulated_stack.memory_init_arena.alloc(
+                            MemoryInitOperands {
+                                data_index,
+                                operands: registers,
+                            },
+                        )),
+                        offset,
+                    );
                 }
                 Operator::DataDrop { data_index } => {
                     instructions.push(RegInstruction::DataDrop(data_index), offset);
@@ -3153,7 +3237,18 @@ impl Instruction for RegInstruction {
                 Operator::Nop => {
                     continue;
                 }
-                Operator::Select => emit!(RegInstruction::Select),
+                Operator::Select => {
+                    let registers = simulated_stack.registers_for::<3, 1>()?;
+
+                    instructions.push(
+                        RegInstruction::Select(
+                            simulated_stack
+                                .select_arena
+                                .alloc(SelectOperands(registers)),
+                        ),
+                        offset,
+                    );
+                }
                 Operator::Drop => {
                     simulated_stack.pop();
 
@@ -3725,6 +3820,8 @@ impl Instruction for RegInstruction {
             br_if_arena: simulated_stack.br_if_arena,
             br_table_arena: simulated_stack.br_table_arena,
             call_indirect_arena: simulated_stack.call_indirect_arena,
+            select_arena: simulated_stack.select_arena,
+            memory_init_arena: simulated_stack.memory_init_arena,
             locals_count,
             consts: simulated_stack.const_interner.consts.into_boxed_slice(),
         };
@@ -6449,9 +6546,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::Select(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
-                let output_register_index =
-                    sig.output.registers(&frame_layout.output_registers_arena)[0];
+                let entry = frame_layout.select_arena.get(*sig);
+                let inputs = entry.0.input.registers(&frame_layout.input_registers_arena);
+                let output_register_index = entry
+                    .0
+                    .output
+                    .registers(&frame_layout.output_registers_arena)[0];
 
                 let a = Self::slot_value(inputs[0], caller_base_data, instance);
                 let b = Self::slot_value(inputs[1], caller_base_data, instance);
@@ -6680,11 +6780,11 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::MemoryInit {
-                data_index,
-                operands,
-            } => {
-                let inputs = operands.registers(&frame_layout.input_registers_arena);
+            RegInstruction::MemoryInit(id) => {
+                let entry = frame_layout.memory_init_arena.get(*id);
+                let inputs = entry
+                    .operands
+                    .registers(&frame_layout.input_registers_arena);
                 let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
                     as usize;
                 let src = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32
@@ -6692,7 +6792,7 @@ impl Instruction for RegInstruction {
                 let len = Self::slot_value(inputs[2], caller_base_data, instance).as_i32() as u32
                     as usize;
 
-                let segment: &[u8] = match &instance.data_vals[*data_index as usize] {
+                let segment: &[u8] = match &instance.data_vals[entry.data_index as usize] {
                     DataVal::Dropped => &[],
                     DataVal::Passive(segment) => segment,
                 };
