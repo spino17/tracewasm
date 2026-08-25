@@ -18,8 +18,8 @@
 
 use crate::{
     instruction::register::{
-        RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot, arena::SmolId,
-        mnemonic,
+        MemoryOffset, RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot,
+        interner::InternedId, mnemonic,
     },
     module::FuncType,
 };
@@ -61,9 +61,9 @@ impl RegInstruction {
         // A load or a store carries an id into `memory_offsets`, not the offset itself,
         // so it is resolved and shown as its value — the id is an artifact of keeping
         // the instruction eight bytes wide.
-        let offset_of = |id: SmolId<u32>| *frame.memory_offsets.get(id);
+        let offset_of = |id: InternedId<MemoryOffset>| frame.memory_offsets.value(id).0;
 
-        let load_op = |kind, id: SmolId<u32>, inputs: &[Slot], outputs: &[u16]| {
+        let load_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot], outputs: &[u16]| {
             format!(
                 "{:<12} [{}]+{} -> {}",
                 mnemonic(kind),
@@ -73,7 +73,7 @@ impl RegInstruction {
             )
         };
 
-        let store_op = |kind, id: SmolId<u32>, inputs: &[Slot]| {
+        let store_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot]| {
             format!(
                 "{:<12} [{}]+{} <- {}",
                 mnemonic(kind),

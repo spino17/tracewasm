@@ -313,8 +313,7 @@ mod tests {
     use super::*;
     use crate::{
         instruction::register::{
-            MAX_NUM_MEMORY_INSTRUCTIONS,
-            arena::{Arena, SmolArena},
+            MAX_MEMORY_OFFSETS, MemoryOffset, arena::Arena, interner::Interner,
         },
         module::ValType,
         runtime::value::Val,
@@ -341,7 +340,7 @@ mod tests {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
-            memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
+            memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
         }
     }
 
@@ -429,7 +428,7 @@ mod tests {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
-            memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
+            memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
         };
 
         frame.enter_frame(

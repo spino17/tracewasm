@@ -70,7 +70,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         call_indirect_arena: Arena::default(),
         select_arena: Arena::default(),
         memory_init_arena: Arena::default(),
-        memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
+        memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
     }
 }
 
@@ -4459,7 +4459,7 @@ fn a_memory_offset_keeps_its_full_u32_range() {
             unreachable!()
         };
 
-        let stored = *frame.memory_offsets.get(*stored);
+        let stored = frame.memory_offsets.value(*stored).0;
 
         assert_eq!(
             stored, offset,
@@ -4484,7 +4484,7 @@ fn a_store_offset_keeps_its_full_u32_range() {
             unreachable!()
         };
 
-        let stored = *frame.memory_offsets.get(*stored);
+        let stored = frame.memory_offsets.value(*stored).0;
 
         assert_eq!(stored, offset, "a store's offset must round-trip exactly");
     }
