@@ -343,12 +343,20 @@ impl ConstInterner {
     ///
     /// Identity is bitwise, so the same NaN interned twice is one slot while `+0.0`
     /// and `-0.0` are two.
-    fn intern(&mut self, val: Const) -> ConstId {
+    /// # Errors
+    ///
+    /// [`TraceWasmError::RegisterFrameTooLarge`] once the pool would outgrow a 16-bit
+    /// frame index.
+    fn intern(&mut self, val: Const) -> Result<ConstId, TraceWasmError> {
         if let Some(id) = self.reverse_map.get(&val) {
-            *id
+            Ok(*id)
         } else {
-            if self.consts.len() as u16 > MAX_CONSTS {
-                todo!() // RAISE ERROR!
+            if self.consts.len() >= MAX_CONSTS as usize {
+                return Err(TraceWasmError::RegisterFrameTooLarge {
+                    what: "constants",
+                    needed: self.consts.len() as u32 + 1,
+                    limit: MAX_CONSTS as u32,
+                });
             }
 
             let id = ConstId(self.consts.len() as u16);
@@ -356,7 +364,7 @@ impl ConstInterner {
             self.consts.push(val);
             self.reverse_map.insert(val, id);
 
-            id
+            Ok(id)
         }
     }
 
@@ -915,16 +923,27 @@ impl SimulatedStack {
     /// than the registers instructions actually write. `br_truncation_registers` is
     /// the one that does it by hand, because its destinations are not allocated by
     /// pushing.
-    fn advanced_register_index(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// [`TraceWasmError::RegisterFrameTooLarge`] once the region would outgrow a
+    /// 16-bit frame index.
+    fn advanced_register_index(&mut self) -> Result<(), TraceWasmError> {
         self.curr_register_index += 1;
 
         if self.curr_register_index as u16 > self.max_registers {
-            self.max_registers += 1;
-
-            if self.max_registers > MAX_REGISTER_SLOTS {
-                todo!() // RAISE ERROR!
+            if self.max_registers >= MAX_REGISTER_SLOTS {
+                return Err(TraceWasmError::RegisterFrameTooLarge {
+                    what: "locals and operand registers",
+                    needed: self.max_registers as u32 + 1,
+                    limit: MAX_REGISTER_SLOTS as u32,
+                });
             }
+
+            self.max_registers += 1;
         }
+
+        Ok(())
     }
 
     /// Frees the top register, when a [`StackSlot::Register`] is popped.
@@ -1175,18 +1194,20 @@ impl SimulatedStack {
     ///
     /// A spill is never pushed. It is a *transition* of an existing borrow, applied
     /// through [`Self::set_lazy`], not a value that arrives from nothing.
-    fn push(&mut self, slot: Slot) {
+    fn push(&mut self, slot: Slot) -> Result<(), TraceWasmError> {
         let slot = if slot.0 < self.locals_count() {
             let slot = Self::push_lazy(slot.0, &mut self.lazy_locals);
 
             StackSlot::Local(slot)
         } else {
-            self.advanced_register_index();
+            self.advanced_register_index()?;
 
             StackSlot::Register(slot.0)
         };
 
         self.stack.push(slot);
+
+        Ok(())
     }
 
     /// Resolves the top operand without consuming it, for `local.tee`.
@@ -1211,16 +1232,19 @@ impl SimulatedStack {
     }
 
     /// `i32.const` and friends: records the immediate, emitting nothing.
-    fn push_const(&mut self, val: Const) {
-        let id = self.const_interner.intern(val);
+    fn push_const(&mut self, val: Const) -> Result<(), TraceWasmError> {
+        let id = self.const_interner.intern(val)?;
+
         self.stack.push(StackSlot::Const(id));
+
+        Ok(())
     }
 
     /// `local.get`: starts or joins a lazy borrow of the local, emitting nothing.
     /// The value is read in place by whatever consumes it, unless a write to the
     /// local intervenes and spills it first.
-    fn push_local(&mut self, index: u16) {
-        self.push(Slot(index));
+    fn push_local(&mut self, index: u16) -> Result<(), TraceWasmError> {
+        self.push(Slot(index))
     }
 
     /// Applies an instruction's stack effect and records its operands in the arenas.
@@ -1233,7 +1257,11 @@ impl SimulatedStack {
     ///
     /// Use [`Self::pops_and_pushes`] when only the stack effect is wanted; this
     /// variant grows the arenas that ship in [`FrameLayout`].
-    fn pops_and_pushes_registers(&mut self, pops: u32, pushes: u32) -> PopsPushesResult {
+    fn pops_and_pushes_registers(
+        &mut self,
+        pops: u32,
+        pushes: u32,
+    ) -> Result<PopsPushesResult, TraceWasmError> {
         let pops = pops as usize;
         let pushes = pushes as usize;
         let input_start = self.input_registers.len();
@@ -1272,13 +1300,13 @@ impl SimulatedStack {
             self.output_registers[output_start + i] = self.curr_register_index as u16;
             let out = Slot(self.curr_register_index as u16);
 
-            self.push(out);
+            self.push(out)?;
         }
 
-        PopsPushesResult {
+        Ok(PopsPushesResult {
             input_start: input_start as u32,
             output_start: output_start as u32,
-        }
+        })
     }
 
     /// The same stack effect as [`Self::pops_and_pushes_registers`], recording
@@ -1292,7 +1320,7 @@ impl SimulatedStack {
     ///
     /// The pops still go through [`Self::pop`], so lazy borrows and spill slots are
     /// released as they should be.
-    fn pops_and_pushes(&mut self, pops: u32, pushes: u32) {
+    fn pops_and_pushes(&mut self, pops: u32, pushes: u32) -> Result<(), TraceWasmError> {
         let pops = pops as usize;
         let pushes = pushes as usize;
 
@@ -1303,8 +1331,10 @@ impl SimulatedStack {
         for _ in 0..pushes {
             let out = Slot(self.curr_register_index as u16);
 
-            self.push(out);
+            self.push(out)?;
         }
+
+        Ok(())
     }
 
     /// Restores the enclosing block to the layout its `else`/`end` expects, after an
@@ -1325,21 +1355,25 @@ impl SimulatedStack {
     /// Pops go through [`Self::pops_and_pushes`], so the operands abandoned here
     /// release their lazy borrows and spill slots. Nothing downstream can read them:
     /// the path that would have is the one just taken away.
-    fn reset_enclosing_block_layout(&mut self) {
+    fn reset_enclosing_block_layout(&mut self) -> Result<(), TraceWasmError> {
         let block = self.get_curr_block();
         let recorded_height = block.recorded_height;
         let results = block.results;
         let unwind = self.stack.height() - recorded_height;
 
-        self.pops_and_pushes(unwind, results);
+        self.pops_and_pushes(unwind, results)?;
+
+        Ok(())
     }
 
     /// [`Self::pops_and_pushes_registers`] for an instruction whose arity is fixed by
     /// its opcode, returning the [`Signature`] to store in the variant.
-    fn registers_for<const I: usize, const O: usize>(&mut self) -> Signature<I, O> {
-        let result = self.pops_and_pushes_registers(I as u32, O as u32);
+    fn registers_for<const I: usize, const O: usize>(
+        &mut self,
+    ) -> Result<Signature<I, O>, TraceWasmError> {
+        let result = self.pops_and_pushes_registers(I as u32, O as u32)?;
 
-        Signature {
+        Ok(Signature {
             input: Registers {
                 start: result.input_start,
                 phantom: PhantomData,
@@ -1348,7 +1382,7 @@ impl SimulatedStack {
                 start: result.output_start,
                 phantom: PhantomData,
             },
-        }
+        })
     }
 
     /// Forces the top `depth` operands into a contiguous register run, returning the
@@ -1362,14 +1396,17 @@ impl SimulatedStack {
     ///
     /// Pops and re-pushes from the same base, so the destination range overlaps the
     /// sources; see [`RegInstruction::Move`] for what that requires of an executor.
-    fn materialize_stack_slots_in_registers(&mut self, depth: u32) -> DynSignature {
-        let result = self.pops_and_pushes_registers(depth, depth);
+    fn materialize_stack_slots_in_registers(
+        &mut self,
+        depth: u32,
+    ) -> Result<DynSignature, TraceWasmError> {
+        let result = self.pops_and_pushes_registers(depth, depth)?;
 
-        DynSignature {
+        Ok(DynSignature {
             input: result.input_start,
             output: result.output_start,
             len: depth,
-        }
+        })
     }
 
     /// Builds the [`RegInstruction::Move`] a branch performs on its way to a label,
@@ -1397,7 +1434,7 @@ impl SimulatedStack {
         &mut self,
         base_height: u32,
         arity_to_preserve: u32,
-    ) -> DynSignature {
+    ) -> Result<DynSignature, TraceWasmError> {
         let input_start = self.input_registers.len();
         let output_start = self.output_registers.len();
         let arity_to_preserve = arity_to_preserve as usize;
@@ -1450,18 +1487,22 @@ impl SimulatedStack {
         }
 
         if register_index > self.max_registers {
-            self.max_registers = register_index;
-
-            if self.max_registers > MAX_REGISTER_SLOTS {
-                todo!() // RAISE ERROR!
+            if register_index > MAX_REGISTER_SLOTS {
+                return Err(TraceWasmError::RegisterFrameTooLarge {
+                    what: "locals and operand registers",
+                    needed: register_index as u32,
+                    limit: MAX_REGISTER_SLOTS as u32,
+                });
             }
+
+            self.max_registers = register_index;
         }
 
-        DynSignature {
+        Ok(DynSignature {
             input: input_start as u32,
             output: output_start as u32,
             len: arity_to_preserve as u32,
-        }
+        })
     }
 
     /// Rescues every operand still forwarding to `location`, ahead of a write to it.
@@ -1479,15 +1520,17 @@ impl SimulatedStack {
         location: u32,
         arena: &mut LazyArena<T>,
         spills: &mut SpillArena,
-    ) -> Option<SpillIndex> {
-        let slot = arena.origin[location as usize]?;
+    ) -> Result<Option<SpillIndex>, TraceWasmError> {
+        let Some(slot) = arena.origin[location as usize] else {
+            return Ok(None);
+        };
 
-        let spill_index = spills.reserve_slot();
+        let spill_index = spills.reserve_slot()?;
 
         slot.spill(spill_index, arena);
         arena.origin[location as usize] = None;
 
-        Some(spill_index)
+        Ok(Some(spill_index))
     }
 
     /// What [`Self::curr_register_index`] would be after popping `depth` operands,
@@ -2486,14 +2529,16 @@ impl RegInstruction {
         instructions: &mut Instructions,
         instruction_emitter: F,
         offset: u32,
-    ) {
+    ) -> Result<(), TraceWasmError> {
         let lazy_count = arena.origin.len() as u32;
 
         for index in 0..lazy_count {
-            if let Some(spill_index) = SimulatedStack::set_lazy(index, arena, spills) {
+            if let Some(spill_index) = SimulatedStack::set_lazy(index, arena, spills)? {
                 instructions.push(instruction_emitter(spill_index, index), offset);
             }
         }
+
+        Ok(())
     }
 
     /// Rescues every live local borrow ahead of a diverging or repeating construct.
@@ -2509,7 +2554,7 @@ impl RegInstruction {
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Instructions,
         offset: u32,
-    ) {
+    ) -> Result<(), TraceWasmError> {
         let instruction_emitter =
             |spill_index: SpillIndex, index: u32| RegInstruction::LocalSpill {
                 index: LocalIndex(index),
@@ -2522,7 +2567,7 @@ impl RegInstruction {
             instructions,
             instruction_emitter,
             offset,
-        );
+        )
     }
 
     /// Claims the registers an operator of arity `I` -> `O` needs, hands them to
@@ -2536,10 +2581,12 @@ impl RegInstruction {
         instructions: &mut Instructions,
         offset: u32,
         emitter: F,
-    ) {
-        let registers = simulated_stack.registers_for::<I, O>();
+    ) -> Result<(), TraceWasmError> {
+        let registers = simulated_stack.registers_for::<I, O>()?;
 
         instructions.push(emitter(registers), offset);
+
+        Ok(())
     }
 }
 
@@ -2678,9 +2725,12 @@ impl Instruction for RegInstruction {
             /// constructor *is* a `Fn(Signature<I, O>) -> RegInstruction`, so the arity
             /// comes from the variant's own declaration and no arm restates it. Pass a
             /// closure where the variant carries an immediate beside its signature.
+            // The `?` lives here rather than in each arm: every one of them reaches
+            // `Self::emit`, so this is the single place a register-allocation failure
+            // has to propagate from.
             macro_rules! emit {
                 ($build:expr) => {
-                    Self::emit(&mut simulated_stack, &mut instructions, offset, $build)
+                    Self::emit(&mut simulated_stack, &mut instructions, offset, $build)?
                 };
             }
 
@@ -2693,7 +2743,7 @@ impl Instruction for RegInstruction {
 
             match operator {
                 Operator::GlobalGet { global_index } => {
-                    let registers = simulated_stack.registers_for::<0, 1>().output;
+                    let registers = simulated_stack.registers_for::<0, 1>()?.output;
 
                     instructions.push(
                         RegInstruction::GlobalGet {
@@ -2704,7 +2754,7 @@ impl Instruction for RegInstruction {
                     );
                 }
                 Operator::GlobalSet { global_index } => {
-                    let registers = simulated_stack.registers_for::<1, 0>().input;
+                    let registers = simulated_stack.registers_for::<1, 0>()?.input;
 
                     instructions.push(
                         RegInstruction::GlobalSet {
@@ -2715,14 +2765,14 @@ impl Instruction for RegInstruction {
                     );
                 }
                 Operator::LocalGet { local_index } => {
-                    simulated_stack.push_local(local_index as u16);
+                    simulated_stack.push_local(local_index as u16)?;
                 }
                 Operator::LocalSet { local_index } => {
                     if let Some(spill_index) = SimulatedStack::set_lazy(
                         local_index,
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
-                    ) {
+                    )? {
                         instructions.push(
                             RegInstruction::LocalSpill {
                                 index: LocalIndex(local_index),
@@ -2732,7 +2782,7 @@ impl Instruction for RegInstruction {
                         );
                     }
 
-                    let registers = simulated_stack.registers_for::<1, 0>().input;
+                    let registers = simulated_stack.registers_for::<1, 0>()?.input;
 
                     instructions.push(
                         RegInstruction::LocalSet {
@@ -2747,7 +2797,7 @@ impl Instruction for RegInstruction {
                         local_index,
                         &mut simulated_stack.lazy_locals,
                         &mut simulated_stack.spills,
-                    ) {
+                    )? {
                         instructions.push(
                             RegInstruction::LocalSpill {
                                 index: LocalIndex(local_index),
@@ -2795,10 +2845,10 @@ impl Instruction for RegInstruction {
                     );
                 }
                 Operator::RefNull { hty: _ } => {
-                    simulated_stack.push_const(Const::Ref(None));
+                    simulated_stack.push_const(Const::Ref(None))?;
                 }
                 Operator::RefFunc { function_index } => {
-                    simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))));
+                    simulated_stack.push_const(Const::Ref(Some(FuncIndex(function_index))))?;
                 }
                 Operator::RefIsNull => emit!(RegInstruction::RefIsNull),
 
@@ -2838,7 +2888,7 @@ impl Instruction for RegInstruction {
                 }
 
                 Operator::I32Const { value } => {
-                    simulated_stack.push_const(Const::I32(value));
+                    simulated_stack.push_const(Const::I32(value))?;
                 }
                 Operator::I32Load { memarg } => emit!(|sig| RegInstruction::I32Load {
                     offset: memarg.offset as u32,
@@ -2916,7 +2966,7 @@ impl Instruction for RegInstruction {
                 Operator::I32Xor => emit!(RegInstruction::I32Xor),
 
                 Operator::I64Const { value } => {
-                    simulated_stack.push_const(Const::I64(value));
+                    simulated_stack.push_const(Const::I64(value))?;
                 }
                 Operator::I64Load { memarg } => emit!(|sig| RegInstruction::I64Load {
                     offset: memarg.offset as u32,
@@ -3009,7 +3059,7 @@ impl Instruction for RegInstruction {
 
                 Operator::F32Const { value } => {
                     simulated_stack
-                        .push_const(Const::F32(OrderedFloat(f32::from_bits(value.bits()))));
+                        .push_const(Const::F32(OrderedFloat(f32::from_bits(value.bits()))))?;
                 }
                 Operator::F32Load { memarg } => emit!(|sig| RegInstruction::F32Load {
                     offset: memarg.offset as u32,
@@ -3049,7 +3099,7 @@ impl Instruction for RegInstruction {
 
                 Operator::F64Const { value } => {
                     simulated_stack
-                        .push_const(Const::F64(OrderedFloat(f64::from_bits(value.bits()))));
+                        .push_const(Const::F64(OrderedFloat(f64::from_bits(value.bits()))))?;
                 }
                 Operator::F64Load { memarg } => emit!(|sig| RegInstruction::F64Load {
                     offset: memarg.offset as u32,
@@ -3105,7 +3155,7 @@ impl Instruction for RegInstruction {
 
                     if block_params != 0 {
                         let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_params);
+                            simulated_stack.materialize_stack_slots_in_registers(block_params)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3114,7 +3164,7 @@ impl Instruction for RegInstruction {
                     // A loop repeats: a rescue left inside the body would re-run on
                     // the back-edge and capture what the previous iteration wrote.
                     // Hoisting it above the header runs it exactly once, on entry.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset)?;
 
                     let (block_params, _) = simulated_stack.add_block(
                         BlockVariant::Loop,
@@ -3125,7 +3175,7 @@ impl Instruction for RegInstruction {
 
                     if block_params != 0 {
                         let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_params);
+                            simulated_stack.materialize_stack_slots_in_registers(block_params)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3135,7 +3185,7 @@ impl Instruction for RegInstruction {
                 Operator::If { blockty } => {
                     // Control diverges here, and a write in either arm would leave
                     // the other path reading a spill slot nothing wrote.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset)?;
 
                     // the simulated stack would have layout like this at `if` instruction: [...other...][...params...][cond]
                     // to obtain recorded_height, we should pop params + 1 number of stack slots, and measure the `curr_register_index`
@@ -3152,15 +3202,15 @@ impl Instruction for RegInstruction {
                     );
 
                     if block_params != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_params + 1);
+                        let move_registers = simulated_stack
+                            .materialize_stack_slots_in_registers(block_params + 1)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
                     instructions.push(
                         RegInstruction::If {
-                            cond: simulated_stack.registers_for::<1, 0>().input,
+                            cond: simulated_stack.registers_for::<1, 0>()?.input,
                             else_index: None,
                             end_index: u32::MAX,
                         },
@@ -3195,7 +3245,7 @@ impl Instruction for RegInstruction {
                     // the else instruction itself.
                     if block_results != 0 {
                         let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_results);
+                            simulated_stack.materialize_stack_slots_in_registers(block_results)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3204,7 +3254,7 @@ impl Instruction for RegInstruction {
                     simulated_stack.pops_and_pushes(
                         simulated_stack.stack.height() - recorded_height,
                         block_params,
-                    );
+                    )?;
 
                     instructions.push(
                         RegInstruction::Else {
@@ -3224,12 +3274,12 @@ impl Instruction for RegInstruction {
                     let (move_registers, target_index) =
                         if let Some(loop_index) = block.kind.is_loop() {
                             (
-                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                simulated_stack.br_truncation_registers(recorded_height, params)?,
                                 loop_index,
                             )
                         } else {
-                            let move_registers =
-                                simulated_stack.br_truncation_registers(recorded_height, results);
+                            let move_registers = simulated_stack
+                                .br_truncation_registers(recorded_height, results)?;
 
                             simulated_stack
                                 .get_block_mut(block_index)
@@ -3252,13 +3302,13 @@ impl Instruction for RegInstruction {
 
                     instructions.push(RegInstruction::Br { target_index }, offset);
 
-                    simulated_stack.reset_enclosing_block_layout();
+                    simulated_stack.reset_enclosing_block_layout()?;
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::BrIf { relative_depth } => {
                     // Taking the branch skips everything after it, including any
                     // write that would have rescued a borrow still live here.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset)?;
 
                     let block_index =
                         simulated_stack.control_stack.len() - 1 - relative_depth as usize;
@@ -3268,17 +3318,17 @@ impl Instruction for RegInstruction {
                     let recorded_height = block.recorded_height;
                     let block_kind = block.kind;
 
-                    let cond = simulated_stack.registers_for::<1, 0>().input;
+                    let cond = simulated_stack.registers_for::<1, 0>()?.input;
 
                     let (move_registers, target_index) =
                         if let Some(loop_index) = block_kind.is_loop() {
                             (
-                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                simulated_stack.br_truncation_registers(recorded_height, params)?,
                                 loop_index,
                             )
                         } else {
-                            let move_registers =
-                                simulated_stack.br_truncation_registers(recorded_height, results);
+                            let move_registers = simulated_stack
+                                .br_truncation_registers(recorded_height, results)?;
 
                             simulated_stack
                                 .get_block_mut(block_index)
@@ -3300,7 +3350,7 @@ impl Instruction for RegInstruction {
                 Operator::BrTable { targets: table } => {
                     // As for `br_if`: every arm jumps away, so a later write cannot
                     // be relied on to have rescued anything.
-                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset);
+                    Self::spill_live_locals(&mut simulated_stack, &mut instructions, offset)?;
 
                     let targets_start = simulated_stack.br_targets.len() as u32;
                     let mut targets_len = 0;
@@ -3310,7 +3360,7 @@ impl Instruction for RegInstruction {
 
                     targets.push(table.default());
 
-                    let table_index = simulated_stack.registers_for::<1, 0>().input; // targets index
+                    let table_index = simulated_stack.registers_for::<1, 0>()?.input; // targets index
 
                     for (i, &relative_depth) in targets.iter().enumerate() {
                         let block_index =
@@ -3325,12 +3375,12 @@ impl Instruction for RegInstruction {
                             block_kind.is_loop()
                         {
                             (
-                                simulated_stack.br_truncation_registers(recorded_height, params),
+                                simulated_stack.br_truncation_registers(recorded_height, params)?,
                                 loop_index,
                             )
                         } else {
-                            let move_registers =
-                                simulated_stack.br_truncation_registers(recorded_height, results);
+                            let move_registers = simulated_stack
+                                .br_truncation_registers(recorded_height, results)?;
 
                             simulated_stack
                                 .get_block_mut(block_index)
@@ -3359,11 +3409,11 @@ impl Instruction for RegInstruction {
                         offset,
                     );
 
-                    simulated_stack.reset_enclosing_block_layout();
+                    simulated_stack.reset_enclosing_block_layout()?;
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Return => {
-                    let move_registers = simulated_stack.br_truncation_registers(0, results);
+                    let move_registers = simulated_stack.br_truncation_registers(0, results)?;
 
                     simulated_stack.control_stack.stack[0]
                         .attached_breaks
@@ -3387,7 +3437,7 @@ impl Instruction for RegInstruction {
                         offset,
                     );
 
-                    simulated_stack.reset_enclosing_block_layout();
+                    simulated_stack.reset_enclosing_block_layout()?;
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Call { function_index } => {
@@ -3400,7 +3450,7 @@ impl Instruction for RegInstruction {
 
                     if params != 0 {
                         let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(params);
+                            simulated_stack.materialize_stack_slots_in_registers(params)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3415,8 +3465,10 @@ impl Instruction for RegInstruction {
                         offset,
                     );
 
-                    simulated_stack
-                        .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
+                    simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - recorded_height,
+                        results,
+                    )?;
                 }
                 Operator::CallIndirect {
                     type_index,
@@ -3428,10 +3480,10 @@ impl Instruction for RegInstruction {
                     let recorded_height = simulated_stack.stack.height() - params - 1;
                     let caller_base = simulated_stack.register_index_at_depth(params + 1) as u16;
 
-                    let slot = simulated_stack.registers_for::<1, 0>().input;
+                    let slot = simulated_stack.registers_for::<1, 0>()?.input;
 
                     let move_registers =
-                        simulated_stack.materialize_stack_slots_in_registers(params);
+                        simulated_stack.materialize_stack_slots_in_registers(params)?;
 
                     call_instr_backpatches.push((instructions.len(), caller_base));
 
@@ -3446,13 +3498,15 @@ impl Instruction for RegInstruction {
                         offset,
                     );
 
-                    simulated_stack
-                        .pops_and_pushes(simulated_stack.stack.height() - recorded_height, results);
+                    simulated_stack.pops_and_pushes(
+                        simulated_stack.stack.height() - recorded_height,
+                        results,
+                    )?;
                 }
                 Operator::Unreachable => {
                     instructions.push(RegInstruction::Unreachable, offset);
 
-                    simulated_stack.reset_enclosing_block_layout();
+                    simulated_stack.reset_enclosing_block_layout()?;
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::End => {
@@ -3462,7 +3516,7 @@ impl Instruction for RegInstruction {
 
                     if results != 0 {
                         let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(results);
+                            simulated_stack.materialize_stack_slots_in_registers(results)?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3568,6 +3622,20 @@ impl Instruction for RegInstruction {
         let locals_count = simulated_stack.lazy_locals.origin.len() as u16;
         let spills = simulated_stack.spills.allocation_len();
         let consts_len = simulated_stack.const_interner.consts.len() as u16;
+
+        // The per-region limits above each bound one region; this bounds the frame,
+        // which is all four laid end to end. Three individually-legal regions can
+        // still add up to something no 16-bit index can name, and this runs before
+        // the backpatch loops below so no such index is ever written.
+        let frame_width = simulated_stack.max_registers as u32 + spills as u32 + consts_len as u32;
+
+        if frame_width > u16::MAX as u32 {
+            return Err(TraceWasmError::RegisterFrameTooLarge {
+                what: "the whole frame",
+                needed: frame_width,
+                limit: u16::MAX as u32,
+            });
+        }
 
         // Constants come first above the locals, in interner order — matching the
         // order `enter_frame` writes the pool in.

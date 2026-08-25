@@ -369,14 +369,14 @@ fn output_operands(xs: &[u16], s: &SimulatedStack) -> Vec<u16> {
 fn borrows_of_one_local_share_a_single_spill() {
     let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
-    s.push_const(Const::I32(5));
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(5)).unwrap();
 
-    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _set = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
+    let _set = s.registers_for::<1, 0>().unwrap();
+    let add = s.registers_for::<2, 1>().unwrap();
 
     resolve_backpatches(&mut s);
 
@@ -397,14 +397,16 @@ fn borrows_of_one_local_share_a_single_spill() {
 fn a_consumed_borrow_is_not_spilled() {
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _load = s.registers_for::<1, 1>(); // consumes the borrow
+    let _load = s.registers_for::<1, 1>().unwrap(); // consumes the borrow
 
-    s.push_const(Const::I32(5));
+    s.push_const(Const::I32(5)).unwrap();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none(),
         "nothing borrows local 0 any more"
     );
 
@@ -415,20 +417,20 @@ fn a_consumed_borrow_is_not_spilled() {
 fn successive_writes_produce_independent_snapshots() {
     let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_const(Const::I32(1));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(1)).unwrap();
 
-    let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
+    let _ = s.registers_for::<1, 0>().unwrap();
 
-    s.push_local(0);
-    s.push_const(Const::I32(2));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let second = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let second = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
+    let _ = s.registers_for::<1, 0>().unwrap();
+    let add = s.registers_for::<2, 1>().unwrap();
 
     resolve_backpatches(&mut s);
 
@@ -449,18 +451,18 @@ fn successive_writes_produce_independent_snapshots() {
 fn dropping_the_last_borrow_releases_its_spill_slot() {
     let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_const(Const::I32(1));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(1)).unwrap();
 
-    SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
+    let _ = s.registers_for::<1, 0>().unwrap();
 
     s.pop(); // drop the spilled borrow
-    s.push_local(0);
-    s.push_const(Const::I32(2));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let reused = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let reused = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     assert_eq!(
         spilled_to(reused),
@@ -475,9 +477,9 @@ fn dropping_the_last_borrow_releases_its_spill_slot() {
 fn tee_spills_before_reading_the_top() {
     let mut s = sim(4);
 
-    s.push_local(3);
+    s.push_local(3).unwrap();
 
-    let spill = SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills).unwrap();
     let operand = s.tee();
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
@@ -670,17 +672,17 @@ fn block_entry_layouts_hold_for_every_block_type() {
         ] {
             let mut s = sim(4);
 
-            s.push_local(0);
+            s.push_local(0).unwrap();
 
-            let _ = s.registers_for::<1, 1>(); // a live register underneath
+            let _ = s.registers_for::<1, 1>().unwrap(); // a live register underneath
             let np = params_and_results_from_blockty(&blockty, &types).0;
 
             for _ in 0..np {
-                s.push_const(Const::I32(9));
+                s.push_const(Const::I32(9)).unwrap();
             }
 
             if is_if {
-                s.push_const(Const::I32(1)); // condition
+                s.push_const(Const::I32(1)).unwrap(); // condition
             }
 
             let (params, _) = s.add_block(variant_of(&variant), &blockty, &types, 0);
@@ -691,7 +693,7 @@ fn block_entry_layouts_hold_for_every_block_type() {
             }
 
             if is_if {
-                let _ = s.registers_for::<1, 0>();
+                let _ = s.registers_for::<1, 0>().unwrap();
             }
 
             assert_eq!(
@@ -730,11 +732,11 @@ fn branch_lowering_does_not_disturb_the_stack() {
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
-    s.push_local(1); // a live lazy borrow above the base
+    s.push_local(1).unwrap(); // a live lazy borrow above the base
 
     let before = (
         heights(&s),
@@ -761,19 +763,19 @@ fn branch_destinations_are_based_at_the_target_label() {
 
     let outer = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r0, below the inner block
+    let _ = s.registers_for::<1, 1>().unwrap(); // r0, below the inner block
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let inner = s.get_curr_block().recorded_height;
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r1, the carried value
-    let to_inner = s.br_truncation_registers(inner, 1);
-    let to_outer = s.br_truncation_registers(outer, 1);
+    let _ = s.registers_for::<1, 1>().unwrap(); // r1, the carried value
+    let to_inner = s.br_truncation_registers(inner, 1).unwrap();
+    let to_outer = s.br_truncation_registers(outer, 1).unwrap();
 
     assert_eq!(
         output_operands(to_inner.output_registers(&s.output_registers), &s),
@@ -801,10 +803,10 @@ fn branch_destinations_count_towards_the_frame() {
     let base = s.get_curr_block().recorded_height;
     // operands that are not already registers: destinations sit above everything
     // allocated so far, so the frame has to grow for them
-    s.push_const(Const::I32(1));
-    s.push_const(Const::I32(2));
+    s.push_const(Const::I32(1)).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let mov = s.br_truncation_registers(base, 2);
+    let mov = s.br_truncation_registers(base, 2).unwrap();
 
     let highest = mov
         .output_registers(&s.output_registers)
@@ -1066,10 +1068,10 @@ fn a_conditional_arm_cannot_own_the_spill() {
     let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow
-    s.push_local(1); // the condition
+    s.push_local(0).unwrap(); // the borrow
+    s.push_local(1).unwrap(); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     assert!(
         !prog.is_empty(),
@@ -1078,18 +1080,20 @@ fn a_conditional_arm_cannot_own_the_spill() {
 
     s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
 
-    let _cond = s.registers_for::<1, 0>();
+    let _cond = s.registers_for::<1, 0>().unwrap();
 
     // then-arm
     let arm = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
         assert!(
-            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none(),
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s.registers_for::<1, 0>().unwrap().input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1106,7 +1110,8 @@ fn a_conditional_arm_cannot_own_the_spill() {
     let recorded = s.get_curr_block().recorded_height;
     let params = s.get_curr_block().params;
 
-    s.pops_and_pushes(s.stack.height() - recorded, params);
+    s.pops_and_pushes(s.stack.height() - recorded, params)
+        .unwrap();
 
     let consumer = s.pop();
     let rendered = render_provisional(&consumer, s.locals_count());
@@ -1137,25 +1142,29 @@ fn a_taken_br_if_cannot_skip_the_spill() {
     let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow
+    s.push_local(0).unwrap(); // the borrow
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_const(Const::I32(1)); // the condition
+    s.push_const(Const::I32(1)).unwrap(); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
-    let _cond = s.registers_for::<1, 0>();
+    let _cond = s.registers_for::<1, 0>().unwrap();
     let _mov = s.br_truncation_registers(base, 0);
 
     // everything after the branch is skipped when it is taken
     let rest = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
-        assert!(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none());
+        assert!(
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none()
+        );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s.registers_for::<1, 0>().unwrap().input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1192,9 +1201,9 @@ fn a_loop_body_cannot_own_the_spill() {
     let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow, below the loop
+    s.push_local(0).unwrap(); // the borrow, below the loop
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     let entry = 0..prog.len();
 
@@ -1207,14 +1216,16 @@ fn a_loop_body_cannot_own_the_spill() {
 
     // body
     let body = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
         assert!(
-            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none(),
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s.registers_for::<1, 0>().unwrap().input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1227,7 +1238,7 @@ fn a_loop_body_cannot_own_the_spill() {
         // the back-edge branches too, and must add nothing
         let before = prog.len();
 
-        RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+        RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
         assert_eq!(prog.len(), before, "nothing left to spill at the back-edge");
 
@@ -1236,7 +1247,7 @@ fn a_loop_body_cannot_own_the_spill() {
 
     let recorded = s.get_curr_block().recorded_height;
 
-    s.pops_and_pushes(s.stack.height() - recorded, 0);
+    s.pops_and_pushes(s.stack.height() - recorded, 0).unwrap();
 
     let consumer = s.pop();
 
@@ -1276,9 +1287,9 @@ fn a_block_does_not_hoist_spills() {
     let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0); // the Block arm makes no such call
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap(); // the Block arm makes no such call
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
@@ -1294,13 +1305,13 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
     let mut s = sim(8);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // consumed into a register
+    let _ = s.registers_for::<1, 1>().unwrap(); // consumed into a register
 
-    s.push_const(Const::I32(1)); // a condition
+    s.push_const(Const::I32(1)).unwrap(); // a condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     assert!(prog.is_empty(), "no live borrows, no instructions");
     assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
@@ -1405,7 +1416,7 @@ fn a_global_read_survives_a_call() {
 fn writing_a_global_does_not_disturb_a_local_borrow() {
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
     // A global write emits nothing that touches the lazy locals arena, so the
     // borrow of local 0 is still live and still reads its origin.
@@ -1422,11 +1433,11 @@ fn writing_a_global_does_not_disturb_a_local_borrow() {
 fn writing_one_local_leaves_other_borrows_alone() {
     let mut s = sim(4);
 
-    s.push_local(0);
-    s.push_local(1);
-    s.push_local(2);
+    s.push_local(0).unwrap();
+    s.push_local(1).unwrap();
+    s.push_local(2).unwrap();
 
-    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
     assert_eq!(s.pop_render(), "local2", "untouched above");
@@ -1438,9 +1449,13 @@ fn writing_one_local_leaves_other_borrows_alone() {
 fn writing_an_unborrowed_local_emits_nothing() {
     let mut s = sim(4);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    assert!(SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills).is_none());
+    assert!(
+        SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(s.spills.allocation_len(), 0);
 }
 
@@ -1448,16 +1463,12 @@ fn writing_an_unborrowed_local_emits_nothing() {
 fn three_borrows_share_one_entry() {
     let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
 
     assert_eq!(
-        spilled_to(SimulatedStack::set_lazy(
-            0,
-            &mut s.lazy_locals,
-            &mut s.spills
-        )),
+        spilled_to(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap()),
         Some("spill0".into())
     );
 
@@ -1473,9 +1484,9 @@ fn three_borrows_share_one_entry() {
 fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     let operand = s.tee();
 
@@ -1492,9 +1503,9 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 fn drop_releases_a_register() {
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
     assert_eq!(heights(&s), (1, 1));
 
@@ -1508,22 +1519,26 @@ fn drop_releases_a_register() {
 fn drop_releases_a_borrow_but_only_the_last_one() {
     let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
     s.pop();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_some(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_some(),
         "one borrow survives, so a write still has to rescue it"
     );
 
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
     s.pop();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none(),
         "the sole borrow is gone"
     );
 }
@@ -1536,11 +1551,11 @@ fn drop_releases_a_borrow_but_only_the_last_one() {
 fn operands_are_recorded_deepest_first() {
     let mut s = sim(4);
 
-    s.push_local(0); // a
-    s.push_local(1); // b
-    s.push_local(2); // condition, pushed last
+    s.push_local(0).unwrap(); // a
+    s.push_local(1).unwrap(); // b
+    s.push_local(2).unwrap(); // condition, pushed last
 
-    let select = s.registers_for::<3, 1>();
+    let select = s.registers_for::<3, 1>().unwrap();
 
     assert_eq!(
         slots(select.input.registers(&s.input_registers), &layout_of(&s)),
@@ -1553,10 +1568,10 @@ fn operands_are_recorded_deepest_first() {
 fn store_records_address_then_value() {
     let mut s = sim(4);
 
-    s.push_local(0); // address
-    s.push_const(Const::I32(9)); // value
+    s.push_local(0).unwrap(); // address
+    s.push_const(Const::I32(9)).unwrap(); // value
 
-    let store = s.registers_for::<2, 0>();
+    let store = s.registers_for::<2, 0>().unwrap();
 
     // The constant has no frame index until the end-of-body backpatch runs, so
     // before that the arena holds a placeholder rather than a location.
@@ -1589,14 +1604,14 @@ fn store_records_address_then_value() {
 fn a_result_reuses_an_operands_register() {
     let mut s = sim(4);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r0
+    let _ = s.registers_for::<1, 1>().unwrap(); // r0
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r1
-    let add = s.registers_for::<2, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap(); // r1
+    let add = s.registers_for::<2, 1>().unwrap();
 
     resolve_backpatches(&mut s);
 
@@ -1621,10 +1636,10 @@ fn max_registers_tracks_the_peak_not_the_total() {
     let mut s = sim(4);
 
     for l in 0..2 {
-        s.push_local(l);
+        s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>();
-        let _ = s.registers_for::<1, 0>();
+        let _ = s.registers_for::<1, 1>().unwrap();
+        let _ = s.registers_for::<1, 0>().unwrap();
     }
 
     assert_eq!(peak_operands(&s), 1, "serial values reuse one register");
@@ -1633,9 +1648,9 @@ fn max_registers_tracks_the_peak_not_the_total() {
     let mut s = sim(4);
 
     for l in 0..2 {
-        s.push_local(l);
+        s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>();
+        let _ = s.registers_for::<1, 1>().unwrap();
     }
 
     assert_eq!(peak_operands(&s), 2);
@@ -1645,9 +1660,9 @@ fn max_registers_tracks_the_peak_not_the_total() {
 fn non_register_operands_occupy_stack_but_not_registers() {
     let mut s = sim(4);
 
-    s.push_const(Const::I32(1));
-    s.push_local(0);
-    s.push_local(1);
+    s.push_const(Const::I32(1)).unwrap();
+    s.push_local(0).unwrap();
+    s.push_local(1).unwrap();
 
     assert_eq!(
         heights(&s),
@@ -1677,7 +1692,7 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
     // with params: an entry move occupies index 7, body starts at 8
     let mut s = sim(4);
 
-    s.push_const(Const::I32(1));
+    s.push_const(Const::I32(1)).unwrap();
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 7);
 
     assert!(matches!(
@@ -1691,7 +1706,7 @@ fn an_if_records_the_index_of_the_if_itself() {
     let types = vec![func_ty(1, 1)];
     let mut s = sim(4);
 
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(1)).unwrap(); // condition
     s.add_block(BlockVariant::If, &BlockType::Empty, &types, 7);
 
     assert!(matches!(
@@ -1701,8 +1716,8 @@ fn an_if_records_the_index_of_the_if_itself() {
 
     let mut s = sim(4);
 
-    s.push_const(Const::I32(9)); // param
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(9)).unwrap(); // param
+    s.push_const(Const::I32(1)).unwrap(); // condition
     s.add_block(BlockVariant::If, &BlockType::FuncType(0), &types, 7);
 
     assert!(matches!(
@@ -1720,15 +1735,15 @@ fn a_branch_to_the_function_frame_unwinds_to_zero() {
     let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
     let func_block = s.get_block(0);
 
     assert_eq!(func_block.recorded_height, 0);
 
-    let mov = s.br_truncation_registers(0, 0);
+    let mov = s.br_truncation_registers(0, 0).unwrap();
 
     assert!(mov.is_empty());
     assert_eq!(heights(&s), (1, 1), "still a simulation");
@@ -1742,14 +1757,14 @@ fn a_branch_carrying_several_values_lands_them_contiguously() {
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
-    s.push_const(Const::I32(2));
-    s.push_local(1);
+    s.push_const(Const::I32(2)).unwrap();
+    s.push_local(1).unwrap();
 
-    let mov = s.br_truncation_registers(base, 3);
+    let mov = s.br_truncation_registers(base, 3).unwrap();
 
     assert_eq!(
         output_operands(mov.output_registers(&s.output_registers), &s),
@@ -1766,7 +1781,7 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     let types = vec![func_ty(1, 1)];
     let mut s = sim(4);
 
-    s.push_const(Const::I32(0)); // the loop's param
+    s.push_const(Const::I32(0)).unwrap(); // the loop's param
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
 
     let loop_block = s.get_curr_block().recorded_height;
@@ -1784,10 +1799,12 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     let block_base = s.get_curr_block().recorded_height;
     let block_results = s.get_curr_block().results;
 
-    s.push_local(0); // the value the branch carries
+    s.push_local(0).unwrap(); // the value the branch carries
 
-    let to_loop = s.br_truncation_registers(loop_block, loop_params);
-    let to_block = s.br_truncation_registers(block_base, block_results);
+    let to_loop = s.br_truncation_registers(loop_block, loop_params).unwrap();
+    let to_block = s
+        .br_truncation_registers(block_base, block_results)
+        .unwrap();
 
     assert_eq!(loop_params, block_results, "arities agree");
 
@@ -1806,10 +1823,12 @@ fn every_br_table_arm_sees_the_same_stack() {
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
     let before = heights(&s);
-    let arms: Vec<_> = (0..4).map(|_| s.br_truncation_registers(base, 1)).collect();
+    let arms: Vec<_> = (0..4)
+        .map(|_| s.br_truncation_registers(base, 1).unwrap())
+        .collect();
 
     assert_eq!(heights(&s), before, "four simulations, no mutation");
 
@@ -1832,12 +1851,12 @@ fn a_branch_carrying_nothing_emits_no_move() {
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
     assert!(
-        s.br_truncation_registers(base, 0).is_empty(),
+        s.br_truncation_registers(base, 0).unwrap().is_empty(),
         "callers use this to skip emitting the move entirely"
     );
 }
@@ -1849,16 +1868,16 @@ fn br_if_consumes_only_its_condition() {
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
-    s.push_local(1);
+    let _ = s.registers_for::<1, 1>().unwrap();
+    s.push_local(1).unwrap();
 
     let live = (heights(&s), s.lazy_locals.origin[1].is_some());
 
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(1)).unwrap(); // condition
 
-    let _cond = s.registers_for::<1, 0>();
+    let _cond = s.registers_for::<1, 0>().unwrap();
     let _mov = s.br_truncation_registers(base, 0);
 
     assert_eq!(
@@ -1950,19 +1969,19 @@ fn br_table_arms_survive_lowering() {
 
     let outer = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let inner = s.get_curr_block().recorded_height;
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
     // two arms plus a default, as the BrTable arm records them
     for base in [inner, outer, inner] {
-        let mov = s.br_truncation_registers(base, 1);
+        let mov = s.br_truncation_registers(base, 1).unwrap();
 
         s.br_targets.push(RegBrTableTarget {
             mov,
@@ -2006,9 +2025,9 @@ fn br_table_arms_survive_lowering() {
 fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
     let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for::<1, 1>().unwrap();
 
     let frame = RegFrameLayout {
         registers: s.max_registers,
@@ -4251,7 +4270,7 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
     let mut interner = ConstInterner::default();
     let ids: Vec<(&str, u16)> = all
         .iter()
-        .map(|(name, c)| (*name, interner.intern(*c).0))
+        .map(|(name, c)| (*name, interner.intern(*c).unwrap().0))
         .collect();
 
     assert_eq!(
@@ -4281,10 +4300,10 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 fn the_pool_keeps_bit_distinct_floats_apart() {
     let mut interner = ConstInterner::default();
 
-    let pos64 = interner.intern(Const::F64(0.0f64.into()));
-    let neg64 = interner.intern(Const::F64((-0.0f64).into()));
-    let pos32 = interner.intern(Const::F32(0.0f32.into()));
-    let neg32 = interner.intern(Const::F32((-0.0f32).into()));
+    let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
+    let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
+    let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
+    let neg32 = interner.intern(Const::F32((-0.0f32).into())).unwrap();
 
     assert_ne!(
         pos64.0, neg64.0,
@@ -4307,9 +4326,9 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     let neg_nan = f64::from_bits(0xfff8_0000_0000_0001);
     let other_payload = f64::from_bits(0x7ff8_0000_dead_beef);
 
-    let a = interner.intern(Const::F64(nan.into()));
-    let b = interner.intern(Const::F64(neg_nan.into()));
-    let c = interner.intern(Const::F64(other_payload.into()));
+    let a = interner.intern(Const::F64(nan.into())).unwrap();
+    let b = interner.intern(Const::F64(neg_nan.into())).unwrap();
+    let c = interner.intern(Const::F64(other_payload.into())).unwrap();
 
     assert_ne!(a.0, b.0, "a NaN and its negation are different constants");
     assert_ne!(
@@ -4318,7 +4337,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     );
 
     // interning the same bits twice must still dedup, or the pool grows per use
-    let again = interner.intern(Const::F64(nan.into()));
+    let again = interner.intern(Const::F64(nan.into())).unwrap();
 
     assert_eq!(a.0, again.0, "the same bits must reuse the same slot");
 }
@@ -4330,9 +4349,9 @@ fn the_pool_still_dedups_equal_constants() {
     let mut interner = ConstInterner::default();
 
     for _ in 0..4 {
-        interner.intern(Const::I32(7));
-        interner.intern(Const::F64(2.5f64.into()));
-        interner.intern(Const::Ref(None));
+        interner.intern(Const::I32(7)).unwrap();
+        interner.intern(Const::F64(2.5f64.into())).unwrap();
+        interner.intern(Const::Ref(None)).unwrap();
     }
 
     assert_eq!(

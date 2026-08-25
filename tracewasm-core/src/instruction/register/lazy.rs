@@ -67,6 +67,7 @@
 //! dropped whole when that body finishes lowering, so it is bounded per function.
 //! A `Dropped` result does not mean memory was reclaimed.
 
+use crate::error::TraceWasmError;
 use id_arena::{Arena, Id};
 use std::{fmt, marker::PhantomData};
 
@@ -265,19 +266,28 @@ pub(crate) struct SpillArena {
 impl SpillArena {
     /// Reserves a slot for a value about to be materialized, reusing a freed one
     /// when possible so [`Self::allocation_len`] tracks peak live usage.
-    pub fn reserve_slot(&mut self) -> SpillIndex {
+    ///
+    /// # Errors
+    ///
+    /// [`TraceWasmError::RegisterFrameTooLarge`] once the region would outgrow a
+    /// 16-bit frame index.
+    pub fn reserve_slot(&mut self) -> Result<SpillIndex, TraceWasmError> {
         if !self.free_slots.is_empty() {
-            return SpillIndex(self.free_slots.pop().unwrap());
+            return Ok(SpillIndex(self.free_slots.pop().unwrap()));
+        }
+
+        if self.allocation_len >= MAX_SPILLS {
+            return Err(TraceWasmError::RegisterFrameTooLarge {
+                what: "spill slots",
+                needed: self.allocation_len as u32 + 1,
+                limit: MAX_SPILLS as u32,
+            });
         }
 
         let slot = self.allocation_len;
         self.allocation_len += 1;
 
-        if self.allocation_len > MAX_SPILLS {
-            todo!() // RAISE ERROR!
-        }
-
-        SpillIndex(slot)
+        Ok(SpillIndex(slot))
     }
 
     /// Returns a slot to the pool once the last stack slot reading it is popped.

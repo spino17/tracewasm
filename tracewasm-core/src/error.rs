@@ -96,6 +96,30 @@ pub enum TraceWasmError {
     /// page count and the allowed maximum.
     #[error("memory too large: initial `{0}` pages exceeds the allowed maximum `{1}`")]
     MemoryTooLarge(u32, u32),
+    /// A function body needs a wider frame than the register machine can address.
+    ///
+    /// Its operands are 16-bit frame indices, so one activation is limited to 65,535
+    /// slots across all four regions — locals, constants, spills and operand
+    /// registers. The wasm spec sets no such bound, so this rejects a module that is
+    /// otherwise valid: an implementation limit, and the only alternative to naming
+    /// the wrong slot.
+    ///
+    /// The stack machine has no equivalent limit, so a module rejected here may still
+    /// run under [`Stack`](crate::Stack).
+    ///
+    /// Fields: which region ran out of room, the count it reached, and its limit.
+    #[error(
+        "function frame too large for the register machine: {what} reached {needed}, \
+         over the limit of {limit} — operands are 16-bit frame indices"
+    )]
+    RegisterFrameTooLarge {
+        /// The region that ran out of room, for locating the cause.
+        what: &'static str,
+        /// The count that region reached.
+        needed: u32,
+        /// The largest value that region may take.
+        limit: u32,
+    },
     /// An active element segment writes past the end of its target table at
     /// instantiation. Fields: the write offset, the number of elements written,
     /// and the target table's length.
