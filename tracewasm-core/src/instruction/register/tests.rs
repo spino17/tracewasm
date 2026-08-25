@@ -70,6 +70,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         call_indirect_arena: Arena::default(),
         select_arena: Arena::default(),
         memory_init_arena: Arena::default(),
+        memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
     }
 }
 
@@ -2016,6 +2017,7 @@ fn br_table_arms_survive_lowering() {
         call_indirect_arena: s.call_indirect_arena,
         select_arena: s.select_arena,
         memory_init_arena: s.memory_init_arena,
+        memory_offsets: s.memory_offsets,
     };
 
     let entry = frame.br_table_arena.get(id);
@@ -4437,15 +4439,17 @@ fn a_memory_offset_keeps_its_full_u32_range() {
                  (func (param i32) (result i32) local.get 0 i32.load offset={offset}))"#
         );
 
-        let (prog, _, _) = lower(&wat);
+        let (prog, _, frame) = lower(&wat);
         let at = index_of_kind(&prog, RegInstructionKind::I32Load).unwrap();
 
         let RegInstruction::I32Load { offset: stored, .. } = &prog[at] else {
             unreachable!()
         };
 
+        let stored = *frame.memory_offsets.get(*stored);
+
         assert_eq!(
-            *stored, offset,
+            stored, offset,
             "a load's offset must round-trip exactly; {offset} came back as {stored}"
         );
     }
@@ -4460,14 +4464,16 @@ fn a_store_offset_keeps_its_full_u32_range() {
                  (func (param i32) local.get 0 i32.const 1 i32.store offset={offset}))"#
         );
 
-        let (prog, _, _) = lower(&wat);
+        let (prog, _, frame) = lower(&wat);
         let at = index_of_kind(&prog, RegInstructionKind::I32Store).unwrap();
 
         let RegInstruction::I32Store { offset: stored, .. } = &prog[at] else {
             unreachable!()
         };
 
-        assert_eq!(*stored, offset, "a store's offset must round-trip exactly");
+        let stored = *frame.memory_offsets.get(*stored);
+
+        assert_eq!(stored, offset, "a store's offset must round-trip exactly");
     }
 }
 

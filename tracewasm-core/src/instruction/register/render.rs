@@ -18,7 +18,8 @@
 
 use crate::{
     instruction::register::{
-        RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot, mnemonic,
+        RegFrameLayout, RegInstruction, RegLoweredFuncBody, Registers, Slot, arena::SmolId,
+        mnemonic,
     },
     module::FuncType,
 };
@@ -57,27 +58,34 @@ impl RegInstruction {
         let operand_base = frame.locals_count + frame.consts.len() as u16 + frame.spills;
         let as_operand = |frame_index: u16| frame_index - operand_base;
 
-        // Every pure value operator renders alike, so the arms below carry no body of
-        // their own. They are split by arity because an or-pattern binds one type, and
-        // then by family, so they scan in the order the enum declares them.
-        let load_op = |kind, offset: u32, inputs: &[Slot], outputs: &[u16]| {
+        // A load or a store carries an id into `memory_offsets`, not the offset itself,
+        // so it is resolved and shown as its value — the id is an artifact of keeping
+        // the instruction eight bytes wide.
+        let offset_of = |id: SmolId<u32>| *frame.memory_offsets.get(id);
+
+        let load_op = |kind, id: SmolId<u32>, inputs: &[Slot], outputs: &[u16]| {
             format!(
-                "{:<12} [{}]+{offset} -> {}",
+                "{:<12} [{}]+{} -> {}",
                 mnemonic(kind),
                 inputs[0].render(frame),
+                offset_of(id),
                 regs(outputs)
             )
         };
 
-        let store_op = |kind, offset: u32, inputs: &[Slot]| {
+        let store_op = |kind, id: SmolId<u32>, inputs: &[Slot]| {
             format!(
-                "{:<12} [{}]+{offset} <- {}",
+                "{:<12} [{}]+{} <- {}",
                 mnemonic(kind),
                 inputs[0].render(frame),
+                offset_of(id),
                 inputs[1].render(frame)
             )
         };
 
+        // Every pure value operator renders alike, so the arms below carry no body of
+        // their own. They are split by arity because an or-pattern binds one type, and
+        // then by family, so they scan in the order the enum declares them.
         let value_op = |kind, inputs: &[Slot], outputs: &[u16]| {
             format!(
                 "{:<12} {} -> {}",

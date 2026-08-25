@@ -311,7 +311,14 @@ impl RuntimeFrame for RegFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{instruction::register::arena::Arena, module::ValType, runtime::value::Val};
+    use crate::{
+        instruction::register::{
+            MAX_NUM_MEMORY_INSTRUCTIONS,
+            arena::{Arena, SmolArena},
+        },
+        module::ValType,
+        runtime::value::Val,
+    };
 
     /// A layout for a frame with `locals` locals, `operands` operand registers,
     /// `spills` spill slots and `consts` constants.
@@ -334,6 +341,7 @@ mod tests {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
         }
     }
 
@@ -421,6 +429,7 @@ mod tests {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
         };
 
         frame.enter_frame(

@@ -155,7 +155,7 @@ use crate::{
         self, Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
         register::{
-            arena::{Arena, Id},
+            arena::{Arena, Id, SmolArena, SmolId},
             lazy::{
                 LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
                 SpillArena, SpillIndex,
@@ -191,6 +191,7 @@ mod tests;
 
 const MAX_CONSTS: u16 = u16::MAX;
 const MAX_REGISTER_SLOTS: u16 = u16::MAX;
+pub(crate) const MAX_NUM_MEMORY_INSTRUCTIONS: u16 = u16::MAX;
 
 /// Which kind of label a block opens, before its instruction index is known.
 ///
@@ -992,6 +993,7 @@ struct SimulatedStack {
     call_indirect_arena: Arena<CallIndirectOperands>,
     select_arena: Arena<SelectOperands>,
     memory_init_arena: Arena<MemoryInitOperands>,
+    memory_offsets: SmolArena<u32>,
     /// Operands awaiting a frame index, each as `(position in
     /// [`Self::input_registers`], provisional register index)`.
     ///
@@ -1043,6 +1045,7 @@ impl SimulatedStack {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            memory_offsets: SmolArena::new(MAX_NUM_MEMORY_INSTRUCTIONS),
             register_backpatches: vec![],
             spill_backpatches: vec![],
             const_backpatches: vec![],
@@ -1764,6 +1767,12 @@ pub(crate) struct RegFrameLayout {
     pub call_indirect_arena: Arena<CallIndirectOperands>,
     pub select_arena: Arena<SelectOperands>,
     pub memory_init_arena: Arena<MemoryInitOperands>,
+    /// Static byte offsets of the body's loads and stores, in allocation order.
+    ///
+    /// A `memarg.offset` is a `u32`, too wide to sit in an 8-byte instruction next to
+    /// a signature, so the instruction carries a [`SmolId<u32>`] into this arena
+    /// instead.
+    pub memory_offsets: SmolArena<u32>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
@@ -1920,51 +1929,65 @@ pub(crate) enum RegInstruction {
     /// `i32.load`.
     I32Load {
         /// Static byte offset added to the popped address.
-        offset: u32,
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_s`.
     I32Load8S {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_u`.
     I32Load8U {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_s`.
     I32Load16S {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_u`.
     I32Load16U {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
 
     // i32 — stores
     /// `i32.store`.
     I32Store {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
     /// `i32.store8`.
     I32Store8 {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
     /// `i32.store16`.
     I32Store16 {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
 
@@ -2057,70 +2080,92 @@ pub(crate) enum RegInstruction {
     // i64 — loads
     /// `i64.load`.
     I64Load {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_s`.
     I64Load8S {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_u`.
     I64Load8U {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_s`.
     I64Load16S {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_u`.
     I64Load16U {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_s`.
     I64Load32S {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_u`.
     I64Load32U {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
 
     // i64 — stores
     /// `i64.store`.
     I64Store {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
     /// `i64.store8`.
     I64Store8 {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
     /// `i64.store16`.
     I64Store16 {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
     /// `i64.store32`.
     I64Store32 {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
 
@@ -2217,16 +2262,20 @@ pub(crate) enum RegInstruction {
     // f32 — loads
     /// `f32.load`.
     F32Load {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
 
     // f32 — stores
     /// `f32.store`.
     F32Store {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
 
@@ -2289,16 +2338,20 @@ pub(crate) enum RegInstruction {
     // f64 — loads
     /// `f64.load`.
     F64Load {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<1, 1>,
     },
 
     // f64 — stores
     /// `f64.store`.
     F64Store {
-        /// Static byte offset added to the popped address.
-        offset: u32,
+        /// Static byte offset added to the popped address, held in
+        /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
+        /// beside the operands.
+        offset: SmolId<u32>,
         sig: Signature<2, 0>,
     },
 
@@ -2827,6 +2880,19 @@ impl Instruction for RegInstruction {
                 };
             }
 
+            // A load or store keeps its byte offset in `memory_offsets`, so the id has
+            // to be allocated before the instruction can be built — which `emit!`'s
+            // closure cannot do, since it can neither borrow the stack nor propagate.
+            macro_rules! emit_mem {
+                ($memarg:expr, $variant:ident) => {{
+                    let offset = simulated_stack
+                        .memory_offsets
+                        .alloc($memarg.offset as u32)?;
+
+                    emit!(|sig| RegInstruction::$variant { offset, sig })
+                }};
+            }
+
             if !matches!(
                 unreachable_tracking_stack.check_unreachablity(&operator),
                 UnreachableCheckResult::Reachable
@@ -2988,38 +3054,14 @@ impl Instruction for RegInstruction {
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value))?;
                 }
-                Operator::I32Load { memarg } => emit!(|sig| RegInstruction::I32Load {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Load8S { memarg } => emit!(|sig| RegInstruction::I32Load8S {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Load8U { memarg } => emit!(|sig| RegInstruction::I32Load8U {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Load16S { memarg } => emit!(|sig| RegInstruction::I32Load16S {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Load16U { memarg } => emit!(|sig| RegInstruction::I32Load16U {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Store { memarg } => emit!(|sig| RegInstruction::I32Store {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Store8 { memarg } => emit!(|sig| RegInstruction::I32Store8 {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I32Store16 { memarg } => emit!(|sig| RegInstruction::I32Store16 {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
+                Operator::I32Load { memarg } => emit_mem!(memarg, I32Load),
+                Operator::I32Load8S { memarg } => emit_mem!(memarg, I32Load8S),
+                Operator::I32Load8U { memarg } => emit_mem!(memarg, I32Load8U),
+                Operator::I32Load16S { memarg } => emit_mem!(memarg, I32Load16S),
+                Operator::I32Load16U { memarg } => emit_mem!(memarg, I32Load16U),
+                Operator::I32Store { memarg } => emit_mem!(memarg, I32Store),
+                Operator::I32Store8 { memarg } => emit_mem!(memarg, I32Store8),
+                Operator::I32Store16 { memarg } => emit_mem!(memarg, I32Store16),
                 Operator::I32Clz => emit!(RegInstruction::I32Clz),
                 Operator::I32Ctz => emit!(RegInstruction::I32Ctz),
                 Operator::I32Eqz => emit!(RegInstruction::I32Eqz),
@@ -3066,50 +3108,17 @@ impl Instruction for RegInstruction {
                 Operator::I64Const { value } => {
                     simulated_stack.push_const(Const::I64(value))?;
                 }
-                Operator::I64Load { memarg } => emit!(|sig| RegInstruction::I64Load {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load8S { memarg } => emit!(|sig| RegInstruction::I64Load8S {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load8U { memarg } => emit!(|sig| RegInstruction::I64Load8U {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load16S { memarg } => emit!(|sig| RegInstruction::I64Load16S {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load16U { memarg } => emit!(|sig| RegInstruction::I64Load16U {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load32S { memarg } => emit!(|sig| RegInstruction::I64Load32S {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Load32U { memarg } => emit!(|sig| RegInstruction::I64Load32U {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Store { memarg } => emit!(|sig| RegInstruction::I64Store {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Store8 { memarg } => emit!(|sig| RegInstruction::I64Store8 {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Store16 { memarg } => emit!(|sig| RegInstruction::I64Store16 {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::I64Store32 { memarg } => emit!(|sig| RegInstruction::I64Store32 {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
+                Operator::I64Load { memarg } => emit_mem!(memarg, I64Load),
+                Operator::I64Load8S { memarg } => emit_mem!(memarg, I64Load8S),
+                Operator::I64Load8U { memarg } => emit_mem!(memarg, I64Load8U),
+                Operator::I64Load16S { memarg } => emit_mem!(memarg, I64Load16S),
+                Operator::I64Load16U { memarg } => emit_mem!(memarg, I64Load16U),
+                Operator::I64Load32S { memarg } => emit_mem!(memarg, I64Load32S),
+                Operator::I64Load32U { memarg } => emit_mem!(memarg, I64Load32U),
+                Operator::I64Store { memarg } => emit_mem!(memarg, I64Store),
+                Operator::I64Store8 { memarg } => emit_mem!(memarg, I64Store8),
+                Operator::I64Store16 { memarg } => emit_mem!(memarg, I64Store16),
+                Operator::I64Store32 { memarg } => emit_mem!(memarg, I64Store32),
                 Operator::I64Clz => emit!(RegInstruction::I64Clz),
                 Operator::I64Ctz => emit!(RegInstruction::I64Ctz),
                 Operator::I64Eqz => emit!(RegInstruction::I64Eqz),
@@ -3159,14 +3168,8 @@ impl Instruction for RegInstruction {
                     simulated_stack
                         .push_const(Const::F32(OrderedFloat(f32::from_bits(value.bits()))))?;
                 }
-                Operator::F32Load { memarg } => emit!(|sig| RegInstruction::F32Load {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::F32Store { memarg } => emit!(|sig| RegInstruction::F32Store {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
+                Operator::F32Load { memarg } => emit_mem!(memarg, F32Load),
+                Operator::F32Store { memarg } => emit_mem!(memarg, F32Store),
                 Operator::F32Abs => emit!(RegInstruction::F32Abs),
                 Operator::F32Ceil => emit!(RegInstruction::F32Ceil),
                 Operator::F32ConvertI32S => emit!(RegInstruction::F32ConvertI32S),
@@ -3199,14 +3202,8 @@ impl Instruction for RegInstruction {
                     simulated_stack
                         .push_const(Const::F64(OrderedFloat(f64::from_bits(value.bits()))))?;
                 }
-                Operator::F64Load { memarg } => emit!(|sig| RegInstruction::F64Load {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
-                Operator::F64Store { memarg } => emit!(|sig| RegInstruction::F64Store {
-                    offset: memarg.offset as u32,
-                    sig,
-                }),
+                Operator::F64Load { memarg } => emit_mem!(memarg, F64Load),
+                Operator::F64Store { memarg } => emit_mem!(memarg, F64Store),
                 Operator::F64Abs => emit!(RegInstruction::F64Abs),
                 Operator::F64Ceil => emit!(RegInstruction::F64Ceil),
                 Operator::F64ConvertI32S => emit!(RegInstruction::F64ConvertI32S),
@@ -3822,6 +3819,7 @@ impl Instruction for RegInstruction {
             call_indirect_arena: simulated_stack.call_indirect_arena,
             select_arena: simulated_stack.select_arena,
             memory_init_arena: simulated_stack.memory_init_arena,
+            memory_offsets: simulated_stack.memory_offsets,
             locals_count,
             consts: simulated_stack.const_interner.consts.into_boxed_slice(),
         };
@@ -3966,6 +3964,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Load { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -3985,6 +3984,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Load8S { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4004,6 +4004,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Load8U { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4023,6 +4024,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Load16S { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4042,6 +4044,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Load16U { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4062,8 +4065,13 @@ impl Instruction for RegInstruction {
                 let input = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(input[1], caller_base_data, instance).as_i32();
 
-                let effective_offset =
-                    Self::effective_address(*offset, input[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    input[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u32(effective_offset, val as u32)?;
 
@@ -4072,8 +4080,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Store8 { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u8(effective_offset, val as u8)?;
 
@@ -4082,8 +4095,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I32Store16 { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u16(effective_offset, val as u16)?;
 
@@ -4760,6 +4778,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4779,6 +4798,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load8S { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4798,6 +4818,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load8U { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4817,6 +4838,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load16S { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4836,6 +4858,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load16U { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4855,6 +4878,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load32S { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4874,6 +4898,7 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Load32U { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -4893,8 +4918,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Store { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u64(effective_offset, val as u64)?;
 
@@ -4903,8 +4933,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Store8 { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u8(effective_offset, val as u8)?;
 
@@ -4913,8 +4948,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Store16 { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u16(effective_offset, val as u16)?;
 
@@ -4923,8 +4963,13 @@ impl Instruction for RegInstruction {
             RegInstruction::I64Store32 { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_u32(effective_offset, val as u32)?;
 
@@ -5632,6 +5677,7 @@ impl Instruction for RegInstruction {
             RegInstruction::F32Load { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -5650,8 +5696,13 @@ impl Instruction for RegInstruction {
             RegInstruction::F32Store { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_f32(effective_offset, val)?;
 
@@ -6091,6 +6142,7 @@ impl Instruction for RegInstruction {
             RegInstruction::F64Load { offset, sig } => {
                 let effective_offset = Self::effective_address(
                     *offset,
+                    frame_layout,
                     sig.input.registers(&frame_layout.input_registers_arena)[0],
                     caller_base_data,
                     instance,
@@ -6110,8 +6162,13 @@ impl Instruction for RegInstruction {
             RegInstruction::F64Store { offset, sig } => {
                 let inputs = sig.input.registers(&frame_layout.input_registers_arena);
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
-                let effective_offset =
-                    Self::effective_address(*offset, inputs[0], caller_base_data, instance)?;
+                let effective_offset = Self::effective_address(
+                    *offset,
+                    frame_layout,
+                    inputs[0],
+                    caller_base_data,
+                    instance,
+                )?;
 
                 instance.memory.write_f64(effective_offset, val)?;
 
@@ -6931,11 +6988,14 @@ impl RegInstruction {
 
     #[inline(always)]
     fn effective_address<M: Memory, I: ImportRegistry>(
-        memarg_offset: u32,
+        offset: SmolId<u32>,
+        frame_layout: &RegFrameLayout,
         slot: Slot,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) -> Result<usize, MemoryError> {
+        let memarg_offset = *frame_layout.memory_offsets.get(offset);
+
         let addr = Self::slot_value(slot, caller_base_data, instance).as_i32() as u32;
 
         let effective_offset = addr
