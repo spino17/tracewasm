@@ -61,7 +61,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         locals_count: s.locals_count(),
-        consts: s.const_interner.consts.clone().into_boxed_slice(),
+        consts: s.const_interner.values().to_vec().into_boxed_slice(),
         input_registers_arena: Box::new([]),
         output_registers_arena: Box::new([]),
         if_arena: Arena::default(),
@@ -88,7 +88,7 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u16) -> String {
         // operand-relative numbering here, which is how the pass is reasoned about.
         BackPatchableSlot::Register(n) => format!("r{}", n - locals_count),
         BackPatchableSlot::Spill(i) => format!("spill{i}"),
-        BackPatchableSlot::Const(id) => format!("const{}", id.0),
+        BackPatchableSlot::Const(id) => format!("const{}", id.raw()),
         BackPatchableSlot::Slot(Slot(n)) if *n < locals_count => {
             format!("local{n}")
         }
@@ -105,11 +105,11 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u16) -> String {
 /// `locals` — moves up past both regions by `consts + spills`.
 fn resolve_backpatches(s: &mut SimulatedStack) {
     let locals_count = s.locals_count();
-    let consts_len = s.const_interner.consts.len() as u16;
+    let consts_len = s.const_interner.len() as u16;
     let spills = s.spills.allocation_len();
 
     for (i, id) in std::mem::take(&mut s.const_backpatches) {
-        s.input_registers[i] = Slot(id.0 + locals_count);
+        s.input_registers[i] = Slot(id.raw() + locals_count);
     }
 
     for (i, spill) in std::mem::take(&mut s.spill_backpatches) {
@@ -131,10 +131,10 @@ fn resolve_backpatches(s: &mut SimulatedStack) {
 /// arena, for a test holding a slot it popped off the simulated stack.
 fn resolve(s: &SimulatedStack, o: &BackPatchableSlot) -> Slot {
     let locals_count = s.locals_count();
-    let consts_len = s.const_interner.consts.len() as u16;
+    let consts_len = s.const_interner.len() as u16;
 
     match o {
-        BackPatchableSlot::Const(id) => Slot(id.0 + locals_count),
+        BackPatchableSlot::Const(id) => Slot(id.raw() + locals_count),
         BackPatchableSlot::Spill(i) => Slot(i.raw_value() + locals_count + consts_len),
         BackPatchableSlot::Register(n) => Slot(n + s.spills.allocation_len() + consts_len),
         BackPatchableSlot::Slot(slot) => *slot,
@@ -971,7 +971,7 @@ impl Frame {
     /// instructions carry are frame indices only after that.
     fn new(s: &SimulatedStack, locals: &[i64], globals: &[i64]) -> Self {
         let locals_count = s.locals_count();
-        let consts_len = s.const_interner.consts.len() as u16;
+        let consts_len = s.const_interner.len() as u16;
         let spills = s.spills.allocation_len();
         let width = (s.max_registers + spills) as usize + consts_len as usize;
 
@@ -985,7 +985,7 @@ impl Frame {
 
         registers[..locals.len()].copy_from_slice(locals);
 
-        for (i, c) in s.const_interner.consts.iter().enumerate() {
+        for (i, c) in s.const_interner.values().iter().enumerate() {
             let Const::I32(v) = c else {
                 unreachable!("these tests push only i32 constants, got {c:?}")
             };
@@ -2008,7 +2008,7 @@ fn br_table_arms_survive_lowering() {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         locals_count: s.lazy_locals.origin.len() as u16,
-        consts: s.const_interner.consts.into_boxed_slice(),
+        consts: s.const_interner.into_values().into_boxed_slice(),
         input_registers_arena: s.input_registers.into_boxed_slice(),
         output_registers_arena: s.output_registers.into_boxed_slice(),
         if_arena: s.if_arena,
@@ -4299,15 +4299,15 @@ fn const_hash_agrees_with_equality() {
 #[test]
 fn the_pool_keeps_same_bits_of_different_types_apart() {
     let all = same_bits_different_types();
-    let mut interner = ConstInterner::default();
+    let mut interner = Interner::new(MAX_CONSTS);
 
     let ids: Vec<(&str, u16)> = all
         .iter()
-        .map(|(name, c)| (*name, interner.intern(*c).unwrap().0))
+        .map(|(name, c)| (*name, interner.intern(*c).unwrap().raw()))
         .collect();
 
     assert_eq!(
-        interner.consts.len(),
+        interner.len(),
         all.len(),
         "each distinct constant needs its own slot, got {ids:?}"
     );
@@ -4317,9 +4317,10 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
         let (_, expected) = all.iter().find(|(n, _)| *n == name).unwrap();
 
         assert_eq!(
-            &interner.consts[id as usize], expected,
+            &interner.values()[id as usize],
+            expected,
             "slot {id} was interned for {name} but holds {:?}",
-            interner.consts[id as usize]
+            interner.values()[id as usize]
         );
     }
 }
@@ -4331,24 +4332,27 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 /// survives `f64.min`/`copysign`, and a NaN payload survives arithmetic.
 #[test]
 fn the_pool_keeps_bit_distinct_floats_apart() {
-    let mut interner = ConstInterner::default();
+    let mut interner = Interner::new(MAX_CONSTS);
+
     let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
     let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
     let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
     let neg32 = interner.intern(Const::F32((-0.0f32).into())).unwrap();
 
     assert_ne!(
-        pos64.0, neg64.0,
+        pos64.raw(),
+        neg64.raw(),
         "f64 +0.0 and -0.0 are different constants"
     );
 
     assert_ne!(
-        pos32.0, neg32.0,
+        pos32.raw(),
+        neg32.raw(),
         "f32 +0.0 and -0.0 are different constants"
     );
 
     assert_eq!(
-        interner.consts[pos64.0 as usize],
+        interner.values()[pos64.raw() as usize],
         Const::F64(0.0f64.into()),
         "the +0.0 slot must not have been overwritten by -0.0"
     );
@@ -4362,24 +4366,33 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     let b = interner.intern(Const::F64(neg_nan.into())).unwrap();
     let c = interner.intern(Const::F64(other_payload.into())).unwrap();
 
-    assert_ne!(a.0, b.0, "a NaN and its negation are different constants");
+    assert_ne!(
+        a.raw(),
+        b.raw(),
+        "a NaN and its negation are different constants"
+    );
 
     assert_ne!(
-        a.0, c.0,
+        a.raw(),
+        c.raw(),
         "NaNs with different payloads are different constants"
     );
 
     // interning the same bits twice must still dedup, or the pool grows per use
     let again = interner.intern(Const::F64(nan.into())).unwrap();
 
-    assert_eq!(a.0, again.0, "the same bits must reuse the same slot");
+    assert_eq!(
+        a.raw(),
+        again.raw(),
+        "the same bits must reuse the same slot"
+    );
 }
 
 /// Dedup still has to work — these properties must not be bought by giving every
 /// use its own slot, which would grow every frame by its constant count.
 #[test]
 fn the_pool_still_dedups_equal_constants() {
-    let mut interner = ConstInterner::default();
+    let mut interner = Interner::new(MAX_CONSTS);
 
     for _ in 0..4 {
         interner.intern(Const::I32(7)).unwrap();
@@ -4388,7 +4401,7 @@ fn the_pool_still_dedups_equal_constants() {
     }
 
     assert_eq!(
-        interner.consts.len(),
+        interner.values().len(),
         3,
         "three distinct constants interned four times each"
     );
@@ -4511,14 +4524,14 @@ fn too_many_constants_is_reported_not_truncated() {
 
     let err = compile_register(&wat).expect_err("the pool cannot name this many");
 
+    // The pool is an `Interner`, so its cap is reported by the interner rather than
+    // by the end-of-body frame-width check — and the `what` is what `Const`'s
+    // `TyToString` names it.
     assert!(
-        matches!(
-            err,
-            TraceWasmError::RegisterFrameTooLarge {
-                what: "constants",
-                ..
-            }
-        ),
+        matches!(&err, TraceWasmError::ToManyUniqueValues { what, needed, limit }
+            if what == "constants"
+                && *needed == MAX_CONSTS as u32 + 1
+                && *limit == MAX_CONSTS as u32),
         "expected the constants limit, got: {err}"
     );
 }

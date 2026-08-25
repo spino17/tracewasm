@@ -120,6 +120,12 @@ pub enum TraceWasmError {
         /// The largest value that region may take.
         limit: u32,
     },
+    #[error("to many unique {what} values: reached {needed}, over the limit of {limit}")]
+    ToManyUniqueValues {
+        what: String,
+        needed: u32,
+        limit: u32,
+    },
     /// An active element segment writes past the end of its target table at
     /// instantiation. Fields: the write offset, the number of elements written,
     /// and the target table's length.

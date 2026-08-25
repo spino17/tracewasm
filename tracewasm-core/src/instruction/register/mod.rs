@@ -156,6 +156,7 @@ use crate::{
         params_and_results_from_blockty,
         register::{
             arena::{Arena, Id, SmolArena, SmolId},
+            interner::{InternedId, Interner, TyToString},
             lazy::{
                 LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
                 SpillArena, SpillIndex,
@@ -175,7 +176,6 @@ use crate::{
     },
 };
 use ordered_float::OrderedFloat;
-use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use std::{marker::PhantomData, vec};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
@@ -183,6 +183,7 @@ use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod arena;
+pub mod interner;
 pub mod lazy;
 pub mod render;
 
@@ -319,72 +320,9 @@ impl PartialEq for Const {
 
 impl Eq for Const {}
 
-/// A constant's index in its body's pool.
-///
-/// Not yet a frame index: it becomes one when the end-of-body pass adds
-/// `locals_count`, which is the only place the two spaces meet.
-#[derive(Debug, Clone, Copy)]
-struct ConstId(u16);
-
-/// The constants one body uses, deduplicated.
-///
-/// Dedup matters twice over: it keeps the frame's constant region as small as the
-/// body's *distinct* constants rather than its uses, and it makes two operands naming
-/// the same constant name the same slot.
-#[derive(Default)]
-struct ConstInterner {
-    /// The pool in [`ConstId`] order, shipped as [`RegFrameLayout::consts`]. Constant
-    /// `i` lives at frame slot `locals_count + i`.
-    consts: Vec<Const>,
-    /// Reverse index for the dedup, keyed by [`Const`]'s variant-and-bits equality.
-    reverse_map: FxHashMap<Const, ConstId>,
-}
-
-impl ConstInterner {
-    /// Returns the id for `val`, adding it to the pool if this is its first use.
-    ///
-    /// Ids are handed out in first-appearance order, which is the order the runtime
-    /// materialises the region in — so nothing has to sort the pool later.
-    ///
-    /// Identity is bitwise, so the same NaN interned twice is one slot while `+0.0`
-    /// and `-0.0` are two.
-    /// # Errors
-    ///
-    /// [`TraceWasmError::RegisterFrameTooLarge`] once the pool would outgrow a 16-bit
-    /// frame index.
-    fn intern(&mut self, val: Const) -> Result<ConstId, TraceWasmError> {
-        if let Some(id) = self.reverse_map.get(&val) {
-            Ok(*id)
-        } else {
-            if self.consts.len() >= MAX_CONSTS as usize {
-                return Err(TraceWasmError::RegisterFrameTooLarge {
-                    what: "constants",
-                    needed: self.consts.len() as u32 + 1,
-                    limit: MAX_CONSTS as u32,
-                });
-            }
-
-            let id = ConstId(self.consts.len() as u16);
-
-            self.consts.push(val);
-            self.reverse_map.insert(val, id);
-
-            Ok(id)
-        }
-    }
-
-    /// The constant `id` names.
-    ///
-    /// Panics on an id minted by a different body's interner, which is why one never
-    /// leaves the lowering of the body that produced it.
-    #[allow(
-        dead_code,
-        reason = "the pool is read through RegFrameLayout::consts at execution; this \
-                  is the lowering-side accessor, kept so an id can be resolved \
-                  before the layout exists"
-    )]
-    fn const_val(&self, id: &ConstId) -> &Const {
-        &self.consts[id.0 as usize]
+impl TyToString for Const {
+    fn to_string() -> String {
+        "constants".to_string()
     }
 }
 
@@ -500,7 +438,7 @@ enum BackPatchableSlot {
     /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
     Spill(SpillIndex),
     /// An interned constant, by pool id. Resolved to `locals_count + id`.
-    Const(ConstId),
+    Const(InternedId<Const>),
     /// An operand whose location is already final: a local, or a global.
     Slot(Slot),
 }
@@ -535,7 +473,7 @@ impl From<Slot> for BackPatchableSlot {
 #[derive(Clone, Copy)]
 enum StackSlot {
     /// An immediate. Occupies a stack position and no register.
-    Const(ConstId),
+    Const(InternedId<Const>),
     /// A value an earlier instruction produced, in the register named here. The
     /// only variant [`SimulatedStack::curr_register_index`] counts.
     Register(u16),
@@ -1009,10 +947,10 @@ struct SimulatedStack {
     /// [`Self::input_registers`], pool id)`.
     ///
     /// Resolved to `locals_count + id`.
-    const_backpatches: Vec<(usize, ConstId)>,
+    const_backpatches: Vec<(usize, InternedId<Const>)>,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
-    const_interner: ConstInterner,
+    const_interner: Interner<Const>,
 }
 
 impl SimulatedStack {
@@ -1049,7 +987,7 @@ impl SimulatedStack {
             register_backpatches: vec![],
             spill_backpatches: vec![],
             const_backpatches: vec![],
-            const_interner: ConstInterner::default(),
+            const_interner: Interner::new(MAX_CONSTS),
         }
     }
 
@@ -3724,7 +3662,7 @@ impl Instruction for RegInstruction {
         //
         let locals_count = simulated_stack.lazy_locals.origin.len() as u16;
         let spills = simulated_stack.spills.allocation_len();
-        let consts_len = simulated_stack.const_interner.consts.len() as u16;
+        let consts_len = simulated_stack.const_interner.len() as u16;
 
         // The per-region limits above each bound one region; this bounds the frame,
         // which is all four laid end to end. Three individually-legal regions can
@@ -3743,7 +3681,7 @@ impl Instruction for RegInstruction {
         // Constants come first above the locals, in interner order — matching the
         // order `enter_frame` writes the pool in.
         for (input_index, const_id) in simulated_stack.const_backpatches {
-            simulated_stack.input_registers[input_index] = Slot(const_id.0 + locals_count);
+            simulated_stack.input_registers[input_index] = Slot(const_id.raw() + locals_count);
         }
 
         // Then the spills. `set_value_to_spills` computes this same address when a
@@ -3821,7 +3759,10 @@ impl Instruction for RegInstruction {
             memory_init_arena: simulated_stack.memory_init_arena,
             memory_offsets: simulated_stack.memory_offsets,
             locals_count,
-            consts: simulated_stack.const_interner.consts.into_boxed_slice(),
+            consts: simulated_stack
+                .const_interner
+                .into_values()
+                .into_boxed_slice(),
         };
 
         Ok((instructions.inner, instructions.offsets, frame))
