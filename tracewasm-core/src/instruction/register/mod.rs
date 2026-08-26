@@ -152,10 +152,11 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        self, Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
         params_and_results_from_blockty,
         register::{
             arena::{Arena, Id},
+            backpatch::{BackPatchableSlot, BackpatchMap, InstructionSource},
             interner::{InternedId, Interner, TyToString},
             lazy::{
                 LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
@@ -177,12 +178,13 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
-use std::{marker::PhantomData, vec};
+use std::{collections::hash_map::Entry, marker::PhantomData, u16, vec};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod arena;
+pub mod backpatch;
 pub mod interner;
 pub mod lazy;
 pub mod render;
@@ -437,47 +439,6 @@ impl Default for Slot {
         Slot(0)
     }
 }
-
-/// An operand as lowering knows it, before the frame layout is final.
-///
-/// The provisional counterpart of [`Slot`]. Three of the four cases cannot be turned
-/// into a frame index while the body is still being walked, because the constant and
-/// spill region sizes are not yet known — so they travel as what they *are* and are
-/// resolved in the end-of-body pass (see the module docs). The fourth is already
-/// final: a local or a global cannot move.
-enum BackPatchableSlot {
-    /// An operand register, as a *provisional* frame index — counted from the frame
-    /// base, so at or above `locals_count`, but not yet clear of the constant and
-    /// spill regions. Resolved by shifting up `consts + spills`.
-    Register(u16),
-    /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
-    Spill(SpillIndex),
-    /// An interned constant, by pool id. Resolved to `locals_count + id`.
-    Const(InternedId<Const>),
-    /// An operand whose location is already final: a local, or a global.
-    Slot(Slot),
-}
-
-impl BackPatchableSlot {
-    /// Whether this operand occupies an operand register.
-    ///
-    /// A variant test, so it is correct at any point in lowering — unlike
-    /// [`Slot::is_register`], which compares an index against `locals_count` and so
-    /// only holds while indices are provisional. This is the one the register-height
-    /// bookkeeping uses.
-    fn is_register(&self) -> bool {
-        matches!(self, BackPatchableSlot::Register(_))
-    }
-}
-
-impl From<Slot> for BackPatchableSlot {
-    /// Adopts an already-resolved operand — a local or a global, the two that need
-    /// no backpatch.
-    fn from(value: Slot) -> Self {
-        BackPatchableSlot::Slot(value)
-    }
-}
-
 /// One entry on the simulated operand stack during lowering.
 ///
 /// The internal counterpart of [`Slot`]. The difference is the lazy cases: where a
@@ -497,6 +458,7 @@ enum StackSlot {
     Local(LocalSlot),
 }
 
+#[derive(Debug)]
 pub(crate) struct InlinedRegisters<const L: usize, T> {
     registers: [T; L],
 }
@@ -563,6 +525,24 @@ const _: () = assert!(
     "InlinedRegisters<3, Slot> (`memory.copy`/`memory.fill`) does not fit an 8-byte \
      instruction"
 );
+
+#[derive(Debug)]
+pub(crate) struct DynSignature2 {
+    input: Vec<Slot>,
+    output: Vec<u16>,
+}
+
+impl DynSignature2 {
+    pub fn new(input: Vec<Slot>, output: Vec<u16>) -> Self {
+        debug_assert!(input.len() == output.len());
+
+        DynSignature2 { input, output }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input.is_empty()
+    }
+}
 
 /// A fixed-length run of `L` entries in one of the flat arenas, named by its start.
 ///
@@ -963,6 +943,7 @@ struct SimulatedStack {
     ///
     /// Resolved to `locals_count + id`.
     const_backpatches: Vec<(usize, InternedId<Const>)>,
+    backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
     const_interner: Interner<Const>,
@@ -1002,6 +983,7 @@ impl SimulatedStack {
             register_backpatches: vec![],
             spill_backpatches: vec![],
             const_backpatches: vec![],
+            backpatch_map: BackpatchMap::default(),
             const_interner: Interner::new(MAX_CONSTS),
         }
     }
@@ -1355,6 +1337,8 @@ impl SimulatedStack {
         &mut self,
         pops: u32,
         pushes: u32,
+        instr_index: usize,
+        source: InstructionSource,
     ) -> Result<PopsPushesResult, TraceWasmError> {
         let pops = pops as usize;
         let pushes = pushes as usize;
@@ -1364,8 +1348,14 @@ impl SimulatedStack {
         self.input_registers
             .resize(input_start + pops, Slot::default());
 
+        let mut backpatchable_slots = vec![BackPatchableSlot::Register(u16::MAX); pops];
+
         for i in 0..pops {
-            self.input_registers[input_start + pops - 1 - i] = match self.pop() {
+            let slot = self.pop();
+
+            backpatchable_slots[pops - 1 - i] = slot;
+
+            self.input_registers[input_start + pops - 1 - i] = match slot {
                 BackPatchableSlot::Slot(slot) => slot,
                 BackPatchableSlot::Const(id) => {
                     self.const_backpatches
@@ -1385,6 +1375,19 @@ impl SimulatedStack {
 
                     Slot(u16::MAX) // will be backpatched
                 }
+            }
+        }
+
+        match self.backpatch_map.0.entry(instr_index) {
+            Entry::Occupied(mut occ) => {
+                let v = occ.get_mut();
+
+                v.push((source, backpatchable_slots));
+            }
+            Entry::Vacant(vac) => {
+                let v = vec![(source, backpatchable_slots)];
+
+                vac.insert(v);
             }
         }
 
@@ -1464,8 +1467,10 @@ impl SimulatedStack {
     /// its opcode, returning the [`Signature`] to store in the variant.
     fn registers_for<const I: usize, const O: usize>(
         &mut self,
+        instr_index: usize,
+        source: InstructionSource,
     ) -> Result<Signature<I, O>, TraceWasmError> {
-        let result = self.pops_and_pushes_registers(I as u32, O as u32)?;
+        let result = self.pops_and_pushes_registers(I as u32, O as u32, instr_index, source)?;
 
         Ok(Signature {
             input: Registers {
@@ -1493,8 +1498,10 @@ impl SimulatedStack {
     fn materialize_stack_slots_in_registers(
         &mut self,
         depth: u32,
+        instr_index: usize,
+        source: InstructionSource,
     ) -> Result<DynSignature, TraceWasmError> {
-        let result = self.pops_and_pushes_registers(depth, depth)?;
+        let result = self.pops_and_pushes_registers(depth, depth, instr_index, source)?;
 
         Ok(DynSignature {
             input: result.input_start,
@@ -1528,6 +1535,8 @@ impl SimulatedStack {
         &mut self,
         base_height: u32,
         arity_to_preserve: u32,
+        instr_index: usize, // TODO: only use this when registers are not empty
+        source: InstructionSource,
     ) -> Result<DynSignature, TraceWasmError> {
         let input_start = self.input_registers.len();
         let output_start = self.output_registers.len();
@@ -1542,6 +1551,9 @@ impl SimulatedStack {
         self.output_registers
             .resize(output_start + arity_to_preserve, 0);
 
+        let mut backpatchable_slots =
+            vec![BackPatchableSlot::Register(u16::MAX); arity_to_preserve];
+
         for i in 0..popped_count {
             let slot = self.simulated_pop(i as u32);
 
@@ -1550,6 +1562,8 @@ impl SimulatedStack {
             }
 
             if i < arity_to_preserve {
+                backpatchable_slots[arity_to_preserve - 1 - i] = slot;
+
                 self.input_registers[input_start + arity_to_preserve - 1 - i] = match slot {
                     BackPatchableSlot::Slot(slot) => slot,
                     BackPatchableSlot::Const(id) => {
@@ -1570,6 +1584,21 @@ impl SimulatedStack {
 
                         Slot(u16::MAX) // will be backpatched
                     }
+                }
+            }
+        }
+
+        if arity_to_preserve > 0 {
+            match self.backpatch_map.0.entry(instr_index) {
+                Entry::Occupied(mut occ) => {
+                    let v = occ.get_mut();
+
+                    v.push((source, backpatchable_slots));
+                }
+                Entry::Vacant(vac) => {
+                    let v = vec![(source, backpatchable_slots)];
+
+                    vac.insert(v);
                 }
             }
         }
@@ -1811,7 +1840,7 @@ pub(crate) enum RegInstruction {
         /// The local written.
         index: LocalIndex,
         /// The value to write, left on the simulated stack for the consumer.
-        input: Registers<1, Slot>,
+        input: InlinedRegisters<1, Slot>,
     },
     /// `loop`: a branch target and nothing else.
     ///
@@ -2682,7 +2711,8 @@ impl RegInstruction {
         offset: u32,
         emitter: F,
     ) -> Result<(), TraceWasmError> {
-        let registers = simulated_stack.registers_for::<I, O>()?;
+        let registers =
+            simulated_stack.registers_for::<I, O>(instructions.len(), InstructionSource::Emit)?;
 
         instructions.push(emitter(registers), offset);
 
@@ -2856,7 +2886,9 @@ impl Instruction for RegInstruction {
 
             match operator {
                 Operator::GlobalGet { global_index } => {
-                    let registers = simulated_stack.registers_for::<0, 1>()?.output;
+                    let registers = simulated_stack
+                        .registers_for::<0, 1>(instructions.len(), InstructionSource::Emit)?
+                        .output;
 
                     instructions.push(
                         RegInstruction::GlobalGet {
@@ -2867,7 +2899,9 @@ impl Instruction for RegInstruction {
                     );
                 }
                 Operator::GlobalSet { global_index } => {
-                    let registers = simulated_stack.registers_for::<1, 0>()?.input;
+                    let registers = simulated_stack
+                        .registers_for::<1, 0>(instructions.len(), InstructionSource::Emit)?
+                        .input;
 
                     instructions.push(
                         RegInstruction::GlobalSet {
@@ -2895,7 +2929,9 @@ impl Instruction for RegInstruction {
                         );
                     }
 
-                    let registers = simulated_stack.registers_for::<1, 0>()?.input;
+                    let registers = simulated_stack
+                        .registers_for::<1, 0>(instructions.len(), InstructionSource::Emit)?
+                        .input;
 
                     instructions.push(
                         RegInstruction::LocalSet {
@@ -2920,33 +2956,23 @@ impl Instruction for RegInstruction {
                         );
                     }
 
-                    let input_start = simulated_stack.input_registers.len();
                     let slot = simulated_stack.tee();
 
-                    simulated_stack.input_registers.push(match slot {
-                        BackPatchableSlot::Slot(slot) => slot,
-                        BackPatchableSlot::Const(id) => {
-                            simulated_stack.const_backpatches.push((input_start, id));
+                    match simulated_stack.backpatch_map.0.entry(instructions.len()) {
+                        Entry::Occupied(mut occ) => {
+                            let v = occ.get_mut();
 
-                            Slot(u16::MAX) // will be backpatched
+                            v.push((InstructionSource::Emit, vec![slot]));
                         }
-                        BackPatchableSlot::Register(index) => {
-                            simulated_stack
-                                .register_backpatches
-                                .push((input_start, index));
+                        Entry::Vacant(vac) => {
+                            let v = vec![(InstructionSource::Emit, vec![slot])];
 
-                            Slot(u16::MAX) // will be backpatched
+                            vac.insert(v);
                         }
-                        BackPatchableSlot::Spill(index) => {
-                            simulated_stack.spill_backpatches.push((input_start, index));
+                    }
 
-                            Slot(u16::MAX) // will be backpatched
-                        }
-                    });
-
-                    let registers = Registers {
-                        start: input_start as u32,
-                        phantom: PhantomData,
+                    let registers = InlinedRegisters {
+                        registers: [Slot(u16::MAX)], // will be backpatched
                     };
 
                     instructions.push(
@@ -2989,7 +3015,9 @@ impl Instruction for RegInstruction {
                 Operator::MemoryInit { data_index, mem } => {
                     check_memory_index(mem)?;
 
-                    let registers = simulated_stack.registers_for::<3, 0>()?.input;
+                    let registers = simulated_stack
+                        .registers_for::<3, 0>(instructions.len(), InstructionSource::Emit)?
+                        .input;
 
                     instructions.push(
                         RegInstruction::MemoryInit(simulated_stack.memory_init_arena.alloc(
@@ -3189,7 +3217,8 @@ impl Instruction for RegInstruction {
                     continue;
                 }
                 Operator::Select => {
-                    let registers = simulated_stack.registers_for::<3, 1>()?;
+                    let registers = simulated_stack
+                        .registers_for::<3, 1>(instructions.len(), InstructionSource::Emit)?;
 
                     instructions.push(
                         RegInstruction::Select(
@@ -3214,8 +3243,11 @@ impl Instruction for RegInstruction {
                     );
 
                     if block_params != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_params)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            block_params,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3234,8 +3266,11 @@ impl Instruction for RegInstruction {
                     );
 
                     if block_params != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_params)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            block_params,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3262,13 +3297,18 @@ impl Instruction for RegInstruction {
                     );
 
                     if block_params != 0 {
-                        let move_registers = simulated_stack
-                            .materialize_stack_slots_in_registers(block_params + 1)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            block_params + 1,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
 
-                    let cond = simulated_stack.registers_for::<1, 0>()?.input;
+                    let cond = simulated_stack
+                        .registers_for::<1, 0>(instructions.len(), InstructionSource::Emit)?
+                        .input;
 
                     instructions.push(
                         RegInstruction::If(simulated_stack.if_arena.alloc(IfOperands {
@@ -3306,8 +3346,11 @@ impl Instruction for RegInstruction {
                     // then the pc is jumped directly to the first instruction of the else arm skipping
                     // the else instruction itself.
                     if block_results != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(block_results)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            block_results,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3336,12 +3379,21 @@ impl Instruction for RegInstruction {
                     let (move_registers, target_index) =
                         if let Some(loop_index) = block.kind.is_loop() {
                             (
-                                simulated_stack.br_truncation_registers(recorded_height, params)?,
+                                simulated_stack.br_truncation_registers(
+                                    recorded_height,
+                                    params,
+                                    instructions.len(),
+                                    InstructionSource::Emit,
+                                )?,
                                 loop_index,
                             )
                         } else {
-                            let move_registers = simulated_stack
-                                .br_truncation_registers(recorded_height, results)?;
+                            let move_registers = simulated_stack.br_truncation_registers(
+                                recorded_height,
+                                results,
+                                instructions.len(),
+                                InstructionSource::Emit,
+                            )?;
 
                             simulated_stack
                                 .get_block_mut(block_index)
@@ -3380,17 +3432,28 @@ impl Instruction for RegInstruction {
                     let recorded_height = block.recorded_height;
                     let block_kind = block.kind;
 
-                    let cond = simulated_stack.registers_for::<1, 0>()?.input;
+                    let cond = simulated_stack
+                        .registers_for::<1, 0>(instructions.len(), InstructionSource::BrIfCond)?
+                        .input;
 
                     let (move_registers, target_index) =
                         if let Some(loop_index) = block_kind.is_loop() {
                             (
-                                simulated_stack.br_truncation_registers(recorded_height, params)?,
+                                simulated_stack.br_truncation_registers(
+                                    recorded_height,
+                                    params,
+                                    instructions.len(),
+                                    InstructionSource::BrIfMov,
+                                )?,
                                 loop_index,
                             )
                         } else {
-                            let move_registers = simulated_stack
-                                .br_truncation_registers(recorded_height, results)?;
+                            let move_registers = simulated_stack.br_truncation_registers(
+                                recorded_height,
+                                results,
+                                instructions.len(),
+                                InstructionSource::BrIfMov,
+                            )?;
 
                             simulated_stack
                                 .get_block_mut(block_index)
@@ -3420,7 +3483,9 @@ impl Instruction for RegInstruction {
 
                     targets.push(table.default());
 
-                    let table_index = simulated_stack.registers_for::<1, 0>()?.input; // targets index
+                    let table_index = simulated_stack
+                        .registers_for::<1, 0>(instructions.len(), InstructionSource::BrTableIndex)?
+                        .input; // targets index
 
                     for (i, &relative_depth) in targets.iter().enumerate() {
                         let block_index =
@@ -3431,24 +3496,32 @@ impl Instruction for RegInstruction {
                         let recorded_height = block.recorded_height;
                         let block_kind = block.kind;
 
-                        let (move_registers, target_index) = if let Some(loop_index) =
-                            block_kind.is_loop()
-                        {
-                            (
-                                simulated_stack.br_truncation_registers(recorded_height, params)?,
-                                loop_index,
-                            )
-                        } else {
-                            let move_registers = simulated_stack
-                                .br_truncation_registers(recorded_height, results)?;
+                        let (move_registers, target_index) =
+                            if let Some(loop_index) = block_kind.is_loop() {
+                                (
+                                    simulated_stack.br_truncation_registers(
+                                        recorded_height,
+                                        params,
+                                        instructions.len(),
+                                        InstructionSource::BrTableMov,
+                                    )?,
+                                    loop_index,
+                                )
+                            } else {
+                                let move_registers = simulated_stack.br_truncation_registers(
+                                    recorded_height,
+                                    results,
+                                    instructions.len(),
+                                    InstructionSource::BrTableMov,
+                                )?;
 
-                            simulated_stack
-                                .get_block_mut(block_index)
-                                .attached_breaks
-                                .push((instructions.len() as u32, i as u32));
+                                simulated_stack
+                                    .get_block_mut(block_index)
+                                    .attached_breaks
+                                    .push((instructions.len() as u32, i as u32));
 
-                            (move_registers, u32::MAX)
-                        };
+                                (move_registers, u32::MAX)
+                            };
 
                         let br_target = RegBrTableTarget {
                             mov: move_registers,
@@ -3472,7 +3545,12 @@ impl Instruction for RegInstruction {
                     unreachable_tracking_stack.set_unreachable();
                 }
                 Operator::Return => {
-                    let move_registers = simulated_stack.br_truncation_registers(0, results)?;
+                    let move_registers = simulated_stack.br_truncation_registers(
+                        0,
+                        results,
+                        instructions.len(),
+                        InstructionSource::Emit,
+                    )?;
 
                     simulated_stack.control_stack.stack[0]
                         .attached_breaks
@@ -3508,8 +3586,11 @@ impl Instruction for RegInstruction {
                     let caller_base = simulated_stack.register_index_at_depth(params) as u16;
 
                     if params != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(params)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            params,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3539,10 +3620,18 @@ impl Instruction for RegInstruction {
                     let recorded_height = simulated_stack.stack.height() - params - 1;
                     let caller_base = simulated_stack.register_index_at_depth(params + 1) as u16;
 
-                    let slot = simulated_stack.registers_for::<1, 0>()?.input;
+                    let slot = simulated_stack
+                        .registers_for::<1, 0>(
+                            instructions.len(),
+                            InstructionSource::CallIndirectSlot,
+                        )?
+                        .input;
 
-                    let move_registers =
-                        simulated_stack.materialize_stack_slots_in_registers(params)?;
+                    let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                        params,
+                        instructions.len(),
+                        InstructionSource::CallIndirectMov,
+                    )?;
 
                     call_instr_backpatches.push((instructions.len(), caller_base));
 
@@ -3576,8 +3665,11 @@ impl Instruction for RegInstruction {
                     let attached_breaks = &block.attached_breaks;
 
                     if results != 0 {
-                        let move_registers =
-                            simulated_stack.materialize_stack_slots_in_registers(results)?;
+                        let move_registers = simulated_stack.materialize_stack_slots_in_registers(
+                            results,
+                            instructions.len(),
+                            InstructionSource::Emit,
+                        )?;
 
                         instructions.push(RegInstruction::Move(move_registers), offset);
                     }
@@ -3844,11 +3936,7 @@ impl Instruction for RegInstruction {
             RegInstruction::LocalTee { index, input } => {
                 Self::set_local(
                     *index,
-                    Self::slot_value(
-                        input.registers(&frame_layout.input_registers_arena)[0],
-                        caller_base_data,
-                        instance,
-                    ),
+                    Self::slot_value(input.registers()[0], caller_base_data, instance),
                     caller_base_data,
                     instance,
                 );

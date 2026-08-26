@@ -360,7 +360,7 @@ impl RegInstruction {
             RegInstruction::LocalTee { index, input } => format!(
                 "local.tee    local{} <- {}",
                 index.0,
-                input.registers(ins)[0].render(frame)
+                input.registers()[0].render(frame)
             ),
             RegInstruction::GlobalGet { index, output } => format!(
                 "global.get   global{} -> {}",
