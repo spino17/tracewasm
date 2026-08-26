@@ -1,6 +1,6 @@
 use crate::instruction::register::{
-    Const, InputRegisters, OutputRegisters, RegInstruction, Signature, Slot, interner::InternedId,
-    lazy::SpillIndex,
+    Const, InputRegisters, OutputRegisters, RegFrameLayout, RegInstruction, Signature, Slot,
+    interner::InternedId, lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
 use std::slice::Iter;
@@ -130,6 +130,7 @@ impl BackpatchMap {
         locals: u16,
         consts: u16,
         spills: u16,
+        frame_layout: &mut RegFrameLayout,
     ) {
         for (instr_index, patches) in &self.0 {
             let instr = &mut instructions[*instr_index];

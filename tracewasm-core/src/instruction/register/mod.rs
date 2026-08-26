@@ -1385,8 +1385,10 @@ impl SimulatedStack {
             output_start: register_index,
         };
 
-        if register_index + arity_to_preserve as u16 > self.max_registers {
-            if register_index > MAX_REGISTER_SLOTS {
+        let peak = register_index as u32 + arity_to_preserve as u32;
+
+        if peak > self.max_registers as u32 {
+            if peak > MAX_REGISTER_SLOTS as u32 {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
                     needed: register_index as u32,
@@ -1394,7 +1396,7 @@ impl SimulatedStack {
                 });
             }
 
-            self.max_registers = register_index + arity_to_preserve as u16;
+            self.max_registers = peak as u16;
         }
 
         Ok(res)
@@ -3596,13 +3598,6 @@ impl Instruction for RegInstruction {
             });
         }
 
-        simulated_stack.backpatch_map.apply(
-            &mut instructions.inner,
-            locals_count,
-            consts_len,
-            spills,
-        );
-
         // A `caller_base` is an operand register index too — the one the arguments
         // were staged at — so it takes the same shift. The consequence is the
         // invariant the whole layout rests on: `caller_base` ends up at or above
@@ -3637,7 +3632,7 @@ impl Instruction for RegInstruction {
         // `registers + spills + consts` wide, and `locals_count` and `consts` travel
         // with it because they are what invert the shifts above: given an index, they
         // are the only way to say which region it names.
-        let frame = RegFrameLayout {
+        let mut frame = RegFrameLayout {
             registers: simulated_stack.max_registers,
             spills,
             if_arena: simulated_stack.if_arena,
@@ -3654,6 +3649,15 @@ impl Instruction for RegInstruction {
                 .into_values()
                 .into_boxed_slice(),
         };
+
+        // apply all backpatches
+        simulated_stack.backpatch_map.apply(
+            &mut instructions.inner,
+            locals_count,
+            consts_len,
+            spills,
+            &mut frame,
+        );
 
         Ok((instructions.inner, instructions.offsets, frame))
     }
