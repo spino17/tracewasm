@@ -1,6 +1,6 @@
 use crate::instruction::register::{
-    Const, InlinedRegisters, InlinedSignature, RegInstruction, Slot, interner::InternedId,
-    lazy::SpillIndex,
+    Const, InlinedSignature, InputRegisters, OutputRegisters, RegInstruction, Slot,
+    interner::InternedId, lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
 use std::slice::Iter;
@@ -76,7 +76,7 @@ pub(crate) struct BackpatchMap(
 impl BackpatchMap {
     fn apply_to_input_registers<const I: usize>(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
-        inputs: &mut InlinedRegisters<I, Slot>,
+        inputs: &mut InputRegisters<I>,
         locals: u16,
         consts: u16,
         spills: u16,
@@ -96,14 +96,12 @@ impl BackpatchMap {
     }
 
     fn apply_to_output_registers<const O: usize>(
-        outputs: &mut InlinedRegisters<O, u16>,
+        outputs: &mut OutputRegisters<O>,
         _locals: u16,
         consts: u16,
         spills: u16,
     ) {
-        for output in &mut outputs.registers {
-            *output = *output + consts + spills;
-        }
+        outputs.start = outputs.start + consts + spills;
     }
 
     fn apply_to_signature<const I: usize, const O: usize>(

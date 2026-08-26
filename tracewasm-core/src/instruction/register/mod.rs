@@ -178,7 +178,7 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
-use std::{collections::hash_map::Entry, marker::PhantomData, u16, vec};
+use std::{collections::hash_map::Entry, marker::PhantomData, vec};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -459,36 +459,29 @@ enum StackSlot {
 }
 
 #[derive(Debug)]
-pub(crate) struct InlinedRegisters<const L: usize, T> {
-    registers: [T; L],
+pub(crate) struct InputRegisters<const I: usize> {
+    registers: [Slot; I],
 }
 
-impl<const L: usize, T> InlinedRegisters<L, T> {
-    #[inline(always)]
-    fn registers(&self) -> &[T; L] {
-        &self.registers
-    }
-
-    #[inline(always)]
-    fn registers_mut(&mut self) -> &mut [T; L] {
-        &mut self.registers
-    }
+pub(crate) struct OutputRegisters<const O: usize> {
+    // starting index
+    start: u16,
 }
 
 pub(crate) struct InlinedSignature<const I: usize, const O: usize> {
-    pub inputs: InlinedRegisters<I, Slot>,
-    pub outputs: InlinedRegisters<O, u16>,
+    pub inputs: InputRegisters<I>,
+    pub outputs: OutputRegisters<O>,
 }
 
 impl<const I: usize, const O: usize> InlinedSignature<I, O> {
     #[inline(always)]
     fn input_registers(&self) -> &[Slot; I] {
-        self.inputs.registers()
+        &self.inputs.registers
     }
 
     #[inline(always)]
-    fn output_registers(&self) -> &[u16; O] {
-        self.outputs.registers()
+    fn output_registers_start(&self) -> u16 {
+        self.outputs.start
     }
 }
 
@@ -522,11 +515,11 @@ const _: () = assert!(
      to an arena, or pin its result to an operand for a two-address form"
 );*/
 const _: () = assert!(
-    size_of::<InlinedRegisters<1, Slot>>() <= INLINE_PAYLOAD_BUDGET,
+    size_of::<InputRegisters<1>>() <= INLINE_PAYLOAD_BUDGET,
     "InlinedRegisters<1, Slot> does not fit an 8-byte instruction"
 );
 const _: () = assert!(
-    size_of::<InlinedRegisters<3, Slot>>() <= INLINE_PAYLOAD_BUDGET,
+    size_of::<InputRegisters<3>>() <= INLINE_PAYLOAD_BUDGET,
     "InlinedRegisters<3, Slot> (`memory.copy`/`memory.fill`) does not fit an 8-byte \
      instruction"
 );
@@ -534,14 +527,15 @@ const _: () = assert!(
 #[derive(Debug)]
 pub(crate) struct DynSignature2 {
     input: Vec<Slot>,
-    output: Vec<u16>,
+    output_start: u16,
 }
 
 impl DynSignature2 {
-    pub fn new(input: Vec<Slot>, output: Vec<u16>) -> Self {
-        debug_assert!(input.len() == output.len());
-
-        DynSignature2 { input, output }
+    pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
+        DynSignature2 {
+            input,
+            output_start,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1845,7 +1839,7 @@ pub(crate) enum RegInstruction {
         /// The local written.
         index: LocalIndex,
         /// The value to write, left on the simulated stack for the consumer.
-        input: InlinedRegisters<1, Slot>,
+        input: InputRegisters<1>,
     },
     /// `loop`: a branch target and nothing else.
     ///
@@ -2976,8 +2970,8 @@ impl Instruction for RegInstruction {
                         }
                     }
 
-                    let registers = InlinedRegisters {
-                        registers: [Slot(u16::MAX)], // will be backpatched
+                    let registers = InputRegisters {
+                        registers: [Slot(u16::MAX)],
                     };
 
                     instructions.push(
@@ -3941,7 +3935,7 @@ impl Instruction for RegInstruction {
             RegInstruction::LocalTee { index, input } => {
                 Self::set_local(
                     *index,
-                    Self::slot_value(input.registers()[0], caller_base_data, instance),
+                    Self::slot_value(input.registers[0], caller_base_data, instance),
                     caller_base_data,
                     instance,
                 );
