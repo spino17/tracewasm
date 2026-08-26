@@ -18,6 +18,7 @@
 use super::*;
 use crate::instruction::register::lazy::SpillIndex;
 use crate::module::{FuncKind, TyIndex, ValType};
+use std::mem;
 use std::ops::Range;
 use wasmparser::Parser;
 
@@ -111,8 +112,9 @@ fn resolve_backpatches(s: &mut SimulatedStack, prog: &mut Instructions) {
     let consts_len = s.const_interner.len() as u16;
     let spills = s.spills.allocation_len();
     let mut layout = layout_of(s);
+    let backpatch_map = mem::take(&mut s.backpatch_map);
 
-    s.backpatch_map.apply(
+    backpatch_map.apply(
         &mut prog.inner,
         locals_count,
         consts_len,
