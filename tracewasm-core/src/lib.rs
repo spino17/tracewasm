@@ -33,11 +33,10 @@
 //! names an instruction, so parameterising it would spread the machine across
 //! every `Result` in the crate to describe something the errors do not hold.
 //!
-//! Two things stay concrete on purpose. **Constant expressions are always lowered
+//! One thing stays concrete on purpose: **constant expressions are always lowered
 //! for the stack machine** whatever the module's own, since they run once at
 //! instantiation and never on a hot path; a lowered one is opaque as
-//! [`module::ConstExpr`]. And execution currently accepts only a [`Stack`]
-//! instance, because the register machine's execution is still being written.
+//! [`module::ConstExpr`].
 //!
 //! ## Scope
 //!
@@ -61,6 +60,13 @@
 //!
 //! The interpreter itself lives in a crate-internal `runtime` module and is not
 //! part of the public API.
+
+// A discarded `Result` is a swallowed failure, and the lowering pass is full of them
+// now that a frame too wide for a 16-bit operand index is reported rather than
+// panicked on. Making a function fallible does not make its callers handle it — nine
+// call sites dropped the error the first time this was wired up — so the lint that
+// catches that has to fail the build, not decorate it.
+#![deny(unused_must_use)]
 
 /// Re-exported so implementors of
 /// [`ImportRegistry`](instance::traits::ImportRegistry) — and the code
@@ -125,7 +131,7 @@ pub trait VirtualMachine: sealed::Internals {}
 /// This is what lets [`VirtualMachine`] be a public name while everything behind it
 /// stays private. The associated type is bounded by the crate-private `Instruction`
 /// trait, so putting it on the public trait would drag that trait — and in turn the
-/// frame traits, the untagged `Value`, the operand arenas — into the public
+/// frame traits, the untagged `Value`, the per-body frame layouts — into the public
 /// surface, none of which an embedder can use.
 mod sealed {
     /// A machine's instruction set, and through its bound everything else the

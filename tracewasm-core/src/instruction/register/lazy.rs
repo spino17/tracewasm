@@ -1,21 +1,26 @@
-//! Lazy forwarding of locals and globals, and the spill slots that rescue them.
+//! Lazy forwarding of locals, and the spill slots that rescue them.
+//!
+//! Globals are not forwarded — [`RegInstruction::GlobalGet`](super::RegInstruction)
+//! materialises one into a register, so nothing can invalidate it and there is
+//! nothing to rescue. Only locals are read in place.
 //!
 //! ## Lazy operands
 //!
 //! `local.get n` moves nothing. The register pass records the operand as "read
 //! local `n`" and lets the instruction that eventually consumes it read the local
 //! directly, so the overwhelmingly common `local.get; local.get; i32.add` costs no
-//! copies at all. Globals work the same way.
+//! copies at all.
 //!
 //! A forwarded operand is valid only while its origin still holds the value the
-//! `local.get` observed. A later `local.set n`, `local.tee n`, or a call that writes
-//! a global ends that. Every operand still forwarding to the origin has to be
+//! `local.get` observed. A later `local.set n` or `local.tee n` ends that — and those
+//! are the only two things that can, since a local lives in the frame and no call can
+//! reach another frame's. Every operand still forwarding to the origin has to be
 //! *materialized* first — copied into a frame spill slot the write cannot reach —
 //! and the copy is emitted immediately before the write.
 //!
 //! ## One entry, many borrows
 //!
-//! A [`LazyEntry`] represents *the value* one local or global held at one point,
+//! A [`LazyEntry`] represents *the value* one local held at one point,
 //! and every stack slot reading that value holds a [`LazySlot`] handle to the same
 //! entry. Two properties fall out of that sharing, and both are needed:
 //!
@@ -63,8 +68,11 @@
 //! dropped whole when that body finishes lowering, so it is bounded per function.
 //! A `Dropped` result does not mean memory was reclaimed.
 
+use crate::error::TraceWasmError;
 use id_arena::{Arena, Id};
 use std::{fmt, marker::PhantomData};
+
+const MAX_SPILLS: u16 = u16::MAX;
 
 /// Where the value behind a [`LazyEntry`] currently lives.
 ///
@@ -72,13 +80,12 @@ use std::{fmt, marker::PhantomData};
 /// once.
 #[derive(Clone, Copy)]
 pub(crate) enum LazyLocation {
-    /// Read straight from its origin — the local or global at this index. Valid
-    /// until something writes that origin.
-    Original(u32),
+    /// Read straight from its origin — the local at this index. Valid until
+    /// something writes that origin.
+    Original(u16),
     /// Materialized into this frame spill slot by a
-    /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) or
-    /// [`GlobalSpill`](super::RegInstruction::GlobalSpill) emitted just before the
-    /// write that ended the forwarding.
+    /// [`RegInstruction::LocalSpill`](super::RegInstruction::LocalSpill) emitted just
+    /// before the write that ended the forwarding.
     Spilled(SpillIndex),
 }
 
@@ -93,9 +100,11 @@ pub(crate) enum LazyEntryDropResult {
 
 /// One lazily forwarded value, shared by every stack slot reading it.
 ///
-/// Not a local or a global as such, but *the value one of them held at one point*.
-/// Two entries for the same origin are alive at once when a write separates them.
+/// Not the local as such, but *the value it held at one point*. Two entries for the
+/// same local are alive at once when a write separates them.
 pub(crate) struct LazyEntry<T> {
+    /// Where the value is right now. Rewriting this one field redirects every slot
+    /// sharing the entry at once, which is the whole point of the indirection.
     location: LazyLocation,
     /// Live stack slots holding this entry. See [`LazyEntryDropResult`].
     ref_count: u32,
@@ -104,15 +113,19 @@ pub(crate) struct LazyEntry<T> {
     phantom: PhantomData<T>,
 }
 
-/// The lazy entries for one origin space — all locals, or all globals, of a
-/// function body — plus the index that finds the live entry for a given origin.
+/// The lazy entries for one origin space — the locals of a function body — plus the
+/// index that finds the live entry for a given origin.
 ///
-/// `T` is [`Local`] or [`Global`]; it carries no data and exists so the two arenas
-/// and their handles are distinct types.
+/// `T` is the origin-space marker, currently only [`Local`]. It carries no data and
+/// exists so an arena and its handles are a distinct type from any other origin
+/// space's, should one be added.
 pub(crate) struct LazyArena<T> {
+    /// Every entry ever created for this body, live or not. Entries are not removed:
+    /// a dropped one only loses its last borrow, and its spill slot goes back to
+    /// [`SpillArena`] rather than the entry going anywhere.
     arena: Arena<LazyEntry<T>>,
-    /// `origin[i]` is the entry currently forwarding local/global `i`, or `None` if
-    /// nothing borrows it.
+    /// `origin[i]` is the entry currently forwarding local `i`, or `None` if nothing
+    /// borrows it.
     ///
     /// Public because lowering both reads it — to decide whether a write needs a
     /// spill — and clears it, when a borrow is released or spilled. An entry stored
@@ -121,11 +134,11 @@ pub(crate) struct LazyArena<T> {
 }
 
 impl<T> LazyArena<T> {
-    /// Creates an empty arena whose origin table covers `origin_count` indices: the
-    /// function's locals count, or the module's globals count.
+    /// Creates an empty arena whose origin table covers `origin_count` indices — the
+    /// function's locals count, locals being the only thing forwarded.
     ///
     /// Indexing `origin` is unchecked, so `origin_count` must cover every index the
-    /// body can name — for locals, params plus declared locals.
+    /// body can name: params plus declared locals.
     pub fn new(origin_count: u32) -> Self {
         LazyArena {
             arena: Arena::new(),
@@ -137,7 +150,7 @@ impl<T> LazyArena<T> {
     ///
     /// Recording it in [`Self::origin`] is the caller's job; the two happen together
     /// only on the first borrow of an origin.
-    pub fn allocate(&mut self, location: u32) -> LazySlot<T> {
+    pub fn allocate(&mut self, location: u16) -> LazySlot<T> {
         LazySlot(self.arena.alloc(LazyEntry {
             location: LazyLocation::Original(location),
             ref_count: 1,
@@ -193,8 +206,8 @@ impl<T> LazySlot<T> {
 
     /// Records one more stack slot borrowing this entry.
     ///
-    /// Called when a second `local.get`/`global.get` of an origin joins the borrow
-    /// already recorded in [`LazyArena::origin`].
+    /// Called when a second `local.get` of an origin joins the borrow already
+    /// recorded in [`LazyArena::origin`].
     pub fn advanced_ref_count(&self, arena: &mut LazyArena<T>) {
         let entry = arena.get_mut_entry(*self);
 
@@ -239,39 +252,51 @@ impl<T> LazySlot<T> {
     }
 }
 
-/// Marker for the globals origin space. Never instantiated.
-pub(crate) struct Global;
 /// Marker for the locals origin space. Never instantiated.
 pub(crate) struct Local;
 
 /// A borrow of a local's value.
 pub(crate) type LocalSlot = LazySlot<Local>;
-/// A borrow of a global's value.
-pub(crate) type GlobalSlot = LazySlot<Global>;
 
 /// The frame's spill area, allocated as a stack of interchangeable slots.
 ///
-/// A spill slot holds one materialized local or global for as long as some stack
+/// A spill slot holds one materialized local for as long as some stack
 /// slot still reads it. Slots carry no identity beyond their index, so a freed one
 /// is handed straight back out.
 #[derive(Default)]
 pub(crate) struct SpillArena {
-    allocation_len: u32,
-    free_slots: Vec<u32>,
+    /// Slots ever handed out — the high-water mark, so the width the frame must
+    /// reserve. Never decreases; a freed slot is reused rather than reclaimed.
+    allocation_len: u16,
+    /// Slots handed back, available before `allocation_len` has to grow again.
+    free_slots: Vec<u16>,
 }
 
 impl SpillArena {
     /// Reserves a slot for a value about to be materialized, reusing a freed one
     /// when possible so [`Self::allocation_len`] tracks peak live usage.
-    pub fn reserve_slot(&mut self) -> SpillIndex {
+    ///
+    /// # Errors
+    ///
+    /// [`TraceWasmError::RegisterFrameTooLarge`] once the region would outgrow a
+    /// 16-bit frame index.
+    pub fn reserve_slot(&mut self) -> Result<SpillIndex, TraceWasmError> {
         if !self.free_slots.is_empty() {
-            return SpillIndex(self.free_slots.pop().unwrap());
+            return Ok(SpillIndex(self.free_slots.pop().unwrap()));
+        }
+
+        if self.allocation_len >= MAX_SPILLS {
+            return Err(TraceWasmError::RegisterFrameTooLarge {
+                what: "spill slots",
+                needed: self.allocation_len as u32 + 1,
+                limit: MAX_SPILLS as u32,
+            });
         }
 
         let slot = self.allocation_len;
         self.allocation_len += 1;
 
-        SpillIndex(slot)
+        Ok(SpillIndex(slot))
     }
 
     /// Returns a slot to the pool once the last stack slot reading it is popped.
@@ -288,23 +313,23 @@ impl SpillArena {
     /// of spills emitted: [`Self::reserve_slot`] reuses a freed slot before
     /// growing, so the count only advances when every existing slot is live at
     /// once — which is exactly what the frame has to hold.
-    pub fn allocation_len(&self) -> u32 {
+    pub fn allocation_len(&self) -> u16 {
         self.allocation_len
     }
 }
 
-/// A slot in the frame's spill area, holding one materialized local or global.
+/// A slot in the frame's spill area, holding one materialized local.
 ///
 /// The inner index is private and only `SpillArena::reserve_slot` can mint one,
 /// so an index that exists is one the arena handed out. There is no `PartialEq`
 /// either: two live borrows never share a slot, and comparing them would only be
 /// asking which of two distinct slots came first.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SpillIndex(u32);
+pub(crate) struct SpillIndex(u16);
 
 impl SpillIndex {
     #[inline(always)]
-    pub fn raw_value(&self) -> u32 {
+    pub fn raw_value(&self) -> u16 {
         self.0
     }
 }

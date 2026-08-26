@@ -930,12 +930,14 @@ pub(crate) struct StackFrameLayout {
     pub br_targets_arena: Box<[StackBrTableTarget]>,
 }
 
-impl FrameLayout for StackFrameLayout {
-    type BrTableTarget = StackBrTableTarget;
-
-    fn br_table_targets(&self) -> &[Self::BrTableTarget] {
+impl StackFrameLayout {
+    fn br_table_targets(&self) -> &[StackBrTableTarget] {
         &self.br_targets_arena
     }
+}
+
+impl FrameLayout for StackFrameLayout {
+    type BrTableTarget = StackBrTableTarget;
 }
 
 /// The three parallel outputs of lowering one function body: the instruction list,
@@ -954,6 +956,7 @@ type StackLoweredFuncBody = (Vec<StackInstruction>, Vec<u32>, StackFrameLayout);
 /// `inner[len - 1 - relative_depth]`.
 #[derive(Default)]
 struct ControlStack {
+    /// Open labels, outermost first.
     inner: Vec<Block>,
     /// Current operand-stack depth at the point the pass has reached. See the
     /// module-level "Height-tracking invariant".
@@ -2336,7 +2339,7 @@ impl Instruction for StackInstruction {
         &self,
         module: &crate::module::Module<Self::Vm>,
         instance: &mut crate::instance::Instance<M, I, crate::Stack>,
-        frame_layout: &Self::FrameLayout,
+        frame_layout: &StackFrameLayout,
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<crate::runtime::Step<Self>, Box<crate::error::InstructionExecutionError>> {
@@ -2399,10 +2402,8 @@ impl Instruction for StackInstruction {
                 let func_ty = &module.types[ty_index.0 as usize];
                 let params = &func_ty.params;
                 let results = &func_ty.results;
-
                 let func = &module.func_decls[callee_func_index.0 as usize];
                 let ty = &module.types[func.ty.0 as usize];
-
                 let declared_params = &ty.params;
                 let declared_results = &ty.results;
 
@@ -4166,7 +4167,7 @@ impl StackInstruction {
             instance.frame.stack.len()
         );
 
-        // SAFETY: `slot < inner.len()`, which needs four separate facts. Only the
+        // SAFETY: `slot < stack.len()`, which needs four separate facts. Only the
         // first belongs to `wasmparser`; the other three are this crate's own and
         // are the ones that can rot:
         //
@@ -4181,15 +4182,15 @@ impl StackInstruction {
         //    `<Stack<Value> as RuntimeFrame>::enter_frame`. Equality holds the instant
         //    setup finishes; operands pushed during the body only raise
         //    `stack_pointer`, which is why the bound below needs `>=` and not `==`.
-        // 3. `stack_pointer <= inner.len()` — the operand-stack invariant documented
+        // 3. `stack_pointer <= stack.len()` — the operand-stack invariant documented
         //    in `runtime::stack`.
-        // 4. `inner.len()` never shrinks. Nothing truncates, clears, resizes or
+        // 4. `stack.len()` never shrinks. Nothing truncates, clears, resizes or
         //    shrinks it; `pop`/`truncate`/`reset` only move `stack_pointer`. Adding
         //    any such call would break this.
         //
         // Together, with (1) giving `index.0 < locals_count`:
         // `caller_base_height + index.0 < caller_base_height + locals_count <=
-        // stack_pointer <= inner.len()`.
+        // stack_pointer <= stack.len()`.
         //
         // Constant expressions cannot reach here at all — they run on the much
         // smaller `Stack::for_const_expr_evaluation`, and

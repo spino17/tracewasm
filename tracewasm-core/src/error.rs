@@ -96,6 +96,50 @@ pub enum TraceWasmError {
     /// page count and the allowed maximum.
     #[error("memory too large: initial `{0}` pages exceeds the allowed maximum `{1}`")]
     MemoryTooLarge(u32, u32),
+    /// A function body needs a wider frame than the register machine can address.
+    ///
+    /// Its operands are 16-bit frame indices, so one activation is limited to 65,535
+    /// slots across all four regions — locals, constants, spills and operand
+    /// registers. The wasm spec sets no such bound, so this rejects a module that is
+    /// otherwise valid: an implementation limit, and the only alternative to naming
+    /// the wrong slot.
+    ///
+    /// The stack machine has no equivalent limit, so a module rejected here may still
+    /// run under [`Stack`](crate::Stack).
+    ///
+    /// Fields: which region ran out of room, the count it reached, and its limit.
+    #[error(
+        "function frame too large for the register machine: {what} reached {needed}, \
+         over the limit of {limit} — operands are 16-bit frame indices"
+    )]
+    RegisterFrameTooLarge {
+        /// The region that ran out of room, for locating the cause.
+        what: &'static str,
+        /// The count that region reached.
+        needed: u32,
+        /// The largest value that region may take.
+        limit: u32,
+    },
+    /// One of the register machine's interned pools ran out of 16-bit ids: the
+    /// body's distinct constants, or the distinct memory offsets its loads and stores
+    /// name between them.
+    ///
+    /// Distinct is the operative word — a pool holds one entry per *value*, however
+    /// many instructions use it — so reaching 65,536 takes a body far past what wasm
+    /// validation allows. Like [`Self::RegisterFrameTooLarge`] this is an
+    /// implementation limit, not a spec one, so a module rejected here may still run
+    /// under [`Stack`](crate::Stack).
+    ///
+    /// Fields: which pool filled up, the count it reached, and its limit.
+    #[error("too many unique {what}: reached {needed}, over the limit of {limit}")]
+    ToManyUniqueValues {
+        /// The pool that filled up, for locating the cause.
+        what: String,
+        /// The number of distinct values that pool would have had to hold.
+        needed: u32,
+        /// The most distinct values a 16-bit id can name.
+        limit: u32,
+    },
     /// An active element segment writes past the end of its target table at
     /// instantiation. Fields: the write offset, the number of elements written,
     /// and the target table's length.
@@ -117,6 +161,12 @@ pub enum TraceWasmError {
     /// not appear in this crate's public API.
     #[error("error occured while parsing: {0}")]
     Parsing(String),
+    /// A host-supplied import failed. Raised for any imported *item*, not just a
+    /// call: reading an imported global takes this path too, since both arrive
+    /// through the blanket [`From<anyhow::Error>`] below.
+    ///
+    /// Field: whatever the host returned, carried opaquely — an embedder's error type
+    /// is its own business.
     #[error("call to imported item returned error: {0}")]
     CallToImportedItemReturnedError(anyhow::Error),
 }
@@ -284,11 +334,12 @@ pub enum InstructionExecutionError {
     #[error("{0}")]
     Memory(MemoryError),
     /// An integer division trapped: a zero divisor, or the signed overflow case
-    /// `MIN / -1`. Fields: the rendered dividend and divisor.
+    /// `MIN / -1`. Fields: `num` is the rendered dividend, `deno` the divisor.
     #[error("division failed: {num}/{deno}")]
     Division { num: String, deno: String },
     /// An integer remainder trapped, which only happens on a zero divisor —
-    /// `MIN % -1` is defined as `0`. Fields: the rendered operands.
+    /// `MIN % -1` is defined as `0`. Fields: `left` is the rendered dividend, `right`
+    /// the divisor.
     #[error("remainder failed: {left} % {right}")]
     Remainder { left: String, right: String },
     /// A `trunc` conversion could not represent its operand in the target integer

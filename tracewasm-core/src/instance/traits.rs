@@ -115,7 +115,9 @@ impl ResultVals {
 
 /// Owning iterator over the [`Val`]s of a [`ResultVals`], in order.
 pub struct ResultValsIter {
+    /// The values being iterated, owned so the iterator outlives its source.
     results: ResultVals,
+    /// How many have been yielded.
     index: usize,
 }
 
@@ -171,9 +173,12 @@ impl AsRef<[ValType]> for ResultValTypes {
     }
 }
 
-/// Internal helper for wrapping a `SmallVec` into one of the newtype wrappers
-/// ([`ParamVals`], [`ResultVals`], and their type counterparts); used by the
-/// tuple impls to build their marshalled values.
+/// Wraps a `SmallVec` into one of the newtype wrappers ([`ParamVals`],
+/// [`ResultVals`], and their type counterparts); used by the tuple impls to build
+/// their marshalled values.
+///
+/// Public because those impls are, but it is machinery rather than API — an embedder
+/// has no reason to name it or implement it.
 pub trait FromSmallVec<A: Array> {
     /// Wraps `s` into the newtype.
     fn from_small_vec(s: SmallVec<A>) -> Self;

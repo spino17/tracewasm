@@ -148,7 +148,11 @@ impl<M: Memory, I: ImportRegistry, V: VirtualMachine> Instance<M, I, V> {
 /// native Rust values, converting to/from runtime `Val`s internally.
 #[derive(Clone, Copy)]
 pub struct TypedFunc<P, R> {
+    /// The function this handle names, checked against the module's declared type
+    /// when the handle was obtained.
     func_index: FuncIndex,
+    /// Carries `P` and `R` without storing them; the signature is checked once at
+    /// lookup and then lives only in the type.
     phantom: PhantomData<(P, R)>,
 }
 

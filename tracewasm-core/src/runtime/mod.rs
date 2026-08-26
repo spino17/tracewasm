@@ -21,10 +21,20 @@
 //! The driver itself owns no value storage. Each machine supplies its own through
 //! [`RuntimeFrame`], reached as
 //! [`Instruction::RuntimeFrame`](crate::instruction::Instruction), and the driver
-//! only asks it to enter a frame, exit one, and hand back results. What follows
-//! describes the stack machine's layout, since that is the one whose base
-//! arithmetic the lowered instructions encode; the register machine sizes a
-//! register file from its [`FrameLayout`](crate::instruction::FrameLayout) instead.
+//! only asks it to enter a frame, exit one, and hand back results.
+//!
+//! Both machines share one buffer across the whole call tree, and both leave a
+//! callee's results in the slots its arguments occupied, so a caller does nothing
+//! after a call returns. They differ in how a frame is addressed:
+//!
+//! * the **stack machine** is implicit — position comes from the stack pointer, and a
+//!   frame needs two base heights. That is the layout described below, and the one
+//!   whose base arithmetic the lowered instructions encode.
+//! * the **register machine** is positional — every operand carries an absolute frame
+//!   index and a frame is four consecutive regions,
+//!   `locals | constants | spills | operand registers`, sized from its
+//!   [`FrameLayout`](crate::instruction::FrameLayout). See
+//!   [`runtime::reg`](crate::runtime::reg) for that layout and why the order matters.
 //!
 //! Rather than giving every call its own operand stack, the whole call tree shares
 //! a single [`Stack`]. A call does not allocate a new stack; the callee builds its
@@ -168,20 +178,27 @@ pub enum Step<Instr: Instruction> {
 /// Built only by [`TraceVM::_execute_on_frame_stack`], which [`TraceVM::run`] does
 /// not currently use — so nothing constructs one.
 struct Frame<'a, Instr: Instruction> {
+    /// Which function this frame is executing, for the trace.
     func_index: FuncIndex,
+    /// That function's body, borrowed from the [`Module`] rather than copied.
     instructions: &'a [Instr],
     /// Index of the `call` itself, not the instruction after it; resuming adds
     /// one, and a trace records the call site.
     pc: u32,
+    /// Where this frame's storage begins, as its own machine measures it.
     caller_base_data: Instr::CallerBaseData,
+    /// The storage plan for *this* frame's body — the callee's, at the point
+    /// [`RuntimeFrame::exit_frame`] is handed it, which is what that method requires.
     frame_layout: &'a Instr::FrameLayout,
+    /// Source offset per instruction, parallel to [`Self::instructions`].
     instruction_offsets: &'a [u32],
-    /// Result count of the callee, needed on return to know how much of its
-    /// region to keep when truncating back to `caller_base_height`.
+    /// Result count of the callee, needed on return to know how much of its region
+    /// survives the teardown.
     callee_results_count: u32,
-    /// Who this frame called, and through which table if indirect. Only the trace
-    /// reads these.
+    /// Who this frame called. Only the trace reads it.
     callee_func_index: FuncIndex,
+    /// The table the callee was resolved through, or `None` for a direct call. Only
+    /// the trace reads it.
     callee_is_indirect: Option<TableIndex>,
 }
 
@@ -202,10 +219,9 @@ impl TraceVM {
     /// frame comes from [`RuntimeFrame`] and its
     /// base from
     /// [`CallerBaseData::initial_data`].
-    /// Whether a given lowering can actually be driven is
-    /// [`Instruction::execute`]'s
-    /// business — the register machine's is still unimplemented, so driving one
-    /// panics rather than failing to compile.
+    /// Which instructions a given lowering can produce, and what each one does, is
+    /// [`Instruction::execute`]'s business; the driver only acts on the
+    /// [`Step`] it reports.
     ///
     /// Resetting on entry rather than on exit is what makes an instance reusable
     /// after a trap: a failing call returns early with values still on the stack,
@@ -265,12 +281,12 @@ impl TraceVM {
     /// [`Step::Call`] is acted on — the instruction arms themselves only report
     /// the call, they do not perform it.
     ///
-    /// **Arguments are passed on the stack, not as a slice.** The caller leaves
-    /// them as the topmost values and this function adopts them in place as the
-    /// leading local slots; it derives its own base as
-    /// `stack.height() - params_count`. Results are likewise left on `stack` for
-    /// the caller to consume, which is why this returns `()` rather than the
-    /// results. See the module docs for the full frame layout.
+    /// **Arguments are passed in the frame store, not as a slice.** The calling
+    /// instruction has already staged them where the callee's params belong and
+    /// reports that position as `caller_base_data`, so this adopts them in place as
+    /// the leading local slots rather than deriving a base of its own. Results are
+    /// likewise left in the store for the caller to read, which is why this returns
+    /// `()` rather than the results. See the module docs for both frame layouts.
     ///
     /// # Errors
     ///
@@ -433,12 +449,14 @@ impl TraceVM {
 
         *call_stack_depth -= 1;
 
-        // Tear the frame down: truncating to `caller_base_height` (the locals
-        // base, *not* `frame_base_height`) discards this frame's locals while
-        // preserving the results on top. They therefore land in exactly the slots
-        // the caller's arguments occupied, which is what lets the caller do
-        // nothing at all after a `Call` returns.
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        // Tear the frame down. Either machine leaves the results in the slots the
+        // caller's arguments occupied — the stack machine by truncating to the frame
+        // base and keeping the top values, the register machine by copying them down
+        // out of its operand region — which is what lets the caller do nothing at all
+        // after a `Call` returns.
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, &func_body.frame_layout);
 
         Ok(())
     }
@@ -628,9 +646,13 @@ impl TraceVM {
                 // pop the frame!
                 let frame = frames.pop().unwrap(); // safe to unwrap as checked above!
 
-                instance
-                    .frame
-                    .exit_frame(frame.callee_results_count, &caller_base_data);
+                // `frame_layout` still describes the callee here — it is replaced with
+                // the caller's below, once its results have been moved down.
+                instance.frame.exit_frame(
+                    frame.callee_results_count,
+                    &caller_base_data,
+                    frame_layout,
+                );
 
                 // reset the state of the frame which executed call instruction
                 func_index = frame.func_index;
@@ -642,13 +664,19 @@ impl TraceVM {
             }
         }
 
-        instance.frame.exit_frame(results_count, &caller_base_data);
+        instance
+            .frame
+            .exit_frame(results_count, &caller_base_data, frame_layout);
 
         Ok(())
     }
 
-    /// Runs an imported callee to completion: pops its parameters, re-tags them
-    /// from its declared types, invokes the host function, pushes its results.
+    /// Runs an imported callee to completion: reads its parameters, re-tags them from
+    /// its declared types, invokes the host function, writes back its results.
+    ///
+    /// Reads and writes rather than pops and pushes, because this is machine-generic:
+    /// the stack frame does consume its arguments, but the register frame reads them
+    /// in place at `caller_base` and writes the results back over them.
     ///
     /// The caller decides which callees come here; a locally-defined one is
     /// reported to the driver as [`Step::Call`] at the instruction arm instead.

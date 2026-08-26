@@ -34,10 +34,15 @@ pub struct Config {
     ///
     /// **The default is tied to the interpreter's native frame size.** Dispatch is
     /// inlined into the driver, so one frame holds the spill slots of every opcode
-    /// arm: 688 bytes per nested call on aarch64 release. The default of 2000
-    /// keeps a full chain near 1.3 MiB, which fits the 2 MiB stack Rust gives a
-    /// spawned thread — the smallest stack a host is likely to run on without
-    /// having chosen one — with about a third to spare.
+    /// arm: on aarch64 release that measures 608 bytes per nested call for the stack
+    /// machine and 640 for the register machine, and the larger sets the bound. The
+    /// default of 2000 keeps a full chain near 1.3 MiB, which fits the 2 MiB stack
+    /// Rust gives a spawned thread — the smallest stack a host is likely to run on
+    /// without having chosen one — with about a third to spare.
+    ///
+    /// A debug build is a different regime entirely, spending ~33 KB per frame, so
+    /// this default is 50x too deep for one; see `MAX_TEST_RECURSION` in
+    /// `tracewasm-test` for how the suites scale instead.
     ///
     /// Raising it is only safe if the host stack is larger to match: run the
     /// interpreter on a thread with an explicit `stack_size`, and size the limit

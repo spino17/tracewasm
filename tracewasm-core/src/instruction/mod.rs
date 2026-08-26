@@ -57,9 +57,14 @@ pub mod stack;
 pub(crate) trait CallerBaseData {
     /// The base data for an outermost activation, where there is no caller.
     ///
-    /// Both machines start at offset 0 with the callee-locals boundary unset;
-    /// [`RuntimeFrame::enter_frame`] fills it in once the entry function's body is
-    /// known, which is before its first instruction runs.
+    /// Both machines start at offset 0, which is why
+    /// [`RuntimeFrame::reset`] has to empty the storage before every call rather than
+    /// only after a trap — the entry frame's arguments land at 0 only while it is
+    /// empty.
+    ///
+    /// The stack machine additionally leaves its callee-locals boundary unset here,
+    /// for [`RuntimeFrame::enter_frame`] to fill in once the entry function's locals
+    /// are known. The register machine has no second base to set.
     fn initial_data() -> Self;
     /// The callee's frame base, in whatever unit the machine counts.
     ///
@@ -93,10 +98,10 @@ pub(crate) trait RuntimeFrame {
     /// consume. Named here as well as on [`Instruction`] so the two can be
     /// constrained equal — see [`Instruction::BrTableTarget`].
     type BrTableTarget;
-    /// What lowering hands this frame to size itself from: the branch-target arena,
-    /// plus whatever else the machine's storage needs (a register count, say). The
-    /// `BrTableTarget` bound is what ties the arena's element type to the branches
-    /// that will index it, so the two cannot drift apart.
+    /// What lowering hands this frame to size itself from — a register count, say —
+    /// and to read its body against. The `BrTableTarget` bound ties the arm type the
+    /// layout stores to the arm type this machine's branches consume, so the two
+    /// cannot drift apart.
     type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
 
     /// Seeds the *entry* function's params, before the driver runs a single
@@ -156,19 +161,21 @@ pub(crate) trait RuntimeFrame {
     /// already in place: the caller staged them where the callee's params belong,
     /// or [`Self::set_initial_params`] seeded them for the entry function.
     ///
-    /// `frame_layout` is what a positional machine sizes its storage from — the
-    /// frame spans the params, the declared locals, and then the layout's operand
-    /// registers. A stack machine grows as it pushes and ignores it.
+    /// `frame_layout` is what a positional machine sizes its storage from, and it
+    /// describes more than operand registers: the register machine's frame is
+    /// `locals | constants | spills | operand registers`, so entering one also
+    /// materialises the body's constant pool. A stack machine grows as it pushes and
+    /// ignores the layout entirely.
     ///
-    /// **An implementation must record the callee's locals boundary into
-    /// `caller_base_data` before returning** — the height or index at which this
-    /// frame's operands begin, which is `base_offset() + locals_ty.len()` in whatever
-    /// unit the machine counts. Every height-sensitive control operation resolves its
-    /// target against it, and [`CallerBaseData::initial_data`] leaves it unset, so a
-    /// frame entered without it runs its first branch against a sentinel.
-    ///
-    /// That is why the argument is `&mut`, and why this is the only place the
-    /// boundary is written: a driver cannot enter a frame and forget to fix it.
+    /// **A machine with a second base must record it into `caller_base_data` before
+    /// returning.** The stack machine has one — the height at which this frame's
+    /// operands begin, `base_offset() + locals_ty.len()` — which every
+    /// height-sensitive control operation resolves against, and which
+    /// [`CallerBaseData::initial_data`] leaves unset; a frame entered without it runs
+    /// its first branch against a sentinel. That is why the argument is `&mut`, and
+    /// why this is the only place it is written: a driver cannot enter a frame and
+    /// forget to fix it. The register machine derives its operand base from the
+    /// layout instead and writes nothing back.
     fn enter_frame(
         &mut self,
         params_count: u32,
@@ -180,26 +187,42 @@ pub(crate) trait RuntimeFrame {
     /// Drops a returning callee's frame and leaves its results where the caller
     /// expects them — the counterpart of [`Self::enter_frame`] at the other end of
     /// a call.
-    fn exit_frame(&mut self, results_count: u32, caller_base_data: &Self::CallerBaseData);
+    ///
+    /// Both machines leave the results in the slots the arguments occupied, so a
+    /// caller does nothing after a call returns, but they get there differently: the
+    /// stack machine truncates to the frame base preserving the top `results_count`
+    /// values, while the register machine copies them down from its operand region and
+    /// reclaims nothing — the space is simply reused by the next call at that depth.
+    ///
+    /// `frame_layout` must be the **callee's**. The register machine needs it to find
+    /// the operand region the results were materialised into
+    /// (`base + locals + consts + spills`); passing the caller's would read them from
+    /// the wrong offset and quietly return the wrong values.
+    fn exit_frame(
+        &mut self,
+        results_count: u32,
+        caller_base_data: &Self::CallerBaseData,
+        frame_layout: &Self::FrameLayout,
+    );
 }
 
 /// The per-function storage plan a lowering produces alongside its instructions.
 ///
-/// What a layout holds differs sharply — the stack machine needs little beyond a
-/// peak height, the register machine carries operand arenas and register counts —
-/// so only the part the driver reads uniformly is named here.
+/// What a layout holds differs sharply — the stack machine carries only its
+/// `br_table` arms, the register machine its four region sizes, its constant pool,
+/// its interned memory offsets, and one arena per operand shape too wide to sit in an
+/// instruction — so only the part the driver reads uniformly is named here.
 pub(crate) trait FrameLayout {
     /// This machine's resolved `br_table` arm.
     type BrTableTarget;
-
-    /// Every `br_table` arm in the body, concatenated in lowering order.
-    ///
-    /// A branch-table instruction owns a contiguous `(start, len)` run of this
-    /// slice rather than an inline list, which is what keeps the instruction
-    /// small enough to stay within its size budget.
-    fn br_table_targets(&self) -> &[Self::BrTableTarget];
 }
 
+/// The three parallel outputs of lowering one body: the instructions, the byte offset
+/// of the operator each was lowered from, and the layout needed to execute them.
+///
+/// The offsets are index-for-index with the instructions, which is what lets a trap
+/// name the operator it came from. Each machine has a concrete alias of its own —
+/// `RegLoweredFuncBody` and `StackLoweredFuncBody`.
 type LoweredFuncBody<T: Instruction> = (Vec<T>, Vec<u32>, T::FrameLayout);
 
 /// One lowering strategy: an instruction set, the frame it runs in, and how a
@@ -233,7 +256,9 @@ pub(crate) trait Instruction: Sized {
     /// [`Self::execute`] name the `Module` and `Instance` it runs against without a
     /// machine parameter of its own.
     type Vm: VirtualMachine + Internals<Instr = Self>;
-    /// A resolved `br_table` arm, as stored in the body's flat target array.
+    /// A resolved `br_table` arm, in whatever form this machine stores its arms —
+    /// one flat array per body for the stack pass, one `Vec` per table for the
+    /// register pass.
     type BrTableTarget;
     /// The storage plan lowering produces for one body.
     type FrameLayout: FrameLayout<BrTableTarget = Self::BrTableTarget>;
@@ -273,8 +298,12 @@ pub(crate) trait Instruction: Sized {
     /// the driver owns control flow and this stays a pure per-instruction
     /// operation.
     ///
-    /// `caller_base_data` locates this activation's frame; `br_table_targets` is
-    /// the body's arm array, which a branch table indexes by its own range.
+    /// `caller_base_data` locates this activation's frame. `frame_layout` is the rest
+    /// of what the body needs to be read at all — the region sizes an operand index
+    /// is meaningless without, and the side tables any id in the instruction points
+    /// into, `br_table` arms among them. `imported_func_count` splits the function
+    /// index space, since an index below it names an import and is dispatched
+    /// differently.
     fn execute<M: Memory, I: ImportRegistry>(
         &self,
         module: &Module<Self::Vm>,
@@ -293,8 +322,9 @@ pub(crate) enum BlockKind {
     /// `end` is the final instruction and no branch instruction stores its
     /// index directly).
     Func,
-    /// A `block`. `index` is the position of its `Instruction::Block`, so the
-    /// `end_index` field can be filled in later.
+    /// A `block`. Carries nothing: its label is its `end`, and every branch to it is
+    /// backpatched through [`Block::attached_breaks`], so there is no index worth
+    /// recording here.
     Block,
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
@@ -368,10 +398,11 @@ struct Block {
     /// `target_index` backpatched once that `end` is reached.
     ///
     /// Each entry is `(instruction_index, brtable_target_slot)`. The second field
-    /// is an **absolute** index into the function's flat `br_table` target array —
-    /// not an arm number relative to the table's own `start_index` — so patching is
-    /// a direct write and never has to read the range back out of the instruction.
-    /// It is `u32::MAX` (unused) for `Br`/`BrIf`/`Return`, which have a single
+    /// names which arm of a `br_table` is waiting, and what it is relative to is the
+    /// machine's business: the stack pass keeps every body's arms in one flat array
+    /// and records an absolute index into it, while the register pass gives each
+    /// table its own `Vec` of arms and records the position within that table. It is
+    /// `u32::MAX` (unused) for `Br`/`BrIf`/`Return`, which have a single
     /// `target_index` in the variant itself.
     attached_breaks: Vec<(u32, u32)>,
 }

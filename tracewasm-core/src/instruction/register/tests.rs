@@ -29,14 +29,135 @@ use wasmparser::Parser;
 // values, which also keeps assertions reading like the emitted code.
 // ---------------------------------------------------------------------------
 
-/// Renders a run of operands.
-fn slots(xs: &[Slot]) -> Vec<String> {
-    xs.iter().map(|x| x.render()).collect()
+/// Renders a run of resolved operands.
+///
+/// `Slot` carries no tag, so naming its region needs the layout — use
+/// [`layout_of`] for a stack that is still mid-lowering.
+fn slots(xs: &[Slot], frame: &RegFrameLayout) -> Vec<String> {
+    xs.iter().map(|x| x.render(frame)).collect()
 }
 
 /// Renders what `set_lazy` returned: `Some("spill0")` when it rescued a borrow.
 fn spilled_to(result: Option<SpillIndex>) -> Option<String> {
     result.map(|i| format!("spill{i}"))
+}
+
+/// The frame indices a run of resolved operands names.
+///
+/// Renderings say which *region* an operand is in; these say exactly where, which is
+/// what pins the layout — a region boundary off by one renders identically for every
+/// slot but the ones that cross it.
+fn frame_indices(xs: &[Slot]) -> Vec<u16> {
+    xs.iter().map(|Slot(i)| *i).collect()
+}
+
+/// A [`RegFrameLayout`] describing `s` as it stands, for rendering resolved slots.
+///
+/// Only the region sizes and the constant pool are filled in — those are all
+/// [`Slot::render`] consults, and the arenas cannot be cloned out of a borrowed
+/// stack. A test that needs the arenas builds the real layout instead.
+///
+/// The empty arenas are also enough for [`resolve_backpatches`], because the
+/// instructions these tests emit keep their operands inline; only the seven
+/// arena-held variants would need real ones.
+fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
+    RegFrameLayout {
+        registers: s.max_registers,
+        spills: s.spills.allocation_len(),
+        locals_count: s.locals_count(),
+        consts: s.const_interner.values().to_vec().into_boxed_slice(),
+        if_arena: Arena::default(),
+        br_if_arena: Arena::default(),
+        br_table_arena: Arena::default(),
+        call_indirect_arena: Arena::default(),
+        select_arena: Arena::default(),
+        memory_init_arena: Arena::default(),
+        dyn_signatures: Arena::default(),
+        memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
+    }
+}
+
+/// Renders a *lowering-time* operand, before the end-of-body backpatch.
+///
+/// Distinct from [`Slot::render`] on purpose: until the backpatch runs, a spill and
+/// a constant have no frame index at all, so they render by what they are —
+/// `spill0`, `const0` — rather than by where they will land. These are the
+/// assertions about what the pass *decided*; the resolved renderings are the
+/// assertions about the layout it produced.
+fn render_provisional(o: &BackPatchableSlot, locals_count: u16) -> String {
+    match o {
+        // A provisional register index counts from the frame base, since lowering
+        // starts `curr_register_index` at `locals_count` — so it is offset back to
+        // operand-relative numbering here, which is how the pass is reasoned about.
+        BackPatchableSlot::Register(n) => format!("r{}", n - locals_count),
+        BackPatchableSlot::Spill(i) => format!("spill{i}"),
+        BackPatchableSlot::Const(id) => format!("const{}", id.raw()),
+        BackPatchableSlot::Slot(Slot(n)) if *n < locals_count => {
+            format!("local{n}")
+        }
+        BackPatchableSlot::Slot(Slot(n)) => format!("r{}", n - locals_count),
+    }
+}
+
+/// Runs the resolution `emit_instructions_for_func` runs once a body is fully
+/// lowered, turning every operand placeholder in `prog` into a frame index.
+///
+/// Calls [`BackpatchMap::apply`] rather than reimplementing the shifts, so a test
+/// asserting on a resolved operand is asserting on the pass's own arithmetic. A copy
+/// of the formula here could agree with itself while disagreeing with the runtime,
+/// which is the failure this is placed to catch.
+fn resolve_backpatches(s: &mut SimulatedStack, prog: &mut Instructions) {
+    let locals_count = s.locals_count();
+    let consts_len = s.const_interner.len() as u16;
+    let spills = s.spills.allocation_len();
+    let mut layout = layout_of(s);
+
+    s.backpatch_map.apply(
+        &mut prog.inner,
+        locals_count,
+        consts_len,
+        spills,
+        &mut layout,
+    );
+}
+
+/// Resolves one lowering-time operand the way [`resolve_backpatches`] resolves the
+/// arena, for a test holding a slot it popped off the simulated stack.
+fn resolve(s: &SimulatedStack, o: &BackPatchableSlot) -> Slot {
+    let locals_count = s.locals_count();
+    let consts_len = s.const_interner.len() as u16;
+
+    match o {
+        BackPatchableSlot::Const(id) => Slot(id.raw() + locals_count),
+        BackPatchableSlot::Spill(i) => Slot(i.raw_value() + locals_count + consts_len),
+        BackPatchableSlot::Register(n) => Slot(n + s.spills.allocation_len() + consts_len),
+        BackPatchableSlot::Slot(slot) => *slot,
+    }
+}
+
+impl SimulatedStack {
+    /// [`Self::registers_for`] for a test driving the stack directly.
+    ///
+    /// Keys the patch by how many are already recorded — which is a fresh index,
+    /// since each call records one — and hands that key back for
+    /// [`resolved_inputs`]. A test that emits no instruction stream has no
+    /// instruction index to key by, and does not need the real one.
+    fn registers_for_at<const I: usize, const O: usize>(
+        &mut self,
+    ) -> Result<(usize, Signature<I, O>), TraceWasmError> {
+        let index = self.backpatch_map.0.len();
+        let sig = self.registers_for::<I, O>(index, InstructionSource::Emit)?;
+
+        Ok((index, sig))
+    }
+
+    /// Pops and renders in one step, so a provisional-form assertion does not have
+    /// to name its own locals count.
+    fn pop_render(&mut self) -> String {
+        let o = self.pop();
+
+        render_provisional(&o, self.locals_count())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,8 +308,8 @@ fn assert_func_lowers_to(wat: &str, n: usize, expected: &str) {
 
 /// A stack with the implicit function frame already pushed, as
 /// `emit_instructions_for_func` sets up.
-fn sim(locals: u32, globals: u32) -> SimulatedStack {
-    let mut s = SimulatedStack::new(locals, globals);
+fn sim(locals: u32) -> SimulatedStack {
+    let mut s = SimulatedStack::new(locals);
 
     s.control_stack.stack.push(Block {
         kind: BlockKind::Func,
@@ -203,6 +324,8 @@ fn sim(locals: u32, globals: u32) -> SimulatedStack {
     s
 }
 
+/// An all-`i32` type of the given arity, for a test whose subject is the arity
+/// rather than the types.
 fn func_ty(params: usize, results: usize) -> FuncType {
     FuncType {
         params: vec![ValType::I32; params].into_boxed_slice(),
@@ -212,7 +335,62 @@ fn func_ty(params: usize, results: usize) -> FuncType {
 
 /// `(slot height, register index)` — the two heights the pass tracks separately.
 fn heights(s: &SimulatedStack) -> (u32, usize) {
-    (s.stack.height(), s.curr_register_index)
+    (s.stack.height(), operands_in_use(s))
+}
+
+/// How many operand registers are currently live.
+///
+/// `curr_register_index` counts from the *frame* base — lowering starts it at
+/// `locals_count` — so it is offset back to operand-relative numbering here, which
+/// is the height the pass is reasoned about and what `r0`, `r1` … name. The absolute
+/// frame indices are pinned separately, by [`frame_indices`] and the runtime's own
+/// layout tests.
+fn operands_in_use(s: &SimulatedStack) -> usize {
+    s.curr_register_index - s.locals_count() as usize
+}
+
+/// The peak operand-register count, i.e. what the frame needs above its locals.
+fn peak_operands(s: &SimulatedStack) -> u16 {
+    s.max_registers - s.locals_count()
+}
+
+/// [`peak_operands`] for a finished layout.
+fn peak_operands_of(frame: &RegFrameLayout) -> u16 {
+    frame.registers - frame.locals_count
+}
+
+/// The frame index the operand registers begin at, given the four-region order
+/// `locals | consts | spills | registers`.
+///
+/// A `caller_base` is an operand register index, so it is at or above this — which is
+/// exactly what keeps a callee's frame from overlapping its caller's constants and
+/// spills. Subtracting it recovers the operand-relative base the pass reasons about.
+fn operand_base_of(frame: &RegFrameLayout) -> u16 {
+    frame.locals_count + frame.consts.len() as u16 + frame.spills
+}
+
+/// A run of destination registers, offset back to operand-relative numbering.
+///
+/// A destination is a start plus an arity, since an instruction's outputs are always
+/// consecutive. This reads the *provisional* start — before resolution shifts
+/// registers up past the constant and spill regions — so the operand base is just
+/// the locals count.
+fn output_operands(start: u16, len: usize, s: &SimulatedStack) -> Vec<u16> {
+    (0..len as u16)
+        .map(|i| start + i - s.locals_count())
+        .collect()
+}
+
+/// The operands lowering recorded for the instruction keyed `index`, resolved to
+/// final frame indices.
+///
+/// A signature's own `input` holds placeholders until resolution runs, so a test
+/// driving [`SimulatedStack`] without an instruction stream reads the operands from
+/// the backpatch map instead.
+fn resolved_inputs(s: &SimulatedStack, index: usize) -> Vec<Slot> {
+    let (_, patch) = &s.backpatch_map.0[&index][0];
+
+    patch.iter().map(|p| resolve(s, p)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -221,16 +399,16 @@ fn heights(s: &SimulatedStack) -> (u32, usize) {
 
 #[test]
 fn borrows_of_one_local_share_a_single_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
-    s.push_const(Const::I32(5));
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(5)).unwrap();
 
-    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _set = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
+    let _set = s.registers_for_at::<1, 0>().unwrap();
+    let (add, _) = s.registers_for_at::<2, 1>().unwrap();
 
     assert_eq!(
         spilled_to(spill),
@@ -239,7 +417,7 @@ fn borrows_of_one_local_share_a_single_spill() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
+        slots(&resolved_inputs(&s, add), &layout_of(&s)),
         ["spill0", "spill0"],
         "both operands redirect"
     );
@@ -247,16 +425,18 @@ fn borrows_of_one_local_share_a_single_spill() {
 
 #[test]
 fn a_consumed_borrow_is_not_spilled() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _load = s.registers_for::<1, 1>(); // consumes the borrow
+    let _load = s.registers_for_at::<1, 1>().unwrap(); // consumes the borrow
 
-    s.push_const(Const::I32(5));
+    s.push_const(Const::I32(5)).unwrap();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none(),
         "nothing borrows local 0 any more"
     );
 
@@ -265,22 +445,22 @@ fn a_consumed_borrow_is_not_spilled() {
 
 #[test]
 fn successive_writes_produce_independent_snapshots() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_const(Const::I32(1));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(1)).unwrap();
 
-    let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
+    let _ = s.registers_for_at::<1, 0>().unwrap();
 
-    s.push_local(0);
-    s.push_const(Const::I32(2));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let second = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let second = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
+    let _ = s.registers_for_at::<1, 0>().unwrap();
+    let (add, _) = s.registers_for_at::<2, 1>().unwrap();
 
     assert_eq!(
         (spilled_to(first), spilled_to(second)),
@@ -289,7 +469,7 @@ fn successive_writes_produce_independent_snapshots() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
+        slots(&resolved_inputs(&s, add), &layout_of(&s)),
         ["spill0", "spill1"],
         "each operand keeps its own snapshot"
     );
@@ -297,20 +477,20 @@ fn successive_writes_produce_independent_snapshots() {
 
 #[test]
 fn dropping_the_last_borrow_releases_its_spill_slot() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_const(Const::I32(1));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(1)).unwrap();
 
-    SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>();
+    let _ = s.registers_for_at::<1, 0>().unwrap();
 
     s.pop(); // drop the spilled borrow
-    s.push_local(0);
-    s.push_const(Const::I32(2));
+    s.push_local(0).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let reused = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let reused = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     assert_eq!(
         spilled_to(reused),
@@ -323,17 +503,20 @@ fn dropping_the_last_borrow_releases_its_spill_slot() {
 
 #[test]
 fn tee_spills_before_reading_the_top() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(3);
+    s.push_local(3).unwrap();
 
-    let spill = SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills);
-
+    let spill = SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills).unwrap();
     let operand = s.tee();
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
 
-    assert_eq!(operand.render(), "spill0", "tee must observe the redirect");
+    assert_eq!(
+        render_provisional(&operand, s.locals_count()),
+        "spill0",
+        "tee must observe the redirect"
+    );
 
     assert_eq!(s.stack.height(), 1, "tee peeks, it does not consume");
 }
@@ -416,6 +599,7 @@ fn a_null_reference_is_the_same_immediate_whatever_its_heap_type() {
         &lower("(module (func (result funcref) ref.null func))"),
         &[],
     );
+
     let externref = RegInstruction::render_body(
         &lower("(module (func (result externref) ref.null extern))"),
         &[],
@@ -478,21 +662,22 @@ fn ref_is_null_feeds_a_branch_directly() {
     );
 }
 
-/// References take part in lazy forwarding like any other value: a `funcref`
-/// global borrowed across a call is rescued, and `ref.is_null` reads the spill.
+/// A reference is a value like any other, so a `funcref` global is read into a
+/// register and `ref.is_null` reads that register — no rescue, whatever the call does
+/// to the global.
 #[test]
-fn a_reference_borrowed_across_a_call_is_rescued() {
+fn a_reference_read_from_a_global_crosses_a_call_in_a_register() {
     assert_func_lowers_to(
         r#"(module (global (mut funcref) (ref.null func)) (func)
              (func (result i32) global.get 0 call 0 ref.is_null))"#,
         1,
         "
-          0  global.spill global0 -> spill0
-          1  call         f0 caller_base=0
-          2  ref.is_null  spill0 -> r0
+          0  global.get   global0 -> r0
+          1  call         f0 caller_base=1
+          2  ref.is_null  r0 -> r0
           3  move         r0 -> r0
           4  end
-             frame: 1 registers, 1 spills
+             frame: 1 registers, 0 spills
         ",
     );
 }
@@ -513,30 +698,34 @@ fn block_entry_layouts_hold_for_every_block_type() {
             BlockType::Type(wasmparser::ValType::I32),
             BlockType::FuncType(0),
         ] {
-            let mut s = sim(4, 0);
+            let mut s = sim(4);
 
-            s.push_local(0);
+            s.push_local(0).unwrap();
 
-            let _ = s.registers_for::<1, 1>(); // a live register underneath
+            let _ = s.registers_for_at::<1, 1>().unwrap(); // a live register underneath
             let np = params_and_results_from_blockty(&blockty, &types).0;
 
             for _ in 0..np {
-                s.push_const(Const::I32(9));
+                s.push_const(Const::I32(9)).unwrap();
             }
 
             if is_if {
-                s.push_const(Const::I32(1)); // condition
+                s.push_const(Const::I32(1)).unwrap(); // condition
             }
 
             let (params, _) = s.add_block(variant_of(&variant), &blockty, &types, 0);
             let recorded = s.get_curr_block().recorded_height;
 
             if params != 0 {
-                let _ = s.materialize_stack_slots_in_registers(params + u32::from(is_if));
+                let _ = s.materialize_stack_slots_in_registers(
+                    params + u32::from(is_if),
+                    s.backpatch_map.0.len(),
+                    InstructionSource::Emit,
+                );
             }
 
             if is_if {
-                let _ = s.registers_for::<1, 0>();
+                let _ = s.registers_for_at::<1, 0>().unwrap();
             }
 
             assert_eq!(
@@ -546,7 +735,7 @@ fn block_entry_layouts_hold_for_every_block_type() {
             );
 
             assert_eq!(
-                s.curr_register_index,
+                operands_in_use(&s),
                 1 + params as usize,
                 "params sit above the live register"
             );
@@ -554,6 +743,8 @@ fn block_entry_layouts_hold_for_every_block_type() {
     }
 }
 
+/// Copies a [`BlockVariant`], which is not `Copy`, so one case can be reused across
+/// the arms of a table-driven test.
 fn variant_of(v: &BlockVariant) -> BlockVariant {
     match v {
         BlockVariant::If => BlockVariant::If,
@@ -569,17 +760,17 @@ fn variant_of(v: &BlockVariant) -> BlockVariant {
 
 #[test]
 fn branch_lowering_does_not_disturb_the_stack() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
-    s.push_local(1); // a live lazy borrow above the base
+    s.push_local(1).unwrap(); // a live lazy borrow above the base
 
     let before = (
         heights(&s),
@@ -587,7 +778,7 @@ fn branch_lowering_does_not_disturb_the_stack() {
         s.spills.allocation_len(),
     );
 
-    let _mov = s.br_truncation_registers(base, 0);
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     let after = (
         heights(&s),
@@ -600,56 +791,56 @@ fn branch_lowering_does_not_disturb_the_stack() {
 
 #[test]
 fn branch_destinations_are_based_at_the_target_label() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let outer = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r0, below the inner block
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r0, below the inner block
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let inner = s.get_curr_block().recorded_height;
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r1, the carried value
-    let to_inner = s.br_truncation_registers(inner, 1);
-    let to_outer = s.br_truncation_registers(outer, 1);
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r1, the carried value
+    let to_inner = s
+        .br_truncation_registers(inner, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
+    let to_outer = s
+        .br_truncation_registers(outer, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
-    assert_eq!(to_inner.output_registers(&s.output_registers), &[1]);
-    assert_eq!(to_outer.output_registers(&s.output_registers), &[0]);
+    assert_eq!(output_operands(to_inner.output_start, 1, &s), vec![1]);
 
-    assert_eq!(
-        to_inner.input_registers(&s.input_registers).len(),
-        1,
-        "every arm reads the same operands"
-    );
+    assert_eq!(output_operands(to_outer.output_start, 1, &s), vec![0]);
+
+    assert_eq!(to_inner.input.len(), 1, "every arm reads the same operands");
 }
 
 #[test]
 fn branch_destinations_count_towards_the_frame() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
     // operands that are not already registers: destinations sit above everything
     // allocated so far, so the frame has to grow for them
-    s.push_const(Const::I32(1));
-    s.push_const(Const::I32(2));
+    s.push_const(Const::I32(1)).unwrap();
+    s.push_const(Const::I32(2)).unwrap();
 
-    let mov = s.br_truncation_registers(base, 2);
-
-    let highest = mov
-        .output_registers(&s.output_registers)
-        .iter()
-        .map(|r| r + 1)
-        .max()
+    let mov = s
+        .br_truncation_registers(base, 2, s.backpatch_map.0.len(), InstructionSource::Emit)
         .unwrap();
+
+    // Destinations are consecutive from the start, so one past the last is the
+    // highest frame index the move writes.
+    let highest = mov.output_start + mov.input.len() as u16;
 
     assert!(
         highest <= s.max_registers,
@@ -679,24 +870,37 @@ fn reachability(ops: &[Operator<'static>]) -> Vec<bool> {
         .collect()
 }
 
+// Operator constructors, abbreviated because the tests below are about the *shape*
+// of an operator sequence and a full `Operator::Block { blockty: .. }` at every
+// position buries it.
+
+/// `block` with no params or results.
 fn blk() -> Operator<'static> {
     Operator::Block {
         blockty: BlockType::Empty,
     }
 }
+
+/// `if` with no params or results.
 fn iff() -> Operator<'static> {
     Operator::If {
         blockty: BlockType::Empty,
     }
 }
+
+/// `loop` with no params or results.
 fn lop() -> Operator<'static> {
     Operator::Loop {
         blockty: BlockType::Empty,
     }
 }
+
+/// `br d`.
 fn br(d: u32) -> Operator<'static> {
     Operator::Br { relative_depth: d }
 }
+
+/// Any operator that pushes one value.
 fn cst() -> Operator<'static> {
     Operator::I32Const { value: 1 }
 }
@@ -773,52 +977,107 @@ fn dead_nested_blocks_keep_the_control_stack_balanced() {
 // known gaps
 // ---------------------------------------------------------------------------
 
-/// A frame just large enough to execute the instructions these tests emit, so a
-/// claim about which path writes what is observed rather than argued.
+/// A register file just large enough to execute the instructions these tests emit,
+/// so a claim about which path writes what is observed rather than argued.
+///
+/// Laid out exactly as [`RegFrame`](crate::runtime::reg::RegFrame) lays one out —
+/// `locals | consts | spills | registers`, based at 0 — so a read is
+/// `registers[frame_index]`, the same single add execution performs. Building it any
+/// other way would let a test pass while the runtime's arithmetic was wrong, which
+/// is the failure this harness exists to catch.
 ///
 /// Spill slots start poisoned, because the whole question is whether a slot is
 /// written on every path that reads it.
 struct Frame {
-    locals: Vec<i64>,
+    /// The whole file, laid out `locals | consts | spills | registers` from 0, so a
+    /// read is `registers[frame_index]` — the same single add execution performs.
+    registers: Vec<i64>,
+    /// The instance's globals, which live outside the frame.
     globals: Vec<i64>,
-    spills: Vec<i64>,
+    /// Width of the first region, and so the base of the constants.
+    locals_count: u16,
+    /// Width of the second region. With `locals_count` it gives the spill base,
+    /// which is the one address these tests have to compute the same way the runtime
+    /// does.
+    consts_len: u16,
 }
 
+/// What an unwritten slot holds, so a test asserting on a value it expects to have
+/// been written cannot pass on a slot nothing wrote.
 const POISON: i64 = i64::MIN;
 
 impl Frame {
-    fn new(locals: &[i64], globals: &[i64]) -> Self {
+    /// Builds a file sized for `s`, doing the two things `enter_frame` does: seed
+    /// the locals, and materialise the constant pool at its region.
+    ///
+    /// Requires [`resolve_backpatches`] to have run, since the operands the emitted
+    /// instructions carry are frame indices only after that.
+    fn new(s: &SimulatedStack, locals: &[i64], globals: &[i64]) -> Self {
+        let locals_count = s.locals_count();
+        let consts_len = s.const_interner.len() as u16;
+        let spills = s.spills.allocation_len();
+        let width = (s.max_registers + spills) as usize + consts_len as usize;
+
+        let mut registers = vec![POISON; width];
+
+        assert_eq!(
+            locals.len(),
+            locals_count as usize,
+            "the harness must seed exactly the frame's locals"
+        );
+
+        registers[..locals.len()].copy_from_slice(locals);
+
+        for (i, c) in s.const_interner.values().iter().enumerate() {
+            let Const::I32(v) = c else {
+                unreachable!("these tests push only i32 constants, got {c:?}")
+            };
+
+            registers[locals_count as usize + i] = *v as i64;
+        }
+
         Frame {
-            locals: locals.to_vec(),
+            registers,
             globals: globals.to_vec(),
-            spills: vec![POISON; 8],
+            locals_count,
+            consts_len,
         }
     }
 
+    /// The absolute index of spill slot `index`, from the runtime's formula.
+    fn spill_at(&self, index: &SpillIndex) -> usize {
+        (self.locals_count + self.consts_len) as usize + spill_slot(index)
+    }
+
+    /// Reads one operand, refusing an unresolved placeholder rather than indexing
+    /// past the end of the file with it.
     fn read(&self, slot: &Slot) -> i64 {
-        match slot {
-            Slot::Const(Const::I32(v)) => *v as i64,
-            Slot::Local(n) => self.locals[*n as usize],
-            Slot::Global(n) => self.globals[*n as usize],
-            Slot::Spilled(i) => self.spills[spill_slot(i)],
-            Slot::Register(_) => unreachable!("these tests emit no register writes"),
-            Slot::Const(_) => unreachable!("i32 constants only"),
-        }
+        let Slot(i) = slot;
+
+        assert_ne!(
+            *i,
+            u16::MAX,
+            "an unresolved placeholder reached execution — \
+             `resolve_backpatches` did not run"
+        );
+
+        self.registers[*i as usize]
     }
 
-    fn exec(&mut self, instruction: &RegInstruction, ins: &[Slot]) {
+    /// Executes one instruction. Only the three these tests emit are handled — a
+    /// fourth reaching here means the test emitted something it did not mean to.
+    fn exec(&mut self, instruction: &RegInstruction) {
         match instruction {
             RegInstruction::LocalSpill { index, spill_index } => {
-                self.spills[spill_slot(spill_index)] = self.locals[index.0 as usize];
-            }
-            RegInstruction::GlobalSpill { index, spill_index } => {
-                self.spills[spill_slot(spill_index)] = self.globals[index.0 as usize];
+                let at = self.spill_at(spill_index);
+
+                self.registers[at] = self.registers[index.0 as usize];
             }
             RegInstruction::LocalSet { index, input } => {
-                self.locals[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.registers[index.0 as usize] = self.read(&input.registers[0]);
             }
             RegInstruction::GlobalSet { index, input } => {
-                self.globals[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.globals[index.0 as usize] = self.read(&input.registers[0]);
             }
             _ => unreachable!("these tests emit only spills and writes"),
         }
@@ -833,13 +1092,13 @@ fn spill_slot(index: &SpillIndex) -> usize {
 
 /// Executes `prog`, skipping the half-open range `skip` — the instructions a branch
 /// jumps over on one of its paths.
-fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
+fn run(prog: &Instructions, skip: Range<usize>, frame: &mut Frame) {
     for (pc, instruction) in prog.inner.iter().enumerate() {
         if skip.contains(&pc) {
             continue;
         }
 
-        frame.exec(instruction, ins);
+        frame.exec(instruction);
     }
 }
 
@@ -859,14 +1118,13 @@ fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame)
 /// that invalidates it happens on one arm only.
 #[test]
 fn a_conditional_arm_cannot_own_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow
-    s.push_local(1); // the condition
+    s.push_local(0).unwrap(); // the borrow
+    s.push_local(1).unwrap(); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     assert!(
         !prog.is_empty(),
@@ -875,18 +1133,24 @@ fn a_conditional_arm_cannot_own_the_spill() {
 
     s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
 
-    let _cond = s.registers_for::<1, 0>();
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
 
     // then-arm
     let arm = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
         assert!(
-            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none(),
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -903,71 +1167,26 @@ fn a_conditional_arm_cannot_own_the_spill() {
     let recorded = s.get_curr_block().recorded_height;
     let params = s.get_curr_block().params;
 
-    s.pops_and_pushes(s.stack.height() - recorded, params);
+    s.pops_and_pushes(s.stack.height() - recorded, params)
+        .unwrap();
 
     let consumer = s.pop();
+    let rendered = render_provisional(&consumer, s.locals_count());
+
+    resolve_backpatches(&mut s, &mut prog);
+
+    let consumer = resolve(&s, &consumer);
 
     for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
-        let mut frame = Frame::new(&[42, 1], &[]);
+        let mut frame = Frame::new(&s, &[42, 1], &[]);
 
-        run(&prog, &s.input_registers, skip, &mut frame);
+        run(&prog, skip, &mut frame);
 
         assert_eq!(
             frame.read(&consumer),
             42,
-            "{tag}: <use> reads {}, which that path never wrote",
-            consumer.render()
+            "{tag}: <use> reads {rendered}, which that path never wrote"
         );
-    }
-}
-
-/// The same shape for a global, which uses the other arena.
-#[test]
-fn a_conditional_arm_cannot_own_a_global_spill() {
-    let mut s = sim(1, 2);
-    let mut prog: Instructions = Instructions::default();
-
-    s.push_global(1);
-    s.push_local(0); // the condition
-
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
-
-    s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
-
-    let _cond = s.registers_for::<1, 0>();
-
-    let arm = prog.len()..{
-        s.push_const(Const::I32(5));
-
-        assert!(SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills).is_none());
-
-        let input = s.registers_for::<1, 0>().input;
-
-        prog.push(
-            RegInstruction::GlobalSet {
-                index: GlobalIndex(1),
-                input,
-            },
-            0,
-        );
-
-        prog.len()
-    };
-
-    let recorded = s.get_curr_block().recorded_height;
-    let params = s.get_curr_block().params;
-
-    s.pops_and_pushes(s.stack.height() - recorded, params);
-
-    let consumer = s.pop();
-
-    for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
-        let mut frame = Frame::new(&[1], &[0, 42]);
-
-        run(&prog, &s.input_registers, skip, &mut frame);
-
-        assert_eq!(frame.read(&consumer), 42, "{tag}");
     }
 }
 
@@ -977,29 +1196,36 @@ fn a_conditional_arm_cannot_own_a_global_spill() {
 /// opposite of the `if` case.
 #[test]
 fn a_taken_br_if_cannot_skip_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow
+    s.push_local(0).unwrap(); // the borrow
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_const(Const::I32(1)); // the condition
+    s.push_const(Const::I32(1)).unwrap(); // the condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
-    let _cond = s.registers_for::<1, 0>();
-    let _mov = s.br_truncation_registers(base, 0);
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     // everything after the branch is skipped when it is taken
     let rest = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
-        assert!(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none());
+        assert!(
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none()
+        );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1014,10 +1240,14 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
     let consumer = s.pop();
 
-    for (tag, skip) in [("not taken", 0..0), ("taken", rest.clone())] {
-        let mut frame = Frame::new(&[42, 1], &[]);
+    resolve_backpatches(&mut s, &mut prog);
 
-        run(&prog, &s.input_registers, skip, &mut frame);
+    let consumer = resolve(&s, &consumer);
+
+    for (tag, skip) in [("not taken", 0..0), ("taken", rest.clone())] {
+        let mut frame = Frame::new(&s, &[42, 1], &[]);
+
+        run(&prog, skip, &mut frame);
 
         assert_eq!(frame.read(&consumer), 42, "{tag}");
     }
@@ -1029,13 +1259,12 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 /// the back-edge and capture the value the previous iteration wrote.
 #[test]
 fn a_loop_body_cannot_own_the_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0); // the borrow, below the loop
+    s.push_local(0).unwrap(); // the borrow, below the loop
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     let entry = 0..prog.len();
 
@@ -1048,14 +1277,19 @@ fn a_loop_body_cannot_own_the_spill() {
 
     // body
     let body = prog.len()..{
-        s.push_const(Const::I32(5));
+        s.push_const(Const::I32(5)).unwrap();
 
         assert!(
-            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+            SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+                .unwrap()
+                .is_none(),
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1068,7 +1302,7 @@ fn a_loop_body_cannot_own_the_spill() {
         // the back-edge branches too, and must add nothing
         let before = prog.len();
 
-        RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
+        RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
         assert_eq!(prog.len(), before, "nothing left to spill at the back-edge");
 
@@ -1077,23 +1311,27 @@ fn a_loop_body_cannot_own_the_spill() {
 
     let recorded = s.get_curr_block().recorded_height;
 
-    s.pops_and_pushes(s.stack.height() - recorded, 0);
+    s.pops_and_pushes(s.stack.height() - recorded, 0).unwrap();
 
     let consumer = s.pop();
 
+    resolve_backpatches(&mut s, &mut prog);
+
+    let consumer = resolve(&s, &consumer);
+
     for iterations in [1, 2, 5] {
-        let mut frame = Frame::new(&[42, 1], &[]);
+        let mut frame = Frame::new(&s, &[42, 1], &[]);
 
         for (pc, instruction) in prog.inner.iter().enumerate() {
             if entry.contains(&pc) {
-                frame.exec(instruction, &s.input_registers);
+                frame.exec(instruction);
             }
         }
 
         for _ in 0..iterations {
             for (pc, instruction) in prog.inner.iter().enumerate() {
                 if body.contains(&pc) {
-                    frame.exec(instruction, &s.input_registers);
+                    frame.exec(instruction);
                 }
             }
         }
@@ -1110,12 +1348,12 @@ fn a_loop_body_cannot_own_the_spill() {
 /// already dominates its readers and runs once.
 #[test]
 fn a_block_does_not_hoist_spills() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0); // the Block arm makes no such call
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap(); // the Block arm makes no such call
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], prog.len());
 
@@ -1128,17 +1366,16 @@ fn a_block_does_not_hoist_spills() {
 /// which is the common case for anything rustc produces.
 #[test]
 fn hoisting_costs_nothing_when_no_borrow_is_live() {
-    let mut s = sim(8, 4);
+    let mut s = sim(8);
     let mut prog: Instructions = Instructions::default();
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // consumed into a register
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // consumed into a register
 
-    s.push_const(Const::I32(1)); // a condition
+    s.push_const(Const::I32(1)).unwrap(); // a condition
 
-    RegInstruction::spill_live_locals(&mut s, &mut prog, 0);
-    RegInstruction::spill_live_globals(&mut s, &mut prog, 0);
+    RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
     assert!(prog.is_empty(), "no live borrows, no instructions");
     assert_eq!(s.spills.allocation_len(), 0, "and no frame slots reserved");
@@ -1147,119 +1384,159 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 // ---------------------------------------------------------------------------
 // globals
 //
-// Globals run through the same machinery as locals but a separate arena, so the
-// asymmetries are worth pinning rather than assuming.
+// A global is *not* lazily forwarded. `global.get` emits a real read into a
+// register, which is what lets an operand be a bare frame index — a global lives in
+// the instance, not the frame — and it means no later write can invalidate a value
+// already read. These pin that: the read happens, and none of the rescue machinery
+// locals need is emitted for it.
 // ---------------------------------------------------------------------------
 
+/// Two mutable globals and a function, shared by the tests about reads of a global
+/// surviving a write or a call.
+const GLOBAL_MODULE: &str = r#"(module
+    (global (mut i32) (i32.const 0))
+    (global (mut i32) (i32.const 0))
+    (func (param i32) (result i32) local.get 0)
+    "#;
+
 #[test]
-fn global_borrows_behave_like_local_ones() {
-    let mut s = sim(2, 2);
-
-    s.push_global(1);
-    s.push_global(1);
-    s.push_const(Const::I32(5));
-
-    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_globals, &mut s.spills);
-
-    let _set = s.registers_for::<1, 0>();
-    let add = s.registers_for::<2, 1>();
-
-    assert_eq!(spilled_to(spill), Some("spill0".into()));
-
-    assert_eq!(
-        slots(add.input.registers(&s.input_registers)),
-        ["spill0", "spill0"]
+fn a_global_read_is_materialised_into_a_register() {
+    assert_func_lowers_to(
+        &format!("{GLOBAL_MODULE} (func (result i32) global.get 0 i32.const 1 i32.add))"),
+        1,
+        "
+          0  global.get   global0 -> r0
+          1  i32.add      r0, 1 -> r0
+          2  move         r0 -> r0
+          3  end
+             frame: 1 registers, 0 spills
+        ",
     );
 }
 
+/// The property the deleted global-spill machinery used to provide: a write cannot
+/// reach a value that has already been read into a register, so nothing is rescued
+/// and the frame needs no spill slot.
 #[test]
-fn a_local_and_a_global_of_the_same_index_are_independent() {
-    let mut s = sim(2, 2);
+fn a_global_write_does_not_rescue_an_earlier_read() {
+    let (prog, _, frame) = lower_func(
+        &format!(
+            "{GLOBAL_MODULE} (func (result i32) \
+               global.get 0 i32.const 9 global.set 0 i32.const 1 i32.add))"
+        ),
+        1,
+    );
 
-    s.push_local(0);
-    s.push_global(0);
-    s.push_const(Const::I32(7));
-
-    // writing global 0 must not disturb the borrow of local 0
-    let global_spill = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
-
-    let _set = s.registers_for::<1, 0>();
-
-    assert_eq!(spilled_to(global_spill), Some("spill0".into()));
+    assert_eq!(
+        frame.spills, 0,
+        "an eager read needs no rescue, so no spill slot is allocated"
+    );
 
     assert!(
-        s.lazy_locals.origin[0].is_some(),
-        "local 0's borrow must survive a write to global 0"
+        !prog
+            .iter()
+            .any(|i| i.kind() == RegInstructionKind::LocalSpill),
+        "and nothing is spilled, but the body emits: {:?}",
+        prog.iter().map(|i| i.kind()).collect::<Vec<_>>()
     );
-
-    assert_eq!(s.pop().render(), "spill0", "the global was rescued");
-    assert_eq!(s.pop().render(), "local0", "the local still forwards");
 }
 
+/// The case a *call* used to force a rescue for, because a callee may write any
+/// global. It cannot reach a register.
 #[test]
-fn locals_and_globals_draw_from_one_spill_pool() {
-    let mut s = sim(2, 2);
-
-    s.push_local(0);
-    s.push_global(0);
-
-    let l = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
-    let g = SimulatedStack::set_lazy(0, &mut s.lazy_globals, &mut s.spills);
-
-    assert_eq!(
-        (spilled_to(l), spilled_to(g)),
-        (Some("spill0".into()), Some("spill1".into())),
-        "distinct slots from the shared pool"
+fn a_global_read_survives_a_call() {
+    let (prog, _, frame) = lower_func(
+        &format!(
+            "{GLOBAL_MODULE} (func (result i32) \
+               global.get 0 i32.const 7 call 0 i32.add))"
+        ),
+        1,
     );
 
-    assert_eq!(s.spills.allocation_len(), 2);
+    assert_eq!(frame.spills, 0, "a call cannot invalidate a register");
+
+    let at = index_of_kind(&prog, RegInstructionKind::I32Add).unwrap();
+
+    let RegInstruction::I32Add(sig) = &prog[at] else {
+        unreachable!()
+    };
+
+    // both operands are operand registers — the global read, and the call's result
+    let operand_base = operand_base_of(&frame);
+
+    for (i, index) in frame_indices(&sig.input.registers).iter().enumerate() {
+        assert!(
+            *index >= operand_base,
+            "operand {i} is slot {index}, below the operand region at {operand_base} \
+             — a global read across a call must be a register"
+        );
+    }
+}
+
+/// Locals still forward lazily, so a write to one *is* rescued — the asymmetry with
+/// globals is the point.
+#[test]
+fn writing_a_global_does_not_disturb_a_local_borrow() {
+    let mut s = sim(2);
+
+    s.push_local(0).unwrap();
+
+    // A global write emits nothing that touches the lazy locals arena, so the
+    // borrow of local 0 is still live and still reads its origin.
+    assert!(
+        s.lazy_locals.origin[0].is_some(),
+        "local 0's borrow is live"
+    );
+
+    assert_eq!(s.spills.allocation_len(), 0, "and nothing is spilled");
+    assert_eq!(s.pop_render(), "local0", "so it still forwards");
 }
 
 #[test]
 fn writing_one_local_leaves_other_borrows_alone() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(0);
-    s.push_local(1);
-    s.push_local(2);
+    s.push_local(0).unwrap();
+    s.push_local(1).unwrap();
+    s.push_local(2).unwrap();
 
-    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(1, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(s.pop().render(), "local2", "untouched above");
-    assert_eq!(s.pop().render(), "spill0", "rescued");
-    assert_eq!(s.pop().render(), "local0", "untouched below");
+    assert_eq!(s.pop_render(), "local2", "untouched above");
+    assert_eq!(s.pop_render(), "spill0", "rescued");
+    assert_eq!(s.pop_render(), "local0", "untouched below");
 }
 
 #[test]
 fn writing_an_unborrowed_local_emits_nothing() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    assert!(SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills).is_none());
+    assert!(
+        SimulatedStack::set_lazy(3, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(s.spills.allocation_len(), 0);
 }
 
 #[test]
 fn three_borrows_share_one_entry() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
 
     assert_eq!(
-        spilled_to(SimulatedStack::set_lazy(
-            0,
-            &mut s.lazy_locals,
-            &mut s.spills
-        )),
+        spilled_to(SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap()),
         Some("spill0".into())
     );
 
     for _ in 0..3 {
-        assert_eq!(s.pop().render(), "spill0", "all three redirect");
+        assert_eq!(s.pop_render(), "spill0", "all three redirect");
     }
 
     // the pool only reclaims once the last of them is gone
@@ -1268,17 +1545,17 @@ fn three_borrows_share_one_entry() {
 
 #[test]
 fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills);
+    let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
     let operand = s.tee();
 
     // `local.tee 0` on a value read from local 0: correct, if redundant
     assert_eq!(spilled_to(spill), Some("spill0".into()));
-    assert_eq!(operand.render(), "spill0");
+    assert_eq!(render_provisional(&operand, s.locals_count()), "spill0");
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,40 +1564,44 @@ fn tee_of_the_local_it_reads_round_trips_through_a_spill() {
 
 #[test]
 fn drop_releases_a_register() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     assert_eq!(heights(&s), (1, 1));
 
     s.pop();
 
     assert_eq!(heights(&s), (0, 0), "the register comes back");
-    assert_eq!(s.max_registers, 1, "but the peak is remembered");
+    assert_eq!(peak_operands(&s), 1, "but the peak is remembered");
 }
 
 #[test]
 fn drop_releases_a_borrow_but_only_the_last_one() {
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
+    s.push_local(0).unwrap();
     s.pop();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_some(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_some(),
         "one borrow survives, so a write still has to rescue it"
     );
 
-    let mut s = sim(2, 0);
+    let mut s = sim(2);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
     s.pop();
 
     assert!(
-        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).is_none(),
+        SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills)
+            .unwrap()
+            .is_none(),
         "the sole borrow is gone"
     );
 }
@@ -1331,16 +1612,16 @@ fn drop_releases_a_borrow_but_only_the_last_one() {
 
 #[test]
 fn operands_are_recorded_deepest_first() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(0); // a
-    s.push_local(1); // b
-    s.push_local(2); // condition, pushed last
+    s.push_local(0).unwrap(); // a
+    s.push_local(1).unwrap(); // b
+    s.push_local(2).unwrap(); // condition, pushed last
 
-    let select = s.registers_for::<3, 1>();
+    let (select, _) = s.registers_for_at::<3, 1>().unwrap();
 
     assert_eq!(
-        slots(select.input.registers(&s.input_registers)),
+        slots(&resolved_inputs(&s, select), &layout_of(&s)),
         ["local0", "local1", "local2"],
         "select reads a, b, cond in that order"
     );
@@ -1348,38 +1629,63 @@ fn operands_are_recorded_deepest_first() {
 
 #[test]
 fn store_records_address_then_value() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(0); // address
-    s.push_const(Const::I32(9)); // value
+    s.push_local(0).unwrap(); // address
+    s.push_const(Const::I32(9)).unwrap(); // value
 
-    let store = s.registers_for::<2, 0>();
+    let (store, sig) = s.registers_for_at::<2, 0>().unwrap();
+
+    // An instruction is built with placeholders for *every* operand, not only the
+    // ones that need a shift — the real ones are recorded in the backpatch map and
+    // written in once the region sizes are known.
+    assert_eq!(
+        slots(&sig.input.registers, &layout_of(&s)),
+        ["<unresolved>", "<unresolved>"],
+        "no operand has a frame index until the body is fully lowered"
+    );
+
+    let operands = resolved_inputs(&s, store);
 
     assert_eq!(
-        slots(store.input.registers(&s.input_registers)),
-        ["local0", "9"]
+        slots(&operands, &layout_of(&s)),
+        ["local0", "9"],
+        "and both resolve once it is"
+    );
+
+    // 4 locals and one constant, so the pool begins at frame index 4 — the
+    // `const_id + locals_count` the pass backpatches.
+    assert_eq!(
+        frame_indices(&operands),
+        vec![0, 4],
+        "address is local 0; the constant is the first slot above the locals"
     );
 }
 
 #[test]
 fn a_result_reuses_an_operands_register() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r0
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r0
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>(); // r1
-    let add = s.registers_for::<2, 1>();
-    let inputs = add.input.registers(&s.input_registers);
-    let output = add.output.registers(&s.output_registers)[0];
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r1
+    let (add, sig) = s.registers_for_at::<2, 1>().unwrap();
 
-    assert_eq!(slots(inputs), ["r0", "r1"]);
+    let inputs = resolved_inputs(&s, add);
+    let output = resolve(&s, &BackPatchableSlot::Register(sig.output.start)).0;
+
+    assert_eq!(slots(&inputs, &layout_of(&s)), ["r0", "r1"]);
+
+    // 4 locals, no constants and no spills, so the operand region begins at 4 and
+    // the destination is the first register — the same slot `r0` occupies.
+    assert_eq!(frame_indices(&inputs), vec![4, 5]);
 
     assert_eq!(
-        output, 0,
+        output, 4,
         "the destination aliases an operand — an executor must read both first"
     );
 }
@@ -1387,36 +1693,36 @@ fn a_result_reuses_an_operands_register() {
 #[test]
 fn max_registers_tracks_the_peak_not_the_total() {
     // two loads, each consumed before the next
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     for l in 0..2 {
-        s.push_local(l);
+        s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>();
-        let _ = s.registers_for::<1, 0>();
+        let _ = s.registers_for_at::<1, 1>().unwrap();
+        let _ = s.registers_for_at::<1, 0>().unwrap();
     }
 
-    assert_eq!(s.max_registers, 1, "serial values reuse one register");
+    assert_eq!(peak_operands(&s), 1, "serial values reuse one register");
 
     // two loads live at once
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     for l in 0..2 {
-        s.push_local(l);
+        s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>();
+        let _ = s.registers_for_at::<1, 1>().unwrap();
     }
 
-    assert_eq!(s.max_registers, 2);
+    assert_eq!(peak_operands(&s), 2);
 }
 
 #[test]
 fn non_register_operands_occupy_stack_but_not_registers() {
-    let mut s = sim(4, 2);
+    let mut s = sim(4);
 
-    s.push_const(Const::I32(1));
-    s.push_local(0);
-    s.push_global(0);
+    s.push_const(Const::I32(1)).unwrap();
+    s.push_local(0).unwrap();
+    s.push_local(1).unwrap();
 
     assert_eq!(
         heights(&s),
@@ -1434,7 +1740,7 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
     let types = vec![func_ty(1, 1)];
 
     // no params: no entry move, so the body starts where the loop was seen
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Loop, &BlockType::Empty, &types, 7);
 
@@ -1444,9 +1750,9 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
     ));
 
     // with params: an entry move occupies index 7, body starts at 8
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_const(Const::I32(1));
+    s.push_const(Const::I32(1)).unwrap();
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 7);
 
     assert!(matches!(
@@ -1458,9 +1764,9 @@ fn a_loop_back_edge_targets_the_first_body_instruction() {
 #[test]
 fn an_if_records_the_index_of_the_if_itself() {
     let types = vec![func_ty(1, 1)];
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(1)).unwrap(); // condition
     s.add_block(BlockVariant::If, &BlockType::Empty, &types, 7);
 
     assert!(matches!(
@@ -1468,10 +1774,10 @@ fn an_if_records_the_index_of_the_if_itself() {
         BlockKind::If { index: 7, .. }
     ));
 
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_const(Const::I32(9)); // param
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(9)).unwrap(); // param
+    s.push_const(Const::I32(1)).unwrap(); // condition
     s.add_block(BlockVariant::If, &BlockType::FuncType(0), &types, 7);
 
     assert!(matches!(
@@ -1486,18 +1792,20 @@ fn an_if_records_the_index_of_the_if_itself() {
 
 #[test]
 fn a_branch_to_the_function_frame_unwinds_to_zero() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     let func_block = s.get_block(0);
 
     assert_eq!(func_block.recorded_height, 0);
 
-    let mov = s.br_truncation_registers(0, 0);
+    let mov = s
+        .br_truncation_registers(0, 0, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
     assert!(mov.is_empty());
     assert_eq!(heights(&s), (1, 1), "still a simulation");
@@ -1505,23 +1813,29 @@ fn a_branch_to_the_function_frame_unwinds_to_zero() {
 
 #[test]
 fn a_branch_carrying_several_values_lands_them_contiguously() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
-    s.push_const(Const::I32(2));
-    s.push_local(1);
+    s.push_const(Const::I32(2)).unwrap();
+    s.push_local(1).unwrap();
 
-    let mov = s.br_truncation_registers(base, 3);
+    let mov = s
+        .br_truncation_registers(base, 3, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
-    assert_eq!(mov.output_registers(&s.output_registers), &[0, 1, 2]);
-    assert_eq!(mov.input_registers(&s.input_registers).len(), 3);
+    assert_eq!(
+        output_operands(mov.output_start, mov.input.len(), &s),
+        vec![0, 1, 2]
+    );
+
+    assert_eq!(mov.input.len(), 3);
 }
 
 #[test]
@@ -1529,15 +1843,19 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     // loop's label type is its params; a block's is its results. Validation only
     // requires the types to match, so the arities agree while the bases differ.
     let types = vec![func_ty(1, 1)];
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
-    s.push_const(Const::I32(0)); // the loop's param
+    s.push_const(Const::I32(0)).unwrap(); // the loop's param
     s.add_block(BlockVariant::Loop, &BlockType::FuncType(0), &types, 0);
 
     let loop_block = s.get_curr_block().recorded_height;
     let loop_params = s.get_curr_block().params;
 
-    let _ = s.materialize_stack_slots_in_registers(loop_params);
+    let _ = s.materialize_stack_slots_in_registers(
+        loop_params,
+        s.backpatch_map.0.len(),
+        InstructionSource::Emit,
+    );
 
     s.add_block(
         BlockVariant::Block,
@@ -1549,41 +1867,58 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     let block_base = s.get_curr_block().recorded_height;
     let block_results = s.get_curr_block().results;
 
-    s.push_local(0); // the value the branch carries
+    s.push_local(0).unwrap(); // the value the branch carries
 
-    let to_loop = s.br_truncation_registers(loop_block, loop_params);
-    let to_block = s.br_truncation_registers(block_base, block_results);
+    let to_loop = s
+        .br_truncation_registers(
+            loop_block,
+            loop_params,
+            s.backpatch_map.0.len(),
+            InstructionSource::Emit,
+        )
+        .unwrap();
+    let to_block = s
+        .br_truncation_registers(
+            block_base,
+            block_results,
+            s.backpatch_map.0.len(),
+            InstructionSource::Emit,
+        )
+        .unwrap();
 
     assert_eq!(loop_params, block_results, "arities agree");
 
     assert_ne!(
-        to_loop.output_registers(&s.output_registers),
-        to_block.output_registers(&s.output_registers),
+        to_loop.output_start, to_block.output_start,
         "but the destinations differ, which is why each arm carries its own move"
     );
 }
 
 #[test]
 fn every_br_table_arm_sees_the_same_stack() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
     let before = heights(&s);
-    let arms: Vec<_> = (0..4).map(|_| s.br_truncation_registers(base, 1)).collect();
+    let arms: Vec<_> = (0..4)
+        .map(|_| {
+            s.br_truncation_registers(base, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+                .unwrap()
+        })
+        .collect();
 
     assert_eq!(heights(&s), before, "four simulations, no mutation");
 
-    let first = arms[0].output_registers(&s.output_registers).to_vec();
+    let first = arms[0].output_start;
 
     for arm in &arms[1..] {
         assert_eq!(
-            arm.output_registers(&s.output_registers),
-            first.as_slice(),
+            arm.output_start, first,
             "identical targets must produce identical moves"
         );
     }
@@ -1591,40 +1926,43 @@ fn every_br_table_arm_sees_the_same_stack() {
 
 #[test]
 fn a_branch_carrying_nothing_emits_no_move() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     assert!(
-        s.br_truncation_registers(base, 0).is_empty(),
+        s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit)
+            .unwrap()
+            .is_empty(),
         "callers use this to skip emitting the move entirely"
     );
 }
 
 #[test]
 fn br_if_consumes_only_its_condition() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let base = s.get_curr_block().recorded_height;
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
-    s.push_local(1);
+    let _ = s.registers_for_at::<1, 1>().unwrap();
+    s.push_local(1).unwrap();
 
     let live = (heights(&s), s.lazy_locals.origin[1].is_some());
 
-    s.push_const(Const::I32(1)); // condition
+    s.push_const(Const::I32(1)).unwrap(); // condition
 
-    let _cond = s.registers_for::<1, 0>();
-    let _mov = s.br_truncation_registers(base, 0);
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     assert_eq!(
         (heights(&s), s.lazy_locals.origin[1].is_some()),
@@ -1709,73 +2047,92 @@ fn deeply_nested_dead_constructs_unwind_in_order() {
 
 #[test]
 fn br_table_arms_survive_lowering() {
-    let mut s = sim(4, 0);
+    let mut s = sim(4);
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let outer = s.get_curr_block().recorded_height;
 
-    s.push_local(0);
+    s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
     let inner = s.get_curr_block().recorded_height;
 
-    s.push_local(1);
+    s.push_local(1).unwrap();
 
-    // two arms plus a default, as the BrTable arm records them
+    // two arms plus a default, as the BrTable arm records them. They now live on
+    // the `BrTableOperands` entry rather than in an arena of their own, so the
+    // instruction carries one id and the arms hang off it.
+    let mut br_targets = vec![];
+
     for base in [inner, outer, inner] {
-        let mov = s.br_truncation_registers(base, 1);
+        let mov = s
+            .br_truncation_registers(base, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+            .unwrap();
 
-        s.br_targets.push(RegBrTableTarget {
+        br_targets.push(RegBrTableTarget {
             mov,
             target_index: u32::MAX,
         });
     }
 
+    let index = s.registers_for_at::<1, 0>().unwrap().1.input;
+    let id = s
+        .br_table_arena
+        .alloc(BrTableOperands { index, br_targets });
+
     let frame = RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
-        input_registers_arena: s.input_registers.into_boxed_slice(),
-        output_registers_arena: s.output_registers.into_boxed_slice(),
-        br_targets_arena: s.br_targets.into_boxed_slice(),
+        locals_count: s.lazy_locals.origin.len() as u16,
+        consts: s.const_interner.into_values().into_boxed_slice(),
+        if_arena: s.if_arena,
+        br_if_arena: s.br_if_arena,
+        br_table_arena: s.br_table_arena,
+        call_indirect_arena: s.call_indirect_arena,
+        select_arena: s.select_arena,
+        memory_init_arena: s.memory_init_arena,
+        dyn_signatures: s.dyn_signatures,
+        memory_offsets: s.memory_offsets,
     };
+
+    let entry = frame.br_table_arena.get(id);
 
     assert_eq!(
-        frame.br_targets_arena.len(),
+        entry.br_targets.len(),
         3,
-        "arms must ship with the body"
+        "arms must ship with the body, reachable from the instruction's id"
     );
 
-    // and each one still resolves against the arenas it was recorded in
-    let dests: Vec<&[u32]> = frame
-        .br_targets_arena
+    // and each one still carries its own destination, in operand-relative form
+    let dests: Vec<u16> = entry
+        .br_targets
         .iter()
-        .map(|t| t.mov.output_registers(&frame.output_registers_arena))
+        .map(|t| t.mov.output_start - frame.locals_count)
         .collect();
 
-    assert_eq!(dests, vec![&[1u32][..], &[0u32][..], &[1u32][..]]);
+    assert_eq!(dests, vec![1, 0, 1]);
 }
 
+/// A body with no `br_table` allocates no arms.
+///
+/// There is no longer an arm arena to be empty — the arms hang off the entry a
+/// `BrTable` instruction points at — so the observable property is that no such
+/// instruction, and therefore no entry, is produced at all.
 #[test]
-fn a_body_without_a_br_table_carries_an_empty_arm_arena() {
-    let mut s = sim(2, 0);
+fn a_body_without_a_br_table_allocates_no_arms() {
+    let (prog, _, _) = lower(
+        r#"(module (func (param i32) (result i32)
+             local.get 0 i32.const 1 i32.add))"#,
+    );
 
-    s.push_local(0);
-
-    let _ = s.registers_for::<1, 1>();
-
-    let frame = RegFrameLayout {
-        registers: s.max_registers,
-        spills: s.spills.allocation_len(),
-        input_registers_arena: s.input_registers.into_boxed_slice(),
-        output_registers_arena: s.output_registers.into_boxed_slice(),
-        br_targets_arena: s.br_targets.into_boxed_slice(),
-    };
-
-    assert!(frame.br_targets_arena.is_empty());
+    assert!(
+        index_of_kind(&prog, RegInstructionKind::BrTable).is_none(),
+        "nothing here branches on a table"
+    );
 }
 
 // ===========================================================================
@@ -1819,8 +2176,13 @@ fn a_straight_line_body_copies_nothing() {
     );
 }
 
+/// A constant is read in place; a global is not.
+///
+/// The asymmetry is the encoding's: an operand is a bare frame index, and the
+/// constant pool *is* part of the frame while a global lives in the instance. So
+/// `i32.const 7` emits nothing and `global.get 0` emits a read.
 #[test]
-fn constants_and_globals_are_read_in_place() {
+fn a_constant_is_read_in_place_but_a_global_is_materialised() {
     assert_lowers_to(
         r#"(module
              (global i32 (i32.const 0))
@@ -1829,9 +2191,10 @@ fn constants_and_globals_are_read_in_place() {
                i32.const 7
                i32.add))"#,
         "
-          0  i32.add      global0, 7 -> r0
-          1  move         r0 -> r0
-          2  end
+          0  global.get   global0 -> r0
+          1  i32.add      r0, 7 -> r0
+          2  move         r0 -> r0
+          3  end
              frame: 1 registers, 0 spills
         ",
     );
@@ -1933,7 +2296,7 @@ fn an_if_else_wires_both_arms_to_one_end() {
 
 #[test]
 fn an_if_without_an_else_jumps_straight_to_the_end() {
-    let (prog, _, _) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              local.get 0
              if i32.const 5 local.set 0 end))"#,
@@ -1942,11 +2305,11 @@ fn an_if_without_an_else_jumps_straight_to_the_end() {
     let at = index_of_kind(&prog, RegInstructionKind::If).unwrap();
 
     let (else_index, end_index) = match &prog[at] {
-        RegInstruction::If {
-            else_index,
-            end_index,
-            ..
-        } => (*else_index, *end_index),
+        RegInstruction::If(id) => {
+            let entry = frame.if_arena.get(*id);
+
+            (entry.else_index, entry.end_index)
+        }
         _ => unreachable!(),
     };
 
@@ -1976,12 +2339,10 @@ fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
              if (result i32) i32.const 1 else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u32>> = prog
+    let dests: Vec<u16> = prog
         .iter()
         .filter_map(|i| match i {
-            RegInstruction::Move(sig) => {
-                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
-            }
+            RegInstruction::Move(id) => Some(frame.dyn_signatures.get(*id).output_start),
             _ => None,
         })
         .collect();
@@ -2083,15 +2444,14 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
     let br = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
-    let RegInstruction::BrIf {
-        mov, target_index, ..
-    } = &prog[br]
-    else {
+    let RegInstruction::BrIf(id) = &prog[br] else {
         unreachable!()
     };
 
+    let entry = frame.br_if_arena.get(*id);
+
     assert_eq!(
-        mov.input_registers(&frame.input_registers_arena).len(),
+        entry.mov.input.len(),
         1,
         "a back-edge transfers the loop's params, not its results"
     );
@@ -2101,15 +2461,18 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
     // at 1. Targeting 0 would re-run that move on every iteration and pin the params
     // to their entry values, which is the bug this number rules out.
     assert_eq!(br, 3, "the back-edge's own index");
+
     assert_eq!(
-        *target_index, 1,
+        entry.target_index, 1,
         "the loop header's index, past the entry move"
     );
+
     assert!(
-        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        matches!(prog[entry.target_index as usize], RegInstruction::Loop),
         "the target must be the `loop` itself, found {:?}",
-        prog[*target_index as usize].kind()
+        prog[entry.target_index as usize].kind()
     );
+
     assert!(
         matches!(prog[0], RegInstruction::Move(_)),
         "instruction 0 is the entry move the back-edge must skip"
@@ -2117,14 +2480,14 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
     // And the destination the back-edge writes is the same register the header move
     // fills, which is what makes skipping the header correct rather than lossy.
-    let back_edge_dst = mov.output_registers(&frame.output_registers_arena);
+    let back_edge_dst = entry.mov.output_start;
     let RegInstruction::Move(header) = &prog[0] else {
         unreachable!()
     };
 
     assert_eq!(
         back_edge_dst,
-        header.output_registers(&frame.output_registers_arena),
+        frame.dyn_signatures.get(*header).output_start,
         "a back-edge must land the params in the registers the loop body reads"
     );
 }
@@ -2138,17 +2501,12 @@ fn br_table_arms_resolve_to_their_own_labels() {
 
     let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
-    let RegInstruction::BrTable {
-        targets_start,
-        targets_len,
-        ..
-    } = &prog[table]
-    else {
+    let RegInstruction::BrTable(id) = &prog[table] else {
         unreachable!()
     };
 
-    let arms =
-        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+    let entry = frame.br_table_arena.get(*id);
+    let arms = &entry.br_targets;
     let targets: Vec<u32> = arms.iter().map(|a| a.target_index).collect();
 
     // The exact arms, not just their relationships. Depth 0 is the inner block,
@@ -2183,31 +2541,21 @@ fn each_br_table_arm_carries_its_own_move() {
 
     let table = index_of_kind(&prog, RegInstructionKind::BrTable).unwrap();
 
-    let RegInstruction::BrTable {
-        targets_start,
-        targets_len,
-        ..
-    } = &prog[table]
-    else {
+    let RegInstruction::BrTable(id) = &prog[table] else {
         unreachable!()
     };
 
-    let arms =
-        &frame.br_targets_arena[*targets_start as usize..(targets_start + targets_len) as usize];
+    let entry = frame.br_table_arena.get(*id);
+    let arms = &entry.br_targets;
 
     for arm in arms {
         assert_eq!(
-            slots(arm.mov.input_registers(&frame.input_registers_arena)),
+            slots(&arm.mov.input, &frame),
             ["9"],
             "every arm transfers the same value"
         );
 
-        assert_eq!(
-            arm.mov
-                .output_registers(&frame.output_registers_arena)
-                .len(),
-            1
-        );
+        assert_eq!(arm.mov.input.len(), 1);
     }
 }
 
@@ -2269,7 +2617,7 @@ fn the_br_if_arm_hoists_the_spill_above_the_branch() {
 
 #[test]
 fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
-    let (prog, _, _) = lower(
+    let (prog, _, frame) = lower(
         r#"(module (func (param i32 i32) (result i32)
              local.get 0
              loop
@@ -2282,18 +2630,21 @@ fn the_loop_arm_hoists_the_spill_out_of_the_repeated_region() {
 
     let back_edge = index_of_kind(&prog, RegInstructionKind::BrIf).unwrap();
 
-    let RegInstruction::BrIf { target_index, .. } = &prog[back_edge] else {
+    let RegInstruction::BrIf(id) = &prog[back_edge] else {
         unreachable!()
     };
+
+    let entry = frame.br_if_arena.get(*id);
 
     // The exact numbers, not just their order: local 0's rescue is instruction 0, the
     // repeated region starts at 1, and the back-edge is instruction 4.
     assert_eq!(back_edge, 4, "the back-edge's own index");
-    assert_eq!(*target_index, 1, "the loop header's index");
+    assert_eq!(entry.target_index, 1, "the loop header's index");
+
     assert!(
-        matches!(prog[*target_index as usize], RegInstruction::Loop),
+        matches!(prog[entry.target_index as usize], RegInstruction::Loop),
         "a back-edge must land on the `loop` itself, not on a body instruction: found {:?}",
-        prog[*target_index as usize].kind()
+        prog[entry.target_index as usize].kind()
     );
 
     let rescues: Vec<usize> = prog
@@ -2430,12 +2781,10 @@ fn a_conditional_return_shares_the_functions_result_register() {
              if (result i32) i32.const 1 return else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u32>> = prog
+    let dests: Vec<u16> = prog
         .iter()
         .filter_map(|i| match i {
-            RegInstruction::Move(sig) => {
-                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
-            }
+            RegInstruction::Move(id) => Some(frame.dyn_signatures.get(*id).output_start),
             _ => None,
         })
         .collect();
@@ -2512,7 +2861,7 @@ fn a_return_makes_the_rest_of_its_block_unreachable() {
 // ---------------------------------------------------------------------------
 
 /// Two callers of the same function, differing only in what sits below the call.
-fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
+fn caller_base_of(wat: &str) -> (u16, Vec<String>) {
     let (prog, _, frame) = lower_func(wat, 1);
     let at = index_of_kind(&prog, RegInstructionKind::Call).unwrap();
 
@@ -2524,14 +2873,25 @@ fn caller_base_of(wat: &str) -> (u32, Vec<String>) {
     let reader = prog[at + 1..]
         .iter()
         .find_map(|i| match i {
-            RegInstruction::I32Add(sig) => {
-                Some(slots(sig.input.registers(&frame.input_registers_arena)))
-            }
+            RegInstruction::I32Add(sig) => Some(slots(&sig.input.registers, &frame)),
             _ => None,
         })
         .expect("something must read the result");
 
-    (*caller_base, reader)
+    // `caller_base` ships as an absolute frame index; the assertions below are about
+    // *which operand register* the arguments were staged at, so it comes back
+    // operand-relative. That it is never below the operand base is itself the
+    // invariant keeping a callee off its caller's constants — asserted here, since a
+    // wrong shift would underflow.
+    let operand_base = operand_base_of(&frame);
+
+    assert!(
+        *caller_base >= operand_base,
+        "caller_base {caller_base} is below the operand base {operand_base}, so the \
+         callee's frame would overlap its caller's constants and spills"
+    );
+
+    (*caller_base - operand_base, reader)
 }
 
 #[test]
@@ -2662,6 +3022,7 @@ fn a_zero_param_call_still_reports_its_result_base() {
         base, 0,
         "nothing is popped, so the base is the current index"
     );
+
     assert!(reader.contains(&"r0".to_string()), "{reader:?}");
 
     let (base, reader) = caller_base_of(&format!(
@@ -2690,21 +3051,32 @@ fn arguments_are_staged_at_the_caller_base() {
         unreachable!()
     };
 
-    let RegInstruction::Move(sig) = &prog[at - 1] else {
+    let RegInstruction::Move(id) = &prog[at - 1] else {
         panic!("the arguments must be staged immediately before the call")
     };
 
+    // Destinations are consecutive from the start, so the run the move writes is
+    // reconstructed the way the executor reconstructs it.
+    let sig = frame.dyn_signatures.get(*id);
+    let dests: Vec<u16> = (0..sig.input.len() as u16)
+        .map(|i| sig.output_start + i)
+        .collect();
+
     assert_eq!(
-        sig.output_registers(&frame.output_registers_arena),
-        &[*caller_base, caller_base + 1],
+        dests,
+        vec![*caller_base, caller_base + 1],
         "arguments land at [caller_base, caller_base + params)"
     );
 }
 
-/// A callee may write any global, so a borrow that outlives the call has to be
-/// rescued first. Locals are safe — the callee has its own frame.
+/// A callee may write any global, but it cannot reach a value already read into a
+/// register — so nothing is rescued, and the two reads straddling the call are simply
+/// two reads.
+///
+/// The second `global.get` is a *separate* read and so sees whatever the callee left,
+/// which is what wasm requires: `global.get` reads at the point it appears.
 #[test]
-fn a_global_read_across_a_call_is_rescued() {
+fn a_global_read_across_a_call_needs_no_rescue() {
     assert_func_lowers_to(
         r#"(module
              (global (mut i32) (i32.const 0))
@@ -2716,12 +3088,13 @@ fn a_global_read_across_a_call_is_rescued() {
                i32.add))"#,
         1,
         "
-          0  global.spill global0 -> spill0
-          1  call         f0 caller_base=0
-          2  i32.add      spill0, global0 -> r0
-          3  move         r0 -> r0
-          4  end
-             frame: 1 registers, 1 spills
+          0  global.get   global0 -> r0
+          1  call         f0 caller_base=1
+          2  global.get   global0 -> r1
+          3  i32.add      r0, r1 -> r0
+          4  move         r0 -> r0
+          5  end
+             frame: 2 registers, 0 spills
         ",
     );
 }
@@ -2843,14 +3216,17 @@ fn a_zero_argument_call_indirect_still_pops_its_index() {
 #[test]
 fn caller_base_counts_past_the_index_to_the_deepest_argument() {
     let base_of = |wat: &str| {
-        let (prog, _, _) = lower_func(wat, 0);
+        let (prog, _, mut frame) = lower_func(wat, 0);
         let at = index_of_kind(&prog, RegInstructionKind::CallIndirect).unwrap();
 
-        let RegInstruction::CallIndirect { caller_base, .. } = &prog[at] else {
+        let RegInstruction::CallIndirect(id) = &prog[at] else {
             unreachable!()
         };
 
-        *caller_base
+        let entry = frame.call_indirect_arena.get_mut(*id);
+
+        // operand-relative, as the renderings above report it
+        entry.caller_base - operand_base_of(&frame)
     };
 
     // the only register is the argument itself: it sits *at* the base
@@ -2931,10 +3307,10 @@ fn results_come_back_at_the_caller_base() {
     );
 }
 
-/// The callee is not known until execution, so it may write any global: a borrow
-/// that outlives the call is rescued exactly as it is for a direct one.
+/// The callee is not known until execution, so it may write any global — and, as for
+/// a direct call, that cannot reach a value already in a register.
 #[test]
-fn a_global_read_across_a_call_indirect_is_rescued() {
+fn a_global_read_across_a_call_indirect_needs_no_rescue() {
     assert_lowers_to(
         &format!(
             "(module (global (mut i32) (i32.const 0)) (type (func (result i32))) (table 4 funcref)
@@ -2946,12 +3322,12 @@ fn a_global_read_across_a_call_indirect_is_rescued() {
                  i32.add)"#
         ),
         "
-          0  global.spill global0 -> spill0
-          1  call_indirect [3] ty0 table0 caller_base=0
-          2  i32.add      spill0, r0 -> r0
+          0  global.get   global0 -> r0
+          1  call_indirect [3] ty0 table0 caller_base=1
+          2  i32.add      r0, r1 -> r0
           3  move         r0 -> r0
           4  end
-             frame: 1 registers, 1 spills
+             frame: 2 registers, 0 spills
         ",
     );
 }
@@ -3129,18 +3505,18 @@ fn an_unreachable_block_does_not_disturb_the_enclosing_block() {
 #[test]
 fn a_spill_live_across_an_unreachable_survives_it() {
     assert_lowers_to(
-        r#"(module (global (mut i32) (i32.const 0)) (func (result i32)
-             global.get 0
+        r#"(module (func (param i32) (result i32)
+             local.get 0
              i32.const 5
-             global.set 0
+             local.set 0
              block
                unreachable
              end
              i32.const 1
              i32.add))"#,
         "
-          0  global.spill global0 -> spill0
-          1  global.set   global0 <- 5
+          0  local.spill  local0 -> spill0
+          1  local.set    local0 <- 5
           2  unreachable
           3  end
           4  i32.add      spill0, 1 -> r0
@@ -3165,7 +3541,11 @@ fn a_trapping_block_still_reserves_its_results() {
              drop))"#,
     );
 
-    assert_eq!(frame.registers, 2, "both results are given registers");
+    assert_eq!(
+        peak_operands_of(&frame),
+        2,
+        "both results are given registers"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3493,9 +3873,9 @@ fn arity_case(kind: RegInstructionKind) -> Option<String> {
 
         RegInstructionKind::LocalSet
         | RegInstructionKind::LocalTee
+        | RegInstructionKind::GlobalGet
         | RegInstructionKind::GlobalSet
         | RegInstructionKind::LocalSpill
-        | RegInstructionKind::GlobalSpill
         | RegInstructionKind::If
         | RegInstructionKind::Else
         | RegInstructionKind::Loop
@@ -3589,8 +3969,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             RegInstruction::render_body(&body, &[])
         );
 
-        let pops = frame.input_registers_arena.len() as i64;
-        let pushes = frame.output_registers_arena.len() as i64;
+        let (pops, pushes) = declared_arity(&prog[0], frame);
 
         assert_eq!(
             pushes - pops,
@@ -3599,6 +3978,211 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
              stack effect is {expected}. The `Signature<I, O>` on the variant is \
              wrong — nothing else records an arity."
         );
+    }
+}
+
+impl<const I: usize, const O: usize> Signature<I, O> {
+    /// The arity the variant declares, as `(pops, pushes)`.
+    fn arity(&self) -> (i64, i64) {
+        (I as i64, O as i64)
+    }
+}
+
+impl<const I: usize> InputRegisters<I> {
+    /// How many operands the shape declares.
+    fn arity(&self) -> i64 {
+        I as i64
+    }
+}
+
+/// The `(pops, pushes)` an instruction's operand shape declares.
+///
+/// Read off the const parameters, which is the thing under test — the arity lives
+/// nowhere else once lowering has run, so a wrong `Signature<I, O>` on a variant is
+/// exactly what this catches.
+///
+/// Only the shapes [`arity_case`] can produce are covered; the operators it returns
+/// `None` for never reach here.
+fn declared_arity(instruction: &RegInstruction, frame: &RegFrameLayout) -> (i64, i64) {
+    match instruction {
+        // A load's `offset` is an interned id, not an operand.
+        RegInstruction::I32Load { sig, .. }
+        | RegInstruction::I32Load8S { sig, .. }
+        | RegInstruction::I32Load8U { sig, .. }
+        | RegInstruction::I32Load16S { sig, .. }
+        | RegInstruction::I32Load16U { sig, .. }
+        | RegInstruction::I64Load { sig, .. }
+        | RegInstruction::I64Load8S { sig, .. }
+        | RegInstruction::I64Load8U { sig, .. }
+        | RegInstruction::I64Load16S { sig, .. }
+        | RegInstruction::I64Load16U { sig, .. }
+        | RegInstruction::I64Load32S { sig, .. }
+        | RegInstruction::I64Load32U { sig, .. }
+        | RegInstruction::F32Load { sig, .. }
+        | RegInstruction::F64Load { sig, .. } => sig.arity(),
+
+        // A store declares no destination, so its shape is the operands alone.
+        RegInstruction::I32Store { input, .. }
+        | RegInstruction::I32Store8 { input, .. }
+        | RegInstruction::I32Store16 { input, .. }
+        | RegInstruction::I64Store { input, .. }
+        | RegInstruction::I64Store8 { input, .. }
+        | RegInstruction::I64Store16 { input, .. }
+        | RegInstruction::I64Store32 { input, .. }
+        | RegInstruction::F32Store { input, .. }
+        | RegInstruction::F64Store { input, .. } => (input.arity(), 0),
+
+        RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => (input.arity(), 0),
+        RegInstruction::MemorySize(_) => (0, 1),
+        RegInstruction::DataDrop(_) => (0, 0),
+        RegInstruction::Select(id) => frame.select_arena.get(*id).0.arity(),
+        RegInstruction::MemoryInit(id) => (frame.memory_init_arena.get(*id).operands.arity(), 0),
+
+        // Every value operator, plus `memory.grow` and `ref.is_null`, declares its
+        // arity the same way — split by shape only because an or-pattern binds one
+        // type.
+        RegInstruction::I32Clz(sig)
+        | RegInstruction::I32Ctz(sig)
+        | RegInstruction::I32Eqz(sig)
+        | RegInstruction::I32Extend16S(sig)
+        | RegInstruction::I32Extend8S(sig)
+        | RegInstruction::I32Popcnt(sig)
+        | RegInstruction::I32ReinterpretF32(sig)
+        | RegInstruction::I32TruncF32S(sig)
+        | RegInstruction::I32TruncF32U(sig)
+        | RegInstruction::I32TruncF64S(sig)
+        | RegInstruction::I32TruncF64U(sig)
+        | RegInstruction::I32TruncSatF32S(sig)
+        | RegInstruction::I32TruncSatF32U(sig)
+        | RegInstruction::I32TruncSatF64S(sig)
+        | RegInstruction::I32TruncSatF64U(sig)
+        | RegInstruction::I32WrapI64(sig)
+        | RegInstruction::I64Clz(sig)
+        | RegInstruction::I64Ctz(sig)
+        | RegInstruction::I64Eqz(sig)
+        | RegInstruction::I64Extend16S(sig)
+        | RegInstruction::I64Extend32S(sig)
+        | RegInstruction::I64Extend8S(sig)
+        | RegInstruction::I64ExtendI32S(sig)
+        | RegInstruction::I64ExtendI32U(sig)
+        | RegInstruction::I64Popcnt(sig)
+        | RegInstruction::I64ReinterpretF64(sig)
+        | RegInstruction::I64TruncF32S(sig)
+        | RegInstruction::I64TruncF32U(sig)
+        | RegInstruction::I64TruncF64S(sig)
+        | RegInstruction::I64TruncF64U(sig)
+        | RegInstruction::I64TruncSatF32S(sig)
+        | RegInstruction::I64TruncSatF32U(sig)
+        | RegInstruction::I64TruncSatF64S(sig)
+        | RegInstruction::I64TruncSatF64U(sig)
+        | RegInstruction::F32Abs(sig)
+        | RegInstruction::F32Ceil(sig)
+        | RegInstruction::F32ConvertI32S(sig)
+        | RegInstruction::F32ConvertI32U(sig)
+        | RegInstruction::F32ConvertI64S(sig)
+        | RegInstruction::F32ConvertI64U(sig)
+        | RegInstruction::F32DemoteF64(sig)
+        | RegInstruction::F32Floor(sig)
+        | RegInstruction::F32Nearest(sig)
+        | RegInstruction::F32Neg(sig)
+        | RegInstruction::F32ReinterpretI32(sig)
+        | RegInstruction::F32Sqrt(sig)
+        | RegInstruction::F32Trunc(sig)
+        | RegInstruction::F64Abs(sig)
+        | RegInstruction::F64Ceil(sig)
+        | RegInstruction::F64ConvertI32S(sig)
+        | RegInstruction::F64ConvertI32U(sig)
+        | RegInstruction::F64ConvertI64S(sig)
+        | RegInstruction::F64ConvertI64U(sig)
+        | RegInstruction::F64Floor(sig)
+        | RegInstruction::F64Nearest(sig)
+        | RegInstruction::F64Neg(sig)
+        | RegInstruction::F64PromoteF32(sig)
+        | RegInstruction::F64ReinterpretI64(sig)
+        | RegInstruction::F64Sqrt(sig)
+        | RegInstruction::F64Trunc(sig)
+        | RegInstruction::RefIsNull(sig)
+        | RegInstruction::MemoryGrow(sig) => sig.arity(),
+
+        RegInstruction::I32Add(sig)
+        | RegInstruction::I32And(sig)
+        | RegInstruction::I32DivS(sig)
+        | RegInstruction::I32DivU(sig)
+        | RegInstruction::I32Eq(sig)
+        | RegInstruction::I32GeS(sig)
+        | RegInstruction::I32GeU(sig)
+        | RegInstruction::I32GtS(sig)
+        | RegInstruction::I32GtU(sig)
+        | RegInstruction::I32LeS(sig)
+        | RegInstruction::I32LeU(sig)
+        | RegInstruction::I32LtS(sig)
+        | RegInstruction::I32LtU(sig)
+        | RegInstruction::I32Mul(sig)
+        | RegInstruction::I32Ne(sig)
+        | RegInstruction::I32Or(sig)
+        | RegInstruction::I32RemS(sig)
+        | RegInstruction::I32RemU(sig)
+        | RegInstruction::I32Rotl(sig)
+        | RegInstruction::I32Rotr(sig)
+        | RegInstruction::I32Shl(sig)
+        | RegInstruction::I32ShrS(sig)
+        | RegInstruction::I32ShrU(sig)
+        | RegInstruction::I32Sub(sig)
+        | RegInstruction::I32Xor(sig)
+        | RegInstruction::I64Add(sig)
+        | RegInstruction::I64And(sig)
+        | RegInstruction::I64DivS(sig)
+        | RegInstruction::I64DivU(sig)
+        | RegInstruction::I64Eq(sig)
+        | RegInstruction::I64GeS(sig)
+        | RegInstruction::I64GeU(sig)
+        | RegInstruction::I64GtS(sig)
+        | RegInstruction::I64GtU(sig)
+        | RegInstruction::I64LeS(sig)
+        | RegInstruction::I64LeU(sig)
+        | RegInstruction::I64LtS(sig)
+        | RegInstruction::I64LtU(sig)
+        | RegInstruction::I64Mul(sig)
+        | RegInstruction::I64Ne(sig)
+        | RegInstruction::I64Or(sig)
+        | RegInstruction::I64RemS(sig)
+        | RegInstruction::I64RemU(sig)
+        | RegInstruction::I64Rotl(sig)
+        | RegInstruction::I64Rotr(sig)
+        | RegInstruction::I64Shl(sig)
+        | RegInstruction::I64ShrS(sig)
+        | RegInstruction::I64ShrU(sig)
+        | RegInstruction::I64Sub(sig)
+        | RegInstruction::I64Xor(sig)
+        | RegInstruction::F32Add(sig)
+        | RegInstruction::F32Copysign(sig)
+        | RegInstruction::F32Div(sig)
+        | RegInstruction::F32Eq(sig)
+        | RegInstruction::F32Ge(sig)
+        | RegInstruction::F32Gt(sig)
+        | RegInstruction::F32Le(sig)
+        | RegInstruction::F32Lt(sig)
+        | RegInstruction::F32Max(sig)
+        | RegInstruction::F32Min(sig)
+        | RegInstruction::F32Mul(sig)
+        | RegInstruction::F32Ne(sig)
+        | RegInstruction::F32Sub(sig)
+        | RegInstruction::F64Add(sig)
+        | RegInstruction::F64Copysign(sig)
+        | RegInstruction::F64Div(sig)
+        | RegInstruction::F64Eq(sig)
+        | RegInstruction::F64Ge(sig)
+        | RegInstruction::F64Gt(sig)
+        | RegInstruction::F64Le(sig)
+        | RegInstruction::F64Lt(sig)
+        | RegInstruction::F64Max(sig)
+        | RegInstruction::F64Min(sig)
+        | RegInstruction::F64Mul(sig)
+        | RegInstruction::F64Ne(sig)
+        | RegInstruction::F64Sub(sig) => sig.arity(),
+
+        // `arity_case` returns `None` for these, so none of them reaches here.
+        other => unreachable!("no arity case lowers to {other:?}"),
     }
 }
 
@@ -3640,7 +4224,7 @@ fn the_frame_reports_peak_register_use() {
              i32.add))"#,
     );
 
-    assert_eq!(frame.registers, 2, "two loads are live at once");
+    assert_eq!(peak_operands_of(&frame), 2, "two loads are live at once");
 }
 
 #[test]
@@ -3658,30 +4242,42 @@ fn the_frame_reports_peak_spill_use() {
     );
 }
 
+/// Operands travel inside the instructions, so what has to ship with the body is
+/// the arenas the *ids* index — and every one of those ids has to resolve.
 #[test]
-fn the_arenas_ship_with_the_body() {
+fn every_id_in_the_body_resolves_against_a_shipped_arena() {
     let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
 
-    assert!(!frame.input_registers_arena.is_empty(), "operands");
-    assert!(!frame.br_targets_arena.is_empty(), "br_table arms");
+    let mut tables = 0;
 
-    // and every index in the program resolves against them
     for instruction in &prog {
-        if let RegInstruction::BrTable {
-            targets_start,
-            targets_len,
-            ..
-        } = instruction
-        {
+        if let RegInstruction::BrTable(id) = instruction {
+            let entry = frame.br_table_arena.get(*id);
+
+            tables += 1;
+
             assert!(
-                (targets_start + targets_len) as usize <= frame.br_targets_arena.len(),
-                "arm range runs past the arena"
+                !entry.br_targets.is_empty(),
+                "a br_table with no arms cannot pick a destination"
             );
+
+            // Both labels here are empty, so no arm has anything to transfer.
+            // That is the case `BackpatchMap::apply` skips, and it must really be
+            // empty rather than a zero-length move with a recorded patch.
+            for arm in &entry.br_targets {
+                assert!(
+                    arm.mov.is_empty(),
+                    "an empty label needs no move: {:?}",
+                    arm.mov
+                );
+            }
         }
     }
+
+    assert_eq!(tables, 1, "the body has exactly one br_table");
 }
 
 // ---------------------------------------------------------------------------
@@ -3861,5 +4457,457 @@ fn a_body_that_lowers_to_one_instruction_still_records_its_offset() {
         offsets[0],
         *real.last().expect("the `end` operator"),
         "the sole instruction is the `end`, so it carries the `end`'s offset"
+    );
+}
+
+// ===========================================================================
+// the constant pool's identity
+//
+// [`ConstInterner`] dedups on [`Const`]'s `Eq`/`Hash`, so those alone decide when
+// two immediates share a frame slot — and a slot holds one value.
+//
+// Two constants may therefore share a slot only when they are the same value *of
+// the same type*. Merging across types is a wrong-value bug, because the pool keeps
+// whichever `Const` arrived first and `enter_frame` materialises it by matching the
+// variant — so an `f64` operand reading a slot interned from an `i32` gets the
+// wrong kind of value. Merging bit-distinct floats is the same class of bug one
+// level down: it silently drops a sign or a NaN payload.
+//
+// Neither is caught by the differential guests reliably. A cross-type merge only
+// bites when the two constants land in the same hash bucket, so it is latent until
+// it is not; these assert the property directly instead.
+// ===========================================================================
+
+/// Hashes a `Const` with the standard hasher.
+///
+/// Deliberately *not* the map's own `FxHasher`: the `Hash`/`Eq` contract has to
+/// hold for every hasher, and a test that used the same one the map does could pass
+/// on a coincidence of that hasher's mixing.
+fn hash_of(c: Const) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+
+    c.hash(&mut h);
+    h.finish()
+}
+
+/// Constants that share a bit pattern across types, so any identity that looks at
+/// the bits alone merges them.
+///
+/// `1065353216` is `1.0f32`'s bit pattern and `4607182418800017408` is `1.0f64`'s,
+/// which is how an integer immediate collides with a float one in practice — a
+/// small float and a large-but-ordinary integer.
+fn same_bits_different_types() -> Vec<(&'static str, Const)> {
+    vec![
+        ("I32(0)", Const::I32(0)),
+        ("I64(0)", Const::I64(0)),
+        ("F32(+0.0)", Const::F32(0.0f32.into())),
+        ("F64(+0.0)", Const::F64(0.0f64.into())),
+        (
+            "Ref(Some(0))",
+            Const::Ref(Some(crate::module::FuncIndex(0))),
+        ),
+        ("I32(1065353216)", Const::I32(1065353216)),
+        ("F32(1.0)", Const::F32(1.0f32.into())),
+        ("I64(4607182418800017408)", Const::I64(4607182418800017408)),
+        ("F64(1.0)", Const::F64(1.0f64.into())),
+    ]
+}
+
+/// Two constants of different types are different constants, whatever their bits.
+#[test]
+fn const_equality_respects_the_type() {
+    let all = same_bits_different_types();
+
+    for (i, (a_name, a)) in all.iter().enumerate() {
+        for (b_name, b) in all.iter().skip(i + 1) {
+            assert_ne!(
+                a, b,
+                "{a_name} and {b_name} are different constants, but compare equal — \
+                 an identity that reads only the bit pattern merges them, and the \
+                 pool would keep whichever was interned first"
+            );
+        }
+    }
+}
+
+/// Values that compare equal must hash equal.
+///
+/// Not a style point: `FxHashMap` finds a key by hashing to a bucket and then
+/// comparing, so a pair that is `==` with unequal hashes is simply never noticed as
+/// a duplicate — and a pair that *is* noticed returns the other one's slot. Whether
+/// the pool merges two constants then depends on the hasher rather than on the
+/// constants.
+#[test]
+fn const_hash_agrees_with_equality() {
+    let all = same_bits_different_types();
+
+    for (a_name, a) in all.iter() {
+        for (b_name, b) in all.iter() {
+            if a == b {
+                assert_eq!(
+                    hash_of(*a),
+                    hash_of(*b),
+                    "{a_name} == {b_name} but they hash differently, which breaks the \
+                     `Hash`/`Eq` contract the pool's map relies on"
+                );
+            }
+        }
+    }
+}
+
+/// The pool gives each of them its own slot.
+///
+/// The consequence of the two properties above, and the one that actually matters:
+/// nine distinct constants must occupy nine slots.
+#[test]
+fn the_pool_keeps_same_bits_of_different_types_apart() {
+    let all = same_bits_different_types();
+    let mut interner = Interner::new(MAX_CONSTS);
+
+    let ids: Vec<(&str, u16)> = all
+        .iter()
+        .map(|(name, c)| (*name, interner.intern(*c).unwrap().raw()))
+        .collect();
+
+    assert_eq!(
+        interner.len(),
+        all.len(),
+        "each distinct constant needs its own slot, got {ids:?}"
+    );
+
+    // and every slot still holds what was interned into it
+    for (name, id) in ids {
+        let (_, expected) = all.iter().find(|(n, _)| *n == name).unwrap();
+
+        assert_eq!(
+            &interner.values()[id as usize],
+            expected,
+            "slot {id} was interned for {name} but holds {:?}",
+            interner.values()[id as usize]
+        );
+    }
+}
+
+/// Floats are identified by their bit pattern, not by `==`.
+///
+/// `-0.0 == 0.0` and every NaN is unequal to itself, so a numeric identity merges
+/// the zeroes and collapses NaN payloads. Both are observable: the sign of zero
+/// survives `f64.min`/`copysign`, and a NaN payload survives arithmetic.
+#[test]
+fn the_pool_keeps_bit_distinct_floats_apart() {
+    let mut interner = Interner::new(MAX_CONSTS);
+
+    let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
+    let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
+    let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
+    let neg32 = interner.intern(Const::F32((-0.0f32).into())).unwrap();
+
+    assert_ne!(
+        pos64.raw(),
+        neg64.raw(),
+        "f64 +0.0 and -0.0 are different constants"
+    );
+
+    assert_ne!(
+        pos32.raw(),
+        neg32.raw(),
+        "f32 +0.0 and -0.0 are different constants"
+    );
+
+    assert_eq!(
+        interner.values()[pos64.raw() as usize],
+        Const::F64(0.0f64.into()),
+        "the +0.0 slot must not have been overwritten by -0.0"
+    );
+
+    // NaN payloads and sign, which arithmetic propagates
+    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
+    let neg_nan = f64::from_bits(0xfff8_0000_0000_0001);
+    let other_payload = f64::from_bits(0x7ff8_0000_dead_beef);
+
+    let a = interner.intern(Const::F64(nan.into())).unwrap();
+    let b = interner.intern(Const::F64(neg_nan.into())).unwrap();
+    let c = interner.intern(Const::F64(other_payload.into())).unwrap();
+
+    assert_ne!(
+        a.raw(),
+        b.raw(),
+        "a NaN and its negation are different constants"
+    );
+
+    assert_ne!(
+        a.raw(),
+        c.raw(),
+        "NaNs with different payloads are different constants"
+    );
+
+    // interning the same bits twice must still dedup, or the pool grows per use
+    let again = interner.intern(Const::F64(nan.into())).unwrap();
+
+    assert_eq!(
+        a.raw(),
+        again.raw(),
+        "the same bits must reuse the same slot"
+    );
+}
+
+/// Dedup still has to work — these properties must not be bought by giving every
+/// use its own slot, which would grow every frame by its constant count.
+#[test]
+fn the_pool_still_dedups_equal_constants() {
+    let mut interner = Interner::new(MAX_CONSTS);
+
+    for _ in 0..4 {
+        interner.intern(Const::I32(7)).unwrap();
+        interner.intern(Const::F64(2.5f64.into())).unwrap();
+        interner.intern(Const::Ref(None)).unwrap();
+    }
+
+    assert_eq!(
+        interner.values().len(),
+        3,
+        "three distinct constants interned four times each"
+    );
+}
+
+// ===========================================================================
+// implementation limits
+//
+// An operand is a 16-bit frame index, so a body needing a wider frame than that can
+// name is refused. The wasm spec sets no such bound, so these modules are *valid* —
+// which is exactly why the failure has to be a reported error and not a wrong answer
+// or a panic.
+//
+// Each case below is checked against `wasmparser`'s own validator first, so a test
+// that stopped exercising the limit — because the wat drifted, or because the
+// operator sequence stopped creating the pressure it was meant to — fails loudly
+// rather than passing vacuously.
+// ===========================================================================
+
+/// Asserts `wat` is a valid module, then hands back what the register pass made of it.
+fn compile_register(wat: &str) -> Result<(), TraceWasmError> {
+    let bytes = wat::parse_str(wat).expect("invalid wat");
+
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .expect("the point of these tests is that the module is VALID wasm");
+
+    crate::module::Module::<crate::Register>::compile(&bytes).map(|_| ())
+}
+
+/// A memory offset is a `u32` by spec — validation only bounds it below `2^32` for a
+/// 32-bit memory — so the whole range has to survive lowering intact.
+///
+/// This is the one limit that is *not* ours to set: narrowing the field would
+/// miscompute an address rather than refuse a module, and silently.
+#[test]
+fn a_memory_offset_keeps_its_full_u32_range() {
+    for offset in [
+        0u32,
+        255,
+        256,
+        u16::MAX as u32,
+        u16::MAX as u32 + 1,
+        u32::MAX,
+    ] {
+        let wat = format!(
+            r#"(module (memory 1)
+                 (func (param i32) (result i32) local.get 0 i32.load offset={offset}))"#
+        );
+
+        let (prog, _, frame) = lower(&wat);
+        let at = index_of_kind(&prog, RegInstructionKind::I32Load).unwrap();
+
+        let RegInstruction::I32Load { offset: stored, .. } = &prog[at] else {
+            unreachable!()
+        };
+
+        let stored = frame.memory_offsets.value(*stored).0;
+
+        assert_eq!(
+            stored, offset,
+            "a load's offset must round-trip exactly; {offset} came back as {stored}"
+        );
+    }
+}
+
+/// The same for a store, which carries the offset on a different variant.
+#[test]
+fn a_store_offset_keeps_its_full_u32_range() {
+    for offset in [0u32, u16::MAX as u32 + 1, u32::MAX] {
+        let wat = format!(
+            r#"(module (memory 1)
+                 (func (param i32) local.get 0 i32.const 1 i32.store offset={offset}))"#
+        );
+
+        let (prog, _, frame) = lower(&wat);
+        let at = index_of_kind(&prog, RegInstructionKind::I32Store).unwrap();
+
+        let RegInstruction::I32Store { offset: stored, .. } = &prog[at] else {
+            unreachable!()
+        };
+
+        let stored = frame.memory_offsets.value(*stored).0;
+
+        assert_eq!(stored, offset, "a store's offset must round-trip exactly");
+    }
+}
+
+/// Validation caps a function at `MAX_WASM_FUNCTION_LOCALS` (50,000), which is below
+/// what a 16-bit index can name — so the locals region can never be the thing that
+/// makes a frame too wide, and a body at the ceiling must still lower.
+#[test]
+fn a_function_at_the_locals_ceiling_still_lowers() {
+    // 49,999 declared locals plus one param. `local.get` of the highest one forces
+    // the pass to name it, so this fails if a local index is narrowed unsafely.
+    let wat = format!(
+        "(module (func (param i32) (result i32) (local {}) local.get 49999))",
+        "i32 ".repeat(49_999).trim()
+    );
+
+    assert!(
+        compile_register(&wat).is_ok(),
+        "a function at the validator's own locals limit must lower"
+    );
+}
+
+/// More distinct constants than the pool can name.
+///
+/// The pool is bounded only by the body's byte length, so this is well within what
+/// wasm allows.
+#[test]
+fn too_many_constants_is_reported_not_truncated() {
+    let mut wat = String::from("(module (func (result i32)\n");
+
+    for i in 0..(MAX_CONSTS as u32 + 10) {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    wat.push_str("  i32.const 7))");
+
+    let err = compile_register(&wat).expect_err("the pool cannot name this many");
+
+    // The pool is an `Interner`, so its cap is reported by the interner rather than
+    // by the end-of-body frame-width check — and the `what` is what `Const`'s
+    // `TyToString` names it.
+    assert!(
+        matches!(&err, TraceWasmError::ToManyUniqueValues { what, needed, limit }
+            if what == "constants"
+                && *needed == MAX_CONSTS as u32 + 1
+                && *limit == MAX_CONSTS as u32),
+        "expected the constants limit, got: {err}"
+    );
+}
+
+/// More simultaneously-live operand registers than can be named.
+///
+/// Each `local.get 0; i32.load` pair leaves one more register live — a run of
+/// identical `i32.const`s would *not*, since they intern to one pool entry and the
+/// adds keep only one register live.
+#[test]
+fn too_many_live_registers_is_reported_not_truncated() {
+    let n = MAX_REGISTER_SLOTS as u32 + 10;
+    let mut wat = String::from("(module (memory 1) (func (param i32) (result i32)\n");
+
+    for _ in 0..n {
+        wat.push_str("  local.get 0 i32.load\n");
+    }
+
+    for _ in 0..(n - 1) {
+        wat.push_str("  i32.add\n");
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("that many registers cannot be named");
+
+    assert!(
+        matches!(
+            err,
+            TraceWasmError::RegisterFrameTooLarge {
+                what: "locals and operand registers",
+                ..
+            }
+        ),
+        "expected the register limit, got: {err}"
+    );
+}
+
+/// Two regions each **under** their own limit whose sum is still unaddressable.
+///
+/// The per-region limits cannot catch this — the frame is the four regions laid end
+/// to end — so this is the case that the end-of-body check exists for, and the one a
+/// future change to those limits would most easily break.
+#[test]
+fn a_frame_whose_regions_sum_past_the_limit_is_reported() {
+    let n = 40_000u32;
+
+    assert!(
+        n < MAX_CONSTS as u32 && n < MAX_REGISTER_SLOTS as u32,
+        "each region must be individually legal for this to test the sum"
+    );
+
+    assert!(
+        n as u64 * 2 > u16::MAX as u64,
+        "and their sum must not be addressable"
+    );
+
+    let mut wat = String::from("(module (memory 1) (func (param i32) (result i32)\n");
+
+    for _ in 0..n {
+        wat.push_str("  local.get 0 i32.load\n");
+    }
+
+    for i in 0..n {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    for _ in 0..(n - 1) {
+        wat.push_str("  i32.add\n");
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the regions sum past the limit");
+
+    assert!(
+        matches!(
+            err,
+            TraceWasmError::RegisterFrameTooLarge {
+                what: "the whole frame",
+                ..
+            }
+        ),
+        "expected the whole-frame limit, got: {err}"
+    );
+}
+
+/// Every module the register machine refuses, the stack machine still runs.
+///
+/// The limit is the register encoding's, not TraceWasm's, and nothing else in the
+/// crate states that — so a change that made the stack pass share the ceiling would
+/// otherwise go unnoticed.
+#[test]
+fn a_frame_too_large_for_the_register_machine_still_lowers_for_the_stack_machine() {
+    let mut wat = String::from("(module (func (result i32)\n");
+
+    for i in 0..(MAX_CONSTS as u32 + 10) {
+        wat.push_str(&format!("  i32.const {i} drop\n"));
+    }
+
+    wat.push_str("  i32.const 7))");
+
+    let bytes = wat::parse_str(&wat).expect("invalid wat");
+
+    assert!(
+        crate::module::Module::<crate::Register>::compile(&bytes).is_err(),
+        "the register machine must refuse it"
+    );
+
+    assert!(
+        crate::module::Module::<crate::Stack>::compile(&bytes).is_ok(),
+        "and the stack machine must not"
     );
 }

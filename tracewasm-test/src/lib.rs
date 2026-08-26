@@ -146,7 +146,7 @@ pub fn try_call<V: VirtualMachine, R: Results>(
 
 /// Whether the guest programs were built. `false` when the wasm target is absent.
 ///
-/// Read by [`guests_were_built`], whose whole job is to make a `false` here visible
+/// Read by `guests_were_built`, whose whole job is to make a `false` here visible
 /// in the test output.
 pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
 
@@ -309,8 +309,8 @@ impl<V: VirtualMachine> Guest<V> {
 /// Deepest recursion the tests should attempt, scaled to the build profile.
 ///
 /// Every active wasm frame costs a native Rust frame, and a **debug** build of the
-/// interpreter spends roughly **30 KB** of native stack per frame against about
-/// **1.3 KB** in release — a ~20x difference, because debug spills everything and
+/// interpreter spends roughly **33 KB** of native stack per frame against about
+/// **640 bytes** in release — a ~50x difference, because debug spills everything and
 /// reuses no slots. A depth that is comfortable under `--release` therefore
 /// overflows under a plain `cargo test`.
 ///
@@ -320,8 +320,10 @@ pub const MAX_TEST_RECURSION: i32 = if cfg!(debug_assertions) { 150 } else { 3_0
 
 /// Native stack given to [`with_large_stack`].
 ///
-/// Sized for `MAX_TEST_RECURSION` at the debug per-frame cost, with headroom. The
-/// pages are faulted lazily, so reserving this is cheap.
+/// `MAX_TEST_RECURSION` at the debug per-frame cost needs about 5 MB; this reserves
+/// far more because the pages are faulted lazily, so the only cost of oversizing is
+/// address space. Sizing it tightly would buy nothing and would have to be revisited
+/// every time a frame grew.
 const LARGE_STACK_BYTES: usize = 256 * 1024 * 1024;
 
 /// Runs `body` on a thread with an explicitly large stack, propagating panics.
@@ -361,7 +363,7 @@ where
 /// invariant — a ratio, an ordering, a count — not an absolute duration.
 ///
 /// The suite's other numeric test, `tests/perf_report.rs`, does not go through
-/// here. A [`Row`] summarises a whole batch as one mean, which is the right
+/// here. A [`metrics::Row`] summarises a whole batch as one mean, which is the right
 /// shape for a regression check and the wrong one for the distributions and
 /// percentiles that report is built around, so it keeps its own statistics.
 pub mod metrics {
