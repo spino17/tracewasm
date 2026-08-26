@@ -459,6 +459,7 @@ impl Default for Slot {
         Slot(0)
     }
 }
+
 /// One entry on the simulated operand stack during lowering.
 ///
 /// The internal counterpart of [`Slot`]. The difference is the lazy cases: where a
@@ -2729,7 +2730,7 @@ impl Instruction for RegInstruction {
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
-        globals_count: u32,
+        _globals_count: u32,
     ) -> Result<RegLoweredFuncBody, TraceWasmError> {
         let mut instructions = Instructions::default();
         let mut simulated_stack = SimulatedStack::new(locals_count);
