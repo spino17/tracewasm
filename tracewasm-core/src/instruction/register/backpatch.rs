@@ -1,7 +1,9 @@
 use crate::instruction::register::{
-    Const, RegInstruction, Slot, interner::InternedId, lazy::SpillIndex,
+    Const, InlinedRegisters, InlinedSignature, RegInstruction, Slot, interner::InternedId,
+    lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
+use std::slice::Iter;
 
 /// An operand as lowering knows it, before the frame layout is final.
 ///
@@ -35,9 +37,9 @@ impl BackPatchableSlot {
         matches!(self, BackPatchableSlot::Register(_))
     }
 
-    fn absolute_slot_in_frame(self, locals: u16, consts: u16, spills: u16) -> Slot {
+    fn absolute_slot_in_frame(&self, locals: u16, consts: u16, spills: u16) -> Slot {
         match self {
-            BackPatchableSlot::Slot(slot) => slot,
+            BackPatchableSlot::Slot(slot) => *slot,
             BackPatchableSlot::Const(const_id) => Slot(const_id.raw() + locals),
             BackPatchableSlot::Spill(spill_index) => {
                 Slot(spill_index.raw_value() + locals + consts)
@@ -55,7 +57,7 @@ impl From<Slot> for BackPatchableSlot {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstructionSource {
     Emit,
     BrIfCond,
@@ -72,6 +74,58 @@ pub(crate) struct BackpatchMap(
 ); // instr_index -> source -> input slots
 
 impl BackpatchMap {
+    fn apply_to_input_registers<const I: usize>(
+        patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
+        inputs: &mut InlinedRegisters<I, Slot>,
+        locals: u16,
+        consts: u16,
+        spills: u16,
+        expected_source: InstructionSource,
+    ) {
+        let (source, patch) = patches.next().expect("backpatch slots expected!");
+
+        debug_assert!(*source == expected_source);
+
+        let inputs_len = inputs.registers.len();
+
+        debug_assert!(patch.len() == inputs_len);
+
+        for (i, slot) in patch.iter().enumerate() {
+            inputs.registers[i] = slot.absolute_slot_in_frame(locals, consts, spills);
+        }
+    }
+
+    fn apply_to_output_registers<const O: usize>(
+        outputs: &mut InlinedRegisters<O, u16>,
+        _locals: u16,
+        consts: u16,
+        spills: u16,
+    ) {
+        for output in &mut outputs.registers {
+            *output = *output + consts + spills;
+        }
+    }
+
+    fn apply_to_signature<const I: usize, const O: usize>(
+        patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
+        sig: &mut InlinedSignature<I, O>,
+        locals: u16,
+        consts: u16,
+        spills: u16,
+        expected_source: InstructionSource,
+    ) {
+        Self::apply_to_input_registers(
+            patches,
+            &mut sig.inputs,
+            locals,
+            consts,
+            spills,
+            expected_source,
+        );
+
+        Self::apply_to_output_registers(&mut sig.outputs, locals, consts, spills);
+    }
+
     pub fn apply(
         &mut self,
         instructions: &mut [RegInstruction],

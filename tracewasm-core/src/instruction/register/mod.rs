@@ -468,11 +468,16 @@ impl<const L: usize, T> InlinedRegisters<L, T> {
     fn registers(&self) -> &[T; L] {
         &self.registers
     }
+
+    #[inline(always)]
+    fn registers_mut(&mut self) -> &mut [T; L] {
+        &mut self.registers
+    }
 }
 
 pub(crate) struct InlinedSignature<const I: usize, const O: usize> {
-    inputs: InlinedRegisters<I, Slot>,
-    outputs: InlinedRegisters<O, u16>,
+    pub inputs: InlinedRegisters<I, Slot>,
+    pub outputs: InlinedRegisters<O, u16>,
 }
 
 impl<const I: usize, const O: usize> InlinedSignature<I, O> {
