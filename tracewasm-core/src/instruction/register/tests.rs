@@ -56,20 +56,23 @@ fn frame_indices(xs: &[Slot]) -> Vec<u16> {
 /// Only the region sizes and the constant pool are filled in — those are all
 /// [`Slot::render`] consults, and the arenas cannot be cloned out of a borrowed
 /// stack. A test that needs the arenas builds the real layout instead.
+///
+/// The empty arenas are also enough for [`resolve_backpatches`], because the
+/// instructions these tests emit keep their operands inline; only the seven
+/// arena-held variants would need real ones.
 fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
     RegFrameLayout {
         registers: s.max_registers,
         spills: s.spills.allocation_len(),
         locals_count: s.locals_count(),
         consts: s.const_interner.values().to_vec().into_boxed_slice(),
-        input_registers_arena: Box::new([]),
-        output_registers_arena: Box::new([]),
         if_arena: Arena::default(),
         br_if_arena: Arena::default(),
         br_table_arena: Arena::default(),
         call_indirect_arena: Arena::default(),
         select_arena: Arena::default(),
         memory_init_arena: Arena::default(),
+        dyn_signatures: Arena::default(),
         memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
     }
 }
@@ -96,35 +99,26 @@ fn render_provisional(o: &BackPatchableSlot, locals_count: u16) -> String {
     }
 }
 
-/// Applies the three backpatches `emit_instructions_for_func` applies once a body is
-/// fully lowered, resolving every arena placeholder to a frame index.
+/// Runs the resolution `emit_instructions_for_func` runs once a body is fully
+/// lowered, turning every operand placeholder in `prog` into a frame index.
 ///
-/// The shifts must match the runtime's `locals | consts | spills | registers` order
-/// term for term: a constant lands at `locals + id`, a spill at
-/// `locals + consts + slot`, and an operand register — provisionally numbered from
-/// `locals` — moves up past both regions by `consts + spills`.
-fn resolve_backpatches(s: &mut SimulatedStack) {
+/// Calls [`BackpatchMap::apply`] rather than reimplementing the shifts, so a test
+/// asserting on a resolved operand is asserting on the pass's own arithmetic. A copy
+/// of the formula here could agree with itself while disagreeing with the runtime,
+/// which is the failure this is placed to catch.
+fn resolve_backpatches(s: &mut SimulatedStack, prog: &mut Instructions) {
     let locals_count = s.locals_count();
     let consts_len = s.const_interner.len() as u16;
     let spills = s.spills.allocation_len();
+    let mut layout = layout_of(s);
 
-    for (i, id) in std::mem::take(&mut s.const_backpatches) {
-        s.input_registers[i] = Slot(id.raw() + locals_count);
-    }
-
-    for (i, spill) in std::mem::take(&mut s.spill_backpatches) {
-        s.input_registers[i] = Slot(spill.raw_value() + locals_count + consts_len);
-    }
-
-    for (i, index) in std::mem::take(&mut s.register_backpatches) {
-        s.input_registers[i] = Slot(index + spills + consts_len);
-    }
-
-    s.output_registers = s
-        .output_registers
-        .iter()
-        .map(|x| x + spills + consts_len)
-        .collect();
+    s.backpatch_map.apply(
+        &mut prog.inner,
+        locals_count,
+        consts_len,
+        spills,
+        &mut layout,
+    );
 }
 
 /// Resolves one lowering-time operand the way [`resolve_backpatches`] resolves the
@@ -142,6 +136,21 @@ fn resolve(s: &SimulatedStack, o: &BackPatchableSlot) -> Slot {
 }
 
 impl SimulatedStack {
+    /// [`Self::registers_for`] for a test driving the stack directly.
+    ///
+    /// Keys the patch by how many are already recorded — which is a fresh index,
+    /// since each call records one — and hands that key back for
+    /// [`resolved_inputs`]. A test that emits no instruction stream has no
+    /// instruction index to key by, and does not need the real one.
+    fn registers_for_at<const I: usize, const O: usize>(
+        &mut self,
+    ) -> Result<(usize, Signature<I, O>), TraceWasmError> {
+        let index = self.backpatch_map.0.len();
+        let sig = self.registers_for::<I, O>(index, InstructionSource::Emit)?;
+
+        Ok((index, sig))
+    }
+
     /// Pops and renders in one step, so a provisional-form assertion does not have
     /// to name its own locals count.
     fn pop_render(&mut self) -> String {
@@ -360,11 +369,26 @@ fn operand_base_of(frame: &RegFrameLayout) -> u16 {
 
 /// A run of destination registers, offset back to operand-relative numbering.
 ///
-/// Reads the *provisional* arena — before [`resolve_backpatches`] shifts registers
-/// up past the constant and spill regions — so the operand base is just the locals
-/// count.
-fn output_operands(xs: &[u16], s: &SimulatedStack) -> Vec<u16> {
-    xs.iter().map(|r| r - s.locals_count()).collect()
+/// A destination is a start plus an arity, since an instruction's outputs are always
+/// consecutive. This reads the *provisional* start — before resolution shifts
+/// registers up past the constant and spill regions — so the operand base is just
+/// the locals count.
+fn output_operands(start: u16, len: usize, s: &SimulatedStack) -> Vec<u16> {
+    (0..len as u16)
+        .map(|i| start + i - s.locals_count())
+        .collect()
+}
+
+/// The operands lowering recorded for the instruction keyed `index`, resolved to
+/// final frame indices.
+///
+/// A signature's own `input` holds placeholders until resolution runs, so a test
+/// driving [`SimulatedStack`] without an instruction stream reads the operands from
+/// the backpatch map instead.
+fn resolved_inputs(s: &SimulatedStack, index: usize) -> Vec<Slot> {
+    let (_, patch) = &s.backpatch_map.0[&index][0];
+
+    patch.iter().map(|p| resolve(s, p)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -381,10 +405,8 @@ fn borrows_of_one_local_share_a_single_spill() {
 
     let spill = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _set = s.registers_for::<1, 0>().unwrap();
-    let add = s.registers_for::<2, 1>().unwrap();
-
-    resolve_backpatches(&mut s);
+    let _set = s.registers_for_at::<1, 0>().unwrap();
+    let (add, _) = s.registers_for_at::<2, 1>().unwrap();
 
     assert_eq!(
         spilled_to(spill),
@@ -393,7 +415,7 @@ fn borrows_of_one_local_share_a_single_spill() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers), &layout_of(&s)),
+        slots(&resolved_inputs(&s, add), &layout_of(&s)),
         ["spill0", "spill0"],
         "both operands redirect"
     );
@@ -405,7 +427,7 @@ fn a_consumed_borrow_is_not_spilled() {
 
     s.push_local(0).unwrap();
 
-    let _load = s.registers_for::<1, 1>().unwrap(); // consumes the borrow
+    let _load = s.registers_for_at::<1, 1>().unwrap(); // consumes the borrow
 
     s.push_const(Const::I32(5)).unwrap();
 
@@ -428,17 +450,15 @@ fn successive_writes_produce_independent_snapshots() {
 
     let first = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>().unwrap();
+    let _ = s.registers_for_at::<1, 0>().unwrap();
 
     s.push_local(0).unwrap();
     s.push_const(Const::I32(2)).unwrap();
 
     let second = SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>().unwrap();
-    let add = s.registers_for::<2, 1>().unwrap();
-
-    resolve_backpatches(&mut s);
+    let _ = s.registers_for_at::<1, 0>().unwrap();
+    let (add, _) = s.registers_for_at::<2, 1>().unwrap();
 
     assert_eq!(
         (spilled_to(first), spilled_to(second)),
@@ -447,7 +467,7 @@ fn successive_writes_produce_independent_snapshots() {
     );
 
     assert_eq!(
-        slots(add.input.registers(&s.input_registers), &layout_of(&s)),
+        slots(&resolved_inputs(&s, add), &layout_of(&s)),
         ["spill0", "spill1"],
         "each operand keeps its own snapshot"
     );
@@ -462,7 +482,7 @@ fn dropping_the_last_borrow_releases_its_spill_slot() {
 
     SimulatedStack::set_lazy(0, &mut s.lazy_locals, &mut s.spills).unwrap();
 
-    let _ = s.registers_for::<1, 0>().unwrap();
+    let _ = s.registers_for_at::<1, 0>().unwrap();
 
     s.pop(); // drop the spilled borrow
     s.push_local(0).unwrap();
@@ -680,7 +700,7 @@ fn block_entry_layouts_hold_for_every_block_type() {
 
             s.push_local(0).unwrap();
 
-            let _ = s.registers_for::<1, 1>().unwrap(); // a live register underneath
+            let _ = s.registers_for_at::<1, 1>().unwrap(); // a live register underneath
             let np = params_and_results_from_blockty(&blockty, &types).0;
 
             for _ in 0..np {
@@ -695,11 +715,15 @@ fn block_entry_layouts_hold_for_every_block_type() {
             let recorded = s.get_curr_block().recorded_height;
 
             if params != 0 {
-                let _ = s.materialize_stack_slots_in_registers(params + u32::from(is_if));
+                let _ = s.materialize_stack_slots_in_registers(
+                    params + u32::from(is_if),
+                    s.backpatch_map.0.len(),
+                    InstructionSource::Emit,
+                );
             }
 
             if is_if {
-                let _ = s.registers_for::<1, 0>().unwrap();
+                let _ = s.registers_for_at::<1, 0>().unwrap();
             }
 
             assert_eq!(
@@ -740,7 +764,7 @@ fn branch_lowering_does_not_disturb_the_stack() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     s.push_local(1).unwrap(); // a live lazy borrow above the base
 
@@ -750,7 +774,7 @@ fn branch_lowering_does_not_disturb_the_stack() {
         s.spills.allocation_len(),
     );
 
-    let _mov = s.br_truncation_registers(base, 0);
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     let after = (
         heights(&s),
@@ -771,7 +795,7 @@ fn branch_destinations_are_based_at_the_target_label() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap(); // r0, below the inner block
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r0, below the inner block
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -779,25 +803,19 @@ fn branch_destinations_are_based_at_the_target_label() {
 
     s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap(); // r1, the carried value
-    let to_inner = s.br_truncation_registers(inner, 1).unwrap();
-    let to_outer = s.br_truncation_registers(outer, 1).unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r1, the carried value
+    let to_inner = s
+        .br_truncation_registers(inner, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
+    let to_outer = s
+        .br_truncation_registers(outer, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
-    assert_eq!(
-        output_operands(to_inner.output_registers(&s.output_registers), &s),
-        vec![1]
-    );
+    assert_eq!(output_operands(to_inner.output_start, 1, &s), vec![1]);
 
-    assert_eq!(
-        output_operands(to_outer.output_registers(&s.output_registers), &s),
-        vec![0]
-    );
+    assert_eq!(output_operands(to_outer.output_start, 1, &s), vec![0]);
 
-    assert_eq!(
-        to_inner.input_registers(&s.input_registers).len(),
-        1,
-        "every arm reads the same operands"
-    );
+    assert_eq!(to_inner.input.len(), 1, "every arm reads the same operands");
 }
 
 #[test]
@@ -812,14 +830,13 @@ fn branch_destinations_count_towards_the_frame() {
     s.push_const(Const::I32(1)).unwrap();
     s.push_const(Const::I32(2)).unwrap();
 
-    let mov = s.br_truncation_registers(base, 2).unwrap();
-
-    let highest = mov
-        .output_registers(&s.output_registers)
-        .iter()
-        .map(|r| r + 1)
-        .max()
+    let mov = s
+        .br_truncation_registers(base, 2, s.backpatch_map.0.len(), InstructionSource::Emit)
         .unwrap();
+
+    // Destinations are consecutive from the start, so one past the last is the
+    // highest frame index the move writes.
+    let highest = mov.output_start + mov.input.len() as u16;
 
     assert!(
         highest <= s.max_registers,
@@ -1019,7 +1036,7 @@ impl Frame {
         self.registers[*i as usize]
     }
 
-    fn exec(&mut self, instruction: &RegInstruction, ins: &[Slot]) {
+    fn exec(&mut self, instruction: &RegInstruction) {
         match instruction {
             RegInstruction::LocalSpill { index, spill_index } => {
                 let at = self.spill_at(spill_index);
@@ -1027,10 +1044,10 @@ impl Frame {
                 self.registers[at] = self.registers[index.0 as usize];
             }
             RegInstruction::LocalSet { index, input } => {
-                self.registers[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.registers[index.0 as usize] = self.read(&input.registers[0]);
             }
             RegInstruction::GlobalSet { index, input } => {
-                self.globals[index.0 as usize] = self.read(&input.registers(ins)[0]);
+                self.globals[index.0 as usize] = self.read(&input.registers[0]);
             }
             _ => unreachable!("these tests emit only spills and writes"),
         }
@@ -1045,13 +1062,13 @@ fn spill_slot(index: &SpillIndex) -> usize {
 
 /// Executes `prog`, skipping the half-open range `skip` — the instructions a branch
 /// jumps over on one of its paths.
-fn run(prog: &Instructions, ins: &[Slot], skip: Range<usize>, frame: &mut Frame) {
+fn run(prog: &Instructions, skip: Range<usize>, frame: &mut Frame) {
     for (pc, instruction) in prog.inner.iter().enumerate() {
         if skip.contains(&pc) {
             continue;
         }
 
-        frame.exec(instruction, ins);
+        frame.exec(instruction);
     }
 }
 
@@ -1086,7 +1103,8 @@ fn a_conditional_arm_cannot_own_the_spill() {
 
     s.add_block(BlockVariant::If, &BlockType::Empty, &[], prog.len());
 
-    let _cond = s.registers_for::<1, 0>().unwrap();
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
 
     // then-arm
     let arm = prog.len()..{
@@ -1099,7 +1117,10 @@ fn a_conditional_arm_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().unwrap().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1122,14 +1143,14 @@ fn a_conditional_arm_cannot_own_the_spill() {
     let consumer = s.pop();
     let rendered = render_provisional(&consumer, s.locals_count());
 
-    resolve_backpatches(&mut s);
+    resolve_backpatches(&mut s, &mut prog);
 
     let consumer = resolve(&s, &consumer);
 
     for (tag, skip) in [("taken", 0..0), ("not taken", arm.clone())] {
         let mut frame = Frame::new(&s, &[42, 1], &[]);
 
-        run(&prog, &s.input_registers, skip, &mut frame);
+        run(&prog, skip, &mut frame);
 
         assert_eq!(
             frame.read(&consumer),
@@ -1157,8 +1178,9 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
     RegInstruction::spill_live_locals(&mut s, &mut prog, 0).unwrap();
 
-    let _cond = s.registers_for::<1, 0>().unwrap();
-    let _mov = s.br_truncation_registers(base, 0);
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     // everything after the branch is skipped when it is taken
     let rest = prog.len()..{
@@ -1170,7 +1192,10 @@ fn a_taken_br_if_cannot_skip_the_spill() {
                 .is_none()
         );
 
-        let input = s.registers_for::<1, 0>().unwrap().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1185,14 +1210,14 @@ fn a_taken_br_if_cannot_skip_the_spill() {
 
     let consumer = s.pop();
 
-    resolve_backpatches(&mut s);
+    resolve_backpatches(&mut s, &mut prog);
 
     let consumer = resolve(&s, &consumer);
 
     for (tag, skip) in [("not taken", 0..0), ("taken", rest.clone())] {
         let mut frame = Frame::new(&s, &[42, 1], &[]);
 
-        run(&prog, &s.input_registers, skip, &mut frame);
+        run(&prog, skip, &mut frame);
 
         assert_eq!(frame.read(&consumer), 42, "{tag}");
     }
@@ -1231,7 +1256,10 @@ fn a_loop_body_cannot_own_the_spill() {
             "the write finds nothing left to rescue"
         );
 
-        let input = s.registers_for::<1, 0>().unwrap().input;
+        let input = s
+            .registers_for::<1, 0>(prog.len(), InstructionSource::Emit)
+            .unwrap()
+            .input;
 
         prog.push(
             RegInstruction::LocalSet {
@@ -1257,7 +1285,7 @@ fn a_loop_body_cannot_own_the_spill() {
 
     let consumer = s.pop();
 
-    resolve_backpatches(&mut s);
+    resolve_backpatches(&mut s, &mut prog);
 
     let consumer = resolve(&s, &consumer);
 
@@ -1266,14 +1294,14 @@ fn a_loop_body_cannot_own_the_spill() {
 
         for (pc, instruction) in prog.inner.iter().enumerate() {
             if entry.contains(&pc) {
-                frame.exec(instruction, &s.input_registers);
+                frame.exec(instruction);
             }
         }
 
         for _ in 0..iterations {
             for (pc, instruction) in prog.inner.iter().enumerate() {
                 if body.contains(&pc) {
-                    frame.exec(instruction, &s.input_registers);
+                    frame.exec(instruction);
                 }
             }
         }
@@ -1313,7 +1341,7 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap(); // consumed into a register
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // consumed into a register
 
     s.push_const(Const::I32(1)).unwrap(); // a condition
 
@@ -1404,10 +1432,7 @@ fn a_global_read_survives_a_call() {
     // both operands are operand registers — the global read, and the call's result
     let operand_base = operand_base_of(&frame);
 
-    for (i, index) in frame_indices(sig.input.registers(&frame.input_registers_arena))
-        .iter()
-        .enumerate()
-    {
+    for (i, index) in frame_indices(&sig.input.registers).iter().enumerate() {
         assert!(
             *index >= operand_base,
             "operand {i} is slot {index}, below the operand region at {operand_base} \
@@ -1511,7 +1536,7 @@ fn drop_releases_a_register() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     assert_eq!(heights(&s), (1, 1));
 
@@ -1561,10 +1586,10 @@ fn operands_are_recorded_deepest_first() {
     s.push_local(1).unwrap(); // b
     s.push_local(2).unwrap(); // condition, pushed last
 
-    let select = s.registers_for::<3, 1>().unwrap();
+    let (select, _) = s.registers_for_at::<3, 1>().unwrap();
 
     assert_eq!(
-        slots(select.input.registers(&s.input_registers), &layout_of(&s)),
+        slots(&resolved_inputs(&s, select), &layout_of(&s)),
         ["local0", "local1", "local2"],
         "select reads a, b, cond in that order"
     );
@@ -1577,30 +1602,29 @@ fn store_records_address_then_value() {
     s.push_local(0).unwrap(); // address
     s.push_const(Const::I32(9)).unwrap(); // value
 
-    let store = s.registers_for::<2, 0>().unwrap();
+    let (store, sig) = s.registers_for_at::<2, 0>().unwrap();
 
-    // The constant has no frame index until the end-of-body backpatch runs, so
-    // before that the arena holds a placeholder rather than a location.
+    // An instruction is built with placeholders for *every* operand, not only the
+    // ones that need a shift — the real ones are recorded in the backpatch map and
+    // written in once the region sizes are known.
     assert_eq!(
-        slots(store.input.registers(&s.input_registers), &layout_of(&s)),
-        ["local0", "<unresolved>"],
-        "a constant operand is a placeholder until the body is fully lowered"
+        slots(&sig.input.registers, &layout_of(&s)),
+        ["<unresolved>", "<unresolved>"],
+        "no operand has a frame index until the body is fully lowered"
     );
 
-    resolve_backpatches(&mut s);
-
-    let operands = store.input.registers(&s.input_registers);
+    let operands = resolved_inputs(&s, store);
 
     assert_eq!(
-        slots(operands, &layout_of(&s)),
+        slots(&operands, &layout_of(&s)),
         ["local0", "9"],
-        "and resolves to the pool's value once it does"
+        "and both resolve once it is"
     );
 
     // 4 locals and one constant, so the pool begins at frame index 4 — the
     // `const_id + locals_count` the pass backpatches.
     assert_eq!(
-        frame_indices(operands),
+        frame_indices(&operands),
         vec![0, 4],
         "address is local 0; the constant is the first slot above the locals"
     );
@@ -1612,23 +1636,21 @@ fn a_result_reuses_an_operands_register() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap(); // r0
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r0
 
     s.push_local(1).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap(); // r1
-    let add = s.registers_for::<2, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap(); // r1
+    let (add, sig) = s.registers_for_at::<2, 1>().unwrap();
 
-    resolve_backpatches(&mut s);
+    let inputs = resolved_inputs(&s, add);
+    let output = resolve(&s, &BackPatchableSlot::Register(sig.output.start)).0;
 
-    let inputs = add.input.registers(&s.input_registers);
-    let output = add.output.registers(&s.output_registers)[0];
-
-    assert_eq!(slots(inputs, &layout_of(&s)), ["r0", "r1"]);
+    assert_eq!(slots(&inputs, &layout_of(&s)), ["r0", "r1"]);
 
     // 4 locals, no constants and no spills, so the operand region begins at 4 and
     // the destination is the first register — the same slot `r0` occupies.
-    assert_eq!(frame_indices(inputs), vec![4, 5]);
+    assert_eq!(frame_indices(&inputs), vec![4, 5]);
 
     assert_eq!(
         output, 4,
@@ -1644,8 +1666,8 @@ fn max_registers_tracks_the_peak_not_the_total() {
     for l in 0..2 {
         s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>().unwrap();
-        let _ = s.registers_for::<1, 0>().unwrap();
+        let _ = s.registers_for_at::<1, 1>().unwrap();
+        let _ = s.registers_for_at::<1, 0>().unwrap();
     }
 
     assert_eq!(peak_operands(&s), 1, "serial values reuse one register");
@@ -1656,7 +1678,7 @@ fn max_registers_tracks_the_peak_not_the_total() {
     for l in 0..2 {
         s.push_local(l).unwrap();
 
-        let _ = s.registers_for::<1, 1>().unwrap();
+        let _ = s.registers_for_at::<1, 1>().unwrap();
     }
 
     assert_eq!(peak_operands(&s), 2);
@@ -1743,13 +1765,15 @@ fn a_branch_to_the_function_frame_unwinds_to_zero() {
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     let func_block = s.get_block(0);
 
     assert_eq!(func_block.recorded_height, 0);
 
-    let mov = s.br_truncation_registers(0, 0).unwrap();
+    let mov = s
+        .br_truncation_registers(0, 0, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
     assert!(mov.is_empty());
     assert_eq!(heights(&s), (1, 1), "still a simulation");
@@ -1765,19 +1789,21 @@ fn a_branch_carrying_several_values_lands_them_contiguously() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     s.push_const(Const::I32(2)).unwrap();
     s.push_local(1).unwrap();
 
-    let mov = s.br_truncation_registers(base, 3).unwrap();
+    let mov = s
+        .br_truncation_registers(base, 3, s.backpatch_map.0.len(), InstructionSource::Emit)
+        .unwrap();
 
     assert_eq!(
-        output_operands(mov.output_registers(&s.output_registers), &s),
+        output_operands(mov.output_start, mov.input.len(), &s),
         vec![0, 1, 2]
     );
 
-    assert_eq!(mov.input_registers(&s.input_registers).len(), 3);
+    assert_eq!(mov.input.len(), 3);
 }
 
 #[test]
@@ -1793,7 +1819,11 @@ fn a_br_table_may_mix_loop_and_block_targets() {
     let loop_block = s.get_curr_block().recorded_height;
     let loop_params = s.get_curr_block().params;
 
-    let _ = s.materialize_stack_slots_in_registers(loop_params);
+    let _ = s.materialize_stack_slots_in_registers(
+        loop_params,
+        s.backpatch_map.0.len(),
+        InstructionSource::Emit,
+    );
 
     s.add_block(
         BlockVariant::Block,
@@ -1807,16 +1837,27 @@ fn a_br_table_may_mix_loop_and_block_targets() {
 
     s.push_local(0).unwrap(); // the value the branch carries
 
-    let to_loop = s.br_truncation_registers(loop_block, loop_params).unwrap();
+    let to_loop = s
+        .br_truncation_registers(
+            loop_block,
+            loop_params,
+            s.backpatch_map.0.len(),
+            InstructionSource::Emit,
+        )
+        .unwrap();
     let to_block = s
-        .br_truncation_registers(block_base, block_results)
+        .br_truncation_registers(
+            block_base,
+            block_results,
+            s.backpatch_map.0.len(),
+            InstructionSource::Emit,
+        )
         .unwrap();
 
     assert_eq!(loop_params, block_results, "arities agree");
 
     assert_ne!(
-        to_loop.output_registers(&s.output_registers),
-        to_block.output_registers(&s.output_registers),
+        to_loop.output_start, to_block.output_start,
         "but the destinations differ, which is why each arm carries its own move"
     );
 }
@@ -1833,17 +1874,19 @@ fn every_br_table_arm_sees_the_same_stack() {
 
     let before = heights(&s);
     let arms: Vec<_> = (0..4)
-        .map(|_| s.br_truncation_registers(base, 1).unwrap())
+        .map(|_| {
+            s.br_truncation_registers(base, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+                .unwrap()
+        })
         .collect();
 
     assert_eq!(heights(&s), before, "four simulations, no mutation");
 
-    let first = arms[0].output_registers(&s.output_registers).to_vec();
+    let first = arms[0].output_start;
 
     for arm in &arms[1..] {
         assert_eq!(
-            arm.output_registers(&s.output_registers),
-            first.as_slice(),
+            arm.output_start, first,
             "identical targets must produce identical moves"
         );
     }
@@ -1859,10 +1902,12 @@ fn a_branch_carrying_nothing_emits_no_move() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     assert!(
-        s.br_truncation_registers(base, 0).unwrap().is_empty(),
+        s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit)
+            .unwrap()
+            .is_empty(),
         "callers use this to skip emitting the move entirely"
     );
 }
@@ -1876,15 +1921,16 @@ fn br_if_consumes_only_its_condition() {
     let base = s.get_curr_block().recorded_height;
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
     s.push_local(1).unwrap();
 
     let live = (heights(&s), s.lazy_locals.origin[1].is_some());
 
     s.push_const(Const::I32(1)).unwrap(); // condition
 
-    let _cond = s.registers_for::<1, 0>().unwrap();
-    let _mov = s.br_truncation_registers(base, 0);
+    // no `If` is emitted here, so the condition wants the stack effect alone
+    s.pops_and_pushes(1, 0).unwrap();
+    let _mov = s.br_truncation_registers(base, 0, s.backpatch_map.0.len(), InstructionSource::Emit);
 
     assert_eq!(
         (heights(&s), s.lazy_locals.origin[1].is_some()),
@@ -1977,7 +2023,7 @@ fn br_table_arms_survive_lowering() {
 
     s.push_local(0).unwrap();
 
-    let _ = s.registers_for::<1, 1>().unwrap();
+    let _ = s.registers_for_at::<1, 1>().unwrap();
 
     s.add_block(BlockVariant::Block, &BlockType::Empty, &[], 0);
 
@@ -1991,7 +2037,9 @@ fn br_table_arms_survive_lowering() {
     let mut br_targets = vec![];
 
     for base in [inner, outer, inner] {
-        let mov = s.br_truncation_registers(base, 1).unwrap();
+        let mov = s
+            .br_truncation_registers(base, 1, s.backpatch_map.0.len(), InstructionSource::Emit)
+            .unwrap();
 
         br_targets.push(RegBrTableTarget {
             mov,
@@ -1999,7 +2047,7 @@ fn br_table_arms_survive_lowering() {
         });
     }
 
-    let index = s.registers_for::<1, 0>().unwrap().input;
+    let index = s.registers_for_at::<1, 0>().unwrap().1.input;
     let id = s
         .br_table_arena
         .alloc(BrTableOperands { index, br_targets });
@@ -2009,14 +2057,13 @@ fn br_table_arms_survive_lowering() {
         spills: s.spills.allocation_len(),
         locals_count: s.lazy_locals.origin.len() as u16,
         consts: s.const_interner.into_values().into_boxed_slice(),
-        input_registers_arena: s.input_registers.into_boxed_slice(),
-        output_registers_arena: s.output_registers.into_boxed_slice(),
         if_arena: s.if_arena,
         br_if_arena: s.br_if_arena,
         br_table_arena: s.br_table_arena,
         call_indirect_arena: s.call_indirect_arena,
         select_arena: s.select_arena,
         memory_init_arena: s.memory_init_arena,
+        dyn_signatures: s.dyn_signatures,
         memory_offsets: s.memory_offsets,
     };
 
@@ -2028,20 +2075,14 @@ fn br_table_arms_survive_lowering() {
         "arms must ship with the body, reachable from the instruction's id"
     );
 
-    // and each one still resolves against the operand arenas it was recorded in
-    let dests: Vec<Vec<u16>> = entry
+    // and each one still carries its own destination, in operand-relative form
+    let dests: Vec<u16> = entry
         .br_targets
         .iter()
-        .map(|t| {
-            t.mov
-                .output_registers(&frame.output_registers_arena)
-                .iter()
-                .map(|r| r - frame.locals_count)
-                .collect()
-        })
+        .map(|t| t.mov.output_start - frame.locals_count)
         .collect();
 
-    assert_eq!(dests, vec![vec![1], vec![0], vec![1]]);
+    assert_eq!(dests, vec![1, 0, 1]);
 }
 
 /// A body with no `br_table` allocates no arms.
@@ -2266,12 +2307,10 @@ fn both_arms_of_an_if_materialise_results_into_the_same_registers() {
              if (result i32) i32.const 1 else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u16>> = prog
+    let dests: Vec<u16> = prog
         .iter()
         .filter_map(|i| match i {
-            RegInstruction::Move(sig) => {
-                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
-            }
+            RegInstruction::Move(id) => Some(frame.dyn_signatures.get(*id).output_start),
             _ => None,
         })
         .collect();
@@ -2380,10 +2419,7 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
     let entry = frame.br_if_arena.get(*id);
 
     assert_eq!(
-        entry
-            .mov
-            .input_registers(&frame.input_registers_arena)
-            .len(),
+        entry.mov.input.len(),
         1,
         "a back-edge transfers the loop's params, not its results"
     );
@@ -2412,14 +2448,14 @@ fn a_branch_to_a_loop_carries_the_loops_params() {
 
     // And the destination the back-edge writes is the same register the header move
     // fills, which is what makes skipping the header correct rather than lossy.
-    let back_edge_dst = entry.mov.output_registers(&frame.output_registers_arena);
+    let back_edge_dst = entry.mov.output_start;
     let RegInstruction::Move(header) = &prog[0] else {
         unreachable!()
     };
 
     assert_eq!(
         back_edge_dst,
-        header.output_registers(&frame.output_registers_arena),
+        frame.dyn_signatures.get(*header).output_start,
         "a back-edge must land the params in the registers the loop body reads"
     );
 }
@@ -2482,20 +2518,12 @@ fn each_br_table_arm_carries_its_own_move() {
 
     for arm in arms {
         assert_eq!(
-            slots(
-                arm.mov.input_registers(&frame.input_registers_arena),
-                &frame
-            ),
+            slots(&arm.mov.input, &frame),
             ["9"],
             "every arm transfers the same value"
         );
 
-        assert_eq!(
-            arm.mov
-                .output_registers(&frame.output_registers_arena)
-                .len(),
-            1
-        );
+        assert_eq!(arm.mov.input.len(), 1);
     }
 }
 
@@ -2721,12 +2749,10 @@ fn a_conditional_return_shares_the_functions_result_register() {
              if (result i32) i32.const 1 return else i32.const 2 end))"#,
     );
 
-    let dests: Vec<Vec<u16>> = prog
+    let dests: Vec<u16> = prog
         .iter()
         .filter_map(|i| match i {
-            RegInstruction::Move(sig) => {
-                Some(sig.output_registers(&frame.output_registers_arena).to_vec())
-            }
+            RegInstruction::Move(id) => Some(frame.dyn_signatures.get(*id).output_start),
             _ => None,
         })
         .collect();
@@ -2815,10 +2841,7 @@ fn caller_base_of(wat: &str) -> (u16, Vec<String>) {
     let reader = prog[at + 1..]
         .iter()
         .find_map(|i| match i {
-            RegInstruction::I32Add(sig) => Some(slots(
-                sig.input.registers(&frame.input_registers_arena),
-                &frame,
-            )),
+            RegInstruction::I32Add(sig) => Some(slots(&sig.input.registers, &frame)),
             _ => None,
         })
         .expect("something must read the result");
@@ -2996,13 +3019,20 @@ fn arguments_are_staged_at_the_caller_base() {
         unreachable!()
     };
 
-    let RegInstruction::Move(sig) = &prog[at - 1] else {
+    let RegInstruction::Move(id) = &prog[at - 1] else {
         panic!("the arguments must be staged immediately before the call")
     };
 
+    // Destinations are consecutive from the start, so the run the move writes is
+    // reconstructed the way the executor reconstructs it.
+    let sig = frame.dyn_signatures.get(*id);
+    let dests: Vec<u16> = (0..sig.input.len() as u16)
+        .map(|i| sig.output_start + i)
+        .collect();
+
     assert_eq!(
-        sig.output_registers(&frame.output_registers_arena),
-        &[*caller_base, caller_base + 1],
+        dests,
+        vec![*caller_base, caller_base + 1],
         "arguments land at [caller_base, caller_base + params)"
     );
 }
@@ -3907,8 +3937,7 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
             RegInstruction::render_body(&body, &[])
         );
 
-        let pops = frame.input_registers_arena.len() as i64;
-        let pushes = frame.output_registers_arena.len() as i64;
+        let (pops, pushes) = declared_arity(&prog[0], frame);
 
         assert_eq!(
             pushes - pops,
@@ -3917,6 +3946,210 @@ fn every_operator_pops_and_pushes_what_the_spec_says() {
              stack effect is {expected}. The `Signature<I, O>` on the variant is \
              wrong — nothing else records an arity."
         );
+    }
+}
+
+impl<const I: usize, const O: usize> Signature<I, O> {
+    /// The arity the variant declares, as `(pops, pushes)`.
+    fn arity(&self) -> (i64, i64) {
+        (I as i64, O as i64)
+    }
+}
+
+impl<const I: usize> InputRegisters<I> {
+    fn arity(&self) -> i64 {
+        I as i64
+    }
+}
+
+/// The `(pops, pushes)` an instruction's operand shape declares.
+///
+/// Read off the const parameters, which is the thing under test — the arity lives
+/// nowhere else once lowering has run, so a wrong `Signature<I, O>` on a variant is
+/// exactly what this catches.
+///
+/// Only the shapes [`arity_case`] can produce are covered; the operators it returns
+/// `None` for never reach here.
+fn declared_arity(instruction: &RegInstruction, frame: &RegFrameLayout) -> (i64, i64) {
+    match instruction {
+        // A load's `offset` is an interned id, not an operand.
+        RegInstruction::I32Load { sig, .. }
+        | RegInstruction::I32Load8S { sig, .. }
+        | RegInstruction::I32Load8U { sig, .. }
+        | RegInstruction::I32Load16S { sig, .. }
+        | RegInstruction::I32Load16U { sig, .. }
+        | RegInstruction::I64Load { sig, .. }
+        | RegInstruction::I64Load8S { sig, .. }
+        | RegInstruction::I64Load8U { sig, .. }
+        | RegInstruction::I64Load16S { sig, .. }
+        | RegInstruction::I64Load16U { sig, .. }
+        | RegInstruction::I64Load32S { sig, .. }
+        | RegInstruction::I64Load32U { sig, .. }
+        | RegInstruction::F32Load { sig, .. }
+        | RegInstruction::F64Load { sig, .. } => sig.arity(),
+
+        // A store declares no destination, so its shape is the operands alone.
+        RegInstruction::I32Store { input, .. }
+        | RegInstruction::I32Store8 { input, .. }
+        | RegInstruction::I32Store16 { input, .. }
+        | RegInstruction::I64Store { input, .. }
+        | RegInstruction::I64Store8 { input, .. }
+        | RegInstruction::I64Store16 { input, .. }
+        | RegInstruction::I64Store32 { input, .. }
+        | RegInstruction::F32Store { input, .. }
+        | RegInstruction::F64Store { input, .. } => (input.arity(), 0),
+
+        RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => (input.arity(), 0),
+        RegInstruction::MemorySize(_) => (0, 1),
+        RegInstruction::DataDrop(_) => (0, 0),
+        RegInstruction::Select(id) => frame.select_arena.get(*id).0.arity(),
+        RegInstruction::MemoryInit(id) => (frame.memory_init_arena.get(*id).operands.arity(), 0),
+
+        // Every value operator, plus `memory.grow` and `ref.is_null`, declares its
+        // arity the same way — split by shape only because an or-pattern binds one
+        // type.
+        RegInstruction::I32Clz(sig)
+        | RegInstruction::I32Ctz(sig)
+        | RegInstruction::I32Eqz(sig)
+        | RegInstruction::I32Extend16S(sig)
+        | RegInstruction::I32Extend8S(sig)
+        | RegInstruction::I32Popcnt(sig)
+        | RegInstruction::I32ReinterpretF32(sig)
+        | RegInstruction::I32TruncF32S(sig)
+        | RegInstruction::I32TruncF32U(sig)
+        | RegInstruction::I32TruncF64S(sig)
+        | RegInstruction::I32TruncF64U(sig)
+        | RegInstruction::I32TruncSatF32S(sig)
+        | RegInstruction::I32TruncSatF32U(sig)
+        | RegInstruction::I32TruncSatF64S(sig)
+        | RegInstruction::I32TruncSatF64U(sig)
+        | RegInstruction::I32WrapI64(sig)
+        | RegInstruction::I64Clz(sig)
+        | RegInstruction::I64Ctz(sig)
+        | RegInstruction::I64Eqz(sig)
+        | RegInstruction::I64Extend16S(sig)
+        | RegInstruction::I64Extend32S(sig)
+        | RegInstruction::I64Extend8S(sig)
+        | RegInstruction::I64ExtendI32S(sig)
+        | RegInstruction::I64ExtendI32U(sig)
+        | RegInstruction::I64Popcnt(sig)
+        | RegInstruction::I64ReinterpretF64(sig)
+        | RegInstruction::I64TruncF32S(sig)
+        | RegInstruction::I64TruncF32U(sig)
+        | RegInstruction::I64TruncF64S(sig)
+        | RegInstruction::I64TruncF64U(sig)
+        | RegInstruction::I64TruncSatF32S(sig)
+        | RegInstruction::I64TruncSatF32U(sig)
+        | RegInstruction::I64TruncSatF64S(sig)
+        | RegInstruction::I64TruncSatF64U(sig)
+        | RegInstruction::F32Abs(sig)
+        | RegInstruction::F32Ceil(sig)
+        | RegInstruction::F32ConvertI32S(sig)
+        | RegInstruction::F32ConvertI32U(sig)
+        | RegInstruction::F32ConvertI64S(sig)
+        | RegInstruction::F32ConvertI64U(sig)
+        | RegInstruction::F32DemoteF64(sig)
+        | RegInstruction::F32Floor(sig)
+        | RegInstruction::F32Nearest(sig)
+        | RegInstruction::F32Neg(sig)
+        | RegInstruction::F32ReinterpretI32(sig)
+        | RegInstruction::F32Sqrt(sig)
+        | RegInstruction::F32Trunc(sig)
+        | RegInstruction::F64Abs(sig)
+        | RegInstruction::F64Ceil(sig)
+        | RegInstruction::F64ConvertI32S(sig)
+        | RegInstruction::F64ConvertI32U(sig)
+        | RegInstruction::F64ConvertI64S(sig)
+        | RegInstruction::F64ConvertI64U(sig)
+        | RegInstruction::F64Floor(sig)
+        | RegInstruction::F64Nearest(sig)
+        | RegInstruction::F64Neg(sig)
+        | RegInstruction::F64PromoteF32(sig)
+        | RegInstruction::F64ReinterpretI64(sig)
+        | RegInstruction::F64Sqrt(sig)
+        | RegInstruction::F64Trunc(sig)
+        | RegInstruction::RefIsNull(sig)
+        | RegInstruction::MemoryGrow(sig) => sig.arity(),
+
+        RegInstruction::I32Add(sig)
+        | RegInstruction::I32And(sig)
+        | RegInstruction::I32DivS(sig)
+        | RegInstruction::I32DivU(sig)
+        | RegInstruction::I32Eq(sig)
+        | RegInstruction::I32GeS(sig)
+        | RegInstruction::I32GeU(sig)
+        | RegInstruction::I32GtS(sig)
+        | RegInstruction::I32GtU(sig)
+        | RegInstruction::I32LeS(sig)
+        | RegInstruction::I32LeU(sig)
+        | RegInstruction::I32LtS(sig)
+        | RegInstruction::I32LtU(sig)
+        | RegInstruction::I32Mul(sig)
+        | RegInstruction::I32Ne(sig)
+        | RegInstruction::I32Or(sig)
+        | RegInstruction::I32RemS(sig)
+        | RegInstruction::I32RemU(sig)
+        | RegInstruction::I32Rotl(sig)
+        | RegInstruction::I32Rotr(sig)
+        | RegInstruction::I32Shl(sig)
+        | RegInstruction::I32ShrS(sig)
+        | RegInstruction::I32ShrU(sig)
+        | RegInstruction::I32Sub(sig)
+        | RegInstruction::I32Xor(sig)
+        | RegInstruction::I64Add(sig)
+        | RegInstruction::I64And(sig)
+        | RegInstruction::I64DivS(sig)
+        | RegInstruction::I64DivU(sig)
+        | RegInstruction::I64Eq(sig)
+        | RegInstruction::I64GeS(sig)
+        | RegInstruction::I64GeU(sig)
+        | RegInstruction::I64GtS(sig)
+        | RegInstruction::I64GtU(sig)
+        | RegInstruction::I64LeS(sig)
+        | RegInstruction::I64LeU(sig)
+        | RegInstruction::I64LtS(sig)
+        | RegInstruction::I64LtU(sig)
+        | RegInstruction::I64Mul(sig)
+        | RegInstruction::I64Ne(sig)
+        | RegInstruction::I64Or(sig)
+        | RegInstruction::I64RemS(sig)
+        | RegInstruction::I64RemU(sig)
+        | RegInstruction::I64Rotl(sig)
+        | RegInstruction::I64Rotr(sig)
+        | RegInstruction::I64Shl(sig)
+        | RegInstruction::I64ShrS(sig)
+        | RegInstruction::I64ShrU(sig)
+        | RegInstruction::I64Sub(sig)
+        | RegInstruction::I64Xor(sig)
+        | RegInstruction::F32Add(sig)
+        | RegInstruction::F32Copysign(sig)
+        | RegInstruction::F32Div(sig)
+        | RegInstruction::F32Eq(sig)
+        | RegInstruction::F32Ge(sig)
+        | RegInstruction::F32Gt(sig)
+        | RegInstruction::F32Le(sig)
+        | RegInstruction::F32Lt(sig)
+        | RegInstruction::F32Max(sig)
+        | RegInstruction::F32Min(sig)
+        | RegInstruction::F32Mul(sig)
+        | RegInstruction::F32Ne(sig)
+        | RegInstruction::F32Sub(sig)
+        | RegInstruction::F64Add(sig)
+        | RegInstruction::F64Copysign(sig)
+        | RegInstruction::F64Div(sig)
+        | RegInstruction::F64Eq(sig)
+        | RegInstruction::F64Ge(sig)
+        | RegInstruction::F64Gt(sig)
+        | RegInstruction::F64Le(sig)
+        | RegInstruction::F64Lt(sig)
+        | RegInstruction::F64Max(sig)
+        | RegInstruction::F64Min(sig)
+        | RegInstruction::F64Mul(sig)
+        | RegInstruction::F64Ne(sig)
+        | RegInstruction::F64Sub(sig) => sig.arity(),
+
+        // `arity_case` returns `None` for these, so none of them reaches here.
+        other => unreachable!("no arity case lowers to {other:?}"),
     }
 }
 
@@ -3976,16 +4209,15 @@ fn the_frame_reports_peak_spill_use() {
     );
 }
 
+/// Operands travel inside the instructions, so what has to ship with the body is
+/// the arenas the *ids* index — and every one of those ids has to resolve.
 #[test]
-fn the_arenas_ship_with_the_body() {
+fn every_id_in_the_body_resolves_against_a_shipped_arena() {
     let (prog, _, frame) = lower(
         r#"(module (func (param i32)
              block block local.get 0 br_table 0 1 0 end end))"#,
     );
 
-    assert!(!frame.input_registers_arena.is_empty(), "operands");
-
-    // and every id in the program resolves against the arena it indexes
     let mut tables = 0;
 
     for instruction in &prog {
@@ -3999,14 +4231,14 @@ fn the_arenas_ship_with_the_body() {
                 "a br_table with no arms cannot pick a destination"
             );
 
-            // every arm's move resolves against the operand arenas
+            // Both labels here are empty, so no arm has anything to transfer.
+            // That is the case `BackpatchMap::apply` skips, and it must really be
+            // empty rather than a zero-length move with a recorded patch.
             for arm in &entry.br_targets {
-                let outs = arm.mov.output_registers(&frame.output_registers_arena);
-
-                assert_eq!(
-                    outs.len(),
-                    arm.mov.input_registers(&frame.input_registers_arena).len(),
-                    "an arm's move must name as many destinations as sources"
+                assert!(
+                    arm.mov.is_empty(),
+                    "an empty label needs no move: {:?}",
+                    arm.mov
                 );
             }
         }

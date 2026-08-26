@@ -332,14 +332,13 @@ mod tests {
             spills,
             locals_count: locals,
             consts: consts.to_vec().into_boxed_slice(),
-            input_registers_arena: Box::new([]),
-            output_registers_arena: Box::new([]),
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
             br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            dyn_signatures: Arena::default(),
             memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
         }
     }
@@ -420,14 +419,13 @@ mod tests {
             spills: 0,
             locals_count: 3,
             consts: Box::new([]),
-            input_registers_arena: Box::new([]),
-            output_registers_arena: Box::new([]),
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
             br_table_arena: Arena::default(),
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            dyn_signatures: Arena::default(),
             memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
         };
 
