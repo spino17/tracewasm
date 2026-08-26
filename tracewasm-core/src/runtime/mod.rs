@@ -668,8 +668,12 @@ impl TraceVM {
         Ok(())
     }
 
-    /// Runs an imported callee to completion: pops its parameters, re-tags them
-    /// from its declared types, invokes the host function, pushes its results.
+    /// Runs an imported callee to completion: reads its parameters, re-tags them from
+    /// its declared types, invokes the host function, writes back its results.
+    ///
+    /// Reads and writes rather than pops and pushes, because this is machine-generic:
+    /// the stack frame does consume its arguments, but the register frame reads them
+    /// in place at `caller_base` and writes the results back over them.
     ///
     /// The caller decides which callees come here; a locally-defined one is
     /// reported to the driver as [`Step::Call`] at the instruction arm instead.

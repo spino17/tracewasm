@@ -496,8 +496,8 @@ impl RegInstruction {
         }
     }
 
-    /// Renders a lowered body as one line per instruction, operands resolved against
-    /// the arenas.
+    /// Renders a lowered body as one line per instruction, operands named against
+    /// the frame's regions.
     ///
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.

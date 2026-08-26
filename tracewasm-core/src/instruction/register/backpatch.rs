@@ -1,3 +1,27 @@
+//! Turning lowering-time operands into frame indices, once the body is done.
+//!
+//! Lowering cannot place an operand as it walks: a constant sits below the operand
+//! registers, so placing one needs the *final* constant count, and a register index
+//! has to clear both the constant and spill regions, so placing one needs both
+//! totals. Every operand is therefore built into its instruction as a
+//! `Slot(u16::MAX)` placeholder, and the operand it stands for is recorded here as a
+//! [`BackPatchableSlot`] — what it *is*, rather than where it will land.
+//!
+//! [`BackpatchMap`] holds those recordings keyed by the index of the instruction that
+//! carries them, and [`BackpatchMap::apply`] walks them once at the end of the body,
+//! writing each operand's frame index into the instruction itself.
+//!
+//! **Two things make the key load-bearing.** It has to be the index the instruction
+//! actually ends up at, since nothing else ties a recording to the operand run it
+//! belongs in — record against the wrong index and `apply` writes the operands into
+//! whatever else sits there. And an instruction may record more than one run:
+//! `br_if` has a condition and a move, `call_indirect` a callee slot and its
+//! arguments. Those share a key, so [`InstructionSource`] labels them and `apply`
+//! consumes them positionally, in the order lowering recorded them.
+//!
+//! A run that would be empty is not recorded at all — a branch to a label carrying
+//! nothing has no move — so `apply` must ask before reaching for one.
+
 use crate::instruction::register::{
     Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, interner::InternedId,
     lazy::SpillIndex,
@@ -11,7 +35,7 @@ use std::slice::Iter;
 /// into a frame index while the body is still being walked, because the constant and
 /// spill region sizes are not yet known — so they travel as what they *are* and are
 /// resolved in the end-of-body pass (see the module docs). The fourth is already
-/// final: a local or a global cannot move.
+/// final: the locals region is the frame's first, so it never moves.
 #[derive(Clone, Copy)]
 pub(crate) enum BackPatchableSlot {
     /// An operand register, as a *provisional* frame index — counted from the frame
@@ -22,7 +46,7 @@ pub(crate) enum BackPatchableSlot {
     Spill(SpillIndex),
     /// An interned constant, by pool id. Resolved to `locals_count + id`.
     Const(InternedId<Const>),
-    /// An operand whose location is already final: a local, or a global.
+    /// An operand whose location is already final, which means a local.
     Slot(Slot),
 }
 
@@ -50,30 +74,60 @@ impl BackPatchableSlot {
 }
 
 impl From<Slot> for BackPatchableSlot {
-    /// Adopts an already-resolved operand — a local or a global, the two that need
-    /// no backpatch.
+    /// Adopts an already-resolved operand — a local, the one case that needs no
+    /// backpatch.
     fn from(value: Slot) -> Self {
         BackPatchableSlot::Slot(value)
     }
 }
 
+/// Which of an instruction's operand runs a recording is.
+///
+/// Most instructions have one, and it is [`Self::Emit`]. Three have more than one,
+/// and since those runs share a key, the label is how [`BackpatchMap::apply`] checks
+/// that it is consuming them in the order lowering wrote them. It is a check, not a
+/// lookup: `apply` walks the runs positionally.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstructionSource {
+    /// The instruction's own operands — every variant with a single run.
     Emit,
+    /// A `br_if`'s condition, read before its move is performed.
     BrIfCond,
+    /// A `br_if`'s move, recorded only when the target label carries something.
     BrIfMov,
+    /// A `br_table`'s index operand.
     BrTableIndex,
+    /// One `br_table` arm's move, in arm order. As many of these as the table has
+    /// arms carrying something.
     BrTableMov,
+    /// A `call_indirect`'s callee index.
     CallIndirectSlot,
+    /// A `call_indirect`'s arguments.
     CallIndirectMov,
 }
 
+/// Every operand run lowering recorded, keyed by the index of the instruction that
+/// carries it.
+///
+/// The `Vec` is the runs belonging to one instruction, in the order they were
+/// recorded — see [`InstructionSource`] for the three cases where there is more than
+/// one.
 #[derive(Default)]
 pub(crate) struct BackpatchMap(
     pub FxHashMap<usize, Vec<(InstructionSource, Vec<BackPatchableSlot>)>>,
-); // instr_index -> source -> input slots
+);
 
 impl BackpatchMap {
+    /// Writes the next recorded run into `inputs`, resolving each operand.
+    ///
+    /// Advances `patches`, so an instruction with several runs calls this once per
+    /// run and the iterator carries the position between them — which is why it is
+    /// `&mut`. `expected_source` names the run this call is for, and checks that the
+    /// order here matches the order lowering recorded in.
+    ///
+    /// Returns having done nothing when there is no run left: a move the label made
+    /// empty is never recorded, so the caller may legitimately ask for one that is
+    /// not there.
     fn apply_to_input_registers(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
         inputs: &mut [Slot],
@@ -97,10 +151,20 @@ impl BackpatchMap {
         }
     }
 
+    /// Lifts a destination run clear of the constant and spill regions.
+    ///
+    /// Nothing is recorded for a destination — it is always an operand register, and
+    /// its provisional index already counts from the frame base — so this is a shift
+    /// and not a lookup. `locals` is unused for exactly that reason: adding it would
+    /// count the locals twice.
+    ///
+    /// Cannot overflow, because the end-of-body width check runs first and bounds
+    /// `registers + spills + consts` to `u16::MAX`.
     fn apply_to_output_registers(output_start: &mut u16, _locals: u16, consts: u16, spills: u16) {
         *output_start = *output_start + consts + spills;
     }
 
+    /// Both halves of a fixed-arity signature: the recorded operands, then the shift.
     fn apply_to_signature<const I: usize, const O: usize>(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
         sig: &mut Signature<I, O>,
@@ -121,6 +185,7 @@ impl BackpatchMap {
         Self::apply_to_output_registers(&mut sig.output.start, locals, consts, spills);
     }
 
+    /// [`Self::apply_to_signature`] for a move, whose arity its opcode does not fix.
     fn apply_to_dyn_signature(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
         sig: &mut DynSignature,
@@ -141,6 +206,21 @@ impl BackpatchMap {
         Self::apply_to_output_registers(&mut sig.output_start, locals, consts, spills);
     }
 
+    /// Resolves every recorded operand into the instruction that carries it.
+    ///
+    /// One pass over the recordings, in whatever order the map yields them — each
+    /// instruction's operands are independent of every other's, so the order does not
+    /// matter.
+    ///
+    /// `frame_layout` is here because seven variants keep their operands in an arena
+    /// entry rather than in the instruction, and an [`Id`](super::arena::Id) alone
+    /// cannot reach one. It must be called *after* the end-of-body width check, which
+    /// is what makes the destination shift non-overflowing, and it may be called
+    /// before or after the `caller_base` pass, which touches a different field.
+    ///
+    /// Panics on an instruction that carries no operands: lowering records nothing
+    /// for one, so a key naming it means the key was wrong, and resolving against the
+    /// wrong instruction would be silent.
     pub fn apply(
         &mut self,
         instructions: &mut [RegInstruction],

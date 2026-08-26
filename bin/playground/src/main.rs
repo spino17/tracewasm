@@ -24,9 +24,9 @@ const DEFAULT_WASM: &str = concat!(
 const ENTRY: &str = "demo";
 
 fn main() -> Result<(), anyhow::Error> {
-    // `tracewasm-scratch` is not a workspace member, so the default path only
-    // exists once it has been built for wasm32. Any other module can be run by
-    // passing its path instead.
+    // The default path only exists once `tracewasm-scratch` has been built for
+    // wasm32 — a normal workspace build does not produce it. Any other module can be
+    // run by passing its path instead.
     let path = std::env::args().nth(1).unwrap_or(DEFAULT_WASM.to_string());
 
     let buf = fs::read(&path).map_err(|err| {

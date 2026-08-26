@@ -120,10 +120,24 @@ pub enum TraceWasmError {
         /// The largest value that region may take.
         limit: u32,
     },
-    #[error("to many unique {what} values: reached {needed}, over the limit of {limit}")]
+    /// One of the register machine's interned pools ran out of 16-bit ids: the
+    /// body's distinct constants, or the distinct memory offsets its loads and stores
+    /// name between them.
+    ///
+    /// Distinct is the operative word — a pool holds one entry per *value*, however
+    /// many instructions use it — so reaching 65,536 takes a body far past what wasm
+    /// validation allows. Like [`Self::RegisterFrameTooLarge`] this is an
+    /// implementation limit, not a spec one, so a module rejected here may still run
+    /// under [`Stack`](crate::Stack).
+    ///
+    /// Fields: which pool filled up, the count it reached, and its limit.
+    #[error("too many unique {what}: reached {needed}, over the limit of {limit}")]
     ToManyUniqueValues {
+        /// The pool that filled up, for locating the cause.
         what: String,
+        /// The number of distinct values that pool would have had to hold.
         needed: u32,
+        /// The most distinct values a 16-bit id can name.
         limit: u32,
     },
     /// An active element segment writes past the end of its target table at

@@ -131,7 +131,7 @@ pub trait VirtualMachine: sealed::Internals {}
 /// This is what lets [`VirtualMachine`] be a public name while everything behind it
 /// stays private. The associated type is bounded by the crate-private `Instruction`
 /// trait, so putting it on the public trait would drag that trait — and in turn the
-/// frame traits, the untagged `Value`, the operand arenas — into the public
+/// frame traits, the untagged `Value`, the per-body frame layouts — into the public
 /// surface, none of which an embedder can use.
 mod sealed {
     /// A machine's instruction set, and through its bound everything else the

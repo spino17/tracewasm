@@ -644,8 +644,9 @@ pub(crate) struct FuncBody<Instr: Instruction> {
     /// [`emit_instructions_for_func`](crate::instruction::Instruction::emit_instructions_for_func).
     pub instruction_offsets: Box<[u32]>,
     /// Whatever else this lowering needs to run the body: `br_table` arms for both
-    /// machines, and for the register machine its operand arenas, the sizes of the
-    /// frame's four regions, and the body's constant pool.
+    /// machines, and for the register machine its locals, spill and register counts,
+    /// its constant pool, its interned memory offsets, and one arena per operand
+    /// shape too wide to sit inside an instruction.
     pub(crate) frame_layout: Instr::FrameLayout,
 }
 
@@ -1051,6 +1052,14 @@ impl<V: VirtualMachine> Module<V> {
     /// globals, 64-bit memory, 64-bit tables, more than one memory, tables of
     /// anything but `funcref`, `v128` locals, or any operator the lowering pass
     /// rejects.
+    ///
+    /// For `Module::<Register>` the lowering pass has two implementation limits of
+    /// its own, both about what a 16-bit index can name. It returns
+    /// [`TraceWasmError::RegisterFrameTooLarge`] when a function's frame — or one of
+    /// its regions — outgrows one, and [`TraceWasmError::ToManyUniqueValues`] when a
+    /// body interns more distinct constants or memory offsets than one can name. Both
+    /// reject a module that is otherwise valid, and neither can happen under
+    /// [`Stack`](crate::Stack).
     pub fn compile(buf: &[u8]) -> Result<Arc<Module<V>>, TraceWasmError> {
         // The parser alone only checks structure; validate semantics (section
         // order, index bounds, types) up front so the AST is built from wasm

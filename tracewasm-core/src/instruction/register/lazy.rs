@@ -9,11 +9,12 @@
 //! `local.get n` moves nothing. The register pass records the operand as "read
 //! local `n`" and lets the instruction that eventually consumes it read the local
 //! directly, so the overwhelmingly common `local.get; local.get; i32.add` costs no
-//! copies at all. Globals work the same way.
+//! copies at all.
 //!
 //! A forwarded operand is valid only while its origin still holds the value the
-//! `local.get` observed. A later `local.set n`, `local.tee n`, or a call that writes
-//! a global ends that. Every operand still forwarding to the origin has to be
+//! `local.get` observed. A later `local.set n` or `local.tee n` ends that — and those
+//! are the only two things that can, since a local lives in the frame and no call can
+//! reach another frame's. Every operand still forwarding to the origin has to be
 //! *materialized* first — copied into a frame spill slot the write cannot reach —
 //! and the copy is emitted immediately before the write.
 //!
@@ -99,8 +100,8 @@ pub(crate) enum LazyEntryDropResult {
 
 /// One lazily forwarded value, shared by every stack slot reading it.
 ///
-/// Not a local or a global as such, but *the value one of them held at one point*.
-/// Two entries for the same origin are alive at once when a write separates them.
+/// Not the local as such, but *the value it held at one point*. Two entries for the
+/// same local are alive at once when a write separates them.
 pub(crate) struct LazyEntry<T> {
     location: LazyLocation,
     /// Live stack slots holding this entry. See [`LazyEntryDropResult`].
@@ -128,11 +129,11 @@ pub(crate) struct LazyArena<T> {
 }
 
 impl<T> LazyArena<T> {
-    /// Creates an empty arena whose origin table covers `origin_count` indices: the
-    /// function's locals count, or the module's globals count.
+    /// Creates an empty arena whose origin table covers `origin_count` indices — the
+    /// function's locals count, locals being the only thing forwarded.
     ///
     /// Indexing `origin` is unchecked, so `origin_count` must cover every index the
-    /// body can name — for locals, params plus declared locals.
+    /// body can name: params plus declared locals.
     pub fn new(origin_count: u32) -> Self {
         LazyArena {
             arena: Arena::new(),
@@ -200,8 +201,8 @@ impl<T> LazySlot<T> {
 
     /// Records one more stack slot borrowing this entry.
     ///
-    /// Called when a second `local.get`/`global.get` of an origin joins the borrow
-    /// already recorded in [`LazyArena::origin`].
+    /// Called when a second `local.get` of an origin joins the borrow already
+    /// recorded in [`LazyArena::origin`].
     pub fn advanced_ref_count(&self, arena: &mut LazyArena<T>) {
         let entry = arena.get_mut_entry(*self);
 

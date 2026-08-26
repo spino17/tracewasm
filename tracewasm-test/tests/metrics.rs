@@ -11,7 +11,7 @@
 //!
 //! The suite passes in both profiles, but **read the numbers from `--release`
 //! only**. A debug interpreter is roughly an order of magnitude slower and spends
-//! ~30 KB of native stack per wasm frame against ~1.3 KB, so debug figures measure
+//! ~33 KB of native stack per wasm frame against ~640 bytes, so debug figures measure
 //! the build profile rather than the engine. Anything profile-sensitive here
 //! (iteration counts, depth caps, the per-call bound) is scaled via
 //! `cfg!(debug_assertions)` or `MAX_TEST_RECURSION`.

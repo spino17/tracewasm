@@ -43,18 +43,19 @@
 //! While walking the body, an operand register index counts from the frame base but
 //! ignores the constant and spill regions — `curr_register_index` starts at
 //! `locals_count` and rises from there. A local is already final, since the locals
-//! region never moves. But a constant, a spill, or an operand register cannot
-//! be given a frame index yet, so each is emitted as a `Slot::RegisterFrame(u32::MAX)`
-//! placeholder in the input arena plus an entry in one of `const_backpatches`,
-//! `spill_backpatches` or `register_backpatches`, keyed by its arena position. That
-//! is what [`BackPatchableSlot`] represents.
+//! region never moves. But no operand can be given a frame index yet, so an
+//! instruction is built with `Slot(u16::MAX)` in every operand position and the real
+//! operands are recorded in a [`BackpatchMap`], keyed by the index of the instruction
+//! that carries them. Each recorded operand is a [`BackPatchableSlot`]: a constant by
+//! pool id, a spill by pool index, an operand register by provisional index, or a
+//! local, which is final already.
 //!
-//! At the end of the body all three lists are drained in one pass: a constant lands
-//! at `locals_count + id`, a spill at `locals_count + consts + slot`, and every
-//! provisional register index — along with every destination in
-//! `output_registers` and every `caller_base` — shifts up by `consts + spills`. The
-//! register shift carries no `locals_count` term, because a provisional register
-//! index already includes it.
+//! At the end of the body [`BackpatchMap::apply`] walks those entries once and writes
+//! the frame index into the instruction itself: a constant lands at
+//! `locals_count + id`, a spill at `locals_count + consts + slot`, and a provisional
+//! register index — along with every destination start and every `caller_base` —
+//! shifts up by `consts + spills`. The register shift carries no `locals_count` term,
+//! because a provisional register index already includes it.
 //!
 //! **Two heights, and they are not the same number.** `stack.height()` counts
 //! simulated slots; `curr_register_index` is a provisional frame index, so it rises
@@ -78,17 +79,24 @@
 //! lives in the instance, not the frame, so it could never be one — and which means
 //! no write and no call can invalidate a value already read.
 //!
-//! ## Operands live in flat side tables
+//! ## Operands live in the instruction
 //!
-//! A [`RegInstruction`] never stores its operands inline. Inputs go into
-//! [`RegFrameLayout::input_registers_arena`] and destination registers into
-//! [`RegFrameLayout::output_registers_arena`]; the variant holds only a start index and
-//! (for the variable-arity forms) a length. That is what keeps the enum at 24 bytes
-//! — inline operands would put `Select` alone at 56 — and it means resolving an
-//! operand at execution is a slice index rather than a pointer chase.
+//! A [`RegInstruction`] carries its own operands. [`InputRegisters<I>`] is `I`
+//! [`Slot`]s laid out in the variant, and [`OutputRegisters<O>`] is the single frame
+//! index the `O` destinations start at — one field suffices because an instruction's
+//! destinations are always consecutive. Reading either at execution is a field
+//! access, not an indirection.
 //!
-//! The arenas ship inside [`FrameLayout`], because every index in the instruction
-//! list points into them.
+//! That is what keeps the enum at 8 bytes: a `Slot` is two, so a binary operator's
+//! whole signature is six. Seven shapes do not fit and carry an [`Id`] into an arena
+//! instead — `if`, `br_if`, `br_table`, `call_indirect`, `select`, `memory.init`, and
+//! [`RegInstruction::Move`], whose arity its opcode does not fix. Those arenas ship
+//! inside [`FrameLayout`], because every id in the instruction list points into one.
+//!
+//! A memory offset is a `u32`, too wide to sit beside a signature, so a load or a
+//! store carries an [`InternedId`] into [`RegFrameLayout::memory_offsets`] —
+//! interned, so the `0` that every bare pointer deref loads through costs one entry
+//! however many instructions use it.
 //!
 //! ## Labels and [`RegInstruction::Move`]
 //!
@@ -192,8 +200,20 @@ pub mod render;
 #[cfg(test)]
 mod tests;
 
+// What a 16-bit index can name, per region. All three are at the type's ceiling
+// because none of them is the real constraint: a frame's four regions laid end to end
+// are, and that sum is checked once at the end of the body — three individually legal
+// regions can still add up to something no `Slot` could name.
+//
+// Nothing in wasm's own limits reaches these. `MAX_WASM_FUNCTION_LOCALS` is 50,000,
+// and a distinct constant or memory offset costs bytes of body, so a body would have
+// to be far past `MAX_WASM_FUNCTION_SIZE` to intern 65,536 of either.
+
+/// Distinct constants one body may intern.
 const MAX_CONSTS: u16 = u16::MAX;
+/// Locals plus operand registers one frame may name, counted from the frame base.
 const MAX_REGISTER_SLOTS: u16 = u16::MAX;
+/// Distinct memory offsets one body's loads and stores may name between them.
 pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 
 /// The static byte offset of one load or store, as its own type so that the
@@ -363,10 +383,10 @@ impl Const {
 /// Where an instruction reads one operand from.
 ///
 /// The resolved, executable form: the lowering pass has already decided that this
-/// operand needs no copy and can be read in place. There are only two places to
-/// read from — the frame, and the globals table — so a constant, a local, a spill
-/// and an operand register are all [`Self::RegisterFrame`], told apart only by which
-/// range of the frame their index falls in.
+/// operand needs no copy and can be read in place. One untagged frame index covers
+/// every case, because there is only one place to read from — a constant, a local, a
+/// spill and an operand register are told apart solely by which of the frame's four
+/// regions their index falls in, and nothing at execution has to ask.
 ///
 /// The lowering-time counterpart is [`BackPatchableSlot`], which additionally has to
 /// represent operands whose frame index is not known yet.
@@ -429,12 +449,12 @@ impl Slot {
 }
 
 impl Default for Slot {
-    /// Filler for arena entries that are about to be overwritten.
+    /// Frame index 0, which is a local in any frame that has one.
     ///
-    /// `SimulatedStack::pops_and_pushes_registers` resizes the input arena before
-    /// popping, because it fills the run back-to-front. Every slot it reserves is
-    /// written before anything reads it, so the value only has to be cheap and
-    /// harmless — a constant reads nothing and names no location.
+    /// Not the placeholder an unresolved operand carries: that is `Slot(u16::MAX)`,
+    /// which [`Slot::render`] names `<unresolved>` and which the runtime cannot
+    /// mistake for a location. A default reads as frame slot 0, so using it for an
+    /// operand still to be filled in would hide the omission rather than show it.
     fn default() -> Self {
         Slot(0)
     }
@@ -458,23 +478,52 @@ enum StackSlot {
     Local(LocalSlot),
 }
 
+/// The `I` operands an instruction reads, in wasm push order — `registers[0]` is the
+/// deepest, the one pushed first.
+///
+/// Two bytes apiece and no indirection, which is what lets a signature fit inside an
+/// eight-byte instruction. Every entry is `Slot(u16::MAX)` until the end-of-body pass
+/// resolves it.
 #[derive(Debug)]
 pub(crate) struct InputRegisters<const I: usize> {
     registers: [Slot; I],
 }
 
+/// The `O` registers an instruction writes, named by the first of them.
+///
+/// One field is enough because an instruction's destinations are always consecutive:
+/// they are allocated one after another as the results are pushed, so the run is
+/// `start .. start + O`. `O` is a compile-time witness only — nothing reads it at
+/// execution, which is why an `O` of 0 still costs the two bytes and why a store
+/// carries [`InputRegisters`] alone instead.
+///
+/// `start` is provisional until the end-of-body pass shifts it clear of the constant
+/// and spill regions.
 #[derive(Debug)]
 pub(crate) struct OutputRegisters<const O: usize> {
-    // starting index
     start: u16,
 }
 
+/// The operands of an instruction whose arity is fixed by its opcode.
+///
+/// **Inputs may alias outputs.** Destinations are allocated after the inputs are
+/// consumed, so a result frequently reuses the register one of its operands occupied.
+/// An executor must read every operand before writing any destination.
 #[derive(Debug)]
 pub(crate) struct Signature<const I: usize, const O: usize> {
     pub input: InputRegisters<I>,
     pub output: OutputRegisters<O>,
 }
 
+/// The operands of a [`RegInstruction::Move`], whose arity is a label's and so is
+/// only known at lowering time.
+///
+/// One length covers both halves because a move is 1:1 — it writes exactly as many
+/// destinations as it reads sources, at `output_start ..  output_start + input.len()`.
+/// Storing a second length would admit a mismatched pair that cannot occur.
+///
+/// Too wide to sit in an instruction, so it lives in
+/// [`RegFrameLayout::dyn_signatures`] and the instruction carries an [`Id`].
 #[derive(Debug)]
 pub(crate) struct DynSignature {
     input: Vec<Slot>,
@@ -489,19 +538,32 @@ impl DynSignature {
         }
     }
 
+    /// Whether this move transfers nothing — a label with no params or results,
+    /// which is the common case.
+    ///
+    /// Load-bearing in two places: lowering skips emitting the [`Move`] entirely
+    /// rather than emitting an empty one, and because it therefore records no
+    /// operands, [`BackpatchMap::apply`] has to ask before reaching for a patch.
+    ///
+    /// [`Move`]: RegInstruction::Move
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
     }
 }
 
-/// Where the operands recorded by [`SimulatedStack::pops_and_pushes_registers`]
-/// landed in the flat arenas.
+/// What [`SimulatedStack::pops_and_pushes_registers`] hands back for the instruction
+/// being built: an operand run to store in it, and the frame index its destinations
+/// start at.
 ///
-/// `#[must_use]` because dropping it means the entries just written are
-/// unreferenced: the arenas ship inside [`FrameLayout`], so a discarded result is
-/// dead weight in every compiled function. A caller that only needs the stack and
-/// register bookkeeping wants [`SimulatedStack::pops_and_pushes`], which does the
-/// same thing without touching the arenas.
+/// The run is all placeholders. The real operands go into the backpatch map under
+/// this instruction's index, so the caller's job is to put the run in the variant and
+/// let the end-of-body pass fill it in.
+///
+/// `#[must_use]` because dropping it leaves the map holding operands for an
+/// instruction that never carried the run they belong in, and resolution would then
+/// write them into whatever else sits at that index. A caller that wants only the
+/// stack and register bookkeeping wants [`SimulatedStack::pops_and_pushes`], which
+/// records nothing.
 #[must_use]
 struct PopsPushesResult {
     input: Vec<Slot>,
@@ -671,19 +733,29 @@ impl UnreachableTrackingControlStack {
     }
 }
 
+/// The arena entry behind [`RegInstruction::If`]: a condition and both of the jump
+/// targets an `if` needs.
 #[derive(Debug)]
 pub(crate) struct IfOperands {
+    /// Read when the instruction executes; a zero takes the else path.
     cond: InputRegisters<1>,
-    /// Index of the matching [`Self::Else`], backpatched at `end`.
+    /// Index of the matching [`RegInstruction::Else`], backpatched at `end`.
     else_index: Option<u32>,
     /// Index of the matching `end`, backpatched.
     end_index: u32,
 }
 
+/// The arena entry behind [`RegInstruction::BrIf`].
 #[derive(Debug)]
 pub(crate) struct BrIfOperands {
+    /// Read before the move is performed, since the move's destinations may include
+    /// the register the condition is in.
     cond: InputRegisters<1>,
+    /// Performed only on the taken path, which is why it is a field here rather than
+    /// a preceding [`RegInstruction::Move`]. Empty when the target label carries
+    /// nothing.
     mov: DynSignature,
+    /// Absolute jump target, backpatched when the label closes.
     target_index: u32,
 }
 
@@ -703,9 +775,14 @@ pub(crate) struct RegBrTableTarget {
     pub target_index: u32,
 }
 
+/// The arena entry behind [`RegInstruction::BrTable`].
 #[derive(Debug)]
 pub(crate) struct BrTableOperands {
+    /// The arm selector. Out-of-range picks the default, which is the last arm.
     index: InputRegisters<1>,
+    /// One per arm, the default last. Each carries its own move and target because a
+    /// single table may mix loop and non-loop labels, whose heights differ even
+    /// though validation makes their arities agree.
     br_targets: Vec<RegBrTableTarget>,
 }
 
@@ -724,19 +801,29 @@ pub(crate) struct CallIndirectOperands {
     /// Where the callee index is read from. Resolved *before* the move is
     /// performed; see the note above.
     slot: InputRegisters<1>,
-    /// Start of this call's arguments in the input arena. They run for the
-    /// `ty_index` signature's param count, in wasm push order, and are moved to
-    /// `caller_base`, `caller_base + 1`, ... one apiece.
+    /// This call's arguments, in wasm push order. The `ty_index` signature's param
+    /// count says how many of them there are, and they are moved to `caller_base`,
+    /// `caller_base + 1`, … one apiece.
+    ///
+    /// A [`DynSignature`] because the arity is not fixed by the opcode. Its
+    /// `output_start` is unused here — [`Self::caller_base`] is the destination, and
+    /// the end-of-body pass shifts that one.
     operands: DynSignature,
     /// Frame index the callee's frame is based at, on the same terms as
-    /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
-    /// satisfying.
+    /// [`RegInstruction::Call`]'s — including the placeholder and the invariant it
+    /// ends up satisfying.
     caller_base: u16,
 }
 
+/// The arena entry behind [`RegInstruction::Select`].
+///
+/// `select` is the only value operator that needs three operands *and* a
+/// destination, which is one slot more than eight bytes hold.
 #[derive(Debug)]
 pub(crate) struct SelectOperands(Signature<3, 1>);
 
+/// The arena entry behind [`RegInstruction::MemoryInit`]: three operands plus an
+/// immediate, which is two bytes past what fits inline.
 #[derive(Debug)]
 pub(crate) struct MemoryInitOperands {
     /// Index of the data segment to copy from.
@@ -794,9 +881,9 @@ impl SimulatedStack {
     ///
     /// The two counts size the lazy origin tables, which are indexed by local and
     /// global index without bounds checks — so `locals_count` must include the
-    /// params, not just the declared locals. The arenas and the control stack start
-    /// empty and grow as the body is walked; the caller pushes the function frame onto
-    /// the control stack.
+    /// params, not just the declared locals. The arenas, the backpatch map and the
+    /// control stack start empty and grow as the body is walked; the caller pushes
+    /// the function frame onto the control stack.
     ///
     /// The two register counters do **not** start at zero. Seeding both to
     /// `locals_count` is what puts locals and operand registers in one index space,
@@ -1159,16 +1246,23 @@ impl SimulatedStack {
         self.push(Slot(index))
     }
 
-    /// Applies an instruction's stack effect and records its operands in the arenas.
+    /// Applies an instruction's stack effect and records its operands for
+    /// resolution.
     ///
-    /// Pops `pops` operands into a fresh input run — deepest first, so `input[0]` is
-    /// the first value pushed — then allocates `pushes` destination registers and
-    /// pushes them back. Allocating the outputs *after* consuming the inputs is what
-    /// lets a result reuse an operand's register, and is why an executor must read
-    /// all operands before writing any destination.
+    /// Pops `pops` operands — deepest first, so `input[0]` is the first value pushed
+    /// — into an entry keyed by `instr_index` in the backpatch map, then allocates
+    /// `pushes` destination registers and pushes them back. Allocating the outputs
+    /// *after* consuming the inputs is what lets a result reuse an operand's
+    /// register, and is why an executor must read all operands before writing any
+    /// destination.
+    ///
+    /// `instr_index` must be the index the instruction carrying these operands will
+    /// occupy, since that is the only thing tying the two together;
+    /// `source` distinguishes several runs recorded against one instruction, as
+    /// `br_if`'s condition and move are.
     ///
     /// Use [`Self::pops_and_pushes`] when only the stack effect is wanted; this
-    /// variant grows the arenas that ship in [`FrameLayout`].
+    /// variant leaves an entry the end-of-body pass will look for.
     fn pops_and_pushes_registers(
         &mut self,
         pops: u32,
@@ -1220,9 +1314,9 @@ impl SimulatedStack {
     ///
     /// For resets that reshape the model without describing an instruction — the
     /// layout an `else` hands to its arm, or the layout an unconditional branch
-    /// leaves the enclosing block in. Those emit no operands, so writing runs into
-    /// the arenas would leave entries nothing indexes, in tables that ship with every
-    /// compiled function.
+    /// leaves the enclosing block in. Those emit no operands, so a map entry would be
+    /// keyed to an instruction that does not carry them, and resolution would write
+    /// them into whatever else occupies that index.
     ///
     /// The pops still go through [`Self::pop`], so lazy borrows and spill slots are
     /// released as they should be.
@@ -1391,7 +1485,7 @@ impl SimulatedStack {
             if peak > MAX_REGISTER_SLOTS as u32 {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
-                    needed: register_index as u32,
+                    needed: peak,
                     limit: MAX_REGISTER_SLOTS as u32,
                 });
             }
@@ -1520,7 +1614,7 @@ pub(crate) struct RegFrameLayout {
     /// Doubles as the base of the constant region, and as the boundary that tells a
     /// local index from an operand register index during lowering.
     pub locals_count: u16,
-    /// The body's interned constants, in [`ConstId`] order.
+    /// The body's interned constants, in [`InternedId`] order.
     ///
     /// Constant `i` occupies frame slot `locals_count + i`, and
     /// [`RuntimeFrame::enter_frame`](crate::instruction::RuntimeFrame::enter_frame)
@@ -1543,10 +1637,11 @@ type RegLoweredFuncBody = (Vec<RegInstruction>, Vec<u32>, RegFrameLayout);
 
 /// One lowered instruction.
 ///
-/// Operands are never inline: a variant carries indices into the arenas on
-/// [`FrameLayout`], resolved through [`Signature`] or [`DynSignature`]. Jump fields
-/// are absolute indices into the containing `Vec<RegInstruction>`, i.e. runtime
-/// program counters.
+/// Operands are inline: a variant carries them as a [`Signature`], or as
+/// [`InputRegisters`] alone where there is no destination to name. The seven shapes
+/// that do not fit eight bytes carry an [`Id`] into an arena on [`FrameLayout`]
+/// instead. Jump fields are absolute indices into the containing
+/// `Vec<RegInstruction>`, i.e. runtime program counters.
 ///
 /// [`Kind`](tracewasm_macros::Kind) derives the fieldless [`RegInstructionKind`]
 /// alongside this, so a table keyed by kind is an exhaustive `match` *and* is
@@ -1641,9 +1736,9 @@ pub(crate) enum RegInstruction {
     /// `br_table`: jump to the arm selected by the operand, or to the default when it
     /// is out of range.
     ///
-    /// Arms are a contiguous run of `BrTarget` in the body's target arena; the
-    /// default is the last element. Each arm carries its own move and target, since
-    /// the labels may sit at different heights even though their arities agree.
+    /// Arms are a `Vec<RegBrTableTarget>` on the arena entry; the default is the last
+    /// element. Each arm carries its own move and target, since the labels may sit at
+    /// different heights even though their arities agree.
     BrTable(Id<BrTableOperands>),
     // The numeric instructions, grouped by the type they are named for and then
     // by shape: loads, stores, unary, binary. Same order as the lowering match, so
@@ -2191,12 +2286,12 @@ pub(crate) enum RegInstruction {
     /// difference from [`Self::Call`] — and the reason both of this call's heights
     /// count one deeper than the signature's arity.
     ///
-    /// **Neither operand run is stored.** The arguments are the `params` operands
-    /// starting at `operands`, `params` coming from the signature [`Self::ty_index`]
-    /// names; their destinations are the same many registers based at `caller_base`,
-    /// contiguous because that is how they were allocated. Reconstructing both from
-    /// the signature is what keeps this variant inside the size budget — see the
-    /// note on [`RegInstruction`]'s size assertion.
+    /// **The argument destinations are not stored.** The arguments themselves are
+    /// [`CallIndirectOperands::operands`], of which the first `params` are the call's
+    /// — `params` coming from the type [`CallIndirectOperands::ty_index`] names. Their
+    /// destinations are that many registers based at
+    /// [`CallIndirectOperands::caller_base`], contiguous because that is how they
+    /// were allocated, so nothing has to name them.
     ///
     /// **The move is a field rather than a preceding [`Self::Move`]**, and unlike
     /// [`Self::BrIf`] the reason is not a control path: the staged arguments land in
@@ -2205,8 +2300,6 @@ pub(crate) enum RegInstruction {
     /// destroy the index before it was used. An executor must therefore resolve
     /// `slot` before performing the move — the same read-before-write contract
     /// [`Self::BrIf`] has with its condition.
-    ///
-    /// [`Self::ty_index`]: RegInstruction::CallIndirect::ty_index
     CallIndirect(Id<CallIndirectOperands>),
     /// `ref.is_null`: `1` if the reference is null, else `0`.
     ///
@@ -2272,8 +2365,8 @@ pub(crate) enum RegInstruction {
     ///
     /// ```text
     /// let mut tmp: SmallVec<[Value; 4]> = SmallVec::new();
-    /// for slot in sig.input_registers(arena) { tmp.push(read(slot)); }
-    /// for (i, &dst) in sig.output_registers(arena).iter().enumerate() { regs[dst] = tmp[i]; }
+    /// for slot in &sig.input { tmp.push(read(slot)); }
+    /// for (i, val) in tmp.into_iter().enumerate() { regs[sig.output_start + i] = val; }
     /// ```
     ///
     /// The buffer costs nothing in practice: arities are the label's params or
@@ -2336,19 +2429,22 @@ pub(crate) enum RegInstruction {
 // compiled module — the same budget, and the same reasoning, as `Instruction` in the
 // stack pass.
 //
-// What holds it here is that operands live in the flat side tables rather than in the
-// variant: a `Registers<I, O>` is a pair of `u32` starts (8 bytes) whatever `I` and
-// `O` are, so the widest variant is `I32Load(u32, Registers<1, 1>)` at 12 bytes plus
-// tag. Inlining the operands instead would put `Select(Registers<3, 1>)` alone at 56.
+// What holds it is that a `Slot` is two bytes and a destination run is named by its
+// start alone, so `Signature<2, 1>` — the widest shape a value operator needs — is
+// six, and the tag fits in the seventh. A load or store spends two of those six on
+// its offset id, which is why a store carries `InputRegisters<2>` and not
+// `Signature<2, 0>`: an `OutputRegisters` it has no use for would still cost two
+// bytes and push the variant to ten.
 //
-// The constraint this places on what comes next: an instruction whose arity is not a
-// compile-time constant — `call`, `call_indirect`, the block param/result moves — must
-// stay within the same 8-byte shape. Either derive both arities at execution from an
-// index the variant already carries (as `CallIndirect` does with its `ty_index` in the
-// stack pass), or store an explicit `len` and drop something else to pay for it.
+// The seven shapes that cannot fit — `if`, `br_if`, `br_table`, `call_indirect`,
+// `select`, `memory.init`, `Move` — carry a four-byte `Id` into an arena, which is
+// also how an instruction whose arity its opcode does not fix is handled at all.
+// Anything added later has the same two choices: fit the eight bytes, or go to an
+// arena and pay one indirection for it.
 const _: () = assert!(
     size_of::<RegInstruction>() <= 8,
-    "RegInstruction grew past 16 bytes. Need to keep it compact."
+    "RegInstruction grew past 8 bytes. Either fit the new shape, or move its operands \
+     to an arena and carry an `Id` instead."
 );
 
 impl RegInstruction {
@@ -2556,13 +2652,16 @@ impl Instruction for RegInstruction {
     ///
     /// `params`/`results` are the body's own arity, seeding the implicit function
     /// frame at the root of the control stack. `locals_count` must cover params plus
-    /// declared locals, and `globals_count` the module's globals — both size the lazy
-    /// origin tables, which are indexed unchecked.
+    /// declared locals, since it sizes the lazy origin table, which is indexed
+    /// unchecked. `globals_count` is unused — globals stopped being forwarded when
+    /// [`RegInstruction::GlobalGet`] began materialising them eagerly — and stays on
+    /// the signature only because [`Instruction`] declares it.
     ///
     /// Returns the instruction list, the byte offset of the operator each instruction
     /// was lowered from, and the [`FrameLayout`] needed to run it. The list and the
-    /// layout are inseparable: every operand in the list is an index into the arenas
-    /// the layout carries.
+    /// layout are inseparable: every operand in the list is a frame index only the
+    /// layout's region sizes can place, and every [`Id`] in it points into one of the
+    /// layout's arenas.
     ///
     /// The offsets are parallel to the instructions, index for index, as the trait
     /// requires. This pass emits several instructions for some operators — a spill,
@@ -3504,8 +3603,8 @@ impl Instruction for RegInstruction {
                             }
                             RegInstruction::BrTable(id) => {
                                 let entry = simulated_stack.br_table_arena.get_mut(*id);
-                                // `br_targets_index` is already absolute, so the table's own
-                                // range is not needed here.
+                                // Each table owns its arms, so the recorded index is
+                                // the arm's position within this table.
                                 entry.br_targets[*br_targets_index as usize].target_index = index;
                             }
                             RegInstruction::Return { target_index } => {
@@ -3572,9 +3671,9 @@ impl Instruction for RegInstruction {
         // given a frame index. Walking the body could not do it: a constant or spill
         // sits below the operand registers, so placing either needs the *final*
         // count of both, and a register index has to clear both regions, so placing
-        // one needs their totals too. Every such operand was therefore emitted as a
-        // `Slot::RegisterFrame(u32::MAX)` placeholder plus an entry in one of the
-        // three lists resolved below, keyed by its position in the input arena.
+        // one needs their totals too. Every operand was therefore built as a
+        // `Slot(u16::MAX)` placeholder, with the real one recorded in the backpatch
+        // map under the index of the instruction carrying it.
         //
         // The frame these produce is:
         //

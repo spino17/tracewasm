@@ -40,8 +40,8 @@
 //!
 //! * its **locals**, which the body reads after the call returns;
 //! * its **constants**, which are read wherever they appear in the body;
-//! * its **spills**, whose entire purpose is holding a local or global that a later
-//!   write or call would otherwise have clobbered (see
+//! * its **spills**, whose entire purpose is holding a local that a later write to it
+//!   would otherwise have clobbered (see
 //!   [`lazy`](crate::instruction::register::lazy)).
 //!
 //! Ordering them below the operand registers makes that hold by construction rather
