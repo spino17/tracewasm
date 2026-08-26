@@ -114,14 +114,14 @@ impl BackpatchMap {
     ) {
         Self::apply_to_input_registers(
             patches,
-            &mut sig.inputs,
+            &mut sig.input,
             locals,
             consts,
             spills,
             expected_source,
         );
 
-        Self::apply_to_output_registers(&mut sig.outputs, locals, consts, spills);
+        Self::apply_to_output_registers(&mut sig.output, locals, consts, spills);
     }
 
     pub fn apply(
