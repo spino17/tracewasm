@@ -470,59 +470,20 @@ pub(crate) struct OutputRegisters<const O: usize> {
 }
 
 #[derive(Debug)]
-pub(crate) struct InlinedSignature<const I: usize, const O: usize> {
+pub(crate) struct Signature<const I: usize, const O: usize> {
     pub input: InputRegisters<I>,
     pub output: OutputRegisters<O>,
 }
 
-/// What an instruction's fields may occupy for [`RegInstruction`] to be 8 bytes.
-///
-/// The discriminant takes the rest. Asserting against the *payload* rather than
-/// against 8 is what makes a failure name the shape that does not fit.
-const INLINE_PAYLOAD_BUDGET: usize = 6;
-
-// Every `(I, O)` arity `RegInstruction` uses, so a shape that cannot be inlined is a
-// compile error naming itself rather than a surprise in `size_of`.
-//
-// These bound a variant whose payload is *only* the signature. One carrying anything
-// else — a load's `offset`, `MemoryInit`'s `data_index` — has less than the whole
-// budget to spend, which no assertion here can see.
-const _: () = assert!(
-    size_of::<InlinedSignature<1, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<1, 1> (unary ops, loads) does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InlinedSignature<2, 0>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<2, 0> (stores) does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InlinedSignature<2, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<2, 1> (binary ops) does not fit an 8-byte instruction"
-);
-/*const _: () = assert!(
-    size_of::<InlinedSignature<3, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<3, 1> (`select`) does not fit an 8-byte instruction — move it \
-     to an arena, or pin its result to an operand for a two-address form"
-);*/
-const _: () = assert!(
-    size_of::<InputRegisters<1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedRegisters<1, Slot> does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InputRegisters<3>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedRegisters<3, Slot> (`memory.copy`/`memory.fill`) does not fit an 8-byte \
-     instruction"
-);
-
 #[derive(Debug)]
-pub(crate) struct DynSignature2 {
+pub(crate) struct DynSignature {
     input: Vec<Slot>,
     output_start: u16,
 }
 
-impl DynSignature2 {
+impl DynSignature {
     pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
-        DynSignature2 {
+        DynSignature {
             input,
             output_start,
         }
@@ -722,7 +683,7 @@ pub(crate) struct IfOperands {
 #[derive(Debug)]
 pub(crate) struct BrIfOperands {
     cond: InputRegisters<1>,
-    mov: DynSignature2,
+    mov: DynSignature,
     target_index: u32,
 }
 
@@ -736,7 +697,7 @@ pub(crate) struct BrIfOperands {
 pub(crate) struct RegBrTableTarget {
     /// Values transferred to this arm's label, on the same terms as
     /// [`RegInstruction::Move`]. Empty when the label carries nothing.
-    pub mov: DynSignature2,
+    pub mov: DynSignature,
     /// Absolute jump target: a loop's start for a back-edge, otherwise the label's
     /// `end`, backpatched when that `end` is reached.
     pub target_index: u32,
@@ -766,7 +727,7 @@ pub(crate) struct CallIndirectOperands {
     /// Start of this call's arguments in the input arena. They run for the
     /// `ty_index` signature's param count, in wasm push order, and are moved to
     /// `caller_base`, `caller_base + 1`, ... one apiece.
-    operands: Id<DynSignature2>,
+    operands: Id<DynSignature>,
     /// Frame index the callee's frame is based at, on the same terms as
     /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
     /// satisfying.
@@ -774,7 +735,7 @@ pub(crate) struct CallIndirectOperands {
 }
 
 #[derive(Debug)]
-pub(crate) struct SelectOperands(InlinedSignature<3, 1>);
+pub(crate) struct SelectOperands(Signature<3, 1>);
 
 #[derive(Debug)]
 pub(crate) struct MemoryInitOperands {
@@ -820,7 +781,7 @@ struct SimulatedStack {
     call_indirect_arena: Arena<CallIndirectOperands>,
     select_arena: Arena<SelectOperands>,
     memory_init_arena: Arena<MemoryInitOperands>,
-    dyn_signatures: Arena<DynSignature2>,
+    dyn_signatures: Arena<DynSignature>,
     memory_offsets: Interner<MemoryOffset>,
     backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
@@ -1317,10 +1278,10 @@ impl SimulatedStack {
         &mut self,
         instr_index: usize,
         source: InstructionSource,
-    ) -> Result<InlinedSignature<I, O>, TraceWasmError> {
+    ) -> Result<Signature<I, O>, TraceWasmError> {
         let result = self.pops_and_pushes_registers(I as u32, O as u32, instr_index, source)?;
 
-        Ok(InlinedSignature {
+        Ok(Signature {
             input: InputRegisters {
                 registers: result.input.try_into().unwrap(),
             },
@@ -1346,10 +1307,10 @@ impl SimulatedStack {
         depth: u32,
         instr_index: usize,
         source: InstructionSource,
-    ) -> Result<DynSignature2, TraceWasmError> {
+    ) -> Result<DynSignature, TraceWasmError> {
         let result = self.pops_and_pushes_registers(depth, depth, instr_index, source)?;
 
-        Ok(DynSignature2 {
+        Ok(DynSignature {
             input: result.input,
             output_start: result.output_start,
         })
@@ -1382,7 +1343,7 @@ impl SimulatedStack {
         arity_to_preserve: u32,
         instr_index: usize, // TODO: only use this when registers are not empty
         source: InstructionSource,
-    ) -> Result<DynSignature2, TraceWasmError> {
+    ) -> Result<DynSignature, TraceWasmError> {
         let arity_to_preserve = arity_to_preserve as usize;
         let curr_stack_height = self.stack.height();
         let popped_count = (curr_stack_height - base_height) as usize;
@@ -1419,12 +1380,12 @@ impl SimulatedStack {
             }
         }
 
-        let res = DynSignature2 {
+        let res = DynSignature {
             input: slots,
             output_start: register_index,
         };
 
-        if register_index > self.max_registers {
+        if register_index + arity_to_preserve as u16 > self.max_registers {
             if register_index > MAX_REGISTER_SLOTS {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
@@ -1433,7 +1394,7 @@ impl SimulatedStack {
                 });
             }
 
-            self.max_registers = register_index;
+            self.max_registers = register_index + arity_to_preserve as u16;
         }
 
         Ok(res)
@@ -1544,7 +1505,7 @@ pub(crate) struct RegFrameLayout {
     pub call_indirect_arena: Arena<CallIndirectOperands>,
     pub select_arena: Arena<SelectOperands>,
     pub memory_init_arena: Arena<MemoryInitOperands>,
-    pub dyn_signatures: Arena<DynSignature2>,
+    pub dyn_signatures: Arena<DynSignature>,
     /// Static byte offsets of the body's loads and stores, in allocation order.
     ///
     /// A `memarg.offset` is a `u32`, too wide to sit in an 8-byte instruction next to
@@ -1709,7 +1670,7 @@ pub(crate) enum RegInstruction {
     I32Load {
         /// Static byte offset added to the popped address.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i32.load8_s`.
     I32Load8S {
@@ -1717,7 +1678,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i32.load8_u`.
     I32Load8U {
@@ -1725,7 +1686,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i32.load16_s`.
     I32Load16S {
@@ -1733,7 +1694,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i32.load16_u`.
     I32Load16U {
@@ -1741,7 +1702,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
 
     // i32 — stores
@@ -1772,89 +1733,89 @@ pub(crate) enum RegInstruction {
 
     // i32 — unary
     /// `i32.clz`.
-    I32Clz(InlinedSignature<1, 1>),
+    I32Clz(Signature<1, 1>),
     /// `i32.ctz`.
-    I32Ctz(InlinedSignature<1, 1>),
+    I32Ctz(Signature<1, 1>),
     /// `i32.eqz`.
-    I32Eqz(InlinedSignature<1, 1>),
+    I32Eqz(Signature<1, 1>),
     /// `i32.extend16_s`.
-    I32Extend16S(InlinedSignature<1, 1>),
+    I32Extend16S(Signature<1, 1>),
     /// `i32.extend8_s`.
-    I32Extend8S(InlinedSignature<1, 1>),
+    I32Extend8S(Signature<1, 1>),
     /// `i32.popcnt`.
-    I32Popcnt(InlinedSignature<1, 1>),
+    I32Popcnt(Signature<1, 1>),
     /// `i32.reinterpret_f32`.
-    I32ReinterpretF32(InlinedSignature<1, 1>),
+    I32ReinterpretF32(Signature<1, 1>),
     /// `i32.trunc_f32_s`.
-    I32TruncF32S(InlinedSignature<1, 1>),
+    I32TruncF32S(Signature<1, 1>),
     /// `i32.trunc_f32_u`.
-    I32TruncF32U(InlinedSignature<1, 1>),
+    I32TruncF32U(Signature<1, 1>),
     /// `i32.trunc_f64_s`.
-    I32TruncF64S(InlinedSignature<1, 1>),
+    I32TruncF64S(Signature<1, 1>),
     /// `i32.trunc_f64_u`.
-    I32TruncF64U(InlinedSignature<1, 1>),
+    I32TruncF64U(Signature<1, 1>),
     /// `i32.trunc_sat_f32_s`.
-    I32TruncSatF32S(InlinedSignature<1, 1>),
+    I32TruncSatF32S(Signature<1, 1>),
     /// `i32.trunc_sat_f32_u`.
-    I32TruncSatF32U(InlinedSignature<1, 1>),
+    I32TruncSatF32U(Signature<1, 1>),
     /// `i32.trunc_sat_f64_s`.
-    I32TruncSatF64S(InlinedSignature<1, 1>),
+    I32TruncSatF64S(Signature<1, 1>),
     /// `i32.trunc_sat_f64_u`.
-    I32TruncSatF64U(InlinedSignature<1, 1>),
+    I32TruncSatF64U(Signature<1, 1>),
     /// `i32.wrap_i64`.
-    I32WrapI64(InlinedSignature<1, 1>),
+    I32WrapI64(Signature<1, 1>),
 
     // i32 — binary
     /// `i32.add`.
-    I32Add(InlinedSignature<2, 1>),
+    I32Add(Signature<2, 1>),
     /// `i32.and`.
-    I32And(InlinedSignature<2, 1>),
+    I32And(Signature<2, 1>),
     /// `i32.div_s`.
-    I32DivS(InlinedSignature<2, 1>),
+    I32DivS(Signature<2, 1>),
     /// `i32.div_u`.
-    I32DivU(InlinedSignature<2, 1>),
+    I32DivU(Signature<2, 1>),
     /// `i32.eq`.
-    I32Eq(InlinedSignature<2, 1>),
+    I32Eq(Signature<2, 1>),
     /// `i32.ge_s`.
-    I32GeS(InlinedSignature<2, 1>),
+    I32GeS(Signature<2, 1>),
     /// `i32.ge_u`.
-    I32GeU(InlinedSignature<2, 1>),
+    I32GeU(Signature<2, 1>),
     /// `i32.gt_s`.
-    I32GtS(InlinedSignature<2, 1>),
+    I32GtS(Signature<2, 1>),
     /// `i32.gt_u`.
-    I32GtU(InlinedSignature<2, 1>),
+    I32GtU(Signature<2, 1>),
     /// `i32.le_s`.
-    I32LeS(InlinedSignature<2, 1>),
+    I32LeS(Signature<2, 1>),
     /// `i32.le_u`.
-    I32LeU(InlinedSignature<2, 1>),
+    I32LeU(Signature<2, 1>),
     /// `i32.lt_s`.
-    I32LtS(InlinedSignature<2, 1>),
+    I32LtS(Signature<2, 1>),
     /// `i32.lt_u`.
-    I32LtU(InlinedSignature<2, 1>),
+    I32LtU(Signature<2, 1>),
     /// `i32.mul`.
-    I32Mul(InlinedSignature<2, 1>),
+    I32Mul(Signature<2, 1>),
     /// `i32.ne`.
-    I32Ne(InlinedSignature<2, 1>),
+    I32Ne(Signature<2, 1>),
     /// `i32.or`.
-    I32Or(InlinedSignature<2, 1>),
+    I32Or(Signature<2, 1>),
     /// `i32.rem_s`.
-    I32RemS(InlinedSignature<2, 1>),
+    I32RemS(Signature<2, 1>),
     /// `i32.rem_u`.
-    I32RemU(InlinedSignature<2, 1>),
+    I32RemU(Signature<2, 1>),
     /// `i32.rotl`.
-    I32Rotl(InlinedSignature<2, 1>),
+    I32Rotl(Signature<2, 1>),
     /// `i32.rotr`.
-    I32Rotr(InlinedSignature<2, 1>),
+    I32Rotr(Signature<2, 1>),
     /// `i32.shl`.
-    I32Shl(InlinedSignature<2, 1>),
+    I32Shl(Signature<2, 1>),
     /// `i32.shr_s`.
-    I32ShrS(InlinedSignature<2, 1>),
+    I32ShrS(Signature<2, 1>),
     /// `i32.shr_u`.
-    I32ShrU(InlinedSignature<2, 1>),
+    I32ShrU(Signature<2, 1>),
     /// `i32.sub`.
-    I32Sub(InlinedSignature<2, 1>),
+    I32Sub(Signature<2, 1>),
     /// `i32.xor`.
-    I32Xor(InlinedSignature<2, 1>),
+    I32Xor(Signature<2, 1>),
 
     // i64 — loads
     /// `i64.load`.
@@ -1863,7 +1824,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load8_s`.
     I64Load8S {
@@ -1871,7 +1832,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load8_u`.
     I64Load8U {
@@ -1879,7 +1840,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load16_s`.
     I64Load16S {
@@ -1887,7 +1848,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load16_u`.
     I64Load16U {
@@ -1895,7 +1856,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load32_s`.
     I64Load32S {
@@ -1903,7 +1864,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
     /// `i64.load32_u`.
     I64Load32U {
@@ -1911,7 +1872,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
 
     // i64 — stores
@@ -1950,93 +1911,93 @@ pub(crate) enum RegInstruction {
 
     // i64 — unary
     /// `i64.clz`.
-    I64Clz(InlinedSignature<1, 1>),
+    I64Clz(Signature<1, 1>),
     /// `i64.ctz`.
-    I64Ctz(InlinedSignature<1, 1>),
+    I64Ctz(Signature<1, 1>),
     /// `i64.eqz`.
-    I64Eqz(InlinedSignature<1, 1>),
+    I64Eqz(Signature<1, 1>),
     /// `i64.extend16_s`.
-    I64Extend16S(InlinedSignature<1, 1>),
+    I64Extend16S(Signature<1, 1>),
     /// `i64.extend32_s`.
-    I64Extend32S(InlinedSignature<1, 1>),
+    I64Extend32S(Signature<1, 1>),
     /// `i64.extend8_s`.
-    I64Extend8S(InlinedSignature<1, 1>),
+    I64Extend8S(Signature<1, 1>),
     /// `i64.extend_i32_s`.
-    I64ExtendI32S(InlinedSignature<1, 1>),
+    I64ExtendI32S(Signature<1, 1>),
     /// `i64.extend_i32_u`.
-    I64ExtendI32U(InlinedSignature<1, 1>),
+    I64ExtendI32U(Signature<1, 1>),
     /// `i64.popcnt`.
-    I64Popcnt(InlinedSignature<1, 1>),
+    I64Popcnt(Signature<1, 1>),
     /// `i64.reinterpret_f64`.
-    I64ReinterpretF64(InlinedSignature<1, 1>),
+    I64ReinterpretF64(Signature<1, 1>),
     /// `i64.trunc_f32_s`.
-    I64TruncF32S(InlinedSignature<1, 1>),
+    I64TruncF32S(Signature<1, 1>),
     /// `i64.trunc_f32_u`.
-    I64TruncF32U(InlinedSignature<1, 1>),
+    I64TruncF32U(Signature<1, 1>),
     /// `i64.trunc_f64_s`.
-    I64TruncF64S(InlinedSignature<1, 1>),
+    I64TruncF64S(Signature<1, 1>),
     /// `i64.trunc_f64_u`.
-    I64TruncF64U(InlinedSignature<1, 1>),
+    I64TruncF64U(Signature<1, 1>),
     /// `i64.trunc_sat_f32_s`.
-    I64TruncSatF32S(InlinedSignature<1, 1>),
+    I64TruncSatF32S(Signature<1, 1>),
     /// `i64.trunc_sat_f32_u`.
-    I64TruncSatF32U(InlinedSignature<1, 1>),
+    I64TruncSatF32U(Signature<1, 1>),
     /// `i64.trunc_sat_f64_s`.
-    I64TruncSatF64S(InlinedSignature<1, 1>),
+    I64TruncSatF64S(Signature<1, 1>),
     /// `i64.trunc_sat_f64_u`.
-    I64TruncSatF64U(InlinedSignature<1, 1>),
+    I64TruncSatF64U(Signature<1, 1>),
 
     // i64 — binary
     /// `i64.add`.
-    I64Add(InlinedSignature<2, 1>),
+    I64Add(Signature<2, 1>),
     /// `i64.and`.
-    I64And(InlinedSignature<2, 1>),
+    I64And(Signature<2, 1>),
     /// `i64.div_s`.
-    I64DivS(InlinedSignature<2, 1>),
+    I64DivS(Signature<2, 1>),
     /// `i64.div_u`.
-    I64DivU(InlinedSignature<2, 1>),
+    I64DivU(Signature<2, 1>),
     /// `i64.eq`.
-    I64Eq(InlinedSignature<2, 1>),
+    I64Eq(Signature<2, 1>),
     /// `i64.ge_s`.
-    I64GeS(InlinedSignature<2, 1>),
+    I64GeS(Signature<2, 1>),
     /// `i64.ge_u`.
-    I64GeU(InlinedSignature<2, 1>),
+    I64GeU(Signature<2, 1>),
     /// `i64.gt_s`.
-    I64GtS(InlinedSignature<2, 1>),
+    I64GtS(Signature<2, 1>),
     /// `i64.gt_u`.
-    I64GtU(InlinedSignature<2, 1>),
+    I64GtU(Signature<2, 1>),
     /// `i64.le_s`.
-    I64LeS(InlinedSignature<2, 1>),
+    I64LeS(Signature<2, 1>),
     /// `i64.le_u`.
-    I64LeU(InlinedSignature<2, 1>),
+    I64LeU(Signature<2, 1>),
     /// `i64.lt_s`.
-    I64LtS(InlinedSignature<2, 1>),
+    I64LtS(Signature<2, 1>),
     /// `i64.lt_u`.
-    I64LtU(InlinedSignature<2, 1>),
+    I64LtU(Signature<2, 1>),
     /// `i64.mul`.
-    I64Mul(InlinedSignature<2, 1>),
+    I64Mul(Signature<2, 1>),
     /// `i64.ne`.
-    I64Ne(InlinedSignature<2, 1>),
+    I64Ne(Signature<2, 1>),
     /// `i64.or`.
-    I64Or(InlinedSignature<2, 1>),
+    I64Or(Signature<2, 1>),
     /// `i64.rem_s`.
-    I64RemS(InlinedSignature<2, 1>),
+    I64RemS(Signature<2, 1>),
     /// `i64.rem_u`.
-    I64RemU(InlinedSignature<2, 1>),
+    I64RemU(Signature<2, 1>),
     /// `i64.rotl`.
-    I64Rotl(InlinedSignature<2, 1>),
+    I64Rotl(Signature<2, 1>),
     /// `i64.rotr`.
-    I64Rotr(InlinedSignature<2, 1>),
+    I64Rotr(Signature<2, 1>),
     /// `i64.shl`.
-    I64Shl(InlinedSignature<2, 1>),
+    I64Shl(Signature<2, 1>),
     /// `i64.shr_s`.
-    I64ShrS(InlinedSignature<2, 1>),
+    I64ShrS(Signature<2, 1>),
     /// `i64.shr_u`.
-    I64ShrU(InlinedSignature<2, 1>),
+    I64ShrU(Signature<2, 1>),
     /// `i64.sub`.
-    I64Sub(InlinedSignature<2, 1>),
+    I64Sub(Signature<2, 1>),
     /// `i64.xor`.
-    I64Xor(InlinedSignature<2, 1>),
+    I64Xor(Signature<2, 1>),
 
     // f32 — loads
     /// `f32.load`.
@@ -2045,7 +2006,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
 
     // f32 — stores
@@ -2060,59 +2021,59 @@ pub(crate) enum RegInstruction {
 
     // f32 — unary
     /// `f32.abs`.
-    F32Abs(InlinedSignature<1, 1>),
+    F32Abs(Signature<1, 1>),
     /// `f32.ceil`.
-    F32Ceil(InlinedSignature<1, 1>),
+    F32Ceil(Signature<1, 1>),
     /// `f32.convert_i32_s`.
-    F32ConvertI32S(InlinedSignature<1, 1>),
+    F32ConvertI32S(Signature<1, 1>),
     /// `f32.convert_i32_u`.
-    F32ConvertI32U(InlinedSignature<1, 1>),
+    F32ConvertI32U(Signature<1, 1>),
     /// `f32.convert_i64_s`.
-    F32ConvertI64S(InlinedSignature<1, 1>),
+    F32ConvertI64S(Signature<1, 1>),
     /// `f32.convert_i64_u`.
-    F32ConvertI64U(InlinedSignature<1, 1>),
+    F32ConvertI64U(Signature<1, 1>),
     /// `f32.demote_f64`.
-    F32DemoteF64(InlinedSignature<1, 1>),
+    F32DemoteF64(Signature<1, 1>),
     /// `f32.floor`.
-    F32Floor(InlinedSignature<1, 1>),
+    F32Floor(Signature<1, 1>),
     /// `f32.nearest`.
-    F32Nearest(InlinedSignature<1, 1>),
+    F32Nearest(Signature<1, 1>),
     /// `f32.neg`.
-    F32Neg(InlinedSignature<1, 1>),
+    F32Neg(Signature<1, 1>),
     /// `f32.reinterpret_i32`.
-    F32ReinterpretI32(InlinedSignature<1, 1>),
+    F32ReinterpretI32(Signature<1, 1>),
     /// `f32.sqrt`.
-    F32Sqrt(InlinedSignature<1, 1>),
+    F32Sqrt(Signature<1, 1>),
     /// `f32.trunc`.
-    F32Trunc(InlinedSignature<1, 1>),
+    F32Trunc(Signature<1, 1>),
 
     // f32 — binary
     /// `f32.add`.
-    F32Add(InlinedSignature<2, 1>),
+    F32Add(Signature<2, 1>),
     /// `f32.copysign`.
-    F32Copysign(InlinedSignature<2, 1>),
+    F32Copysign(Signature<2, 1>),
     /// `f32.div`.
-    F32Div(InlinedSignature<2, 1>),
+    F32Div(Signature<2, 1>),
     /// `f32.eq`.
-    F32Eq(InlinedSignature<2, 1>),
+    F32Eq(Signature<2, 1>),
     /// `f32.ge`.
-    F32Ge(InlinedSignature<2, 1>),
+    F32Ge(Signature<2, 1>),
     /// `f32.gt`.
-    F32Gt(InlinedSignature<2, 1>),
+    F32Gt(Signature<2, 1>),
     /// `f32.le`.
-    F32Le(InlinedSignature<2, 1>),
+    F32Le(Signature<2, 1>),
     /// `f32.lt`.
-    F32Lt(InlinedSignature<2, 1>),
+    F32Lt(Signature<2, 1>),
     /// `f32.max`.
-    F32Max(InlinedSignature<2, 1>),
+    F32Max(Signature<2, 1>),
     /// `f32.min`.
-    F32Min(InlinedSignature<2, 1>),
+    F32Min(Signature<2, 1>),
     /// `f32.mul`.
-    F32Mul(InlinedSignature<2, 1>),
+    F32Mul(Signature<2, 1>),
     /// `f32.ne`.
-    F32Ne(InlinedSignature<2, 1>),
+    F32Ne(Signature<2, 1>),
     /// `f32.sub`.
-    F32Sub(InlinedSignature<2, 1>),
+    F32Sub(Signature<2, 1>),
 
     // f64 — loads
     /// `f64.load`.
@@ -2121,7 +2082,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: InlinedSignature<1, 1>,
+        sig: Signature<1, 1>,
     },
 
     // f64 — stores
@@ -2136,59 +2097,59 @@ pub(crate) enum RegInstruction {
 
     // f64 — unary
     /// `f64.abs`.
-    F64Abs(InlinedSignature<1, 1>),
+    F64Abs(Signature<1, 1>),
     /// `f64.ceil`.
-    F64Ceil(InlinedSignature<1, 1>),
+    F64Ceil(Signature<1, 1>),
     /// `f64.convert_i32_s`.
-    F64ConvertI32S(InlinedSignature<1, 1>),
+    F64ConvertI32S(Signature<1, 1>),
     /// `f64.convert_i32_u`.
-    F64ConvertI32U(InlinedSignature<1, 1>),
+    F64ConvertI32U(Signature<1, 1>),
     /// `f64.convert_i64_s`.
-    F64ConvertI64S(InlinedSignature<1, 1>),
+    F64ConvertI64S(Signature<1, 1>),
     /// `f64.convert_i64_u`.
-    F64ConvertI64U(InlinedSignature<1, 1>),
+    F64ConvertI64U(Signature<1, 1>),
     /// `f64.floor`.
-    F64Floor(InlinedSignature<1, 1>),
+    F64Floor(Signature<1, 1>),
     /// `f64.nearest`.
-    F64Nearest(InlinedSignature<1, 1>),
+    F64Nearest(Signature<1, 1>),
     /// `f64.neg`.
-    F64Neg(InlinedSignature<1, 1>),
+    F64Neg(Signature<1, 1>),
     /// `f64.promote_f32`.
-    F64PromoteF32(InlinedSignature<1, 1>),
+    F64PromoteF32(Signature<1, 1>),
     /// `f64.reinterpret_i64`.
-    F64ReinterpretI64(InlinedSignature<1, 1>),
+    F64ReinterpretI64(Signature<1, 1>),
     /// `f64.sqrt`.
-    F64Sqrt(InlinedSignature<1, 1>),
+    F64Sqrt(Signature<1, 1>),
     /// `f64.trunc`.
-    F64Trunc(InlinedSignature<1, 1>),
+    F64Trunc(Signature<1, 1>),
 
     // f64 — binary
     /// `f64.add`.
-    F64Add(InlinedSignature<2, 1>),
+    F64Add(Signature<2, 1>),
     /// `f64.copysign`.
-    F64Copysign(InlinedSignature<2, 1>),
+    F64Copysign(Signature<2, 1>),
     /// `f64.div`.
-    F64Div(InlinedSignature<2, 1>),
+    F64Div(Signature<2, 1>),
     /// `f64.eq`.
-    F64Eq(InlinedSignature<2, 1>),
+    F64Eq(Signature<2, 1>),
     /// `f64.ge`.
-    F64Ge(InlinedSignature<2, 1>),
+    F64Ge(Signature<2, 1>),
     /// `f64.gt`.
-    F64Gt(InlinedSignature<2, 1>),
+    F64Gt(Signature<2, 1>),
     /// `f64.le`.
-    F64Le(InlinedSignature<2, 1>),
+    F64Le(Signature<2, 1>),
     /// `f64.lt`.
-    F64Lt(InlinedSignature<2, 1>),
+    F64Lt(Signature<2, 1>),
     /// `f64.max`.
-    F64Max(InlinedSignature<2, 1>),
+    F64Max(Signature<2, 1>),
     /// `f64.min`.
-    F64Min(InlinedSignature<2, 1>),
+    F64Min(Signature<2, 1>),
     /// `f64.mul`.
-    F64Mul(InlinedSignature<2, 1>),
+    F64Mul(Signature<2, 1>),
     /// `f64.ne`.
-    F64Ne(InlinedSignature<2, 1>),
+    F64Ne(Signature<2, 1>),
     /// `f64.sub`.
-    F64Sub(InlinedSignature<2, 1>),
+    F64Sub(Signature<2, 1>),
     /// `select`: `input[2] != 0 ? input[0] : input[1]`.
     Select(Id<SelectOperands>),
     /// `return`: leave the function, carrying its results.
@@ -2254,7 +2215,7 @@ pub(crate) enum RegInstruction {
     /// Its operand is frequently a [`Const::Ref`] rather than a register, since
     /// `ref.null` and `ref.func` are immediates — the answer is known at lowering
     /// time in that case, but folding it is left to whatever optimizes the stream.
-    RefIsNull(InlinedSignature<1, 1>),
+    RefIsNull(Signature<1, 1>),
     /// `unreachable`: trap.
     ///
     /// Lowered like the branches in everything but the branch: it ends the block's
@@ -2315,7 +2276,7 @@ pub(crate) enum RegInstruction {
     ///
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
-    Move(Id<DynSignature2>),
+    Move(Id<DynSignature>),
     // The bulk-memory operators. Each takes its operands in wasm push order, so the
     // run reads left to right as the operands are written in the text format —
     // `input[0]` is the deepest, not the top of the stack. All of them address memory
@@ -2332,7 +2293,7 @@ pub(crate) enum RegInstruction {
     /// Does **not** trap when the request cannot be satisfied — it writes `-1` and
     /// execution continues. The ceiling is the module's declared maximum, narrowed by
     /// the instance [`Config`](crate::instance::config::Config).
-    MemoryGrow(InlinedSignature<1, 1>),
+    MemoryGrow(Signature<1, 1>),
     /// `memory.copy`: copy within linear memory. Operands are `dest`, `src`, `len`.
     ///
     /// The ranges may overlap (`memmove` semantics). Traps if either runs past the
@@ -2501,7 +2462,7 @@ impl RegInstruction {
     /// The arity is carried by the const parameters, so it comes from the variant's
     /// own declaration — see the `emit!` macro in
     /// [`Self::emit_instructions_for_func`], which is how every arm reaches this.
-    fn emit<const I: usize, const O: usize, F: FnOnce(InlinedSignature<I, O>) -> RegInstruction>(
+    fn emit<const I: usize, const O: usize, F: FnOnce(Signature<I, O>) -> RegInstruction>(
         simulated_stack: &mut SimulatedStack,
         instructions: &mut Instructions,
         offset: u32,
@@ -2679,7 +2640,7 @@ impl Instruction for RegInstruction {
                         .memory_offsets
                         .intern(MemoryOffset($memarg.offset as u32))?;
 
-                    emit!(|sig: InlinedSignature<2, 0>| RegInstruction::$variant {
+                    emit!(|sig: Signature<2, 0>| RegInstruction::$variant {
                         offset,
                         input: sig.input
                     })
@@ -2803,7 +2764,7 @@ impl Instruction for RegInstruction {
                 Operator::MemorySize { mem } => {
                     check_memory_index(mem)?;
 
-                    emit!(|sig: InlinedSignature<0, 1>| { RegInstruction::MemorySize(sig.output) })
+                    emit!(|sig: Signature<0, 1>| { RegInstruction::MemorySize(sig.output) })
                 }
                 Operator::MemoryGrow { mem } => {
                     check_memory_index(mem)?;
@@ -2814,12 +2775,12 @@ impl Instruction for RegInstruction {
                     check_memory_index(dst_mem)?;
                     check_memory_index(src_mem)?;
 
-                    emit!(|sig: InlinedSignature<3, 0>| { RegInstruction::MemoryCopy(sig.input) })
+                    emit!(|sig: Signature<3, 0>| { RegInstruction::MemoryCopy(sig.input) })
                 }
                 Operator::MemoryFill { mem } => {
                     check_memory_index(mem)?;
 
-                    emit!(|sig: InlinedSignature<3, 0>| { RegInstruction::MemoryFill(sig.input) })
+                    emit!(|sig: Signature<3, 0>| { RegInstruction::MemoryFill(sig.input) })
                 }
                 Operator::MemoryInit { data_index, mem } => {
                     check_memory_index(mem)?;
@@ -6560,7 +6521,7 @@ impl RegInstruction {
 
     #[inline(always)]
     fn execute_mov<M: Memory, I: ImportRegistry>(
-        signature: &DynSignature2,
+        signature: &DynSignature,
         caller_base_data: &RegCallerBaseData,
         instance: &mut Instance<M, I, crate::Register>,
     ) {

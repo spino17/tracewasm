@@ -18,7 +18,7 @@
 
 use crate::{
     instruction::register::{
-        DynSignature2, InputRegisters, MemoryOffset, RegFrameLayout, RegInstruction,
+        DynSignature, InputRegisters, MemoryOffset, RegFrameLayout, RegInstruction,
         RegLoweredFuncBody, Slot, interner::InternedId, mnemonic,
     },
     module::FuncType,
@@ -51,7 +51,7 @@ impl RegInstruction {
 
         // A move's destinations are the `len` registers based at its start, which is
         // the same run the executor writes — reconstructed here the way it does.
-        let mov = |sig: &DynSignature2| {
+        let mov = |sig: &DynSignature| {
             format!(
                 "{} -> {}",
                 list(&sig.input),
@@ -113,12 +113,9 @@ impl RegInstruction {
             | RegInstruction::I32Load8S { offset, sig }
             | RegInstruction::I32Load8U { offset, sig }
             | RegInstruction::I32Load16S { offset, sig }
-            | RegInstruction::I32Load16U { offset, sig } => load_op(
-                self.kind(),
-                *offset,
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I32Load16U { offset, sig } => {
+                load_op(self.kind(), *offset, &sig.input.registers, sig.output.start)
+            }
 
             // i32 — stores
             RegInstruction::I32Store { offset, input }
@@ -143,11 +140,9 @@ impl RegInstruction {
             | RegInstruction::I32TruncSatF32U(sig)
             | RegInstruction::I32TruncSatF64S(sig)
             | RegInstruction::I32TruncSatF64U(sig)
-            | RegInstruction::I32WrapI64(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I32WrapI64(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // i32 — binary
             RegInstruction::I32Add(sig)
@@ -174,11 +169,9 @@ impl RegInstruction {
             | RegInstruction::I32ShrS(sig)
             | RegInstruction::I32ShrU(sig)
             | RegInstruction::I32Sub(sig)
-            | RegInstruction::I32Xor(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I32Xor(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // i64 — loads
             RegInstruction::I64Load { offset, sig }
@@ -187,12 +180,9 @@ impl RegInstruction {
             | RegInstruction::I64Load16S { offset, sig }
             | RegInstruction::I64Load16U { offset, sig }
             | RegInstruction::I64Load32S { offset, sig }
-            | RegInstruction::I64Load32U { offset, sig } => load_op(
-                self.kind(),
-                *offset,
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I64Load32U { offset, sig } => {
+                load_op(self.kind(), *offset, &sig.input.registers, sig.output.start)
+            }
 
             // i64 — stores
             RegInstruction::I64Store { offset, input }
@@ -220,11 +210,9 @@ impl RegInstruction {
             | RegInstruction::I64TruncSatF32S(sig)
             | RegInstruction::I64TruncSatF32U(sig)
             | RegInstruction::I64TruncSatF64S(sig)
-            | RegInstruction::I64TruncSatF64U(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I64TruncSatF64U(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // i64 — binary
             RegInstruction::I64Add(sig)
@@ -251,19 +239,14 @@ impl RegInstruction {
             | RegInstruction::I64ShrS(sig)
             | RegInstruction::I64ShrU(sig)
             | RegInstruction::I64Sub(sig)
-            | RegInstruction::I64Xor(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::I64Xor(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // f32 — loads
-            RegInstruction::F32Load { offset, sig } => load_op(
-                self.kind(),
-                *offset,
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            RegInstruction::F32Load { offset, sig } => {
+                load_op(self.kind(), *offset, &sig.input.registers, sig.output.start)
+            }
 
             // f32 — stores
             RegInstruction::F32Store { offset, input } => {
@@ -283,11 +266,9 @@ impl RegInstruction {
             | RegInstruction::F32Neg(sig)
             | RegInstruction::F32ReinterpretI32(sig)
             | RegInstruction::F32Sqrt(sig)
-            | RegInstruction::F32Trunc(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::F32Trunc(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // f32 — binary
             RegInstruction::F32Add(sig)
@@ -302,19 +283,14 @@ impl RegInstruction {
             | RegInstruction::F32Min(sig)
             | RegInstruction::F32Mul(sig)
             | RegInstruction::F32Ne(sig)
-            | RegInstruction::F32Sub(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::F32Sub(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // f64 — loads
-            RegInstruction::F64Load { offset, sig } => load_op(
-                self.kind(),
-                *offset,
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            RegInstruction::F64Load { offset, sig } => {
+                load_op(self.kind(), *offset, &sig.input.registers, sig.output.start)
+            }
 
             // f64 — stores
             RegInstruction::F64Store { offset, input } => {
@@ -334,11 +310,9 @@ impl RegInstruction {
             | RegInstruction::F64PromoteF32(sig)
             | RegInstruction::F64ReinterpretI64(sig)
             | RegInstruction::F64Sqrt(sig)
-            | RegInstruction::F64Trunc(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::F64Trunc(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             // f64 — binary
             RegInstruction::F64Add(sig)
@@ -353,11 +327,9 @@ impl RegInstruction {
             | RegInstruction::F64Min(sig)
             | RegInstruction::F64Mul(sig)
             | RegInstruction::F64Ne(sig)
-            | RegInstruction::F64Sub(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            | RegInstruction::F64Sub(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
 
             RegInstruction::LocalSet { index, input } => format!(
                 "local.set    local{} <- {}",
@@ -409,27 +381,17 @@ impl RegInstruction {
             // `memory.copy` reads destination, source, length; `memory.fill` reads
             // destination, byte, length.
             RegInstruction::MemoryCopy(input) | RegInstruction::MemoryFill(input) => {
-                format!(
-                    "{:<12} {}",
-                    mnemonic(self.kind()),
-                    list(&input.registers)
-                )
+                format!("{:<12} {}", mnemonic(self.kind()), list(&input.registers))
             }
             // Kept out of the value-op groups above: it has the shape of a unary
             // operator but a side effect they do not, and the group comment there
             // says "pure".
-            RegInstruction::MemoryGrow(sig) => value_op(
-                self.kind(),
-                &sig.input.registers,
-                sig.output.start,
-            ),
+            RegInstruction::MemoryGrow(sig) => {
+                value_op(self.kind(), &sig.input.registers, sig.output.start)
+            }
             // No operands to show: the only run it carries is its destination.
             RegInstruction::MemorySize(output) => {
-                format!(
-                    "{:<12} -> {}",
-                    mnemonic(self.kind()),
-                    regs(output.start, 1)
-                )
+                format!("{:<12} -> {}", mnemonic(self.kind()), regs(output.start, 1))
             }
             RegInstruction::Select(sig) => {
                 let entry = frame.select_arena.get(*sig);
@@ -520,7 +482,11 @@ impl RegInstruction {
                     if params == 0 {
                         String::new()
                     } else {
-                        format!("  move {} -> {}", list(args), regs(entry.caller_base, params))
+                        format!(
+                            "  move {} -> {}",
+                            list(args),
+                            regs(entry.caller_base, params)
+                        )
                     }
                 )
             }
