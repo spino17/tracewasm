@@ -727,7 +727,7 @@ pub(crate) struct CallIndirectOperands {
     /// Start of this call's arguments in the input arena. They run for the
     /// `ty_index` signature's param count, in wasm push order, and are moved to
     /// `caller_base`, `caller_base + 1`, ... one apiece.
-    operands: Id<DynSignature>,
+    operands: DynSignature,
     /// Frame index the callee's frame is based at, on the same terms as
     /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
     /// satisfying.
@@ -3448,7 +3448,7 @@ impl Instruction for RegInstruction {
                                 ty_index: TyIndex(type_index),
                                 table_index: TableIndex(table_index),
                                 slot,
-                                operands: simulated_stack.dyn_signatures.alloc(move_registers),
+                                operands: move_registers,
                                 caller_base: u16::MAX,
                             },
                         )),
@@ -6269,8 +6269,7 @@ impl Instruction for RegInstruction {
                     )));
                 }
 
-                let param_slots =
-                    &frame_layout.dyn_signatures.get(entry.operands).input[..declared_params.len()];
+                let param_slots = &entry.operands.input[..declared_params.len()];
 
                 let mut tmp: SmallVec<[Value; 3]> = smallvec![];
 

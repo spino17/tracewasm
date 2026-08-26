@@ -1,6 +1,6 @@
 use crate::instruction::register::{
-    Const, InputRegisters, OutputRegisters, RegFrameLayout, RegInstruction, Signature, Slot,
-    interner::InternedId, lazy::SpillIndex,
+    Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, interner::InternedId,
+    lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
 use std::slice::Iter;
@@ -74,9 +74,9 @@ pub(crate) struct BackpatchMap(
 ); // instr_index -> source -> input slots
 
 impl BackpatchMap {
-    fn apply_to_input_registers<const I: usize>(
+    fn apply_to_input_registers(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
-        inputs: &mut InputRegisters<I>,
+        inputs: &mut [Slot],
         locals: u16,
         consts: u16,
         spills: u16,
@@ -86,27 +86,42 @@ impl BackpatchMap {
 
         debug_assert!(*source == expected_source);
 
-        let inputs_len = inputs.registers.len();
+        let inputs_len = inputs.len();
 
         debug_assert!(patch.len() == inputs_len);
 
         for (i, slot) in patch.iter().enumerate() {
-            inputs.registers[i] = slot.absolute_slot_in_frame(locals, consts, spills);
+            inputs[i] = slot.absolute_slot_in_frame(locals, consts, spills);
         }
     }
 
-    fn apply_to_output_registers<const O: usize>(
-        outputs: &mut OutputRegisters<O>,
-        _locals: u16,
-        consts: u16,
-        spills: u16,
-    ) {
-        outputs.start = outputs.start + consts + spills;
+    fn apply_to_output_registers(output_start: &mut u16, _locals: u16, consts: u16, spills: u16) {
+        *output_start = *output_start + consts + spills;
     }
 
     fn apply_to_signature<const I: usize, const O: usize>(
         patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
         sig: &mut Signature<I, O>,
+        locals: u16,
+        consts: u16,
+        spills: u16,
+        expected_source: InstructionSource,
+    ) {
+        Self::apply_to_input_registers(
+            patches,
+            &mut sig.input.registers,
+            locals,
+            consts,
+            spills,
+            expected_source,
+        );
+
+        Self::apply_to_output_registers(&mut sig.output.start, locals, consts, spills);
+    }
+
+    fn apply_to_dyn_signature(
+        patches: &mut Iter<'_, (InstructionSource, Vec<BackPatchableSlot>)>,
+        sig: &mut DynSignature,
         locals: u16,
         consts: u16,
         spills: u16,
@@ -121,7 +136,7 @@ impl BackpatchMap {
             expected_source,
         );
 
-        Self::apply_to_output_registers(&mut sig.output, locals, consts, spills);
+        Self::apply_to_output_registers(&mut sig.output_start, locals, consts, spills);
     }
 
     pub fn apply(
@@ -136,6 +151,18 @@ impl BackpatchMap {
             let instr = &mut instructions[*instr_index];
 
             match instr {
+                RegInstruction::LocalSet { index: _, input } => {
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut input.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::Emit,
+                    );
+                }
                 RegInstruction::LocalTee { index: _, input } => {
                     debug_assert!(patches.len() == 1);
 
@@ -147,6 +174,128 @@ impl BackpatchMap {
                     let patch = patch[0];
 
                     input.registers[0] = patch.absolute_slot_in_frame(locals, consts, spills)
+                }
+                RegInstruction::GlobalGet { index: _, output } => {
+                    Self::apply_to_output_registers(&mut output.start, locals, consts, spills);
+                }
+                RegInstruction::GlobalSet { index: _, input } => {
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut input.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::Emit,
+                    );
+                }
+                RegInstruction::If(id) => {
+                    let entry = frame_layout.if_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut entry.cond.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::Emit,
+                    );
+                }
+                RegInstruction::BrIf(id) => {
+                    let entry = frame_layout.br_if_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut entry.cond.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::BrIfCond,
+                    );
+
+                    Self::apply_to_dyn_signature(
+                        &mut patch_iter,
+                        &mut entry.mov,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::BrIfCond,
+                    );
+                }
+                RegInstruction::BrTable(id) => {
+                    let entry = frame_layout.br_table_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut entry.index.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::BrTableIndex,
+                    );
+
+                    for target in &mut entry.br_targets {
+                        Self::apply_to_dyn_signature(
+                            &mut patch_iter,
+                            &mut target.mov,
+                            locals,
+                            consts,
+                            spills,
+                            InstructionSource::BrTableMov,
+                        );
+                    }
+                }
+                RegInstruction::CallIndirect(id) => {
+                    let entry = frame_layout.call_indirect_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut entry.slot.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::CallIndirectSlot,
+                    );
+
+                    Self::apply_to_dyn_signature(
+                        &mut patch_iter,
+                        &mut entry.operands,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::CallIndirectMov,
+                    );
+                }
+                RegInstruction::Select(id) => {
+                    let entry = frame_layout.select_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_signature(
+                        &mut patch_iter,
+                        &mut entry.0,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::Emit,
+                    );
+                }
+                RegInstruction::MemoryInit(id) => {
+                    let entry = frame_layout.memory_init_arena.get_mut(*id);
+                    let mut patch_iter = patches.iter();
+
+                    Self::apply_to_input_registers(
+                        &mut patch_iter,
+                        &mut entry.operands.registers,
+                        locals,
+                        consts,
+                        spills,
+                        InstructionSource::Emit,
+                    );
                 }
                 // TODO: add all instructions! - most can be handled by macros!
                 _ => todo!(),

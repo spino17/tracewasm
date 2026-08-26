@@ -471,7 +471,7 @@ impl RegInstruction {
                 // executor has to reconstruct them is the point — a test that read
                 // them any other way would not notice the two disagreeing.
                 let params = types[entry.ty_index.0 as usize].params.len();
-                let args = &frame.dyn_signatures.get(entry.operands).input[..params];
+                let args = &entry.operands.input[..params];
 
                 format!(
                     "call_indirect [{}] ty{} table{} caller_base={}{}",
