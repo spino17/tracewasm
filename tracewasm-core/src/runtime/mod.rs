@@ -178,7 +178,9 @@ pub enum Step<Instr: Instruction> {
 /// Built only by [`TraceVM::_execute_on_frame_stack`], which [`TraceVM::run`] does
 /// not currently use — so nothing constructs one.
 struct Frame<'a, Instr: Instruction> {
+    /// Which function this frame is executing, for the trace.
     func_index: FuncIndex,
+    /// That function's body, borrowed from the [`Module`] rather than copied.
     instructions: &'a [Instr],
     /// Index of the `call` itself, not the instruction after it; resuming adds
     /// one, and a trace records the call site.
@@ -193,9 +195,10 @@ struct Frame<'a, Instr: Instruction> {
     /// Result count of the callee, needed on return to know how much of its region
     /// survives the teardown.
     callee_results_count: u32,
-    /// Who this frame called, and through which table if indirect. Only the trace
-    /// reads these.
+    /// Who this frame called. Only the trace reads it.
     callee_func_index: FuncIndex,
+    /// The table the callee was resolved through, or `None` for a direct call. Only
+    /// the trace reads it.
     callee_is_indirect: Option<TableIndex>,
 }
 

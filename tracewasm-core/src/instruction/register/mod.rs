@@ -486,6 +486,7 @@ enum StackSlot {
 /// resolves it.
 #[derive(Debug)]
 pub(crate) struct InputRegisters<const I: usize> {
+    /// The operands, deepest first.
     registers: [Slot; I],
 }
 
@@ -501,6 +502,7 @@ pub(crate) struct InputRegisters<const I: usize> {
 /// and spill regions.
 #[derive(Debug)]
 pub(crate) struct OutputRegisters<const O: usize> {
+    /// Frame index of the first destination; the run continues for `O`.
     start: u16,
 }
 
@@ -511,7 +513,9 @@ pub(crate) struct OutputRegisters<const O: usize> {
 /// An executor must read every operand before writing any destination.
 #[derive(Debug)]
 pub(crate) struct Signature<const I: usize, const O: usize> {
+    /// Where the operands are read from.
     pub input: InputRegisters<I>,
+    /// Where the results are written to.
     pub output: OutputRegisters<O>,
 }
 
@@ -526,11 +530,14 @@ pub(crate) struct Signature<const I: usize, const O: usize> {
 /// [`RegFrameLayout::dyn_signatures`] and the instruction carries an [`Id`].
 #[derive(Debug)]
 pub(crate) struct DynSignature {
+    /// The sources, deepest first. Its length is the move's arity.
     input: Vec<Slot>,
+    /// Frame index of the first destination; the run continues for `input.len()`.
     output_start: u16,
 }
 
 impl DynSignature {
+    /// A move of `input` into the run based at `output_start`.
     pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
         DynSignature {
             input,
@@ -566,7 +573,10 @@ impl DynSignature {
 /// records nothing.
 #[must_use]
 struct PopsPushesResult {
+    /// One `Slot(u16::MAX)` per operand popped, to store in the instruction. The
+    /// operands themselves are in the backpatch map.
     input: Vec<Slot>,
+    /// Provisional frame index of the first destination allocated.
     output_start: u16,
 }
 
@@ -575,6 +585,7 @@ struct PopsPushesResult {
 /// A `br relative_depth` resolves to `stack[len - 1 - relative_depth]`.
 #[derive(Default)]
 struct ControlStack {
+    /// Open labels, outermost first.
     stack: Vec<Block>,
 }
 
@@ -786,6 +797,8 @@ pub(crate) struct BrTableOperands {
     br_targets: Vec<RegBrTableTarget>,
 }
 
+/// The arena entry behind [`RegInstruction::CallIndirect`]: two operand runs, two
+/// immediates and a frame base, several times what fits inline.
 #[derive(Debug)]
 pub(crate) struct CallIndirectOperands {
     /// Index into the module's type section of the signature this call site
@@ -862,14 +875,31 @@ struct SimulatedStack {
     spills: SpillArena,
     /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
+    // One arena per operand shape too wide to sit inside an eight-byte instruction.
+    // All seven move to the [`RegFrameLayout`] unchanged when the body ends; they are
+    // separate rather than one arena of an enum so an [`Id`] cannot be read against
+    // the wrong shape.
+    /// `if` conditions and their two jump targets.
     if_arena: Arena<IfOperands>,
+    /// `br_if` conditions, each with the move performed only on the taken path.
     br_if_arena: Arena<BrIfOperands>,
+    /// `br_table` index operands, each with its own `Vec` of arms.
     br_table_arena: Arena<BrTableOperands>,
+    /// `call_indirect` callee slots, arguments and callee frame bases.
     call_indirect_arena: Arena<CallIndirectOperands>,
+    /// `select`'s three operands and its destination.
     select_arena: Arena<SelectOperands>,
+    /// `memory.init`'s three operands and its segment index.
     memory_init_arena: Arena<MemoryInitOperands>,
+    /// The label moves a [`RegInstruction::Move`] performs. Separate from the six
+    /// above because a move's arity is a label's, not an opcode's.
     dyn_signatures: Arena<DynSignature>,
+    /// Static byte offsets of the body's loads and stores, deduped so a repeated
+    /// offset costs one entry.
     memory_offsets: Interner<MemoryOffset>,
+    /// Every operand recorded against the instruction that will carry it, for the
+    /// end-of-body pass. Lowering-time only: it is what fills the instructions in,
+    /// and is dropped once it has.
     backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
@@ -911,6 +941,11 @@ impl SimulatedStack {
         }
     }
 
+    /// Params plus declared locals, which is also where the operand registers begin
+    /// in the provisional index space.
+    ///
+    /// Read off the lazy origin table rather than stored again, since that table is
+    /// sized to exactly this and the two could otherwise disagree.
     fn locals_count(&self) -> u16 {
         self.lazy_locals.origin.len() as u16
     }
@@ -1595,12 +1630,23 @@ pub(crate) struct RegFrameLayout {
     /// common case — and then the region is simply empty, closing the gap between the
     /// constants and the operand registers.
     pub spills: u16,
+    // The seven operand shapes that do not fit inside an eight-byte instruction. Each
+    // of those instructions holds only an [`Id`], so these have to ship with the body
+    // — an id is meaningless without the arena it indexes.
+    /// `if` conditions, and the `else`/`end` indices a false condition jumps to.
     pub if_arena: Arena<IfOperands>,
+    /// `br_if` conditions, each with the move its taken path performs.
     pub br_if_arena: Arena<BrIfOperands>,
+    /// `br_table` index operands, each with its own arms.
     pub br_table_arena: Arena<BrTableOperands>,
+    /// `call_indirect` callee slots, arguments, type index and callee frame base.
     pub call_indirect_arena: Arena<CallIndirectOperands>,
+    /// `select`'s three operands and its destination.
     pub select_arena: Arena<SelectOperands>,
+    /// `memory.init`'s three operands and its segment index.
     pub memory_init_arena: Arena<MemoryInitOperands>,
+    /// The label moves [`RegInstruction::Move`] performs, whose arity a label fixes
+    /// rather than an opcode.
     pub dyn_signatures: Arena<DynSignature>,
     /// Static byte offsets of the body's loads and stores, in allocation order.
     ///
@@ -2599,6 +2645,8 @@ impl CallerBaseData for RegCallerBaseData {
         }
     }
 
+    /// The frame's first slot, which is all this machine needs: every [`Slot`] is an
+    /// offset from it.
     fn base_offset(&self) -> u32 {
         self.base_register_index
     }
@@ -2616,7 +2664,10 @@ impl CallerBaseData for RegCallerBaseData {
 /// trap reached the missing entry.
 #[derive(Default)]
 struct Instructions {
+    /// The lowered body, in execution order. An index into it is a program counter.
     inner: Vec<RegInstruction>,
+    /// Byte offset of the operator each instruction was lowered from, index for index
+    /// with `inner`. Several instructions from one operator repeat its offset.
     offsets: Vec<u32>,
 }
 
@@ -2735,6 +2786,9 @@ impl Instruction for RegInstruction {
                 }};
             }
 
+            // As `emit_load!`, but a store has no destination, so only the operand
+            // half of the signature reaches the variant. The arity is annotated
+            // because discarding the output leaves `O` otherwise unconstrained.
             macro_rules! emit_store {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
@@ -6621,6 +6675,13 @@ impl RegInstruction {
             + frame_layout.consts.len()] = val;
     }
 
+    /// Performs a label move: reads every source, then writes every destination.
+    ///
+    /// Both passes are needed because the two runs may overlap — a move to a label
+    /// whose registers sit under the operands it carries is the common case — so
+    /// writing as it reads would clobber a source it had not reached yet. The buffer
+    /// costs nothing in practice: an arity is a label's params or results, which is
+    /// one or two values for anything rustc emits.
     #[inline(always)]
     fn execute_mov<M: Memory, I: ImportRegistry>(
         signature: &DynSignature,
@@ -6641,6 +6702,14 @@ impl RegInstruction {
         }
     }
 
+    /// The address a load or store touches: the operand in `slot`, plus the static
+    /// offset `offset` names in [`RegFrameLayout::memory_offsets`].
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::EffectiveAddressOverflow`] when the sum leaves the 32-bit
+    /// address space, which is out of bounds by definition and so a trap rather than
+    /// a wrap.
     #[inline(always)]
     fn effective_address<M: Memory, I: ImportRegistry>(
         offset: InternedId<MemoryOffset>,

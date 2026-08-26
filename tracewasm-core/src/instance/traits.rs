@@ -115,7 +115,9 @@ impl ResultVals {
 
 /// Owning iterator over the [`Val`]s of a [`ResultVals`], in order.
 pub struct ResultValsIter {
+    /// The values being iterated, owned so the iterator outlives its source.
     results: ResultVals,
+    /// How many have been yielded.
     index: usize,
 }
 

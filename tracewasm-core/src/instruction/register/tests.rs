@@ -324,6 +324,8 @@ fn sim(locals: u32) -> SimulatedStack {
     s
 }
 
+/// An all-`i32` type of the given arity, for a test whose subject is the arity
+/// rather than the types.
 fn func_ty(params: usize, results: usize) -> FuncType {
     FuncType {
         params: vec![ValType::I32; params].into_boxed_slice(),
@@ -741,6 +743,8 @@ fn block_entry_layouts_hold_for_every_block_type() {
     }
 }
 
+/// Copies a [`BlockVariant`], which is not `Copy`, so one case can be reused across
+/// the arms of a table-driven test.
 fn variant_of(v: &BlockVariant) -> BlockVariant {
     match v {
         BlockVariant::If => BlockVariant::If,
@@ -866,24 +870,37 @@ fn reachability(ops: &[Operator<'static>]) -> Vec<bool> {
         .collect()
 }
 
+// Operator constructors, abbreviated because the tests below are about the *shape*
+// of an operator sequence and a full `Operator::Block { blockty: .. }` at every
+// position buries it.
+
+/// `block` with no params or results.
 fn blk() -> Operator<'static> {
     Operator::Block {
         blockty: BlockType::Empty,
     }
 }
+
+/// `if` with no params or results.
 fn iff() -> Operator<'static> {
     Operator::If {
         blockty: BlockType::Empty,
     }
 }
+
+/// `loop` with no params or results.
 fn lop() -> Operator<'static> {
     Operator::Loop {
         blockty: BlockType::Empty,
     }
 }
+
+/// `br d`.
 fn br(d: u32) -> Operator<'static> {
     Operator::Br { relative_depth: d }
 }
+
+/// Any operator that pushes one value.
 fn cst() -> Operator<'static> {
     Operator::I32Const { value: 1 }
 }
@@ -972,12 +989,21 @@ fn dead_nested_blocks_keep_the_control_stack_balanced() {
 /// Spill slots start poisoned, because the whole question is whether a slot is
 /// written on every path that reads it.
 struct Frame {
+    /// The whole file, laid out `locals | consts | spills | registers` from 0, so a
+    /// read is `registers[frame_index]` — the same single add execution performs.
     registers: Vec<i64>,
+    /// The instance's globals, which live outside the frame.
     globals: Vec<i64>,
+    /// Width of the first region, and so the base of the constants.
     locals_count: u16,
+    /// Width of the second region. With `locals_count` it gives the spill base,
+    /// which is the one address these tests have to compute the same way the runtime
+    /// does.
     consts_len: u16,
 }
 
+/// What an unwritten slot holds, so a test asserting on a value it expects to have
+/// been written cannot pass on a slot nothing wrote.
 const POISON: i64 = i64::MIN;
 
 impl Frame {
@@ -1023,6 +1049,8 @@ impl Frame {
         (self.locals_count + self.consts_len) as usize + spill_slot(index)
     }
 
+    /// Reads one operand, refusing an unresolved placeholder rather than indexing
+    /// past the end of the file with it.
     fn read(&self, slot: &Slot) -> i64 {
         let Slot(i) = slot;
 
@@ -1036,6 +1064,8 @@ impl Frame {
         self.registers[*i as usize]
     }
 
+    /// Executes one instruction. Only the three these tests emit are handled — a
+    /// fourth reaching here means the test emitted something it did not mean to.
     fn exec(&mut self, instruction: &RegInstruction) {
         match instruction {
             RegInstruction::LocalSpill { index, spill_index } => {
@@ -1361,6 +1391,8 @@ fn hoisting_costs_nothing_when_no_borrow_is_live() {
 // locals need is emitted for it.
 // ---------------------------------------------------------------------------
 
+/// Two mutable globals and a function, shared by the tests about reads of a global
+/// surviving a write or a call.
 const GLOBAL_MODULE: &str = r#"(module
     (global (mut i32) (i32.const 0))
     (global (mut i32) (i32.const 0))
@@ -3957,6 +3989,7 @@ impl<const I: usize, const O: usize> Signature<I, O> {
 }
 
 impl<const I: usize> InputRegisters<I> {
+    /// How many operands the shape declares.
     fn arity(&self) -> i64 {
         I as i64
     }

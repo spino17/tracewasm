@@ -103,6 +103,8 @@ pub(crate) enum LazyEntryDropResult {
 /// Not the local as such, but *the value it held at one point*. Two entries for the
 /// same local are alive at once when a write separates them.
 pub(crate) struct LazyEntry<T> {
+    /// Where the value is right now. Rewriting this one field redirects every slot
+    /// sharing the entry at once, which is the whole point of the indirection.
     location: LazyLocation,
     /// Live stack slots holding this entry. See [`LazyEntryDropResult`].
     ref_count: u32,
@@ -118,6 +120,9 @@ pub(crate) struct LazyEntry<T> {
 /// exists so an arena and its handles are a distinct type from any other origin
 /// space's, should one be added.
 pub(crate) struct LazyArena<T> {
+    /// Every entry ever created for this body, live or not. Entries are not removed:
+    /// a dropped one only loses its last borrow, and its spill slot goes back to
+    /// [`SpillArena`] rather than the entry going anywhere.
     arena: Arena<LazyEntry<T>>,
     /// `origin[i]` is the entry currently forwarding local `i`, or `None` if nothing
     /// borrows it.
@@ -260,7 +265,10 @@ pub(crate) type LocalSlot = LazySlot<Local>;
 /// is handed straight back out.
 #[derive(Default)]
 pub(crate) struct SpillArena {
+    /// Slots ever handed out — the high-water mark, so the width the frame must
+    /// reserve. Never decreases; a freed slot is reused rather than reclaimed.
     allocation_len: u16,
+    /// Slots handed back, available before `allocation_len` has to grow again.
     free_slots: Vec<u16>,
 }
 

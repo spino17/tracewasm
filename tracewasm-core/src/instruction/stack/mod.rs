@@ -956,6 +956,7 @@ type StackLoweredFuncBody = (Vec<StackInstruction>, Vec<u32>, StackFrameLayout);
 /// `inner[len - 1 - relative_depth]`.
 #[derive(Default)]
 struct ControlStack {
+    /// Open labels, outermost first.
     inner: Vec<Block>,
     /// Current operand-stack depth at the point the pass has reached. See the
     /// module-level "Height-tracking invariant".

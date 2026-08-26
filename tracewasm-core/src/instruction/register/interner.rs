@@ -52,8 +52,12 @@ pub(crate) trait TyToString {
 /// `values` is what ships with the body; `reverse_map` is lowering-time only.
 #[derive(Default)]
 pub(crate) struct Interner<T> {
+    /// The distinct values, in id order — `values[id]` is what `id` names.
     values: Vec<T>,
+    /// Value back to id, so a repeat costs a lookup rather than an entry. Dropped
+    /// with the pool; only `values` ships.
     reverse_map: FxHashMap<T, InternedId<T>>,
+    /// Most distinct values this pool may hold, i.e. what its id width can name.
     max_size: u16,
 }
 

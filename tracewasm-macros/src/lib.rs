@@ -180,6 +180,11 @@ pub fn imports(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Builds the `ImportRegistry` impl for an `#[imports]` block.
+///
+/// Takes the block by `&mut` because it strips the per-method helper attributes —
+/// `#[module]` and friends — as it reads them: they are instructions to this macro,
+/// and leaving them on would make the emitted block fail to compile.
 fn expand(impl_block: &mut ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = impl_block.self_ty.clone();
 
@@ -523,6 +528,9 @@ pub fn kind(item: TokenStream) -> TokenStream {
     }
 }
 
+/// Builds the fieldless `…Kind` enum, its `ALL` table and the `kind()` projection.
+///
+/// Errors on anything but an enum, since there is nothing to project from a struct.
 fn expand_kind(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let syn::Data::Enum(data) = &input.data else {
         return Err(syn::Error::new_spanned(

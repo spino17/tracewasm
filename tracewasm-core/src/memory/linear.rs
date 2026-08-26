@@ -12,6 +12,8 @@ use crate::{
 /// bounds-checked accesses, grown in place by reallocating the `Vec` (see
 /// [`Memory::grow`]).
 pub struct LinearMemory {
+    /// The bytes, one per addressable byte of guest memory. Its length is always a
+    /// whole number of WASM pages.
     inner: Vec<u8>,
 }
 
