@@ -178,7 +178,7 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
-use std::{collections::hash_map::Entry, marker::PhantomData, vec};
+use std::{collections::hash_map::Entry, vec};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -463,76 +463,27 @@ pub(crate) struct InputRegisters<const I: usize> {
     registers: [Slot; I],
 }
 
+#[derive(Debug)]
 pub(crate) struct OutputRegisters<const O: usize> {
     // starting index
     start: u16,
 }
 
-pub(crate) struct InlinedSignature<const I: usize, const O: usize> {
-    pub inputs: InputRegisters<I>,
-    pub outputs: OutputRegisters<O>,
+#[derive(Debug)]
+pub(crate) struct Signature<const I: usize, const O: usize> {
+    pub input: InputRegisters<I>,
+    pub output: OutputRegisters<O>,
 }
-
-impl<const I: usize, const O: usize> InlinedSignature<I, O> {
-    #[inline(always)]
-    fn input_registers(&self) -> &[Slot; I] {
-        &self.inputs.registers
-    }
-
-    #[inline(always)]
-    fn output_registers_start(&self) -> u16 {
-        self.outputs.start
-    }
-}
-
-/// What an instruction's fields may occupy for [`RegInstruction`] to be 8 bytes.
-///
-/// The discriminant takes the rest. Asserting against the *payload* rather than
-/// against 8 is what makes a failure name the shape that does not fit.
-const INLINE_PAYLOAD_BUDGET: usize = 6;
-
-// Every `(I, O)` arity `RegInstruction` uses, so a shape that cannot be inlined is a
-// compile error naming itself rather than a surprise in `size_of`.
-//
-// These bound a variant whose payload is *only* the signature. One carrying anything
-// else — a load's `offset`, `MemoryInit`'s `data_index` — has less than the whole
-// budget to spend, which no assertion here can see.
-const _: () = assert!(
-    size_of::<InlinedSignature<1, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<1, 1> (unary ops, loads) does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InlinedSignature<2, 0>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<2, 0> (stores) does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InlinedSignature<2, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<2, 1> (binary ops) does not fit an 8-byte instruction"
-);
-/*const _: () = assert!(
-    size_of::<InlinedSignature<3, 1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedSignature<3, 1> (`select`) does not fit an 8-byte instruction — move it \
-     to an arena, or pin its result to an operand for a two-address form"
-);*/
-const _: () = assert!(
-    size_of::<InputRegisters<1>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedRegisters<1, Slot> does not fit an 8-byte instruction"
-);
-const _: () = assert!(
-    size_of::<InputRegisters<3>>() <= INLINE_PAYLOAD_BUDGET,
-    "InlinedRegisters<3, Slot> (`memory.copy`/`memory.fill`) does not fit an 8-byte \
-     instruction"
-);
 
 #[derive(Debug)]
-pub(crate) struct DynSignature2 {
+pub(crate) struct DynSignature {
     input: Vec<Slot>,
     output_start: u16,
 }
 
-impl DynSignature2 {
+impl DynSignature {
     pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
-        DynSignature2 {
+        DynSignature {
             input,
             output_start,
         }
@@ -540,88 +491,6 @@ impl DynSignature2 {
 
     pub fn is_empty(&self) -> bool {
         self.input.is_empty()
-    }
-}
-
-/// A fixed-length run of `L` entries in one of the flat arenas, named by its start.
-///
-/// `T` is [`Slot`] for input runs and `u32` for output-register runs; the parameter
-/// keeps the two from being resolved against the wrong arena. Four bytes whatever `L`
-/// is, which is what lets instruction variants stay small.
-#[derive(Debug)]
-pub(crate) struct Registers<const L: usize, T> {
-    /// Index of the run's first entry in its arena; it covers `L` from there.
-    start: u32,
-    phantom: PhantomData<T>,
-}
-
-impl<const L: usize, T> Registers<L, T> {
-    /// Resolves this run against the arena it indexes.
-    ///
-    /// Returns a fixed-size array, so callers index it without bounds checks. Panics
-    /// if `arena` is not the arena this run was recorded in — for a lowered body,
-    /// the matching field of its [`FrameLayout`].
-    pub fn registers<'a>(&self, arena: &'a [T]) -> &'a [T; L] {
-        let start = self.start as usize;
-
-        arena[start..(start + L)].try_into().unwrap()
-    }
-}
-
-/// The operands of an instruction whose arity is fixed by its opcode.
-///
-/// `I` inputs and `O` destination registers, each a run in the corresponding arena.
-///
-/// **Inputs may alias outputs.** Destination registers are allocated after the
-/// inputs are consumed, so an instruction's output frequently reuses the register one
-/// of its inputs occupied. An executor must read every operand before writing any
-/// destination.
-#[derive(Debug)]
-pub(crate) struct Signature<const I: usize, const O: usize> {
-    /// Operands in wasm push order — `input[0]` is the deepest, the one pushed first.
-    pub input: Registers<I, Slot>,
-    /// Destination registers, in the order results are pushed.
-    pub output: Registers<O, u16>,
-}
-
-/// The operands of an instruction whose arity is only known at lowering time — a
-/// label's params or results.
-///
-/// One `len` covers both runs because every user is 1:1: a [`RegInstruction::Move`]
-/// writes exactly as many destinations as it reads sources. Storing two lengths would
-/// admit a mismatched pair that cannot occur, and would push [`RegInstruction`] past
-/// its size budget.
-#[derive(Debug)]
-pub(crate) struct DynSignature {
-    /// Start of the source run in the input arena.
-    input: u32,
-    /// Start of the destination run in the output arena.
-    output: u32,
-    /// Length of both runs; see why there is only one on the type.
-    len: u32,
-}
-
-impl DynSignature {
-    /// The source operands, in push order.
-    pub fn input_registers<'a>(&self, arena: &'a [Slot]) -> &'a [Slot] {
-        let start = self.input as usize;
-
-        &arena[start..(start + self.len as usize)]
-    }
-
-    /// The destination registers, positionally matched to
-    /// [`Self::input_registers`].
-    pub fn output_registers<'a>(&self, arena: &'a [u16]) -> &'a [u16] {
-        let start = self.output as usize;
-
-        &arena[start..(start + self.len as usize)]
-    }
-
-    /// Whether this signature moves nothing — a label with no params or results,
-    /// which is the common case. Callers use it to skip emitting a `Move` entirely
-    /// rather than emitting an empty one.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 }
 
@@ -635,8 +504,8 @@ impl DynSignature {
 /// same thing without touching the arenas.
 #[must_use]
 struct PopsPushesResult {
-    input_start: u32,
-    output_start: u32,
+    input: Vec<Slot>,
+    output_start: u16,
 }
 
 /// The open labels, innermost last. Index 0 is the implicit function frame.
@@ -804,7 +673,7 @@ impl UnreachableTrackingControlStack {
 
 #[derive(Debug)]
 pub(crate) struct IfOperands {
-    cond: Registers<1, Slot>,
+    cond: InputRegisters<1>,
     /// Index of the matching [`Self::Else`], backpatched at `end`.
     else_index: Option<u32>,
     /// Index of the matching `end`, backpatched.
@@ -813,7 +682,7 @@ pub(crate) struct IfOperands {
 
 #[derive(Debug)]
 pub(crate) struct BrIfOperands {
-    cond: Registers<1, Slot>,
+    cond: InputRegisters<1>,
     mov: DynSignature,
     target_index: u32,
 }
@@ -836,7 +705,7 @@ pub(crate) struct RegBrTableTarget {
 
 #[derive(Debug)]
 pub(crate) struct BrTableOperands {
-    index: Registers<1, Slot>,
+    index: InputRegisters<1>,
     br_targets: Vec<RegBrTableTarget>,
 }
 
@@ -854,11 +723,11 @@ pub(crate) struct CallIndirectOperands {
     table_index: TableIndex,
     /// Where the callee index is read from. Resolved *before* the move is
     /// performed; see the note above.
-    slot: Registers<1, Slot>,
+    slot: InputRegisters<1>,
     /// Start of this call's arguments in the input arena. They run for the
     /// `ty_index` signature's param count, in wasm push order, and are moved to
     /// `caller_base`, `caller_base + 1`, ... one apiece.
-    operands: u32,
+    operands: DynSignature,
     /// Frame index the callee's frame is based at, on the same terms as
     /// [`Self::Call`]'s — including the placeholder and the invariant it ends up
     /// satisfying.
@@ -873,7 +742,7 @@ pub(crate) struct MemoryInitOperands {
     /// Index of the data segment to copy from.
     data_index: u32,
     /// `dest`, `src`, `len`.
-    operands: Registers<3, Slot>,
+    operands: InputRegisters<3>,
 }
 
 /// The whole lowering state for one function body.
@@ -904,19 +773,6 @@ struct SimulatedStack {
     lazy_locals: LazyArena<Local>,
     /// Frame slots holding locals materialized ahead of a write.
     spills: SpillArena,
-    /// Flat arena of every instruction's input operands, indexed by
-    /// [`Registers`]/[`DynSignature`] and shipped in [`RegFrameLayout`].
-    ///
-    /// Entries are not final while the body is being walked: a constant, spill or
-    /// operand register is written here as `Slot::RegisterFrame(u32::MAX)` and
-    /// resolved by the end-of-body pass.
-    input_registers: Vec<Slot>,
-    /// Flat arena of every instruction's destination registers, on the same terms.
-    ///
-    /// Every entry is a provisional operand-register index — a destination is never a
-    /// constant, local or global — so the whole arena takes one uniform shift at the
-    /// end of the body.
-    output_registers: Vec<u16>,
     /// Open labels, for resolving branch depths and backpatching at `end`.
     control_stack: ControlStack,
     if_arena: Arena<IfOperands>,
@@ -925,23 +781,8 @@ struct SimulatedStack {
     call_indirect_arena: Arena<CallIndirectOperands>,
     select_arena: Arena<SelectOperands>,
     memory_init_arena: Arena<MemoryInitOperands>,
+    dyn_signatures: Arena<DynSignature>,
     memory_offsets: Interner<MemoryOffset>,
-    /// Operands awaiting a frame index, each as `(position in
-    /// [`Self::input_registers`], provisional register index)`.
-    ///
-    /// Resolved to `index + consts + spills` — no `locals_count` term, because a
-    /// provisional register index already counts from the frame base.
-    register_backpatches: Vec<(usize, u16)>,
-    /// Operands awaiting a frame index, each as `(position in
-    /// [`Self::input_registers`], spill slot)`.
-    ///
-    /// Resolved to `locals_count + consts + slot`.
-    spill_backpatches: Vec<(usize, SpillIndex)>,
-    /// Operands awaiting a frame index, each as `(position in
-    /// [`Self::input_registers`], pool id)`.
-    ///
-    /// Resolved to `locals_count + id`.
-    const_backpatches: Vec<(usize, InternedId<Const>)>,
     backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
@@ -969,8 +810,6 @@ impl SimulatedStack {
             max_registers: locals_count as u16,
             lazy_locals: LazyArena::new(locals_count),
             spills: SpillArena::default(),
-            input_registers: vec![],
-            output_registers: vec![],
             control_stack: ControlStack::default(),
             if_arena: Arena::default(),
             br_if_arena: Arena::default(),
@@ -978,10 +817,8 @@ impl SimulatedStack {
             call_indirect_arena: Arena::default(),
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
+            dyn_signatures: Arena::default(),
             memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
-            register_backpatches: vec![],
-            spill_backpatches: vec![],
-            const_backpatches: vec![],
             backpatch_map: BackpatchMap::default(),
             const_interner: Interner::new(MAX_CONSTS),
         }
@@ -1341,40 +1178,14 @@ impl SimulatedStack {
     ) -> Result<PopsPushesResult, TraceWasmError> {
         let pops = pops as usize;
         let pushes = pushes as usize;
-        let input_start = self.input_registers.len();
-        let output_start = self.output_registers.len();
-
-        self.input_registers
-            .resize(input_start + pops, Slot::default());
 
         let mut backpatchable_slots = vec![BackPatchableSlot::Register(u16::MAX); pops];
+        let slots = vec![Slot(u16::MAX); pops]; // will be backpatched!
 
         for i in 0..pops {
             let slot = self.pop();
 
             backpatchable_slots[pops - 1 - i] = slot;
-
-            self.input_registers[input_start + pops - 1 - i] = match slot {
-                BackPatchableSlot::Slot(slot) => slot,
-                BackPatchableSlot::Const(id) => {
-                    self.const_backpatches
-                        .push((input_start + pops - 1 - i, id));
-
-                    Slot(u16::MAX) // will be backpatched
-                }
-                BackPatchableSlot::Register(index) => {
-                    self.register_backpatches
-                        .push((input_start + pops - 1 - i, index));
-
-                    Slot(u16::MAX) // will be backpatched
-                }
-                BackPatchableSlot::Spill(index) => {
-                    self.spill_backpatches
-                        .push((input_start + pops - 1 - i, index));
-
-                    Slot(u16::MAX) // will be backpatched
-                }
-            }
         }
 
         match self.backpatch_map.0.entry(instr_index) {
@@ -1390,19 +1201,18 @@ impl SimulatedStack {
             }
         }
 
-        self.output_registers.resize(output_start + pushes, 0);
+        let res = PopsPushesResult {
+            input: slots,
+            output_start: self.curr_register_index as u16,
+        };
 
-        for i in 0..pushes {
-            self.output_registers[output_start + i] = self.curr_register_index as u16;
+        for _ in 0..pushes {
             let out = Slot(self.curr_register_index as u16);
 
             self.push(out)?;
         }
 
-        Ok(PopsPushesResult {
-            input_start: input_start as u32,
-            output_start: output_start as u32,
-        })
+        Ok(res)
     }
 
     /// The same stack effect as [`Self::pops_and_pushes_registers`], recording
@@ -1472,13 +1282,11 @@ impl SimulatedStack {
         let result = self.pops_and_pushes_registers(I as u32, O as u32, instr_index, source)?;
 
         Ok(Signature {
-            input: Registers {
-                start: result.input_start,
-                phantom: PhantomData,
+            input: InputRegisters {
+                registers: result.input.try_into().unwrap(),
             },
-            output: Registers {
+            output: OutputRegisters {
                 start: result.output_start,
-                phantom: PhantomData,
             },
         })
     }
@@ -1503,9 +1311,8 @@ impl SimulatedStack {
         let result = self.pops_and_pushes_registers(depth, depth, instr_index, source)?;
 
         Ok(DynSignature {
-            input: result.input_start,
-            output: result.output_start,
-            len: depth,
+            input: result.input,
+            output_start: result.output_start,
         })
     }
 
@@ -1537,21 +1344,14 @@ impl SimulatedStack {
         instr_index: usize, // TODO: only use this when registers are not empty
         source: InstructionSource,
     ) -> Result<DynSignature, TraceWasmError> {
-        let input_start = self.input_registers.len();
-        let output_start = self.output_registers.len();
         let arity_to_preserve = arity_to_preserve as usize;
         let curr_stack_height = self.stack.height();
         let popped_count = (curr_stack_height - base_height) as usize;
         let mut register_index = self.curr_register_index as u16;
 
-        self.input_registers
-            .resize(input_start + arity_to_preserve, Slot::default());
-
-        self.output_registers
-            .resize(output_start + arity_to_preserve, 0);
-
         let mut backpatchable_slots =
             vec![BackPatchableSlot::Register(u16::MAX); arity_to_preserve];
+        let slots = vec![Slot(u16::MAX); arity_to_preserve];
 
         for i in 0..popped_count {
             let slot = self.simulated_pop(i as u32);
@@ -1562,28 +1362,6 @@ impl SimulatedStack {
 
             if i < arity_to_preserve {
                 backpatchable_slots[arity_to_preserve - 1 - i] = slot;
-
-                self.input_registers[input_start + arity_to_preserve - 1 - i] = match slot {
-                    BackPatchableSlot::Slot(slot) => slot,
-                    BackPatchableSlot::Const(id) => {
-                        self.const_backpatches
-                            .push((input_start + arity_to_preserve - 1 - i, id));
-
-                        Slot(u16::MAX) // will be backpatched
-                    }
-                    BackPatchableSlot::Register(index) => {
-                        self.register_backpatches
-                            .push((input_start + arity_to_preserve - 1 - i, index));
-
-                        Slot(u16::MAX) // will be backpatched
-                    }
-                    BackPatchableSlot::Spill(index) => {
-                        self.spill_backpatches
-                            .push((input_start + arity_to_preserve - 1 - i, index));
-
-                        Slot(u16::MAX) // will be backpatched
-                    }
-                }
             }
         }
 
@@ -1602,14 +1380,15 @@ impl SimulatedStack {
             }
         }
 
-        // output registers for the branch results
-        for i in 0..arity_to_preserve {
-            self.output_registers[output_start + i] = register_index;
-            register_index += 1;
-        }
+        let res = DynSignature {
+            input: slots,
+            output_start: register_index,
+        };
 
-        if register_index > self.max_registers {
-            if register_index > MAX_REGISTER_SLOTS {
+        let peak = register_index as u32 + arity_to_preserve as u32;
+
+        if peak > self.max_registers as u32 {
+            if peak > MAX_REGISTER_SLOTS as u32 {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
                     needed: register_index as u32,
@@ -1617,14 +1396,10 @@ impl SimulatedStack {
                 });
             }
 
-            self.max_registers = register_index;
+            self.max_registers = peak as u16;
         }
 
-        Ok(DynSignature {
-            input: input_start as u32,
-            output: output_start as u32,
-            len: arity_to_preserve as u32,
-        })
+        Ok(res)
     }
 
     /// Rescues every operand still forwarding to `location`, ahead of a write to it.
@@ -1726,28 +1501,13 @@ pub(crate) struct RegFrameLayout {
     /// common case — and then the region is simply empty, closing the gap between the
     /// constants and the operand registers.
     pub spills: u16,
-    /// Every instruction's input operands, concatenated in lowering order.
-    ///
-    /// [`Signature::input`] and [`DynSignature::input_registers`] name runs here.
-    /// Shipped with the body because every one of those indices is meaningless
-    /// without it.
-    ///
-    /// Every entry is a *final* frame index: the end-of-body pass in
-    /// [`RegInstruction::emit_instructions_for_func`] has already resolved the
-    /// placeholders that constants, spills and operand registers were emitted as. A
-    /// surviving `u32::MAX` is a bug, which is why [`Slot::render`] names one
-    /// `<unresolved>` rather than indexing the pool with it.
-    pub input_registers_arena: Box<[Slot]>,
-    /// Every instruction's destination registers, on the same terms as
-    /// [`Self::input_registers_arena`] — final frame indices, always in the operand
-    /// region.
-    pub output_registers_arena: Box<[u16]>,
     pub if_arena: Arena<IfOperands>,
     pub br_if_arena: Arena<BrIfOperands>,
     pub br_table_arena: Arena<BrTableOperands>,
     pub call_indirect_arena: Arena<CallIndirectOperands>,
     pub select_arena: Arena<SelectOperands>,
     pub memory_init_arena: Arena<MemoryInitOperands>,
+    pub dyn_signatures: Arena<DynSignature>,
     /// Static byte offsets of the body's loads and stores, in allocation order.
     ///
     /// A `memarg.offset` is a `u32`, too wide to sit in an 8-byte instruction next to
@@ -1809,7 +1569,7 @@ pub(crate) enum RegInstruction {
         /// The global read, in the module's global index space.
         index: GlobalIndex,
         /// The register the value is written to.
-        output: Registers<1, u16>,
+        output: OutputRegisters<1>,
     },
     /// `global.set`: write the operand into a global.
     ///
@@ -1817,13 +1577,13 @@ pub(crate) enum RegInstruction {
     /// each one into a register, so this cannot invalidate an operand.
     GlobalSet {
         index: GlobalIndex,
-        input: Registers<1, Slot>,
+        input: InputRegisters<1>,
     },
     /// `local.set`: write the operand into a local. See [`Self::GlobalSet`] on
     /// rescues.
     LocalSet {
         index: LocalIndex,
-        input: Registers<1, Slot>,
+        input: InputRegisters<1>,
     },
     /// Copies a local into a spill slot, immediately before a write that would
     /// otherwise invalidate operands still reading it. See [`lazy`].
@@ -1954,7 +1714,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
     /// `i32.store8`.
     I32Store8 {
@@ -1962,7 +1722,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
     /// `i32.store16`.
     I32Store16 {
@@ -1970,7 +1730,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
 
     // i32 — unary
@@ -2124,7 +1884,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
     /// `i64.store8`.
     I64Store8 {
@@ -2132,7 +1892,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
     /// `i64.store16`.
     I64Store16 {
@@ -2140,7 +1900,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
     /// `i64.store32`.
     I64Store32 {
@@ -2148,7 +1908,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
 
     // i64 — unary
@@ -2258,7 +2018,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
 
     // f32 — unary
@@ -2334,7 +2094,7 @@ pub(crate) enum RegInstruction {
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
         offset: InternedId<MemoryOffset>,
-        sig: Signature<2, 0>,
+        input: InputRegisters<2>,
     },
 
     // f64 — unary
@@ -2518,7 +2278,7 @@ pub(crate) enum RegInstruction {
     ///
     /// The buffer costs nothing in practice: arities are the label's params or
     /// results, which are one or two values for anything rustc emits.
-    Move(DynSignature),
+    Move(Id<DynSignature>),
     // The bulk-memory operators. Each takes its operands in wasm push order, so the
     // run reads left to right as the operands are written in the text format —
     // `input[0]` is the deepest, not the top of the stack. All of them address memory
@@ -2528,7 +2288,7 @@ pub(crate) enum RegInstruction {
     ///
     /// The only variant here with no inputs, so it carries a bare output run rather
     /// than a [`Signature`].
-    MemorySize(Registers<1, u16>),
+    MemorySize(OutputRegisters<1>),
     /// `memory.grow`: grow the memory by the page delta in the input, writing the
     /// size *before* the growth to the output.
     ///
@@ -2541,13 +2301,13 @@ pub(crate) enum RegInstruction {
     /// The ranges may overlap (`memmove` semantics). Traps if either runs past the
     /// end of memory, with nothing written — so an executor must bounds-check both
     /// before it moves a byte.
-    MemoryCopy(Registers<3, Slot>),
+    MemoryCopy(InputRegisters<3>),
     /// `memory.fill`: set a range to the low byte of a value. Operands are `dest`,
     /// `value`, `len`.
     ///
     /// Only the low byte of `value` is used, though the operand is a full `i32`.
     /// Traps if the range runs past the end of memory.
-    MemoryFill(Registers<3, Slot>),
+    MemoryFill(InputRegisters<3>),
     /// `memory.init`: copy from a passive data segment into linear memory. Operands
     /// are `dest`, `src`, `len`, where `src` indexes the *segment*.
     ///
@@ -2587,7 +2347,7 @@ pub(crate) enum RegInstruction {
 // index the variant already carries (as `CallIndirect` does with its `ty_index` in the
 // stack pass), or store an explicit `len` and drop something else to pay for it.
 const _: () = assert!(
-    size_of::<RegInstruction>() <= 16,
+    size_of::<RegInstruction>() <= 8,
     "RegInstruction grew past 16 bytes. Need to keep it compact."
 );
 
@@ -2866,13 +2626,26 @@ impl Instruction for RegInstruction {
             // A load or store keeps its byte offset in `memory_offsets`, so the id has
             // to be allocated before the instruction can be built — which `emit!`'s
             // closure cannot do, since it can neither borrow the stack nor propagate.
-            macro_rules! emit_mem {
+            macro_rules! emit_load {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
                         .intern(MemoryOffset($memarg.offset as u32))?;
 
                     emit!(|sig| RegInstruction::$variant { offset, sig })
+                }};
+            }
+
+            macro_rules! emit_store {
+                ($memarg:expr, $variant:ident) => {{
+                    let offset = simulated_stack
+                        .memory_offsets
+                        .intern(MemoryOffset($memarg.offset as u32))?;
+
+                    emit!(|sig: Signature<2, 0>| RegInstruction::$variant {
+                        offset,
+                        input: sig.input
+                    })
                 }};
             }
 
@@ -3035,14 +2808,14 @@ impl Instruction for RegInstruction {
                 Operator::I32Const { value } => {
                     simulated_stack.push_const(Const::I32(value))?;
                 }
-                Operator::I32Load { memarg } => emit_mem!(memarg, I32Load),
-                Operator::I32Load8S { memarg } => emit_mem!(memarg, I32Load8S),
-                Operator::I32Load8U { memarg } => emit_mem!(memarg, I32Load8U),
-                Operator::I32Load16S { memarg } => emit_mem!(memarg, I32Load16S),
-                Operator::I32Load16U { memarg } => emit_mem!(memarg, I32Load16U),
-                Operator::I32Store { memarg } => emit_mem!(memarg, I32Store),
-                Operator::I32Store8 { memarg } => emit_mem!(memarg, I32Store8),
-                Operator::I32Store16 { memarg } => emit_mem!(memarg, I32Store16),
+                Operator::I32Load { memarg } => emit_load!(memarg, I32Load),
+                Operator::I32Load8S { memarg } => emit_load!(memarg, I32Load8S),
+                Operator::I32Load8U { memarg } => emit_load!(memarg, I32Load8U),
+                Operator::I32Load16S { memarg } => emit_load!(memarg, I32Load16S),
+                Operator::I32Load16U { memarg } => emit_load!(memarg, I32Load16U),
+                Operator::I32Store { memarg } => emit_store!(memarg, I32Store),
+                Operator::I32Store8 { memarg } => emit_store!(memarg, I32Store8),
+                Operator::I32Store16 { memarg } => emit_store!(memarg, I32Store16),
                 Operator::I32Clz => emit!(RegInstruction::I32Clz),
                 Operator::I32Ctz => emit!(RegInstruction::I32Ctz),
                 Operator::I32Eqz => emit!(RegInstruction::I32Eqz),
@@ -3089,17 +2862,17 @@ impl Instruction for RegInstruction {
                 Operator::I64Const { value } => {
                     simulated_stack.push_const(Const::I64(value))?;
                 }
-                Operator::I64Load { memarg } => emit_mem!(memarg, I64Load),
-                Operator::I64Load8S { memarg } => emit_mem!(memarg, I64Load8S),
-                Operator::I64Load8U { memarg } => emit_mem!(memarg, I64Load8U),
-                Operator::I64Load16S { memarg } => emit_mem!(memarg, I64Load16S),
-                Operator::I64Load16U { memarg } => emit_mem!(memarg, I64Load16U),
-                Operator::I64Load32S { memarg } => emit_mem!(memarg, I64Load32S),
-                Operator::I64Load32U { memarg } => emit_mem!(memarg, I64Load32U),
-                Operator::I64Store { memarg } => emit_mem!(memarg, I64Store),
-                Operator::I64Store8 { memarg } => emit_mem!(memarg, I64Store8),
-                Operator::I64Store16 { memarg } => emit_mem!(memarg, I64Store16),
-                Operator::I64Store32 { memarg } => emit_mem!(memarg, I64Store32),
+                Operator::I64Load { memarg } => emit_load!(memarg, I64Load),
+                Operator::I64Load8S { memarg } => emit_load!(memarg, I64Load8S),
+                Operator::I64Load8U { memarg } => emit_load!(memarg, I64Load8U),
+                Operator::I64Load16S { memarg } => emit_load!(memarg, I64Load16S),
+                Operator::I64Load16U { memarg } => emit_load!(memarg, I64Load16U),
+                Operator::I64Load32S { memarg } => emit_load!(memarg, I64Load32S),
+                Operator::I64Load32U { memarg } => emit_load!(memarg, I64Load32U),
+                Operator::I64Store { memarg } => emit_store!(memarg, I64Store),
+                Operator::I64Store8 { memarg } => emit_store!(memarg, I64Store8),
+                Operator::I64Store16 { memarg } => emit_store!(memarg, I64Store16),
+                Operator::I64Store32 { memarg } => emit_store!(memarg, I64Store32),
                 Operator::I64Clz => emit!(RegInstruction::I64Clz),
                 Operator::I64Ctz => emit!(RegInstruction::I64Ctz),
                 Operator::I64Eqz => emit!(RegInstruction::I64Eqz),
@@ -3149,8 +2922,8 @@ impl Instruction for RegInstruction {
                     simulated_stack
                         .push_const(Const::F32(OrderedFloat(f32::from_bits(value.bits()))))?;
                 }
-                Operator::F32Load { memarg } => emit_mem!(memarg, F32Load),
-                Operator::F32Store { memarg } => emit_mem!(memarg, F32Store),
+                Operator::F32Load { memarg } => emit_load!(memarg, F32Load),
+                Operator::F32Store { memarg } => emit_store!(memarg, F32Store),
                 Operator::F32Abs => emit!(RegInstruction::F32Abs),
                 Operator::F32Ceil => emit!(RegInstruction::F32Ceil),
                 Operator::F32ConvertI32S => emit!(RegInstruction::F32ConvertI32S),
@@ -3183,8 +2956,8 @@ impl Instruction for RegInstruction {
                     simulated_stack
                         .push_const(Const::F64(OrderedFloat(f64::from_bits(value.bits()))))?;
                 }
-                Operator::F64Load { memarg } => emit_mem!(memarg, F64Load),
-                Operator::F64Store { memarg } => emit_mem!(memarg, F64Store),
+                Operator::F64Load { memarg } => emit_load!(memarg, F64Load),
+                Operator::F64Store { memarg } => emit_store!(memarg, F64Store),
                 Operator::F64Abs => emit!(RegInstruction::F64Abs),
                 Operator::F64Ceil => emit!(RegInstruction::F64Ceil),
                 Operator::F64ConvertI32S => emit!(RegInstruction::F64ConvertI32S),
@@ -3248,7 +3021,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
                 }
                 Operator::Loop { blockty } => {
@@ -3271,7 +3049,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     instructions.push(RegInstruction::Loop, offset);
@@ -3302,7 +3085,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     let cond = simulated_stack
@@ -3351,7 +3139,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     // reset the frame layout with params on top for else instructions.
@@ -3410,7 +3203,12 @@ impl Instruction for RegInstruction {
                         };
 
                     if !move_registers.is_empty() {
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     instructions.push(RegInstruction::Br { target_index }, offset);
@@ -3563,7 +3361,12 @@ impl Instruction for RegInstruction {
                         ));
 
                     if !move_registers.is_empty() {
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     instructions.push(
@@ -3591,7 +3394,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     call_instr_backpatches.push((instructions.len(), caller_base));
@@ -3640,7 +3448,7 @@ impl Instruction for RegInstruction {
                                 ty_index: TyIndex(type_index),
                                 table_index: TableIndex(table_index),
                                 slot,
-                                operands: move_registers.input,
+                                operands: move_registers,
                                 caller_base: u16::MAX,
                             },
                         )),
@@ -3670,7 +3478,12 @@ impl Instruction for RegInstruction {
                             InstructionSource::Emit,
                         )?;
 
-                        instructions.push(RegInstruction::Move(move_registers), offset);
+                        instructions.push(
+                            RegInstruction::Move(
+                                simulated_stack.dyn_signatures.alloc(move_registers),
+                            ),
+                            offset,
+                        );
                     }
 
                     debug_assert!(
@@ -3785,40 +3598,6 @@ impl Instruction for RegInstruction {
             });
         }
 
-        // Constants come first above the locals, in interner order — matching the
-        // order `enter_frame` writes the pool in.
-        for (input_index, const_id) in simulated_stack.const_backpatches {
-            simulated_stack.input_registers[input_index] = Slot(const_id.raw() + locals_count);
-        }
-
-        // Then the spills. `set_value_to_spills` computes this same address when a
-        // `LocalSpill` writes one, and the two must agree exactly or a
-        // spill is read from a slot nothing wrote.
-        for (input_index, spill_index) in simulated_stack.spill_backpatches {
-            simulated_stack.input_registers[input_index] =
-                Slot(spill_index.raw_value() + locals_count + consts_len);
-        }
-
-        // Operand registers sit above both regions, so each provisional index moves
-        // up by their combined width.
-        //
-        // There is deliberately no `locals_count` term here, unlike the two loops
-        // above: a provisional register index is already counted from the frame base,
-        // because `curr_register_index` starts at `locals_count`. Adding it again
-        // would push every register past the end of the frame.
-        for (input_index, index) in simulated_stack.register_backpatches {
-            simulated_stack.input_registers[input_index] = Slot(index + spills + consts_len)
-        }
-
-        // Destinations live in the same provisional space, so they take the identical
-        // shift — unconditionally, since every entry is an operand register. A
-        // constant, local or global can be read but never written.
-        simulated_stack.output_registers = simulated_stack
-            .output_registers
-            .iter()
-            .map(|x| x + spills + consts_len)
-            .collect();
-
         // A `caller_base` is an operand register index too — the one the arguments
         // were staged at — so it takes the same shift. The consequence is the
         // invariant the whole layout rests on: `caller_base` ends up at or above
@@ -3853,17 +3632,16 @@ impl Instruction for RegInstruction {
         // `registers + spills + consts` wide, and `locals_count` and `consts` travel
         // with it because they are what invert the shifts above: given an index, they
         // are the only way to say which region it names.
-        let frame = RegFrameLayout {
+        let mut frame = RegFrameLayout {
             registers: simulated_stack.max_registers,
             spills,
-            input_registers_arena: simulated_stack.input_registers.into_boxed_slice(),
-            output_registers_arena: simulated_stack.output_registers.into_boxed_slice(),
             if_arena: simulated_stack.if_arena,
             br_if_arena: simulated_stack.br_if_arena,
             br_table_arena: simulated_stack.br_table_arena,
             call_indirect_arena: simulated_stack.call_indirect_arena,
             select_arena: simulated_stack.select_arena,
             memory_init_arena: simulated_stack.memory_init_arena,
+            dyn_signatures: simulated_stack.dyn_signatures,
             memory_offsets: simulated_stack.memory_offsets,
             locals_count,
             consts: simulated_stack
@@ -3871,6 +3649,15 @@ impl Instruction for RegInstruction {
                 .into_values()
                 .into_boxed_slice(),
         };
+
+        // apply all backpatches
+        simulated_stack.backpatch_map.apply(
+            &mut instructions.inner,
+            locals_count,
+            consts_len,
+            spills,
+            &mut frame,
+        );
 
         Ok((instructions.inner, instructions.offsets, frame))
     }
@@ -3887,7 +3674,7 @@ impl Instruction for RegInstruction {
         let res = match self {
             RegInstruction::GlobalGet { index, output } => {
                 Self::set_value_to_register(
-                    output.registers(&frame_layout.output_registers_arena)[0],
+                    output.start,
                     instance.global_vals[index.0 as usize].into(),
                     caller_base_data,
                     instance,
@@ -3898,23 +3685,15 @@ impl Instruction for RegInstruction {
             RegInstruction::GlobalSet { index, input } => {
                 let ty = module.globals[index.0 as usize].ty.content_type();
 
-                instance.global_vals[index.0 as usize] = Self::slot_value(
-                    input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .into_val(&ty);
+                instance.global_vals[index.0 as usize] =
+                    Self::slot_value(input.registers[0], caller_base_data, instance).into_val(&ty);
 
                 Step::Next
             }
             RegInstruction::LocalSet { index, input } => {
                 Self::set_local(
                     *index,
-                    Self::slot_value(
-                        input.registers(&frame_layout.input_registers_arena)[0],
-                        caller_base_data,
-                        instance,
-                    ),
+                    Self::slot_value(input.registers[0], caller_base_data, instance),
                     caller_base_data,
                     instance,
                 );
@@ -3945,12 +3724,8 @@ impl Instruction for RegInstruction {
             RegInstruction::Loop => Step::Next,
             RegInstruction::If(id) => {
                 let entry = frame_layout.if_arena.get(*id);
-                let cond = Self::slot_value(
-                    entry.cond.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let cond =
+                    Self::slot_value(entry.cond.registers[0], caller_base_data, instance).as_i32();
 
                 if cond != 0 {
                     Step::Next
@@ -3967,15 +3742,11 @@ impl Instruction for RegInstruction {
             RegInstruction::BrIf(id) => {
                 let entry = frame_layout.br_if_arena.get(*id);
 
-                let cond = Self::slot_value(
-                    entry.cond.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let cond =
+                    Self::slot_value(entry.cond.registers[0], caller_base_data, instance).as_i32();
 
                 if cond != 0 {
-                    Self::execute_mov(&entry.mov, caller_base_data, frame_layout, instance);
+                    Self::execute_mov(&entry.mov, caller_base_data, instance);
 
                     Step::JumpTo(entry.target_index)
                 } else {
@@ -3986,12 +3757,8 @@ impl Instruction for RegInstruction {
                 let entry = frame_layout.br_table_arena.get(*id);
                 let targets = &entry.br_targets;
 
-                let index = Self::slot_value(
-                    entry.index.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32 as usize;
+                let index = Self::slot_value(entry.index.registers[0], caller_base_data, instance)
+                    .as_i32() as u32 as usize;
 
                 let target_count = targets.len() - 1;
 
@@ -4001,7 +3768,7 @@ impl Instruction for RegInstruction {
                     &targets[index]
                 };
 
-                Self::execute_mov(&branch.mov, caller_base_data, frame_layout, instance);
+                Self::execute_mov(&branch.mov, caller_base_data, instance);
 
                 Step::JumpTo(branch.target_index)
             }
@@ -4009,7 +3776,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4017,7 +3784,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i32(effective_offset)?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(val),
                     caller_base_data,
                     instance,
@@ -4029,7 +3796,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4037,7 +3804,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i8(effective_offset)? as i32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(val),
                     caller_base_data,
                     instance,
@@ -4049,7 +3816,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4057,7 +3824,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_u8(effective_offset)? as i32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(val),
                     caller_base_data,
                     instance,
@@ -4069,7 +3836,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4077,7 +3844,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i16(effective_offset)? as i32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(val),
                     caller_base_data,
                     instance,
@@ -4089,7 +3856,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4097,7 +3864,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_u16(effective_offset)? as i32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(val),
                     caller_base_data,
                     instance,
@@ -4105,8 +3872,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I32Store { offset, sig } => {
-                let input = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I32Store { offset, input } => {
+                let input = &input.registers;
                 let val = Self::slot_value(input[1], caller_base_data, instance).as_i32();
 
                 let effective_offset = Self::effective_address(
@@ -4121,8 +3888,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I32Store8 { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I32Store8 { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -4136,8 +3903,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I32Store16 { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I32Store16 { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -4152,15 +3919,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Clz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.leading_zeros() as i32),
                     caller_base_data,
                     instance,
@@ -4169,15 +3932,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Ctz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.trailing_zeros() as i32),
                     caller_base_data,
                     instance,
@@ -4186,15 +3945,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Eqz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(if a == 0 { 1 } else { 0 }),
                     caller_base_data,
                     instance,
@@ -4203,15 +3958,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Extend16S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i16 as i32),
                     caller_base_data,
                     instance,
@@ -4220,15 +3971,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Extend8S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i8 as i32),
                     caller_base_data,
                     instance,
@@ -4237,18 +3984,14 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Popcnt(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 // Counts set bits in the two's-complement representation, so a
                 // negative operand counts its sign bits too — which is what the
                 // spec's bit-level definition asks for.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.count_ones() as i32),
                     caller_base_data,
                     instance,
@@ -4257,15 +4000,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32ReinterpretF32(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.to_bits() as i32),
                     caller_base_data,
                     instance,
@@ -4275,17 +4014,13 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::I32TruncF32S(sig) => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as f64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as f64;
 
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(truncated as i32),
                     caller_base_data,
                     instance,
@@ -4295,19 +4030,15 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::I32TruncF32U(sig) => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as f64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as f64;
 
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 // The result is the `u32` bit pattern held in an `i32`, so values
                 // above `i32::MAX` come back out negative.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(truncated as u32 as i32),
                     caller_base_data,
                     instance,
@@ -4316,17 +4047,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32TruncF64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 let truncated = trunc_float_to_int(a, I32_TRUNC_LOW, I32_TRUNC_HIGH, "i32")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(truncated as i32),
                     caller_base_data,
                     instance,
@@ -4335,17 +4062,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32TruncF64U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 let truncated = trunc_float_to_int(a, 0.0, U32_TRUNC_HIGH, "u32")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(truncated as u32 as i32),
                     caller_base_data,
                     instance,
@@ -4354,15 +4077,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32TruncSatF32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i32),
                     caller_base_data,
                     instance,
@@ -4371,15 +4090,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32TruncSatF32U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i32),
                     caller_base_data,
                     instance,
@@ -4388,15 +4103,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32TruncSatF64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i32),
                     caller_base_data,
                     instance,
@@ -4407,15 +4118,11 @@ impl Instruction for RegInstruction {
             RegInstruction::I32TruncSatF64U(sig) => {
                 // Saturate to `u32`, the *target* width — going through `u64` here
                 // would clamp at the wrong bound and then wrap on the way down.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f64() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i32),
                     caller_base_data,
                     instance,
@@ -4424,15 +4131,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32WrapI64(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a as i32),
                     caller_base_data,
                     instance,
@@ -4441,12 +4144,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Add(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_add(b)),
                     caller_base_data,
                     instance,
@@ -4455,12 +4158,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32And(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.bitand(b)),
                     caller_base_data,
                     instance,
@@ -4469,12 +4172,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32DivS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.checked_div(b).ok_or(
                         InstructionExecutionError::Division {
                             num: a.to_string(),
@@ -4488,12 +4191,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32DivU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(
                         a.checked_div(b)
                             .ok_or(InstructionExecutionError::Division {
@@ -4508,12 +4211,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Eq(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a == b) as i32),
                     caller_base_data,
                     instance,
@@ -4522,12 +4225,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32GeS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -4536,12 +4239,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32GeU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -4550,12 +4253,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32GtS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -4564,12 +4267,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32GtU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -4578,12 +4281,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32LeS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -4592,12 +4295,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32LeU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -4606,12 +4309,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32LtS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -4620,12 +4323,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32LtU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -4634,12 +4337,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Mul(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_mul(b)),
                     caller_base_data,
                     instance,
@@ -4648,12 +4351,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Ne(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a != b) as i32),
                     caller_base_data,
                     instance,
@@ -4662,12 +4365,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Or(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.bitor(b)),
                     caller_base_data,
                     instance,
@@ -4676,7 +4379,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32RemS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
@@ -4692,7 +4395,7 @@ impl Instruction for RegInstruction {
                 }
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_rem(b)),
                     caller_base_data,
                     instance,
@@ -4701,12 +4404,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32RemU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.checked_rem(b).ok_or(
                         InstructionExecutionError::Remainder {
                             left: a.to_string(),
@@ -4720,12 +4423,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Rotl(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.rotate_left(b) as i32),
                     caller_base_data,
                     instance,
@@ -4734,12 +4437,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Rotr(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.rotate_right(b) as i32),
                     caller_base_data,
                     instance,
@@ -4748,12 +4451,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Shl(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_shl(b as u32)),
                     caller_base_data,
                     instance,
@@ -4762,13 +4465,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32ShrS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 // Arithmetic shift: on `i32` the sign bit is replicated.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_shr(b as u32)),
                     caller_base_data,
                     instance,
@@ -4777,13 +4480,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32ShrU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32;
 
                 // Logical shift: done on `u32` so the vacated high bits are zeros.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_shr(b) as i32),
                     caller_base_data,
                     instance,
@@ -4792,12 +4495,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Sub(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.wrapping_sub(b)),
                     caller_base_data,
                     instance,
@@ -4806,12 +4509,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I32Xor(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(a.bitxor(b)),
                     caller_base_data,
                     instance,
@@ -4823,7 +4526,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4831,7 +4534,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i64(effective_offset)?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4843,7 +4546,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4851,7 +4554,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i8(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4863,7 +4566,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4871,7 +4574,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_u8(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4883,7 +4586,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4891,7 +4594,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i16(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4903,7 +4606,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4911,7 +4614,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_u16(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4923,7 +4626,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4931,7 +4634,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_i32(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4943,7 +4646,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -4951,7 +4654,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_u32(effective_offset)? as i64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(val),
                     caller_base_data,
                     instance,
@@ -4959,8 +4662,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I64Store { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I64Store { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -4974,8 +4677,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I64Store8 { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I64Store8 { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -4989,8 +4692,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I64Store16 { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I64Store16 { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -5004,8 +4707,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::I64Store32 { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::I64Store32 { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -5020,15 +4723,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Clz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.leading_zeros() as i64),
                     caller_base_data,
                     instance,
@@ -5037,15 +4736,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Ctz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.trailing_zeros() as i64),
                     caller_base_data,
                     instance,
@@ -5054,15 +4749,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Eqz(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(if a == 0 { 1 } else { 0 }),
                     caller_base_data,
                     instance,
@@ -5071,15 +4762,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Extend16S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i16 as i64),
                     caller_base_data,
                     instance,
@@ -5088,15 +4775,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Extend32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i32 as i64),
                     caller_base_data,
                     instance,
@@ -5105,15 +4788,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Extend8S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i8 as i64),
                     caller_base_data,
                     instance,
@@ -5122,15 +4801,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64ExtendI32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5139,15 +4814,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64ExtendI32U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5156,18 +4827,14 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Popcnt(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 // See `I32Popcnt`. The count is at most 64, but the result type is
                 // `i64` — unary integer ops keep their operand's width, unlike the
                 // comparisons.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.count_ones() as i64),
                     caller_base_data,
                     instance,
@@ -5176,15 +4843,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64ReinterpretF64(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.to_bits() as i64),
                     caller_base_data,
                     instance,
@@ -5194,17 +4857,13 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::I64TruncF32S(sig) => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as f64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as f64;
 
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(truncated as i64),
                     caller_base_data,
                     instance,
@@ -5214,19 +4873,15 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::I64TruncF32U(sig) => {
                 // `f32` promotes to `f64` losslessly, keeping the bounds exact.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as f64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as f64;
 
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 // As with the `i32` forms, the result is the unsigned bit pattern
                 // held in a signed value.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(truncated as u64 as i64),
                     caller_base_data,
                     instance,
@@ -5235,17 +4890,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64TruncF64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 let truncated = trunc_float_to_int(a, I64_TRUNC_LOW, I64_TRUNC_HIGH, "i64")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(truncated as i64),
                     caller_base_data,
                     instance,
@@ -5254,17 +4905,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64TruncF64U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 let truncated = trunc_float_to_int(a, 0.0, U64_TRUNC_HIGH, "u64")?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(truncated as u64 as i64),
                     caller_base_data,
                     instance,
@@ -5273,15 +4920,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64TruncSatF32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5292,15 +4935,11 @@ impl Instruction for RegInstruction {
             RegInstruction::I64TruncSatF32U(sig) => {
                 // Saturate to `u64`, the *target* width — clamping at `u32::MAX`
                 // first would lose every value an `i64` can still represent.
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32() as u64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f32() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5309,15 +4948,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64TruncSatF64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5326,15 +4961,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64TruncSatF64U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64() as u64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_f64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a as i64),
                     caller_base_data,
                     instance,
@@ -5343,12 +4974,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Add(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_add(b)),
                     caller_base_data,
                     instance,
@@ -5357,12 +4988,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64And(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.bitand(b)),
                     caller_base_data,
                     instance,
@@ -5371,12 +5002,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64DivS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.checked_div(b).ok_or(
                         InstructionExecutionError::Division {
                             num: a.to_string(),
@@ -5390,12 +5021,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64DivU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(
                         a.checked_div(b)
                             .ok_or(InstructionExecutionError::Division {
@@ -5410,12 +5041,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Eq(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a == b) as i32),
                     caller_base_data,
                     instance,
@@ -5424,12 +5055,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64GeS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -5438,12 +5069,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64GeU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -5452,12 +5083,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64GtS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -5466,12 +5097,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64GtU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -5480,12 +5111,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64LeS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -5494,12 +5125,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64LeU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -5508,12 +5139,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64LtS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -5522,12 +5153,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64LtU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -5536,12 +5167,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Mul(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_mul(b)),
                     caller_base_data,
                     instance,
@@ -5550,12 +5181,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Ne(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a != b) as i32),
                     caller_base_data,
                     instance,
@@ -5564,12 +5195,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Or(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.bitor(b)),
                     caller_base_data,
                     instance,
@@ -5578,7 +5209,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64RemS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
@@ -5591,7 +5222,7 @@ impl Instruction for RegInstruction {
                 }
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_rem(b)),
                     caller_base_data,
                     instance,
@@ -5600,12 +5231,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64RemU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.checked_rem(b).ok_or(
                         InstructionExecutionError::Remainder {
                             left: a.to_string(),
@@ -5619,12 +5250,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Rotl(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.rotate_left(b as u32) as i64),
                     caller_base_data,
                     instance,
@@ -5633,12 +5264,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Rotr(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.rotate_right(b as u32) as i64),
                     caller_base_data,
                     instance,
@@ -5647,12 +5278,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Shl(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_shl(b as u32)),
                     caller_base_data,
                     instance,
@@ -5661,13 +5292,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64ShrS(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 // Arithmetic shift: on `i64` the sign bit is replicated.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_shr(b as u32)),
                     caller_base_data,
                     instance,
@@ -5676,13 +5307,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64ShrU(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64() as u64;
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64() as u64;
 
                 // Logical shift: done on `u64` so the vacated high bits are zeros.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_shr(b as u32) as i64),
                     caller_base_data,
                     instance,
@@ -5691,12 +5322,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Sub(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.wrapping_sub(b)),
                     caller_base_data,
                     instance,
@@ -5705,12 +5336,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::I64Xor(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_i64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i64(a.bitxor(b)),
                     caller_base_data,
                     instance,
@@ -5722,14 +5353,14 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
                 let val = instance.memory.read_f32(effective_offset)?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(val),
                     caller_base_data,
                     instance,
@@ -5737,8 +5368,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::F32Store { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::F32Store { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -5753,15 +5384,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Abs(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.abs()),
                     caller_base_data,
                     instance,
@@ -5770,15 +5397,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Ceil(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.ceil()),
                     caller_base_data,
                     instance,
@@ -5787,15 +5410,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32ConvertI32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a as f32),
                     caller_base_data,
                     instance,
@@ -5804,15 +5423,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32ConvertI32U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a as f32),
                     caller_base_data,
                     instance,
@@ -5821,15 +5436,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32ConvertI64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a as f32),
                     caller_base_data,
                     instance,
@@ -5838,15 +5449,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32ConvertI64U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64() as u64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a as f32),
                     caller_base_data,
                     instance,
@@ -5855,15 +5462,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32DemoteF64(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a as f32),
                     caller_base_data,
                     instance,
@@ -5872,15 +5475,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Floor(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.floor()),
                     caller_base_data,
                     instance,
@@ -5889,15 +5488,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Nearest(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.round_ties_even()),
                     caller_base_data,
                     instance,
@@ -5906,15 +5501,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Neg(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.neg()),
                     caller_base_data,
                     instance,
@@ -5923,15 +5514,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32ReinterpretI32(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(f32::from_bits(a)),
                     caller_base_data,
                     instance,
@@ -5940,15 +5527,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Sqrt(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.sqrt()),
                     caller_base_data,
                     instance,
@@ -5957,15 +5540,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Trunc(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.trunc()),
                     caller_base_data,
                     instance,
@@ -5974,12 +5553,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Add(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a + b),
                     caller_base_data,
                     instance,
@@ -5988,7 +5567,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Copysign(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
@@ -5997,7 +5576,7 @@ impl Instruction for RegInstruction {
                 // copied without inspecting the payload — so unlike `min`/`max`
                 // this needs no NaN special case, and Rust's method matches.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a.copysign(b)),
                     caller_base_data,
                     instance,
@@ -6006,14 +5585,14 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Div(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 // Unlike the integer divides this never traps: IEEE 754 gives
                 // `±inf` for a non-zero numerator over zero, and NaN for `0.0/0.0`.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a / b),
                     caller_base_data,
                     instance,
@@ -6022,12 +5601,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Eq(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a == b) as i32),
                     caller_base_data,
                     instance,
@@ -6036,12 +5615,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Ge(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -6050,12 +5629,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Gt(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -6064,12 +5643,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Le(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -6078,12 +5657,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Lt(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -6092,7 +5671,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Max(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
@@ -6108,7 +5687,7 @@ impl Instruction for RegInstruction {
                 };
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(r),
                     caller_base_data,
                     instance,
@@ -6117,7 +5696,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Min(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
@@ -6133,7 +5712,7 @@ impl Instruction for RegInstruction {
                 };
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(r),
                     caller_base_data,
                     instance,
@@ -6142,12 +5721,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Mul(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a * b),
                     caller_base_data,
                     instance,
@@ -6156,12 +5735,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Ne(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a != b) as i32),
                     caller_base_data,
                     instance,
@@ -6170,12 +5749,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F32Sub(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f32();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f32(a - b),
                     caller_base_data,
                     instance,
@@ -6187,7 +5766,7 @@ impl Instruction for RegInstruction {
                 let effective_offset = Self::effective_address(
                     *offset,
                     frame_layout,
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
+                    sig.input.registers[0],
                     caller_base_data,
                     instance,
                 )?;
@@ -6195,7 +5774,7 @@ impl Instruction for RegInstruction {
                 let val = instance.memory.read_f64(effective_offset)?;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(val),
                     caller_base_data,
                     instance,
@@ -6203,8 +5782,8 @@ impl Instruction for RegInstruction {
 
                 Step::Next
             }
-            RegInstruction::F64Store { offset, sig } => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+            RegInstruction::F64Store { offset, input } => {
+                let inputs = &input.registers;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let effective_offset = Self::effective_address(
                     *offset,
@@ -6219,15 +5798,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Abs(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.abs()),
                     caller_base_data,
                     instance,
@@ -6236,15 +5811,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Ceil(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.ceil()),
                     caller_base_data,
                     instance,
@@ -6253,15 +5824,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64ConvertI32S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a as f64),
                     caller_base_data,
                     instance,
@@ -6270,15 +5837,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64ConvertI32U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i32() as u32;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a as f64),
                     caller_base_data,
                     instance,
@@ -6287,15 +5850,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64ConvertI64S(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a as f64),
                     caller_base_data,
                     instance,
@@ -6304,15 +5863,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64ConvertI64U(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64() as u64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a as f64),
                     caller_base_data,
                     instance,
@@ -6321,15 +5876,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Floor(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.floor()),
                     caller_base_data,
                     instance,
@@ -6338,15 +5889,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Nearest(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.round_ties_even()),
                     caller_base_data,
                     instance,
@@ -6355,15 +5902,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Neg(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.neg()),
                     caller_base_data,
                     instance,
@@ -6372,15 +5915,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64PromoteF32(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f32();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f32();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a as f64),
                     caller_base_data,
                     instance,
@@ -6389,15 +5928,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64ReinterpretI64(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i64() as u64;
+                let a = Self::slot_value(sig.input.registers[0], caller_base_data, instance)
+                    .as_i64() as u64;
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(f64::from_bits(a)),
                     caller_base_data,
                     instance,
@@ -6406,15 +5941,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Sqrt(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.sqrt()),
                     caller_base_data,
                     instance,
@@ -6423,15 +5954,11 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Trunc(sig) => {
-                let a = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_f64();
+                let a =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.trunc()),
                     caller_base_data,
                     instance,
@@ -6440,12 +5967,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Add(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a + b),
                     caller_base_data,
                     instance,
@@ -6454,13 +5981,13 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Copysign(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 // See `F32Copysign`: magnitude of `a`, sign of `b`, NaN included.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a.copysign(b)),
                     caller_base_data,
                     instance,
@@ -6469,14 +5996,14 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Div(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 // See `F32Div`: division by zero yields an infinity or NaN, never
                 // a trap.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a / b),
                     caller_base_data,
                     instance,
@@ -6485,12 +6012,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Eq(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a == b) as i32),
                     caller_base_data,
                     instance,
@@ -6499,12 +6026,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Ge(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a >= b) as i32),
                     caller_base_data,
                     instance,
@@ -6513,12 +6040,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Gt(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a > b) as i32),
                     caller_base_data,
                     instance,
@@ -6527,12 +6054,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Le(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a <= b) as i32),
                     caller_base_data,
                     instance,
@@ -6541,12 +6068,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Lt(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a < b) as i32),
                     caller_base_data,
                     instance,
@@ -6555,7 +6082,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Max(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
@@ -6571,7 +6098,7 @@ impl Instruction for RegInstruction {
                 };
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(r),
                     caller_base_data,
                     instance,
@@ -6580,7 +6107,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Min(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
@@ -6596,7 +6123,7 @@ impl Instruction for RegInstruction {
                 };
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(r),
                     caller_base_data,
                     instance,
@@ -6605,12 +6132,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Mul(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a * b),
                     caller_base_data,
                     instance,
@@ -6619,12 +6146,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Ne(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32((a != b) as i32),
                     caller_base_data,
                     instance,
@@ -6633,12 +6160,12 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::F64Sub(sig) => {
-                let inputs = sig.input.registers(&frame_layout.input_registers_arena);
+                let inputs = &sig.input.registers;
                 let b = Self::slot_value(inputs[1], caller_base_data, instance).as_f64();
                 let a = Self::slot_value(inputs[0], caller_base_data, instance).as_f64();
 
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_f64(a - b),
                     caller_base_data,
                     instance,
@@ -6648,11 +6175,8 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::Select(sig) => {
                 let entry = frame_layout.select_arena.get(*sig);
-                let inputs = entry.0.input.registers(&frame_layout.input_registers_arena);
-                let output_register_index = entry
-                    .0
-                    .output
-                    .registers(&frame_layout.output_registers_arena)[0];
+                let inputs = &entry.0.input.registers;
+                let output_register_index = entry.0.output.start;
 
                 let a = Self::slot_value(inputs[0], caller_base_data, instance);
                 let b = Self::slot_value(inputs[1], caller_base_data, instance);
@@ -6708,12 +6232,8 @@ impl Instruction for RegInstruction {
                 let entry = frame_layout.call_indirect_arena.get(*id);
                 let table = &instance.table_vals[entry.table_index.0 as usize];
 
-                let slot = Self::slot_value(
-                    entry.slot.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32 as usize;
+                let slot = Self::slot_value(entry.slot.registers[0], caller_base_data, instance)
+                    .as_i32() as u32 as usize;
 
                 let Some(func_ref) = table.table.get(slot).copied() else {
                     return Err(Box::new(InstructionExecutionError::CallIndirect(
@@ -6749,9 +6269,7 @@ impl Instruction for RegInstruction {
                     )));
                 }
 
-                let input_start = entry.operands as usize;
-                let param_slots = &frame_layout.input_registers_arena
-                    [input_start..(input_start + declared_params.len())];
+                let param_slots = &entry.operands.input[..declared_params.len()];
 
                 let mut tmp: SmallVec<[Value; 3]> = smallvec![];
 
@@ -6792,18 +6310,14 @@ impl Instruction for RegInstruction {
                 }
             }
             RegInstruction::RefIsNull(sig) => {
-                let func_ref = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_ref();
+                let func_ref =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_ref();
 
                 // A predicate, so the result is an `i32` and not a reference — the
                 // same convention `iNN.eqz` follows, which is what lets it feed a
                 // `br_if` directly.
                 Self::set_value_to_register(
-                    sig.output.registers(&frame_layout.output_registers_arena)[0],
+                    sig.output.start,
                     Value::from_i32(func_ref.is_none() as i32),
                     caller_base_data,
                     instance,
@@ -6814,14 +6328,18 @@ impl Instruction for RegInstruction {
             RegInstruction::Unreachable => {
                 return Err(Box::new(InstructionExecutionError::Unreachable));
             }
-            RegInstruction::Move(sig) => {
-                Self::execute_mov(sig, caller_base_data, frame_layout, instance);
+            RegInstruction::Move(id) => {
+                Self::execute_mov(
+                    frame_layout.dyn_signatures.get(*id),
+                    caller_base_data,
+                    instance,
+                );
 
                 Step::Next
             }
             RegInstruction::MemorySize(outputs) => {
                 Self::set_value_to_register(
-                    outputs.registers(&frame_layout.output_registers_arena)[0],
+                    outputs.start,
                     Value::from_i32(instance.memory.size_in_pages() as i32),
                     caller_base_data,
                     instance,
@@ -6830,24 +6348,21 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::MemoryGrow(sig) => {
-                let delta_in_pages = Self::slot_value(
-                    sig.input.registers(&frame_layout.input_registers_arena)[0],
-                    caller_base_data,
-                    instance,
-                )
-                .as_i32() as u32;
+                let delta_in_pages =
+                    Self::slot_value(sig.input.registers[0], caller_base_data, instance).as_i32()
+                        as u32;
 
                 let max_pages = instance.config.get_max_memory_size_in_pages();
 
                 match instance.memory.grow(delta_in_pages, max_pages) {
                     Ok(old_page) => Self::set_value_to_register(
-                        sig.output.registers(&frame_layout.output_registers_arena)[0],
+                        sig.output.start,
                         Value::from_i32(old_page as i32),
                         caller_base_data,
                         instance,
                     ),
                     Err(_) => Self::set_value_to_register(
-                        sig.output.registers(&frame_layout.output_registers_arena)[0],
+                        sig.output.start,
                         Value::from_i32(-1),
                         caller_base_data,
                         instance,
@@ -6857,7 +6372,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::MemoryCopy(inputs) => {
-                let inputs = inputs.registers(&frame_layout.input_registers_arena);
+                let inputs = &inputs.registers;
                 let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
                     as usize;
                 let src = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32
@@ -6870,7 +6385,7 @@ impl Instruction for RegInstruction {
                 Step::Next
             }
             RegInstruction::MemoryFill(inputs) => {
-                let inputs = inputs.registers(&frame_layout.input_registers_arena);
+                let inputs = &inputs.registers;
                 let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
                     as usize;
                 let val = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32;
@@ -6883,9 +6398,7 @@ impl Instruction for RegInstruction {
             }
             RegInstruction::MemoryInit(id) => {
                 let entry = frame_layout.memory_init_arena.get(*id);
-                let inputs = entry
-                    .operands
-                    .registers(&frame_layout.input_registers_arena);
+                let inputs = &entry.operands.registers;
                 let dest = Self::slot_value(inputs[0], caller_base_data, instance).as_i32() as u32
                     as usize;
                 let src = Self::slot_value(inputs[1], caller_base_data, instance).as_i32() as u32
@@ -7013,12 +6526,11 @@ impl RegInstruction {
     fn execute_mov<M: Memory, I: ImportRegistry>(
         signature: &DynSignature,
         caller_base_data: &RegCallerBaseData,
-        frame_layout: &RegFrameLayout,
         instance: &mut Instance<M, I, crate::Register>,
     ) {
         let mut tmp: SmallVec<[Value; 3]> = smallvec![];
-        let inputs = signature.input_registers(&frame_layout.input_registers_arena);
-        let outputs = signature.output_registers(&frame_layout.output_registers_arena);
+        let inputs = &signature.input;
+        let output_start = signature.output_start;
 
         // memmove: input and output can overlap!
         for slot in inputs {
@@ -7026,7 +6538,7 @@ impl RegInstruction {
         }
 
         for (i, val) in tmp.into_iter().enumerate() {
-            Self::set_value_to_register(outputs[i], val, caller_base_data, instance);
+            Self::set_value_to_register(output_start + i as u16, val, caller_base_data, instance);
         }
     }
 
