@@ -2,7 +2,7 @@
 
 use crate::{
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
-    instruction::{Instruction, PhiInstruction},
+    instruction::{Instruction, PhiInstrId, PhiInstruction},
 };
 use id_arena::{Arena, Id};
 
@@ -12,6 +12,7 @@ pub struct BasicBlockId(Id<BasicBlock>);
 pub struct BasicBlock {
     name: String,
     func_id: FuncId,
+    phis: Vec<PhiInstruction>,
     instructions: Vec<Instruction>,
 }
 
@@ -23,6 +24,7 @@ impl FuncId {
         let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
             name,
             func_id: *self,
+            phis: vec![],
             instructions: vec![],
         }));
 
@@ -35,6 +37,22 @@ impl FuncId {
 
         id
     }
+
+    pub fn get_basic_block<'a>(&self, id: BasicBlockId, ctx: &'a Context) -> &'a BasicBlock {
+        ctx.blocks
+            .get(id.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
+    pub fn get_basic_block_mut<'a>(
+        &self,
+        id: BasicBlockId,
+        ctx: &'a mut Context,
+    ) -> &'a mut BasicBlock {
+        ctx.blocks
+            .get_mut(id.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
 }
 
 pub struct Function {
@@ -44,12 +62,6 @@ pub struct Function {
 
 pub struct Global {}
 
-#[derive(Default)]
-pub struct Context {
-    blocks: Arena<BasicBlock>,
-    funcs: Arena<Function>,
-}
-
 struct Module {
     triple: String,
     data_layout: String,
@@ -57,12 +69,19 @@ struct Module {
     functions: Vec<FuncId>,
 }
 
+#[derive(Default)]
+pub struct Context {
+    blocks: Arena<BasicBlock>,
+    funcs: Arena<Function>,
+}
+
 pub struct Cursor {
     block: BasicBlockId,
+    is_phi_ongoing: bool,
 }
 
 impl Cursor {
-    pub fn add_instruction(&self, instr: Instruction, ctx: &mut Context) {
+    pub fn add_instruction(&mut self, instr: Instruction, ctx: &mut Context) {
         let block_id = self.block;
 
         let block = ctx
@@ -70,7 +89,35 @@ impl Cursor {
             .get_mut(block_id.0)
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
 
-        block.instructions.push(instr);
+        if let Instruction::Phi(instr) = instr {
+            if !self.is_phi_ongoing {
+                panic!("phi instructions should be added at the start of the basic block")
+            }
+
+            block.phis.push(instr);
+        } else {
+            self.is_phi_ongoing = false;
+
+            block.instructions.push(instr);
+        }
+    }
+
+    pub fn add_phi(&mut self, instr: PhiInstruction, ctx: &mut Context) -> PhiInstrId {
+        let block_id = self.block;
+
+        let block = ctx
+            .blocks
+            .get_mut(block_id.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+
+        if !self.is_phi_ongoing {
+            panic!("phi instructions should be added at the start of the basic block")
+        }
+
+        let id = block.phis.len();
+        block.phis.push(instr);
+
+        PhiInstrId::new(id)
     }
 }
 
@@ -91,7 +138,10 @@ impl Builder {
     }
 
     pub fn at_block_end(&mut self, id: BasicBlockId) -> Cursor {
-        Cursor { block: id }
+        Cursor {
+            block: id,
+            is_phi_ongoing: true,
+        }
     }
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context) -> FuncId {
@@ -103,22 +153,6 @@ impl Builder {
         self.module.functions.push(id);
 
         id
-    }
-
-    pub fn get_basic_block<'a>(&self, id: BasicBlockId, ctx: &'a Context) -> &'a BasicBlock {
-        ctx.blocks
-            .get(id.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-    }
-
-    pub fn get_basic_block_mut<'a>(
-        &self,
-        id: BasicBlockId,
-        ctx: &'a mut Context,
-    ) -> &'a mut BasicBlock {
-        ctx.blocks
-            .get_mut(id.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
     pub fn build(self) -> Cfg {
@@ -133,7 +167,7 @@ pub struct Cfg {
 }
 
 impl Cfg {
-    pub fn emit_ll(&self) -> String {
+    pub fn emit_ll(&self, ctx: &Context) -> String {
         todo!()
     }
 }
@@ -150,7 +184,7 @@ mod tests {
         let func = builder.add_function("sum".to_string(), &mut ctx);
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
 
-        let cursor = builder.at_block_end(entry);
+        let mut cursor = builder.at_block_end(entry);
         cursor.add_instruction(Instruction::Phi(PhiInstruction {}), &mut ctx);
 
         let cfg = builder.build();
