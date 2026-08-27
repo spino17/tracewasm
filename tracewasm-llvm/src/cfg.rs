@@ -1,5 +1,3 @@
-#![allow(warnings)] // TODO: remove this, just use it while developing
-
 use crate::{
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     instruction::{Instruction, PhiInstrId, PhiInstruction},
@@ -14,6 +12,12 @@ pub struct BasicBlock {
     func_id: FuncId,
     phis: Vec<PhiInstruction>,
     instructions: Vec<Instruction>,
+}
+
+impl BasicBlock {
+    fn is_phi_ongoing(&self) -> bool {
+        self.instructions.is_empty()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -36,22 +40,6 @@ impl FuncId {
         func.blocks.push(id);
 
         id
-    }
-
-    pub fn get_basic_block<'a>(&self, id: BasicBlockId, ctx: &'a Context) -> &'a BasicBlock {
-        ctx.blocks
-            .get(id.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-    }
-
-    pub fn get_basic_block_mut<'a>(
-        &self,
-        id: BasicBlockId,
-        ctx: &'a mut Context,
-    ) -> &'a mut BasicBlock {
-        ctx.blocks
-            .get_mut(id.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 }
 
@@ -137,10 +125,16 @@ impl Builder {
         }
     }
 
-    pub fn at_block_end(&mut self, id: BasicBlockId) -> Cursor {
+    pub fn cursor_at_block(&mut self, id: BasicBlockId, ctx: &Context) -> Cursor {
+        let is_phi_ongoing = ctx
+            .blocks
+            .get(id.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+            .is_phi_ongoing();
+
         Cursor {
             block: id,
-            is_phi_ongoing: true,
+            is_phi_ongoing,
         }
     }
 
@@ -155,18 +149,18 @@ impl Builder {
         id
     }
 
-    pub fn build(self) -> Cfg {
-        Cfg {
+    pub fn build(self) -> ControlFlowGraph {
+        ControlFlowGraph {
             module: self.module,
         }
     }
 }
 
-pub struct Cfg {
+pub struct ControlFlowGraph {
     module: Module,
 }
 
-impl Cfg {
+impl ControlFlowGraph {
     pub fn emit_ll(&self, ctx: &Context) -> String {
         todo!()
     }
@@ -184,9 +178,9 @@ mod tests {
         let func = builder.add_function("sum".to_string(), &mut ctx);
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
 
-        let mut cursor = builder.at_block_end(entry);
+        let mut cursor = builder.cursor_at_block(entry, &ctx);
         cursor.add_instruction(Instruction::Phi(PhiInstruction {}), &mut ctx);
 
-        let cfg = builder.build();
+        let _cfg = builder.build();
     }
 }
