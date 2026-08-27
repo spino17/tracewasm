@@ -13,6 +13,7 @@ impl PhiInstrId {
 
 pub struct BasicBlock<I> {
     name: String,
+    is_first: bool,
     func_id: FuncId<I>,
     phis: Vec<PhiInstruction>,
     instructions: Vec<I>,
@@ -29,15 +30,6 @@ impl<I> Clone for BasicBlockId<I> {
 impl<I> Copy for BasicBlockId<I> {}
 
 impl<I> BasicBlockId<I> {
-    fn is_phi_ongoing(&self, ctx: &Context<I>) -> bool {
-        let block = ctx
-            .blocks
-            .get(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        block.instructions.is_empty()
-    }
-
     fn add_instruction(&self, instr: I, ctx: &mut Context<I>) {
         let block = ctx
             .blocks
@@ -47,17 +39,29 @@ impl<I> BasicBlockId<I> {
         block.instructions.push(instr);
     }
 
-    fn add_phi(&self, instr: PhiInstruction, ctx: &mut Context<I>) -> PhiInstrId {
+    fn add_phi(
+        &self,
+        instr: PhiInstruction,
+        ctx: &mut Context<I>,
+    ) -> Result<PhiInstrId, BuildError> {
         let block = ctx
             .blocks
             .get_mut(self.0)
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
 
+        if block.is_first {
+            return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);
+        }
+
+        if !block.instructions.is_empty() {
+            return Err(BuildError::PhiInstructionAddError);
+        }
+
         let id = block.phis.len();
 
         block.phis.push(instr);
 
-        PhiInstrId::new(id)
+        Ok(PhiInstrId::new(id))
     }
 }
 
@@ -78,19 +82,26 @@ impl<I> Copy for FuncId<I> {}
 
 impl<I> FuncId<I> {
     pub fn add_basic_block(&self, name: String, ctx: &mut Context<I>) -> BasicBlockId<I> {
+        let is_first = ctx
+            .funcs
+            .get(self.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+            .blocks
+            .is_empty();
+
         let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
             name,
+            is_first,
             func_id: *self,
             phis: vec![],
             instructions: vec![],
         }));
 
-        let func = ctx
-            .funcs
+        ctx.funcs
             .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        func.blocks.push(id);
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+            .blocks
+            .push(id);
 
         id
     }
@@ -121,12 +132,10 @@ impl<I> Default for Context<I> {
 
 pub struct Cursor<I> {
     block: BasicBlockId<I>,
-    is_phi_ongoing: bool,
 }
 
 impl<I> Cursor<I> {
     pub fn add_instruction(&mut self, instr: I, ctx: &mut Context<I>) {
-        self.is_phi_ongoing = false;
         self.block.add_instruction(instr, ctx);
     }
 
@@ -135,11 +144,7 @@ impl<I> Cursor<I> {
         instr: PhiInstruction,
         ctx: &mut Context<I>,
     ) -> Result<PhiInstrId, BuildError> {
-        if !self.is_phi_ongoing {
-            return Err(BuildError::PhiInstructionAddError);
-        }
-
-        Ok(self.block.add_phi(instr, ctx))
+        self.block.add_phi(instr, ctx)
     }
 }
 
@@ -159,13 +164,8 @@ impl<I> Builder<I> {
         }
     }
 
-    pub fn cursor_at_block(&mut self, id: BasicBlockId<I>, ctx: &Context<I>) -> Cursor<I> {
-        let is_phi_ongoing = id.is_phi_ongoing(ctx);
-
-        Cursor {
-            block: id,
-            is_phi_ongoing,
-        }
+    pub fn cursor_at_block(&mut self, id: BasicBlockId<I>) -> Cursor<I> {
+        Cursor { block: id }
     }
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context<I>) -> FuncId<I> {
@@ -209,7 +209,7 @@ mod tests {
         let func = builder.add_function("sum".to_string(), &mut ctx);
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
 
-        let mut cursor = builder.cursor_at_block(entry, &ctx);
+        let mut cursor = builder.cursor_at_block(entry);
         let _ = cursor.add_phi(PhiInstruction {}, &mut ctx).unwrap();
 
         let _cfg = builder.build();
