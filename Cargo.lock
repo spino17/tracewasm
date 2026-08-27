@@ -447,6 +447,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracewasm-llvm"
+version = "0.1.0"
+dependencies = [
+ "id-arena",
+]
+
+[[package]]
 name = "tracewasm-macros"
 version = "0.1.0"
 dependencies = [
