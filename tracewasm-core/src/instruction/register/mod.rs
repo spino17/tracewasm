@@ -1471,7 +1471,7 @@ impl SimulatedStack {
         &mut self,
         base_height: u32,
         arity_to_preserve: u32,
-        instr_index: usize, // TODO: only use this when registers are not empty
+        instr_index: usize,
         source: InstructionSource,
     ) -> Result<DynSignature, TraceWasmError> {
         let arity_to_preserve = arity_to_preserve as usize;
