@@ -30,7 +30,7 @@ impl RegInstruction {
     /// `types` is needed because a `call_indirect` stores only a type index, so how
     /// many of its arena operands are arguments is recoverable only from the module's
     /// type section — the same thing executing one has to do.
-    pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
+    pub(crate) fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
         let sig1 = |i: &InputRegisters<1>| i.registers[0].render(frame);
         let list = |xs: &[Slot]| {
             xs.iter()
@@ -501,7 +501,7 @@ impl RegInstruction {
     ///
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.
-    pub fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
+    pub(crate) fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
         let (instructions, _, frame) = body;
         let mut out = String::new();
 
