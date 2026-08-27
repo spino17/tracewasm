@@ -222,7 +222,7 @@ impl BackpatchMap {
     /// for one, so a key naming it means the key was wrong, and resolving against the
     /// wrong instruction would be silent.
     pub fn apply(
-        mut self,
+        self,
         instructions: &mut [RegInstruction],
         locals: u16,
         consts: u16,
