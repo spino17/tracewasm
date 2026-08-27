@@ -103,6 +103,7 @@ impl Cursor {
         }
 
         let id = block.phis.len();
+
         block.phis.push(instr);
 
         PhiInstrId::new(id)

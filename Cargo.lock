@@ -441,6 +441,7 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "thiserror",
+ "tracewasm-llvm",
  "tracewasm-macros",
  "wasmparser 0.253.0",
  "wat",
@@ -450,6 +451,7 @@ dependencies = [
 name = "tracewasm-llvm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "id-arena",
 ]
 

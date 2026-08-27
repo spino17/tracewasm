@@ -2,10 +2,11 @@
 members = [
     "bin/playground",
     "tracewasm-bench",
-    "tracewasm-core", "tracewasm-llvm",
+    "tracewasm-core",
     "tracewasm-macros",
     "tracewasm-scratch",
-    "tracewasm-test"
+    "tracewasm-test",
+    "tracewasm-llvm"
 ]
 
 resolver = "3"

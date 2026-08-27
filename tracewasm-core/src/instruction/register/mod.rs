@@ -195,6 +195,7 @@ pub mod arena;
 pub mod backpatch;
 pub mod interner;
 pub mod lazy;
+pub mod llvm;
 pub mod render;
 
 #[cfg(test)]
