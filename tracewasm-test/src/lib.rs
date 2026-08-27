@@ -215,6 +215,7 @@ impl<V: VirtualMachine> Guest<V> {
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
         let module = Module::<V>::compile(wasm).expect("guest should compile");
+
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");
