@@ -20,11 +20,20 @@ pub struct FuncId(Id<Function>);
 
 impl FuncId {
     pub fn add_basic_block(&self, name: String, ctx: &mut Context) -> BasicBlockId {
-        BasicBlockId(ctx.blocks.alloc(BasicBlock {
+        let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
             name,
             func_id: *self,
             instructions: vec![],
-        }))
+        }));
+
+        let func = ctx
+            .funcs
+            .get_mut(self.0)
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+
+        func.blocks.push(id);
+
+        id
     }
 }
 
@@ -48,15 +57,11 @@ struct Module {
     functions: Vec<FuncId>,
 }
 
-struct Cursor {
+pub struct Cursor {
     block: BasicBlockId,
 }
 
-pub struct CfgBuilderCursor {
-    block: BasicBlockId,
-}
-
-impl CfgBuilderCursor {
+impl Cursor {
     pub fn add_instruction(&self, instr: Instruction, ctx: &mut Context) {
         let block_id = self.block;
 
@@ -69,13 +74,13 @@ impl CfgBuilderCursor {
     }
 }
 
-pub struct CfgBuilder {
+pub struct Builder {
     module: Module,
 }
 
-impl CfgBuilder {
+impl Builder {
     pub fn new(triple: String, data_layout: String) -> Self {
-        CfgBuilder {
+        Builder {
             module: Module {
                 triple,
                 data_layout,
@@ -85,8 +90,8 @@ impl CfgBuilder {
         }
     }
 
-    pub fn at_block_end(&mut self, id: BasicBlockId) -> CfgBuilderCursor {
-        CfgBuilderCursor { block: id }
+    pub fn at_block_end(&mut self, id: BasicBlockId) -> Cursor {
+        Cursor { block: id }
     }
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context) -> FuncId {
@@ -140,7 +145,7 @@ mod tests {
     #[test]
     fn simple_api_usage() {
         let mut ctx = Context::default();
-        let mut builder = CfgBuilder::new("".to_string(), "".to_string());
+        let mut builder = Builder::new("".to_string(), "".to_string());
 
         let func = builder.add_function("sum".to_string(), &mut ctx);
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
