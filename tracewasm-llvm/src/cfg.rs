@@ -1,4 +1,4 @@
-use crate::constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID;
+use crate::{constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID, error::BuildError};
 use id_arena::{Arena, Id};
 
 pub struct PhiInstruction {}
@@ -130,12 +130,16 @@ impl<I> Cursor<I> {
         self.block.add_instruction(instr, ctx);
     }
 
-    pub fn add_phi(&mut self, instr: PhiInstruction, ctx: &mut Context<I>) -> PhiInstrId {
+    pub fn add_phi(
+        &mut self,
+        instr: PhiInstruction,
+        ctx: &mut Context<I>,
+    ) -> Result<PhiInstrId, BuildError> {
         if !self.is_phi_ongoing {
-            panic!("phi instructions should be added at the start of the basic block")
+            return Err(BuildError::PhiInstructionAddError);
         }
 
-        self.block.add_phi(instr, ctx)
+        Ok(self.block.add_phi(instr, ctx))
     }
 }
 
@@ -206,7 +210,7 @@ mod tests {
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
 
         let mut cursor = builder.cursor_at_block(entry, &ctx);
-        cursor.add_phi(PhiInstruction {}, &mut ctx);
+        let _ = cursor.add_phi(PhiInstruction {}, &mut ctx).unwrap();
 
         let _cfg = builder.build();
     }

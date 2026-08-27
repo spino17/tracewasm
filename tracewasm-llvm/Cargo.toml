@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 id-arena = { workspace = true }
 anyhow = { workspace = true }
+thiserror =  { workspace = true }
