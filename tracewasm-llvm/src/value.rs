@@ -6,6 +6,12 @@ use ordered_float::OrderedFloat;
 use std::fmt::{Debug, Display};
 
 #[derive(PartialEq, Eq)]
+pub struct FuncSignature {
+    params: Vec<Type>,
+    result: Box<Type>,
+}
+
+#[derive(PartialEq, Eq)]
 pub enum Type {
     I1,
     I8,
@@ -19,6 +25,7 @@ pub enum Type {
     Ptr,
     Array { size: u64, element_ty: Box<Type> },
     Struct { fields: Vec<Type>, packed: bool },
+    Func(FuncSignature),
     Void,
 }
 
@@ -58,7 +65,26 @@ impl Display for Type {
 
                 f.write_str(close)
             }
+            Type::Func(signature) => write!(f, "{signature}"),
         }
+    }
+}
+
+impl Display for FuncSignature {
+    /// `<result> (<params>)`, the order LLVM writes a function type in — result
+    /// first, which is the opposite of how the signature reads in source.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (", self.result)?;
+
+        for (i, param) in self.params.iter().enumerate() {
+            if i != 0 {
+                f.write_str(", ")?;
+            }
+
+            write!(f, "{param}")?;
+        }
+
+        f.write_str(")")
     }
 }
 
@@ -218,9 +244,7 @@ impl Eq for ConstValue {}
 
 pub trait Const {
     fn ty() -> Type;
-
     fn into_const(self) -> ConstValue;
-
     fn try_cast(&self, ty: &Type) -> Option<ConstValue>;
 }
 
@@ -620,6 +644,112 @@ mod tests {
             "re-interning the same NaN must reuse its entry"
         );
         assert_eq!(interner.len(), 3);
+    }
+
+    /// A signature, so the function-type tests below read as the types they mean.
+    fn func(params: Vec<Type>, result: Type) -> FuncSignature {
+        FuncSignature {
+            params,
+            result: Box::new(result),
+        }
+    }
+
+    /// LLVM writes a function type **result first**, which is the reverse of how the
+    /// signature reads in source — so getting the order wrong would produce IR that
+    /// parses as a different type rather than failing.
+    #[test]
+    fn a_function_type_renders_its_result_before_its_params() {
+        let signature = func(vec![Type::I8, Type::Ptr], Type::I32);
+
+        assert_eq!(signature.to_string(), "i32 (i8, ptr)");
+
+        assert_eq!(
+            Type::Func(signature).to_string(),
+            "i32 (i8, ptr)",
+            "the variant renders as its signature, with nothing added"
+        );
+    }
+
+    /// A function taking nothing still has the parens, and `void` is a result like
+    /// any other.
+    #[test]
+    fn a_function_type_with_no_params_keeps_its_parens() {
+        assert_eq!(func(vec![], Type::Void).to_string(), "void ()");
+        assert_eq!(func(vec![], Type::I1).to_string(), "i1 ()");
+    }
+
+    /// Params may be aggregates, so the renderer has to compose with the array and
+    /// struct arms rather than assume a scalar.
+    #[test]
+    fn a_function_type_composes_with_aggregate_params() {
+        let signature = func(
+            vec![
+                Type::Array {
+                    size: 4,
+                    element_ty: Box::new(Type::I32),
+                },
+                Type::Struct {
+                    fields: vec![Type::I8, Type::Ptr],
+                    packed: false,
+                },
+            ],
+            Type::Void,
+        );
+
+        assert_eq!(signature.to_string(), "void ([4 x i32], { i8, ptr })");
+    }
+
+    /// The parameter list is part of the type, arity included. Comparing the two
+    /// lists positionally would stop at the shorter one and call these the same.
+    #[test]
+    fn function_types_differ_on_arity() {
+        let one = Type::Func(func(vec![Type::I32], Type::Void));
+        let two = Type::Func(func(vec![Type::I32, Type::I64], Type::Void));
+        let none = Type::Func(func(vec![], Type::Void));
+
+        assert_ne!(one, two, "a prefix of a longer list is a different type");
+        assert_ne!(none, one, "and so is the empty list");
+    }
+
+    /// The rest of the identity: which params, in which order, and the result.
+    #[test]
+    fn function_types_differ_on_params_order_and_result() {
+        let base = || func(vec![Type::I32, Type::I64], Type::Void);
+
+        assert_eq!(
+            Type::Func(base()),
+            Type::Func(base()),
+            "the same signature twice is the same type"
+        );
+
+        assert_ne!(
+            Type::Func(base()),
+            Type::Func(func(vec![Type::I64, Type::I32], Type::Void)),
+            "parameter order matters"
+        );
+
+        assert_ne!(
+            Type::Func(base()),
+            Type::Func(func(vec![Type::I32, Type::I32], Type::Void)),
+            "so do the parameter types"
+        );
+
+        assert_ne!(
+            Type::Func(base()),
+            Type::Func(func(vec![Type::I32, Type::I64], Type::I32)),
+            "and the result"
+        );
+    }
+
+    /// `BuildError` renders a `Type` through `Debug`, so a function type has to be
+    /// printable on that path too — it is the one variant whose payload is not
+    /// itself `Debug`.
+    #[test]
+    fn a_function_type_is_debug_printable() {
+        assert_eq!(
+            format!("{:?}", Type::Func(func(vec![Type::Double], Type::I64))),
+            "i64 (double)"
+        );
     }
 
     /// Type rendering is what error messages and (later) emitted IR are built from,
