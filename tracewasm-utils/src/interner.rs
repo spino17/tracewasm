@@ -138,3 +138,148 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         &self.values
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Interning is only worth doing if a repeat is free, so this is the property
+    /// everything else rests on.
+    #[test]
+    fn a_repeat_returns_the_first_id_and_adds_nothing() {
+        let mut i: Interner<String, u16> = Interner::new();
+
+        let a = i.intern("x".to_string()).unwrap();
+        let b = i.intern("y".to_string()).unwrap();
+        let a_again = i.intern("x".to_string()).unwrap();
+
+        assert_eq!(a, a_again, "the same value must get the same id");
+        assert_ne!(a, b, "different values must get different ids");
+        assert_eq!(i.len(), 2, "a repeat must not grow the pool");
+    }
+
+    /// Ids are positions, so they have to be handed out in order and index back to
+    /// the value that produced them.
+    #[test]
+    fn ids_are_positions_and_round_trip() {
+        let mut i: Interner<String, u16> = Interner::new();
+
+        let ids: Vec<u16> = ["a", "b", "c"]
+            .iter()
+            .map(|s| i.intern(s.to_string()).unwrap().raw())
+            .collect();
+
+        assert_eq!(ids, vec![0, 1, 2]);
+
+        for (n, name) in ["a", "b", "c"].iter().enumerate() {
+            let id = i.intern(name.to_string()).unwrap();
+
+            assert_eq!(id.raw() as usize, n);
+            assert_eq!(i.value(id), name);
+        }
+
+        assert_eq!(i.values(), ["a", "b", "c"], "`values` is in id order");
+    }
+
+    /// The pool ships as its values in id order, so a consumer can index it with a
+    /// raw id after the interner is gone.
+    #[test]
+    fn into_values_keeps_id_order() {
+        let mut i: Interner<String, u16> = Interner::new();
+
+        for s in ["first", "second", "third"] {
+            i.intern(s.to_string()).unwrap();
+        }
+
+        assert_eq!(i.into_values(), vec!["first", "second", "third"]);
+    }
+
+    /// The cap is reported rather than silently truncating the id, which is the
+    /// whole reason `intern` is fallible.
+    #[test]
+    fn exceeding_the_capacity_is_an_error() {
+        let mut i: Interner<u32, u16> = Interner::new();
+
+        // `Capacity::val` for `u16` is `u16::MAX`, so that many entries fit.
+        for n in 0..u16::MAX as u32 {
+            i.intern(n)
+                .unwrap_or_else(|e| panic!("entry {n} should fit: {e}"));
+        }
+
+        let err = i.intern(u32::MAX).expect_err("one past the cap must fail");
+
+        assert!(
+            matches!(
+                err,
+                TracewasmUtilsError::ToManyUniqueValues { limit, .. }
+                    if limit == u16::MAX as u64
+            ),
+            "the error must name the capacity it hit, got: {err}"
+        );
+
+        assert_eq!(
+            i.len(),
+            u16::MAX as usize,
+            "the failed intern added nothing"
+        );
+    }
+
+    /// A repeat must still succeed once the pool is full: it costs no entry, so
+    /// refusing it would reject a program that fits.
+    #[test]
+    fn a_repeat_still_succeeds_at_capacity() {
+        let mut i: Interner<u32, u16> = Interner::new();
+
+        for n in 0..u16::MAX as u32 {
+            i.intern(n).unwrap();
+        }
+
+        assert!(i.intern(0).is_ok(), "0 is already interned");
+        assert!(i.intern(u32::MAX).is_err(), "but a new value is not");
+    }
+
+    /// The id width follows `C`, so a wider capacity really can name more entries.
+    /// A 16-bit id would wrap here and hand two values the same id.
+    #[test]
+    fn a_u32_capacity_names_more_than_a_u16_id_could() {
+        let mut i: Interner<u32, u32> = Interner::new();
+        let first = i.intern(0).unwrap();
+
+        for n in 1..=(u16::MAX as u32 + 1) {
+            i.intern(n).unwrap();
+        }
+
+        let past_u16 = i.intern(u16::MAX as u32 + 1).unwrap();
+
+        assert_eq!(past_u16.raw(), u16::MAX as u32 + 1);
+        assert_ne!(first, past_u16, "ids must not wrap");
+        assert_eq!(i.value(first), &0);
+        assert_eq!(i.value(past_u16), &(u16::MAX as u32 + 1));
+    }
+
+    /// `from_usize`/`to_usize` are how a position becomes an id and back, so they
+    /// have to be lossless over the range each capacity admits.
+    #[test]
+    fn capacity_conversions_round_trip_at_their_edges() {
+        assert_eq!(u16::from_usize(0).to_usize(), 0);
+
+        assert_eq!(
+            u16::from_usize(u16::MAX as usize - 1).to_usize(),
+            u16::MAX as usize - 1
+        );
+
+        assert_eq!(
+            u32::from_usize(u16::MAX as usize + 1).to_usize(),
+            u16::MAX as usize + 1
+        );
+
+        assert_eq!(
+            u64::from_usize(u32::MAX as usize + 1).to_usize(),
+            u32::MAX as usize + 1
+        );
+
+        assert_eq!(u16::val(), u16::MAX as u64);
+        assert_eq!(u32::val(), u32::MAX as u64);
+        assert_eq!(u64::val(), u64::MAX);
+    }
+}

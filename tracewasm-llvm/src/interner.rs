@@ -19,7 +19,7 @@ impl DerefMut for StrInterner {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct StrId(pub InternedId<String, u32>);
 
 impl From<InternedId<String, u32>> for StrId {
@@ -45,7 +45,7 @@ impl DerefMut for ConstInterner {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ConstId(InternedId<ConstValue, u32>);
 
 impl From<InternedId<ConstValue, u32>> for ConstId {

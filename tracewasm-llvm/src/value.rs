@@ -123,7 +123,17 @@ pub struct Register {
     name: StrId,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// A constant the module uses, interned into a per-context pool.
+///
+/// Identity is by **variant and bit pattern**, not by numeric equality — see the
+/// hand-written [`PartialEq`] below for why that is not merely pedantic.
+///
+/// The float arms hold `OrderedFloat` because `f32`/`f64` are not `Hash`, and the
+/// derived `Hash` uses its canonicalising implementation. That is sound but not
+/// exact: it hashes `-0.0` as `+0.0` and every NaN alike, so those pairs collide.
+/// They are unequal, so the map separates them on comparison; the collision costs
+/// one extra comparison and nothing else.
+#[derive(Clone, Copy, Hash, Debug)]
 pub enum ConstValue {
     I1(i8),
     I8(i8),
@@ -133,6 +143,78 @@ pub enum ConstValue {
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
 }
+
+/// Two constants are the same constant only if they are the same *variant* and the
+/// same *bits*. Both halves are load-bearing, because this is the interner's dedup
+/// key and a merge means two operands sharing one pool entry.
+///
+/// **Same variant.** LLVM types a constant, so `i8 0` and `i32 0` are different
+/// constants even though they are the same number; merging them would emit one where
+/// the other was meant.
+///
+/// **Same bits, not numerically equal.** Numeric equality would merge `+0.0` with
+/// `-0.0`, and every NaN with every other. The sign of a zero survives `fdiv`
+/// (`1.0 / -0.0` is `-inf`), `copysign` and `llvm.minnum`/`maxnum`, and LLVM prints
+/// the two differently — so collapsing them would emit a constant the source never
+/// asked for. Comparing bits is also what makes the [`Eq`] impl below sound: a NaN
+/// constant has to equal itself, or the pool could neither find nor dedup it.
+impl PartialEq for ConstValue {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            ConstValue::I1(first) => {
+                if let ConstValue::I1(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+            ConstValue::I8(first) => {
+                if let ConstValue::I8(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+            ConstValue::I16(first) => {
+                if let ConstValue::I16(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+            ConstValue::I32(first) => {
+                if let ConstValue::I32(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+            ConstValue::I64(first) => {
+                if let ConstValue::I64(second) = other {
+                    first == second
+                } else {
+                    false
+                }
+            }
+            ConstValue::Float(first) => {
+                if let ConstValue::Float(second) = other {
+                    first.into_inner().to_bits() == second.into_inner().to_bits()
+                } else {
+                    false
+                }
+            }
+            ConstValue::Double(first) => {
+                if let ConstValue::Double(second) = other {
+                    first.into_inner().to_bits() == second.into_inner().to_bits()
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+impl Eq for ConstValue {}
 
 pub trait Const {
     fn ty() -> Type;
@@ -320,5 +402,311 @@ mod tests {
         assert_eq!(c.is_ok(), true);
         assert_eq!(d.is_ok(), true);
         assert_eq!(e.is_err(), true);
+    }
+
+    /// The type a value reports is the one it was cast *to*, not the one the Rust
+    /// literal had — otherwise a later `into_i1` or a type check reads the wrong
+    /// answer.
+    #[test]
+    fn a_cast_sets_the_values_type_and_its_stored_variant() {
+        let mut interner = ConstInterner::default();
+
+        let widened = Value::from_const(7i8, Some(Type::I64), &mut interner).unwrap();
+
+        assert_eq!(widened.ty, Type::I64);
+        assert!(
+            matches!(widened.kind, ValueKind::Const(_)),
+            "a constant value holds a pool id"
+        );
+
+        // The stored constant is widened too, not left as the i8 it came from.
+        assert_eq!(interner.values(), [ConstValue::I64(7)]);
+    }
+
+    /// No cast means the value keeps the source type, which is what `Const::ty`
+    /// says it is.
+    #[test]
+    fn without_a_cast_the_source_type_is_kept() {
+        let mut interner = ConstInterner::default();
+
+        for (value, expected) in [
+            (Value::from_const(1i8, None, &mut interner), Type::I8),
+            (Value::from_const(1i16, None, &mut interner), Type::I16),
+            (Value::from_const(1i32, None, &mut interner), Type::I32),
+            (Value::from_const(1i64, None, &mut interner), Type::I64),
+            (Value::from_const(1.0f32, None, &mut interner), Type::Float),
+            (Value::from_const(1.0f64, None, &mut interner), Type::Double),
+            (Value::from_const(true, None, &mut interner), Type::I1),
+        ] {
+            assert_eq!(value.unwrap().ty, expected);
+        }
+    }
+
+    /// Integer casts go both ways between widths, and a narrowing cast folds the
+    /// value the way LLVM's `trunc` would.
+    #[test]
+    fn integer_casts_widen_and_narrow() {
+        let mut interner = ConstInterner::default();
+
+        assert_eq!(
+            300i32.try_cast(&Type::I8),
+            Some(ConstValue::I8(300i32 as i8)),
+            "narrowing truncates rather than refusing"
+        );
+
+        assert_eq!(1i8.try_cast(&Type::I32), Some(ConstValue::I32(1)));
+        assert_eq!((-1i64).try_cast(&Type::I16), Some(ConstValue::I16(-1)));
+
+        assert!(
+            Value::from_const(300i32, Some(Type::I8), &mut interner).is_ok(),
+            "so the builder accepts it too"
+        );
+    }
+
+    /// Ints and floats are not interchangeable, in either direction — a real
+    /// conversion needs an `sitofp`/`fptosi` instruction, not a constant cast.
+    #[test]
+    fn casts_between_integers_and_floats_are_refused() {
+        assert_eq!(1i32.try_cast(&Type::Float), None);
+        assert_eq!(1i64.try_cast(&Type::Double), None);
+        assert_eq!(1.0f32.try_cast(&Type::I32), None);
+        assert_eq!(1.0f64.try_cast(&Type::I64), None);
+        assert_eq!(true.try_cast(&Type::I32), None);
+    }
+
+    /// Floats cast between the two widths and nowhere else.
+    #[test]
+    fn float_casts_cover_both_widths_only() {
+        assert_eq!(
+            1.5f32.try_cast(&Type::Double),
+            Some(ConstValue::Double(OrderedFloat(1.5)))
+        );
+
+        assert_eq!(
+            1.5f64.try_cast(&Type::Float),
+            Some(ConstValue::Float(OrderedFloat(1.5)))
+        );
+
+        assert_eq!(1.5f32.try_cast(&Type::Half), None);
+        assert_eq!(1.5f64.try_cast(&Type::Ptr), None);
+    }
+
+    /// A failed cast names both ends, which is the only way to tell which side was
+    /// wrong from the message alone.
+    #[test]
+    fn a_failed_cast_reports_both_types() {
+        let mut interner = ConstInterner::default();
+
+        let err = Value::from_const(1.0f64, Some(Type::I32), &mut interner)
+            .err()
+            .expect("f64 does not cast to i32");
+
+        let msg = err.to_string();
+
+        assert!(msg.contains("double"), "missing the source type: {msg}");
+        assert!(msg.contains("i32"), "missing the target type: {msg}");
+        assert_eq!(interner.len(), 0, "a failed cast interns nothing");
+    }
+
+    /// `into_i1` gates the conditional-branch operand, so it has to reject a
+    /// non-`i1` by *returning*, not by panicking while building the message.
+    #[test]
+    fn into_i1_accepts_only_i1() {
+        let mut interner = ConstInterner::default();
+
+        let ok = Value::from_const(true, None, &mut interner).unwrap();
+
+        assert!(ok.into_i1().is_ok());
+
+        let not_i1 = Value::from_const(1i32, None, &mut interner).unwrap();
+        let err = not_i1.into_i1().err().expect("i32 is not i1");
+
+        assert!(
+            err.to_string().contains("i32"),
+            "the message must name the offending type: {err}"
+        );
+    }
+
+    /// Round-tripping through `I1Value` must come back as an `i1`.
+    #[test]
+    fn an_i1_value_converts_back_to_a_value() {
+        let mut interner = ConstInterner::default();
+
+        let i1 = Value::from_const(true, None, &mut interner)
+            .unwrap()
+            .into_i1()
+            .unwrap();
+
+        assert_eq!(Value::from(i1).ty, Type::I1);
+    }
+
+    /// Equal constants share a pool entry; constants that differ in *type* do not,
+    /// even when they carry the same number — `i8 0` and `i32 0` are different
+    /// constants in the IR.
+    #[test]
+    fn constants_dedup_by_value_and_type() {
+        let mut interner = ConstInterner::default();
+
+        let a = interner.intern(ConstValue::I32(0)).unwrap();
+        let b = interner.intern(ConstValue::I32(0)).unwrap();
+        let c = interner.intern(ConstValue::I8(0)).unwrap();
+        let d = interner.intern(ConstValue::I64(0)).unwrap();
+
+        assert_eq!(a, b, "the same constant interns once");
+        assert_ne!(a, c, "i32 0 and i8 0 are distinct");
+        assert_ne!(a, d, "i32 0 and i64 0 are distinct");
+        assert_eq!(interner.len(), 3);
+    }
+
+    /// `-0.0` is not `0.0` in IEEE-754 and LLVM prints them differently: the sign
+    /// survives `fdiv`, `copysign` and `minnum`, so collapsing them into one pool
+    /// entry would emit the wrong constant.
+    #[test]
+    fn positive_and_negative_zero_are_distinct_constants() {
+        let mut interner = ConstInterner::default();
+
+        let pos = interner
+            .intern(ConstValue::Float(OrderedFloat(0.0)))
+            .unwrap();
+        let neg = interner
+            .intern(ConstValue::Float(OrderedFloat(-0.0)))
+            .unwrap();
+
+        assert_ne!(pos, neg, "0.0 and -0.0 must not share a pool entry");
+        assert_eq!(interner.len(), 2);
+
+        let ConstValue::Float(back) = *interner.value(neg) else {
+            panic!("expected a float")
+        };
+
+        assert!(
+            back.into_inner().is_sign_negative(),
+            "the sign must survive interning"
+        );
+    }
+
+    /// The other half of comparing bits: a NaN has a sign and a payload, and two
+    /// NaNs that differ in either are different constants. `OrderedFloat`'s numeric
+    /// equality calls every NaN equal, so this is the pair that would merge.
+    #[test]
+    fn nans_are_distinguished_by_their_bits() {
+        let mut interner = ConstInterner::default();
+
+        let quiet = f64::NAN;
+        let negative = -f64::NAN;
+        let payload = f64::from_bits(f64::NAN.to_bits() | 0x3);
+
+        let a = interner
+            .intern(ConstValue::Double(OrderedFloat(quiet)))
+            .unwrap();
+        let b = interner
+            .intern(ConstValue::Double(OrderedFloat(negative)))
+            .unwrap();
+        let c = interner
+            .intern(ConstValue::Double(OrderedFloat(payload)))
+            .unwrap();
+
+        assert_ne!(a, b, "a NaN's sign bit is part of its identity");
+        assert_ne!(a, c, "so is its payload");
+        assert_eq!(interner.len(), 3);
+
+        // And a NaN still equals *itself*, which is what lets the pool find one it
+        // has already interned — numeric equality could not do this.
+        assert_eq!(
+            interner
+                .intern(ConstValue::Double(OrderedFloat(quiet)))
+                .unwrap(),
+            a,
+            "re-interning the same NaN must reuse its entry"
+        );
+        assert_eq!(interner.len(), 3);
+    }
+
+    /// Type rendering is what error messages and (later) emitted IR are built from,
+    /// so every shape has to spell itself the way LLVM does.
+    #[test]
+    fn types_render_as_llvm_spells_them() {
+        assert_eq!(Type::I1.to_string(), "i1");
+        assert_eq!(Type::I64.to_string(), "i64");
+        assert_eq!(Type::Half.to_string(), "half");
+        assert_eq!(Type::Bfloat.to_string(), "bfloat");
+        assert_eq!(Type::Float.to_string(), "float");
+        assert_eq!(Type::Double.to_string(), "double");
+        assert_eq!(Type::Ptr.to_string(), "ptr");
+        assert_eq!(Type::Void.to_string(), "void");
+
+        assert_eq!(
+            Type::Array {
+                size: 8,
+                element_ty: Box::new(Type::I32),
+            }
+            .to_string(),
+            "[8 x i32]"
+        );
+
+        assert_eq!(
+            Type::Struct {
+                fields: vec![Type::I32, Type::Double],
+                packed: false,
+            }
+            .to_string(),
+            "{ i32, double }"
+        );
+
+        assert_eq!(
+            Type::Struct {
+                fields: vec![Type::I8],
+                packed: true,
+            }
+            .to_string(),
+            "<{ i8 }>"
+        );
+
+        assert_eq!(
+            Type::Struct {
+                fields: vec![],
+                packed: false,
+            }
+            .to_string(),
+            "{  }",
+            "an empty struct still renders"
+        );
+
+        // Nesting has to compose, since a struct field may be any type.
+        assert_eq!(
+            Type::Array {
+                size: 2,
+                element_ty: Box::new(Type::Struct {
+                    fields: vec![
+                        Type::Ptr,
+                        Type::Array {
+                            size: 3,
+                            element_ty: Box::new(Type::I16),
+                        },
+                    ],
+                    packed: true,
+                }),
+            }
+            .to_string(),
+            "[2 x <{ ptr, [3 x i16] }>]"
+        );
+    }
+
+    /// `BuildError` carries a `Type`, so `Debug` — which is what `unwrap` prints —
+    /// must render rather than panic.
+    #[test]
+    fn a_type_is_debug_printable() {
+        assert_eq!(format!("{:?}", Type::I32), "i32");
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                Type::Array {
+                    size: 1,
+                    element_ty: Box::new(Type::Float)
+                }
+            ),
+            "[1 x float]"
+        );
     }
 }
