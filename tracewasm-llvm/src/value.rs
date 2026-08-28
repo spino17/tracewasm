@@ -1,7 +1,22 @@
-use crate::{error::BuildError, interner::StrId};
+use crate::{
+    error::BuildError,
+    interner::{ConstId, StrId},
+};
 
 pub enum Type {
+    Void,
     I1,
+    I8,
+    I16,
+    I32,
+    I64,
+    Half,
+    Bfloat,
+    Float,
+    Double,
+    Ptr,
+    Array { size: u64, element_ty: Box<Type> },
+    Struct { fields: Vec<Type>, packed: bool },
 }
 
 impl Type {
@@ -12,11 +27,7 @@ impl Type {
 
 impl ToString for Type {
     fn to_string(&self) -> String {
-        let r = match self {
-            Type::I1 => "i1",
-        };
-
-        r.to_string()
+        todo!()
     }
 }
 
@@ -26,7 +37,7 @@ pub struct Register {
 
 pub enum ValueKind {
     Reg(Register),
-    Const, // interned constant it!
+    Const(ConstId),
 }
 
 pub struct Value {

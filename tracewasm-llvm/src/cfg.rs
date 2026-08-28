@@ -2,7 +2,7 @@ use crate::{
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     instruction::Instruction,
-    interner::{StrId, StrInterner},
+    interner::{ConstInterner, StrId, StrInterner},
     value::Value,
 };
 use id_arena::{Arena, Id};
@@ -109,7 +109,7 @@ impl FuncId {
         name: String,
         ctx: &mut Context,
     ) -> Result<BasicBlockId, BuildError> {
-        let name_id = ctx.interner.intern(name)?;
+        let name_id = ctx.str_interner.intern(name)?;
 
         let is_first = ctx
             .funcs
@@ -148,7 +148,8 @@ struct Module {
 pub struct Context {
     blocks: Arena<BasicBlock>,
     funcs: Arena<Function>,
-    interner: StrInterner,
+    str_interner: StrInterner,
+    const_interner: ConstInterner,
 }
 
 impl Default for Context {
@@ -156,7 +157,8 @@ impl Default for Context {
         Context {
             blocks: Arena::default(),
             funcs: Arena::default(),
-            interner: StrInterner::default(),
+            str_interner: StrInterner::default(),
+            const_interner: ConstInterner::default(),
         }
     }
 }
@@ -201,7 +203,7 @@ impl Builder {
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context) -> Result<FuncId, BuildError> {
         // TODO: check if func already exist with this name!
-        let name_id = ctx.interner.intern(name)?;
+        let name_id = ctx.str_interner.intern(name)?;
 
         let id = FuncId(ctx.funcs.alloc(Function {
             name: name_id.into(),
