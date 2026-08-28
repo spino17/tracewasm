@@ -21,3 +21,4 @@ gimli = "0.34.0"
 serde = { version = "1.0.229", features = ["derive"] }
 addr2line = "0.27.0"
 id-arena = "2.3.0"
+ordered-float = "5.5.0"

@@ -1,6 +1,8 @@
 use std::ops::{Deref, DerefMut};
 use tracewasm_utils::interner::{InternedId, Interner};
 
+use crate::value::ConstValue;
+
 #[derive(Default)]
 pub struct StrInterner(Interner<String, u32>);
 
@@ -26,13 +28,11 @@ impl From<InternedId<String>> for StrId {
     }
 }
 
-pub enum Const {}
-
 #[derive(Default)]
-pub struct ConstInterner(Interner<Const, u32>);
+pub struct ConstInterner(Interner<ConstValue, u32>);
 
 impl Deref for ConstInterner {
-    type Target = Interner<Const, u32>;
+    type Target = Interner<ConstValue, u32>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -45,10 +45,10 @@ impl DerefMut for ConstInterner {
     }
 }
 
-pub struct ConstId(InternedId<Const>);
+pub struct ConstId(InternedId<ConstValue>);
 
-impl From<InternedId<Const>> for ConstId {
-    fn from(value: InternedId<Const>) -> Self {
+impl From<InternedId<ConstValue>> for ConstId {
+    fn from(value: InternedId<ConstValue>) -> Self {
         ConstId(value)
     }
 }

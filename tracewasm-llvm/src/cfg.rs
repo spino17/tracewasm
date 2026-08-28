@@ -245,7 +245,6 @@ mod tests {
         let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         let mut cursor = builder.cursor_at_block(entry);
-        let _ = cursor.add_phi(PhiInstruction::default(), &mut ctx).unwrap();
 
         let _cfg = builder.build();
     }

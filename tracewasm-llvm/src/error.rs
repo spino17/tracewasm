@@ -1,6 +1,8 @@
 use thiserror::Error;
 use tracewasm_utils::error::TracewasmUtilsError;
 
+use crate::value::Type;
+
 #[derive(Error, Debug)]
 pub enum BuildError {
     #[error("phi instructions should be added at the start of the basic block")]
@@ -13,6 +15,8 @@ pub enum BuildError {
     ValueToI1ValueFailed(String),
     #[error("{0}")]
     UtilsError(TracewasmUtilsError),
+    #[error("constant with type `{0}` failed to be casted as `{0}`")]
+    ConstantCastToProvidedTypeFailed(Type, Type),
 }
 
 impl From<TracewasmUtilsError> for BuildError {

@@ -454,6 +454,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "id-arena",
+ "ordered-float",
  "rustc-hash",
  "thiserror",
  "tracewasm-utils",
