@@ -19,7 +19,7 @@ impl PhiInstruction {
         let block_id = branch.0;
 
         if self.blocks.contains(&block_id) {
-            return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);
+            return Err(BuildError::BasicBlockBranchAlreadyInPhiInstruction);
         }
 
         self.blocks.insert(block_id);
@@ -29,12 +29,10 @@ impl PhiInstruction {
     }
 }
 
-pub struct PhiInstrId(usize);
-
-impl PhiInstrId {
-    pub(crate) fn new(id: usize) -> Self {
-        PhiInstrId(id)
-    }
+#[derive(Clone, Copy)]
+pub struct PhiInstrId {
+    index: usize,
+    block: BasicBlockId,
 }
 
 pub struct BasicBlock {
@@ -84,7 +82,10 @@ impl BasicBlockId {
 
         block.phis.push(instr);
 
-        Ok(PhiInstrId::new(id))
+        Ok(PhiInstrId {
+            index: id,
+            block: *self,
+        })
     }
 }
 

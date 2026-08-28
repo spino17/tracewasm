@@ -20,10 +20,10 @@ impl DerefMut for StrInterner {
     }
 }
 
-pub struct StrId(InternedId<String>);
+pub struct StrId(InternedId<String, u32>);
 
-impl From<InternedId<String>> for StrId {
-    fn from(value: InternedId<String>) -> Self {
+impl From<InternedId<String, u32>> for StrId {
+    fn from(value: InternedId<String, u32>) -> Self {
         StrId(value)
     }
 }
@@ -45,10 +45,10 @@ impl DerefMut for ConstInterner {
     }
 }
 
-pub struct ConstId(InternedId<ConstValue>);
+pub struct ConstId(InternedId<ConstValue, u32>);
 
-impl From<InternedId<ConstValue>> for ConstId {
-    fn from(value: InternedId<ConstValue>) -> Self {
+impl From<InternedId<ConstValue, u32>> for ConstId {
+    fn from(value: InternedId<ConstValue, u32>) -> Self {
         ConstId(value)
     }
 }

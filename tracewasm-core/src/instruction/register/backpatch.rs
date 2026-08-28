@@ -45,7 +45,7 @@ pub(crate) enum BackPatchableSlot {
     /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
     Spill(SpillIndex),
     /// An interned constant, by pool id. Resolved to `locals_count + id`.
-    Const(InternedId<Const>),
+    Const(InternedId<Const, u16>),
     /// An operand whose location is already final, which means a local.
     Slot(Slot),
 }

@@ -3,29 +3,41 @@ use rustc_hash::FxHashMap;
 use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
 #[derive(Debug)]
-pub struct InternedId<T>(u16, PhantomData<T>);
+pub struct InternedId<T, C>(C, PhantomData<T>);
 
-impl<T> InternedId<T> {
-    pub fn raw(&self) -> u16 {
+impl<T, C: Capacity> InternedId<T, C> {
+    pub fn raw(&self) -> C {
         self.0
     }
 }
 
-impl<T> Clone for InternedId<T> {
+impl<T, C: Capacity> Clone for InternedId<T, C> {
     fn clone(&self) -> Self {
         InternedId(self.0, PhantomData)
     }
 }
 
-impl<T> Copy for InternedId<T> {}
+impl<T, C: Capacity> Copy for InternedId<T, C> {}
 
-pub trait Capacity {
+pub trait Capacity: Clone + Copy {
     fn val() -> u64;
+
+    fn from_usize(val: usize) -> Self;
+
+    fn to_usize(&self) -> usize;
 }
 
 impl Capacity for u16 {
     fn val() -> u64 {
         u16::MAX as u64
+    }
+
+    fn from_usize(val: usize) -> Self {
+        val as u16
+    }
+
+    fn to_usize(&self) -> usize {
+        *self as usize
     }
 }
 
@@ -33,17 +45,33 @@ impl Capacity for u32 {
     fn val() -> u64 {
         u32::MAX as u64
     }
+
+    fn from_usize(val: usize) -> Self {
+        val as u32
+    }
+
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
 }
 
 impl Capacity for u64 {
     fn val() -> u64 {
         u64::MAX
     }
+
+    fn from_usize(val: usize) -> Self {
+        val as u64
+    }
+
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
 }
 
 pub struct Interner<T, C> {
     values: Vec<T>,
-    reverse_map: FxHashMap<T, InternedId<T>>,
+    reverse_map: FxHashMap<T, InternedId<T, C>>,
     phantom: PhantomData<C>,
 }
 
@@ -66,7 +94,7 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         }
     }
 
-    pub fn intern(&mut self, val: T) -> Result<InternedId<T>, TracewasmUtilsError> {
+    pub fn intern(&mut self, val: T) -> Result<InternedId<T, C>, TracewasmUtilsError> {
         if let Some(id) = self.reverse_map.get(&val) {
             Ok(*id)
         } else {
@@ -77,7 +105,7 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
                 });
             }
 
-            let id = InternedId(self.values.len() as u16, PhantomData);
+            let id = InternedId(C::from_usize(self.values.len()), PhantomData);
 
             self.values.push(val.clone());
             self.reverse_map.insert(val, id);
@@ -86,8 +114,8 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         }
     }
 
-    pub fn value(&self, id: InternedId<T>) -> &T {
-        &self.values[id.0 as usize]
+    pub fn value(&self, id: InternedId<T, C>) -> &T {
+        &self.values[id.0.to_usize()]
     }
 
     pub fn len(&self) -> usize {

@@ -15,7 +15,7 @@ pub enum BuildError {
     ValueToI1ValueFailed(String),
     #[error("{0}")]
     UtilsError(TracewasmUtilsError),
-    #[error("constant with type `{0}` failed to be casted as `{0}`")]
+    #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(Type, Type),
 }
 

@@ -70,9 +70,9 @@ impl RegInstruction {
         // A load or a store carries an id into `memory_offsets`, not the offset itself,
         // so it is resolved and shown as its value — the id is an artifact of keeping
         // the instruction eight bytes wide.
-        let offset_of = |id: InternedId<MemoryOffset>| frame.memory_offsets.value(id).0;
+        let offset_of = |id: InternedId<MemoryOffset, u16>| frame.memory_offsets.value(id).0;
 
-        let load_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot], output: u16| {
+        let load_op = |kind, id: InternedId<MemoryOffset, u16>, inputs: &[Slot], output: u16| {
             format!(
                 "{:<12} [{}]+{} -> {}",
                 mnemonic(kind),
@@ -82,7 +82,7 @@ impl RegInstruction {
             )
         };
 
-        let store_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot]| {
+        let store_op = |kind, id: InternedId<MemoryOffset, u16>, inputs: &[Slot]| {
             format!(
                 "{:<12} [{}]+{} <- {}",
                 mnemonic(kind),

@@ -7,7 +7,6 @@ use std::fmt::{Debug, Display};
 
 #[derive(PartialEq, Eq)]
 pub enum Type {
-    Void,
     I1,
     I8,
     I16,
@@ -20,6 +19,7 @@ pub enum Type {
     Ptr,
     Array { size: u64, element_ty: Box<Type> },
     Struct { fields: Vec<Type>, packed: bool },
+    Void,
 }
 
 impl Display for Type {
@@ -100,10 +100,6 @@ pub enum ConstValue {
 
 pub trait Const {
     fn ty() -> Type;
-
-    fn is_cast_valid(ty: Type) -> bool {
-        ty == Self::ty()
-    }
 
     fn into_const(self) -> ConstValue;
 

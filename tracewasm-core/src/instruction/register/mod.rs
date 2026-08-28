@@ -193,7 +193,6 @@ use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod arena;
 pub mod backpatch;
-pub mod interner;
 pub mod lazy;
 pub mod llvm;
 pub mod render;
@@ -459,7 +458,7 @@ impl Default for Slot {
 #[derive(Clone, Copy)]
 enum StackSlot {
     /// An immediate. Occupies a stack position and no register.
-    Const(InternedId<Const>),
+    Const(InternedId<Const, u16>),
     /// A value an earlier instruction produced, in the register named here. The
     /// only variant [`SimulatedStack::curr_register_index`] counts.
     Register(u16),
@@ -1802,7 +1801,7 @@ pub(crate) enum RegInstruction {
     /// `i32.load`.
     I32Load {
         /// Static byte offset added to the popped address.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_s`.
@@ -1810,7 +1809,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_u`.
@@ -1818,7 +1817,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_s`.
@@ -1826,7 +1825,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_u`.
@@ -1834,7 +1833,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -1844,7 +1843,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i32.store8`.
@@ -1852,7 +1851,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i32.store16`.
@@ -1860,7 +1859,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -1956,7 +1955,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_s`.
@@ -1964,7 +1963,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_u`.
@@ -1972,7 +1971,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_s`.
@@ -1980,7 +1979,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_u`.
@@ -1988,7 +1987,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_s`.
@@ -1996,7 +1995,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_u`.
@@ -2004,7 +2003,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2014,7 +2013,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store8`.
@@ -2022,7 +2021,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store16`.
@@ -2030,7 +2029,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store32`.
@@ -2038,7 +2037,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -2138,7 +2137,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2148,7 +2147,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -2214,7 +2213,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2224,7 +2223,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -6702,7 +6701,7 @@ impl RegInstruction {
     /// a wrap.
     #[inline(always)]
     fn effective_address<M: Memory, I: ImportRegistry>(
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         frame_layout: &RegFrameLayout,
         slot: Slot,
         caller_base_data: &RegCallerBaseData,
