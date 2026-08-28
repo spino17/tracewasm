@@ -7,3 +7,4 @@ edition = "2024"
 id-arena = { workspace = true }
 anyhow = { workspace = true }
 thiserror =  { workspace = true }
+rustc-hash = { workspace = true }

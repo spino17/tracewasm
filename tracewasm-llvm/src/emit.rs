@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 
-pub trait Emitter<I> {
+pub trait Emitter {
     type SourceInstr;
     type SourceInstrCtx;
 
@@ -8,5 +8,5 @@ pub trait Emitter<I> {
         self,
         stream: &[Self::SourceInstr],
         ctx: &Self::SourceInstrCtx,
-    ) -> Result<ControlFlowGraph<I>, anyhow::Error>;
+    ) -> Result<ControlFlowGraph, anyhow::Error>;
 }

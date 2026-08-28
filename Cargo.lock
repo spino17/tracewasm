@@ -453,6 +453,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "id-arena",
+ "rustc-hash",
  "thiserror",
 ]
 

@@ -1,7 +1,30 @@
-use crate::{constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID, error::BuildError};
+use crate::{
+    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID, error::BuildError, instruction::Instruction,
+    value::Value,
+};
 use id_arena::{Arena, Id};
+use rustc_hash::FxHashSet;
 
-pub struct PhiInstruction {}
+#[derive(Default)]
+pub struct PhiInstruction {
+    branches: Vec<(BasicBlockId, Value)>,
+    blocks: FxHashSet<BasicBlockId>,
+}
+
+impl PhiInstruction {
+    pub fn add_branch(&mut self, branch: (BasicBlockId, Value)) -> Result<(), BuildError> {
+        let block_id = branch.0;
+
+        if self.blocks.contains(&block_id) {
+            return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);
+        }
+
+        self.blocks.insert(block_id);
+        self.branches.push(branch);
+
+        Ok(())
+    }
+}
 
 pub struct PhiInstrId(usize);
 
@@ -11,26 +34,27 @@ impl PhiInstrId {
     }
 }
 
-pub struct BasicBlock<I> {
+pub struct BasicBlock {
     name: String,
     is_first: bool,
-    func_id: FuncId<I>,
+    func_id: FuncId,
     phis: Vec<PhiInstruction>,
-    instructions: Vec<I>,
+    instructions: Vec<Instruction>,
 }
 
-pub struct BasicBlockId<I>(Id<BasicBlock<I>>);
+#[derive(PartialEq, Eq, Hash)]
+pub struct BasicBlockId(Id<BasicBlock>);
 
-impl<I> Clone for BasicBlockId<I> {
+impl Clone for BasicBlockId {
     fn clone(&self) -> Self {
         BasicBlockId(self.0)
     }
 }
 
-impl<I> Copy for BasicBlockId<I> {}
+impl Copy for BasicBlockId {}
 
-impl<I> BasicBlockId<I> {
-    fn add_instruction(&self, instr: I, ctx: &mut Context<I>) {
+impl BasicBlockId {
+    fn add_instruction(&self, instr: Instruction, ctx: &mut Context) {
         let block = ctx
             .blocks
             .get_mut(self.0)
@@ -39,11 +63,7 @@ impl<I> BasicBlockId<I> {
         block.instructions.push(instr);
     }
 
-    fn add_phi(
-        &self,
-        instr: PhiInstruction,
-        ctx: &mut Context<I>,
-    ) -> Result<PhiInstrId, BuildError> {
+    fn add_phi(&self, instr: PhiInstruction, ctx: &mut Context) -> Result<PhiInstrId, BuildError> {
         let block = ctx
             .blocks
             .get_mut(self.0)
@@ -65,23 +85,23 @@ impl<I> BasicBlockId<I> {
     }
 }
 
-pub struct Function<I> {
+pub struct Function {
     name: String,
-    blocks: Vec<BasicBlockId<I>>,
+    blocks: Vec<BasicBlockId>,
 }
 
-pub struct FuncId<I>(Id<Function<I>>);
+pub struct FuncId(Id<Function>);
 
-impl<I> Clone for FuncId<I> {
+impl Clone for FuncId {
     fn clone(&self) -> Self {
         FuncId(self.0)
     }
 }
 
-impl<I> Copy for FuncId<I> {}
+impl Copy for FuncId {}
 
-impl<I> FuncId<I> {
-    pub fn add_basic_block(&self, name: String, ctx: &mut Context<I>) -> BasicBlockId<I> {
+impl FuncId {
+    pub fn add_basic_block(&self, name: String, ctx: &mut Context) -> BasicBlockId {
         let is_first = ctx
             .funcs
             .get(self.0)
@@ -109,19 +129,19 @@ impl<I> FuncId<I> {
 
 pub struct Global {}
 
-struct Module<I> {
+struct Module {
     triple: String,
     data_layout: String,
     globals: Vec<Global>,
-    functions: Vec<FuncId<I>>,
+    functions: Vec<FuncId>,
 }
 
-pub struct Context<I> {
-    blocks: Arena<BasicBlock<I>>,
-    funcs: Arena<Function<I>>,
+pub struct Context {
+    blocks: Arena<BasicBlock>,
+    funcs: Arena<Function>,
 }
 
-impl<I> Default for Context<I> {
+impl Default for Context {
     fn default() -> Self {
         Context {
             blocks: Arena::default(),
@@ -130,29 +150,29 @@ impl<I> Default for Context<I> {
     }
 }
 
-pub struct Cursor<I> {
-    block: BasicBlockId<I>,
+pub struct Cursor {
+    block: BasicBlockId,
 }
 
-impl<I> Cursor<I> {
-    pub fn add_instruction(&mut self, instr: I, ctx: &mut Context<I>) {
+impl Cursor {
+    pub fn add_instruction(&mut self, instr: Instruction, ctx: &mut Context) {
         self.block.add_instruction(instr, ctx);
     }
 
     pub fn add_phi(
         &mut self,
         instr: PhiInstruction,
-        ctx: &mut Context<I>,
+        ctx: &mut Context,
     ) -> Result<PhiInstrId, BuildError> {
         self.block.add_phi(instr, ctx)
     }
 }
 
-pub struct Builder<I> {
-    module: Module<I>,
+pub struct Builder {
+    module: Module,
 }
 
-impl<I> Builder<I> {
+impl Builder {
     pub fn new(triple: String, data_layout: String) -> Self {
         Builder {
             module: Module {
@@ -164,11 +184,11 @@ impl<I> Builder<I> {
         }
     }
 
-    pub fn cursor_at_block(&mut self, id: BasicBlockId<I>) -> Cursor<I> {
+    pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor {
         Cursor { block: id }
     }
 
-    pub fn add_function(&mut self, name: String, ctx: &mut Context<I>) -> FuncId<I> {
+    pub fn add_function(&mut self, name: String, ctx: &mut Context) -> FuncId {
         let id = FuncId(ctx.funcs.alloc(Function {
             name,
             blocks: vec![],
@@ -179,19 +199,19 @@ impl<I> Builder<I> {
         id
     }
 
-    pub fn build(self) -> ControlFlowGraph<I> {
+    pub fn build(self) -> ControlFlowGraph {
         ControlFlowGraph {
             module: self.module,
         }
     }
 }
 
-pub struct ControlFlowGraph<I> {
-    module: Module<I>,
+pub struct ControlFlowGraph {
+    module: Module,
 }
 
-impl<I> ControlFlowGraph<I> {
-    pub fn emit_ll(&self, ctx: &Context<I>) -> String {
+impl ControlFlowGraph {
+    pub fn emit_ll(&self, ctx: &Context) -> String {
         todo!()
     }
 }
@@ -199,18 +219,17 @@ impl<I> ControlFlowGraph<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instruction::Instruction;
 
     #[test]
     fn simple_api_usage() {
-        let mut ctx = Context::<Instruction>::default();
+        let mut ctx = Context::default();
         let mut builder = Builder::new("".to_string(), "".to_string());
 
         let func = builder.add_function("sum".to_string(), &mut ctx);
         let entry = func.add_basic_block("entry".to_string(), &mut ctx);
 
         let mut cursor = builder.cursor_at_block(entry);
-        let _ = cursor.add_phi(PhiInstruction {}, &mut ctx).unwrap();
+        let _ = cursor.add_phi(PhiInstruction::default(), &mut ctx).unwrap();
 
         let _cfg = builder.build();
     }
