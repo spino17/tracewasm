@@ -18,6 +18,7 @@ id-arena = { workspace = true }
 anyhow = { workspace = true }
 ordered-float = "5.5.0"
 tracewasm-llvm = { path = "../tracewasm-llvm" }
+tracewasm-utils = { path = "../tracewasm-utils" }
 
 [dev-dependencies]
 wat = "1.254.0"

@@ -23,8 +23,8 @@ impl Emitter for RegInstructionEmitter {
         let mut context = Context::default();
         let mut builder = Builder::new("".to_string(), "".to_string());
 
-        let func = builder.add_function(ctx.func_name.to_string(), &mut context);
-        let entry = func.add_basic_block("entry".to_string(), &mut context);
+        let func = builder.add_function(ctx.func_name.to_string(), &mut context)?;
+        let entry = func.add_basic_block("entry".to_string(), &mut context)?;
 
         let cursor = builder.cursor_at_block(entry);
 

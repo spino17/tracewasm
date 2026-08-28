@@ -1,4 +1,5 @@
 use thiserror::Error;
+use tracewasm_utils::error::TracewasmUtilsError;
 
 #[derive(Error, Debug)]
 pub enum BuildError {
@@ -8,4 +9,14 @@ pub enum BuildError {
     PhiInstructionCannotBeAddedToEntryBasicBlock,
     #[error("basic block branch already in phi instruction")]
     BasicBlockBranchAlreadyInPhiInstruction,
+    #[error("value of type `{0}` cannot be converted into i1 value")]
+    ValueToI1ValueFailed(String),
+    #[error("{0}")]
+    UtilsError(TracewasmUtilsError),
+}
+
+impl From<TracewasmUtilsError> for BuildError {
+    fn from(value: TracewasmUtilsError) -> Self {
+        BuildError::UtilsError(value)
+    }
 }

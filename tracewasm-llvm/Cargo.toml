@@ -8,3 +8,4 @@ id-arena = { workspace = true }
 anyhow = { workspace = true }
 thiserror =  { workspace = true }
 rustc-hash = { workspace = true }
+tracewasm-utils = { path = "../tracewasm-utils" }

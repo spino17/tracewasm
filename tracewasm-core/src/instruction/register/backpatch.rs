@@ -23,11 +23,11 @@
 //! nothing has no move — so `apply` must ask before reaching for one.
 
 use crate::instruction::register::{
-    Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, interner::InternedId,
-    lazy::SpillIndex,
+    Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
 use std::slice::Iter;
+use tracewasm_utils::interner::InternedId;
 
 /// An operand as lowering knows it, before the frame layout is final.
 ///

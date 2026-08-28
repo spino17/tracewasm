@@ -16,10 +16,12 @@
 //!
 //! Both are conversions *out* of the executable form; nothing here runs at execution.
 
+use tracewasm_utils::interner::InternedId;
+
 use crate::{
     instruction::register::{
         DynSignature, InputRegisters, MemoryOffset, RegFrameLayout, RegInstruction,
-        RegLoweredFuncBody, Slot, interner::InternedId, mnemonic,
+        RegLoweredFuncBody, Slot, mnemonic,
     },
     module::FuncType,
 };

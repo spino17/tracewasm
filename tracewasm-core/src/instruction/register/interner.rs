@@ -14,7 +14,7 @@
 //! type's business. `Const` defines both by *bits*, which is what keeps `+0.0` apart
 //! from `-0.0` and one NaN payload apart from another.
 
-use crate::error::TraceWasmError;
+/*use crate::error::TraceWasmError;
 use rustc_hash::FxHashMap;
 use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
@@ -124,4 +124,4 @@ impl<T: Clone + PartialEq + Eq + Hash + TyToString> Interner<T> {
     pub fn values(&self) -> &[T] {
         &self.values
     }
-}
+}*/

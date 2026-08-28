@@ -74,7 +74,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         select_arena: Arena::default(),
         memory_init_arena: Arena::default(),
         dyn_signatures: Arena::default(),
-        memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
+        memory_offsets: Interner::default(),
     }
 }
 
@@ -4566,7 +4566,7 @@ fn const_hash_agrees_with_equality() {
 #[test]
 fn the_pool_keeps_same_bits_of_different_types_apart() {
     let all = same_bits_different_types();
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
     let ids: Vec<(&str, u16)> = all
         .iter()
@@ -4599,7 +4599,7 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 /// survives `f64.min`/`copysign`, and a NaN payload survives arithmetic.
 #[test]
 fn the_pool_keeps_bit_distinct_floats_apart() {
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
     let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
     let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
@@ -4659,7 +4659,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
 /// use its own slot, which would grow every frame by its constant count.
 #[test]
 fn the_pool_still_dedups_equal_constants() {
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
     for _ in 0..4 {
         interner.intern(Const::I32(7)).unwrap();
@@ -4795,10 +4795,9 @@ fn too_many_constants_is_reported_not_truncated() {
     // by the end-of-body frame-width check — and the `what` is what `Const`'s
     // `TyToString` names it.
     assert!(
-        matches!(&err, TraceWasmError::ToManyUniqueValues { what, needed, limit }
-            if what == "constants"
-                && *needed == MAX_CONSTS as u32 + 1
-                && *limit == MAX_CONSTS as u32),
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { needed, limit })
+            if *needed == MAX_CONSTS as u32 + 1
+                && *limit == MAX_CONSTS as u64),
         "expected the constants limit, got: {err}"
     );
 }

@@ -443,6 +443,7 @@ dependencies = [
  "thiserror",
  "tracewasm-llvm",
  "tracewasm-macros",
+ "tracewasm-utils",
  "wasmparser 0.253.0",
  "wat",
 ]
@@ -455,6 +456,7 @@ dependencies = [
  "id-arena",
  "rustc-hash",
  "thiserror",
+ "tracewasm-utils",
 ]
 
 [[package]]
@@ -477,6 +479,14 @@ dependencies = [
  "tracewasm-core",
  "tracewasm-macros",
  "wat",
+]
+
+[[package]]
+name = "tracewasm-utils"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "thiserror",
 ]
 
 [[package]]

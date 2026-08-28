@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
+use tracewasm_utils::error::TracewasmUtilsError;
 
 /// Any failure while validating, parsing, lowering, instantiating, or executing
 /// a WebAssembly module.
@@ -169,6 +170,14 @@ pub enum TraceWasmError {
     /// is its own business.
     #[error("call to imported item returned error: {0}")]
     CallToImportedItemReturnedError(anyhow::Error),
+    #[error("{0}")]
+    UtilsError(TracewasmUtilsError),
+}
+
+impl From<TracewasmUtilsError> for TraceWasmError {
+    fn from(value: TracewasmUtilsError) -> Self {
+        TraceWasmError::UtilsError(value)
+    }
 }
 
 impl From<anyhow::Error> for TraceWasmError {

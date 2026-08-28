@@ -1,5 +1,8 @@
 use crate::{
-    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID, error::BuildError, instruction::Instruction,
+    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
+    error::BuildError,
+    instruction::Instruction,
+    interner::{StrId, StrInterner},
     value::Value,
 };
 use id_arena::{Arena, Id};
@@ -35,7 +38,7 @@ impl PhiInstrId {
 }
 
 pub struct BasicBlock {
-    name: String,
+    name: StrId,
     is_first: bool,
     func_id: FuncId,
     phis: Vec<PhiInstruction>,
@@ -86,7 +89,7 @@ impl BasicBlockId {
 }
 
 pub struct Function {
-    name: String,
+    name: StrId,
     blocks: Vec<BasicBlockId>,
 }
 
@@ -101,7 +104,13 @@ impl Clone for FuncId {
 impl Copy for FuncId {}
 
 impl FuncId {
-    pub fn add_basic_block(&self, name: String, ctx: &mut Context) -> BasicBlockId {
+    pub fn add_basic_block(
+        &self,
+        name: String,
+        ctx: &mut Context,
+    ) -> Result<BasicBlockId, BuildError> {
+        let name_id = ctx.interner.intern(name)?;
+
         let is_first = ctx
             .funcs
             .get(self.0)
@@ -110,7 +119,7 @@ impl FuncId {
             .is_empty();
 
         let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
-            name,
+            name: name_id.into(),
             is_first,
             func_id: *self,
             phis: vec![],
@@ -123,7 +132,7 @@ impl FuncId {
             .blocks
             .push(id);
 
-        id
+        Ok(id)
     }
 }
 
@@ -139,6 +148,7 @@ struct Module {
 pub struct Context {
     blocks: Arena<BasicBlock>,
     funcs: Arena<Function>,
+    interner: StrInterner,
 }
 
 impl Default for Context {
@@ -146,6 +156,7 @@ impl Default for Context {
         Context {
             blocks: Arena::default(),
             funcs: Arena::default(),
+            interner: StrInterner::default(),
         }
     }
 }
@@ -188,15 +199,18 @@ impl Builder {
         Cursor { block: id }
     }
 
-    pub fn add_function(&mut self, name: String, ctx: &mut Context) -> FuncId {
+    pub fn add_function(&mut self, name: String, ctx: &mut Context) -> Result<FuncId, BuildError> {
+        // TODO: check if func already exist with this name!
+        let name_id = ctx.interner.intern(name)?;
+
         let id = FuncId(ctx.funcs.alloc(Function {
-            name,
+            name: name_id.into(),
             blocks: vec![],
         }));
 
         self.module.functions.push(id);
 
-        id
+        Ok(id)
     }
 
     pub fn build(self) -> ControlFlowGraph {
@@ -225,8 +239,8 @@ mod tests {
         let mut ctx = Context::default();
         let mut builder = Builder::new("".to_string(), "".to_string());
 
-        let func = builder.add_function("sum".to_string(), &mut ctx);
-        let entry = func.add_basic_block("entry".to_string(), &mut ctx);
+        let func = builder.add_function("sum".to_string(), &mut ctx).unwrap();
+        let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         let mut cursor = builder.cursor_at_block(entry);
         let _ = cursor.add_phi(PhiInstruction::default(), &mut ctx).unwrap();

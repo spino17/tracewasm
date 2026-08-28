@@ -165,7 +165,6 @@ use crate::{
         register::{
             arena::{Arena, Id},
             backpatch::{BackPatchableSlot, BackpatchMap, InstructionSource},
-            interner::{InternedId, Interner, TyToString},
             lazy::{
                 LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
                 SpillArena, SpillIndex,
@@ -187,6 +186,7 @@ use crate::{
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
 use std::{collections::hash_map::Entry, vec};
+use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -225,12 +225,6 @@ pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 /// "memory offsets".
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct MemoryOffset(pub u32);
-
-impl TyToString for MemoryOffset {
-    fn to_string() -> String {
-        "memory offsets".to_string()
-    }
-}
 
 /// Which kind of label a block opens, before its instruction index is known.
 ///
@@ -357,12 +351,6 @@ impl PartialEq for Const {
 }
 
 impl Eq for Const {}
-
-impl TyToString for Const {
-    fn to_string() -> String {
-        "constants".to_string()
-    }
-}
 
 impl Const {
     /// The value as it appears in a rendered instruction.
@@ -898,14 +886,14 @@ struct SimulatedStack {
     dyn_signatures: Arena<DynSignature>,
     /// Static byte offsets of the body's loads and stores, deduped so a repeated
     /// offset costs one entry.
-    memory_offsets: Interner<MemoryOffset>,
+    memory_offsets: Interner<MemoryOffset, u16>,
     /// Every operand recorded against the instruction that will carry it, for the
     /// end-of-body pass. Lowering-time only: it is what fills the instructions in,
     /// and is dropped once it has.
     backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
-    const_interner: Interner<Const>,
+    const_interner: Interner<Const, u16>,
 }
 
 impl SimulatedStack {
@@ -937,9 +925,9 @@ impl SimulatedStack {
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
             dyn_signatures: Arena::default(),
-            memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
+            memory_offsets: Interner::default(),
             backpatch_map: BackpatchMap::default(),
-            const_interner: Interner::new(MAX_CONSTS),
+            const_interner: Interner::default(),
         }
     }
 
@@ -1656,7 +1644,7 @@ pub(crate) struct RegFrameLayout {
     /// a signature, so the instruction carries an [`InternedId<MemoryOffset>`] into
     /// this pool instead. Interned, so the `0` that every bare pointer deref loads
     /// through costs one entry no matter how many loads use it.
-    pub memory_offsets: Interner<MemoryOffset>,
+    pub memory_offsets: Interner<MemoryOffset, u16>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
