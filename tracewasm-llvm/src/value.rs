@@ -1,11 +1,9 @@
-use std::fmt::{Debug, Display};
-
-use ordered_float::OrderedFloat;
-
 use crate::{
     error::BuildError,
     interner::{ConstId, ConstInterner, StrId},
 };
+use ordered_float::OrderedFloat;
+use std::fmt::{Debug, Display};
 
 #[derive(PartialEq, Eq)]
 pub enum Type {
@@ -42,10 +40,6 @@ impl Type {
     }
 }
 
-pub struct Register {
-    name: StrId,
-}
-
 pub enum ValueKind {
     Reg(Register),
     Const(ConstId),
@@ -70,16 +64,14 @@ impl Value {
         optional_cast: Option<Type>,
         interner: &mut ConstInterner,
     ) -> Result<Self, BuildError> {
-        let ty = C::ty();
-
-        let val = if let Some(ty) = optional_cast {
+        let (val, ty) = if let Some(ty) = optional_cast {
             let Some(c) = val.try_cast(&ty) else {
                 return Err(BuildError::ConstantCastToProvidedTypeFailed(C::ty(), ty));
             };
 
-            c
+            (c, ty)
         } else {
-            val.into_const()
+            (val.into_const(), C::ty())
         };
 
         let const_id = interner.intern(val)?;
@@ -91,17 +83,8 @@ impl Value {
     }
 }
 
-pub struct I1Value {
-    kind: ValueKind,
-}
-
-impl From<I1Value> for Value {
-    fn from(value: I1Value) -> Self {
-        Value {
-            ty: Type::I1,
-            kind: value.kind,
-        }
-    }
+pub struct Register {
+    name: StrId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -270,6 +253,19 @@ impl Const for f64 {
         };
 
         Some(v)
+    }
+}
+
+pub struct I1Value {
+    kind: ValueKind,
+}
+
+impl From<I1Value> for Value {
+    fn from(value: I1Value) -> Self {
+        Value {
+            ty: Type::I1,
+            kind: value.kind,
+        }
     }
 }
 
