@@ -2,7 +2,7 @@ use crate::error::TracewasmUtilsError;
 use rustc_hash::FxHashMap;
 use std::{fmt::Debug, hash::Hash, marker::PhantomData};
 
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 pub struct InternedId<T, C>(C, PhantomData<T>);
 
 impl<T, C: Capacity> InternedId<T, C> {
@@ -10,6 +10,14 @@ impl<T, C: Capacity> InternedId<T, C> {
         self.0
     }
 }
+
+impl<T, C: Capacity> PartialEq for InternedId<T, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl<T, C: Capacity> Eq for InternedId<T, C> {}
 
 impl<T, C: Capacity> Clone for InternedId<T, C> {
     fn clone(&self) -> Self {
@@ -19,7 +27,7 @@ impl<T, C: Capacity> Clone for InternedId<T, C> {
 
 impl<T, C: Capacity> Copy for InternedId<T, C> {}
 
-pub trait Capacity: Clone + Copy {
+pub trait Capacity: Clone + Copy + PartialEq + Eq + Hash {
     fn val() -> u64;
 
     fn from_usize(val: usize) -> Self;

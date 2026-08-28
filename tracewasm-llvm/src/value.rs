@@ -23,14 +23,50 @@ pub enum Type {
 }
 
 impl Display for Type {
+    /// Writes the type as LLVM spells it, so a rendered error reads the same as the
+    /// IR it is about.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            Type::I1 => f.write_str("i1"),
+            Type::I8 => f.write_str("i8"),
+            Type::I16 => f.write_str("i16"),
+            Type::I32 => f.write_str("i32"),
+            Type::I64 => f.write_str("i64"),
+            Type::Half => f.write_str("half"),
+            Type::Bfloat => f.write_str("bfloat"),
+            Type::Float => f.write_str("float"),
+            Type::Double => f.write_str("double"),
+            Type::Ptr => f.write_str("ptr"),
+            Type::Void => f.write_str("void"),
+            Type::Array { size, element_ty } => write!(f, "[{size} x {element_ty}]"),
+            Type::Struct { fields, packed } => {
+                let (open, close) = if *packed {
+                    ("<{ ", " }>")
+                } else {
+                    ("{ ", " }")
+                };
+
+                f.write_str(open)?;
+
+                for (i, field) in fields.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(", ")?;
+                    }
+
+                    write!(f, "{field}")?;
+                }
+
+                f.write_str(close)
+            }
+        }
     }
 }
 
 impl Debug for Type {
+    /// The same rendering as [`Display`]. `BuildError` carries a `Type`, so a
+    /// `Debug`-formatted error — which is what `unwrap` prints — has to work too.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        Display::fmt(self, f)
     }
 }
 

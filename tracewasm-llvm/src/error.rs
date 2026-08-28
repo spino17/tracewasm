@@ -1,7 +1,6 @@
+use crate::value::Type;
 use thiserror::Error;
 use tracewasm_utils::error::TracewasmUtilsError;
-
-use crate::value::Type;
 
 #[derive(Error, Debug)]
 pub enum BuildError {
@@ -17,6 +16,14 @@ pub enum BuildError {
     UtilsError(TracewasmUtilsError),
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(Type, Type),
+    /// Two functions cannot share a name: LLVM identifies a definition by it, so
+    /// emitting both would produce two `@name` definitions in one module.
+    #[error("a function named `{0}` already exists in this module")]
+    DuplicateFunctionName(String),
+    /// Two blocks in one function cannot share a name, for the same reason: the
+    /// label a branch names would be ambiguous.
+    #[error("a basic block named `{0}` already exists in this function")]
+    DuplicateBasicBlockName(String),
 }
 
 impl From<TracewasmUtilsError> for BuildError {

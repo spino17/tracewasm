@@ -92,6 +92,7 @@ impl BasicBlockId {
 pub struct Function {
     name: StrId,
     blocks: Vec<BasicBlockId>,
+    block_names: FxHashSet<StrId>,
 }
 
 pub struct FuncId(Id<Function>);
@@ -110,28 +111,36 @@ impl FuncId {
         name: String,
         ctx: &mut Context,
     ) -> Result<BasicBlockId, BuildError> {
-        let name_id = ctx.str_interner.intern(name)?;
+        let name_id: StrId = ctx.str_interner.intern(name)?.into();
 
-        let is_first = ctx
+        let func = ctx
             .funcs
             .get(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-            .blocks
-            .is_empty();
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+
+        if func.block_names.contains(&name_id) {
+            return Err(BuildError::DuplicateBasicBlockName(
+                ctx.str_interner.value(name_id.0).to_string(),
+            ));
+        }
+
+        let is_first = func.blocks.is_empty();
 
         let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
-            name: name_id.into(),
+            name: name_id,
             is_first,
             func_id: *self,
             phis: vec![],
             instructions: vec![],
         }));
 
-        ctx.funcs
+        let func = ctx
+            .funcs
             .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-            .blocks
-            .push(id);
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+
+        func.blocks.push(id);
+        func.block_names.insert(name_id);
 
         Ok(id)
     }
@@ -144,6 +153,7 @@ struct Module {
     data_layout: String,
     globals: Vec<Global>,
     functions: Vec<FuncId>,
+    func_names: FxHashSet<StrId>,
 }
 
 pub struct Context {
@@ -194,6 +204,7 @@ impl Builder {
                 data_layout,
                 globals: vec![],
                 functions: vec![],
+                func_names: FxHashSet::default(),
             },
         }
     }
@@ -203,14 +214,21 @@ impl Builder {
     }
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context) -> Result<FuncId, BuildError> {
-        // TODO: check if func already exist with this name!
-        let name_id = ctx.str_interner.intern(name)?;
+        let name_id: StrId = ctx.str_interner.intern(name)?.into();
+
+        if self.module.func_names.contains(&name_id) {
+            return Err(BuildError::DuplicateFunctionName(
+                ctx.str_interner.value(name_id.0).to_string(),
+            ));
+        }
 
         let id = FuncId(ctx.funcs.alloc(Function {
-            name: name_id.into(),
+            name: name_id,
             blocks: vec![],
+            block_names: FxHashSet::default(),
         }));
 
+        self.module.func_names.insert(name_id);
         self.module.functions.push(id);
 
         Ok(id)
