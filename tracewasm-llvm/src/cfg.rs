@@ -255,7 +255,6 @@ impl ControlFlowGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::value::{Type, Value};
 
     /// A context and a builder, which every test below needs.
