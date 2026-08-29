@@ -1,5 +1,5 @@
 use crate::{
-    cfg::{BasicBlockId, Context, Cursor},
+    cfg::{Cursor, basic_block::BasicBlockId, context::Context},
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     value::{I1Value, Type, Value},

@@ -1,133 +1,17 @@
 use crate::{
-    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
+    cfg::{
+        basic_block::BasicBlockId,
+        context::Context,
+        function::{FuncId, Function},
+    },
     error::BuildError,
-    instruction::{Instruction, PhiInstrHandler, PhiInstruction},
-    interner::{ConstInterner, StrId, StrInterner},
+    interner::StrId,
 };
-use id_arena::{Arena, Id};
 use rustc_hash::FxHashSet;
 
-pub struct BasicBlock {
-    pub(crate) name: StrId,
-    pub(crate) is_first: bool,
-    pub(crate) func_id: FuncId,
-    pub(crate) phis: Vec<PhiInstruction>,
-    pub(crate) instructions: Vec<Instruction>,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct BasicBlockId(Id<BasicBlock>);
-
-impl BasicBlockId {
-    pub(crate) fn raw(&self) -> Id<BasicBlock> {
-        self.0
-    }
-}
-
-impl Clone for BasicBlockId {
-    fn clone(&self) -> Self {
-        BasicBlockId(self.0)
-    }
-}
-
-impl Copy for BasicBlockId {}
-
-impl BasicBlockId {
-    pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) {
-        let block = ctx
-            .blocks
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        block.instructions.push(instr);
-    }
-
-    pub(crate) fn add_phi(
-        &self,
-        instr: PhiInstruction,
-        ctx: &mut Context,
-    ) -> Result<PhiInstrHandler, BuildError> {
-        let block = ctx
-            .blocks
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        if block.is_first {
-            return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);
-        }
-
-        if !block.instructions.is_empty() {
-            return Err(BuildError::PhiInstructionAddError);
-        }
-
-        let id = block.phis.len();
-
-        block.phis.push(instr);
-
-        Ok(PhiInstrHandler {
-            index: id,
-            block: *self,
-        })
-    }
-}
-
-pub struct Function {
-    name: StrId,
-    blocks: Vec<BasicBlockId>,
-    block_names: FxHashSet<StrId>,
-}
-
-#[derive(Debug)]
-pub struct FuncId(Id<Function>);
-
-impl Clone for FuncId {
-    fn clone(&self) -> Self {
-        FuncId(self.0)
-    }
-}
-
-impl Copy for FuncId {}
-
-impl FuncId {
-    pub fn add_basic_block(
-        &self,
-        name: String,
-        ctx: &mut Context,
-    ) -> Result<BasicBlockId, BuildError> {
-        let name_id: StrId = ctx.str_interner.intern(name)?.into();
-
-        let func = ctx
-            .funcs
-            .get(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        if func.block_names.contains(&name_id) {
-            return Err(BuildError::DuplicateBasicBlockName(
-                ctx.str_interner.value(name_id.0).to_string(),
-            ));
-        }
-
-        let is_first = func.blocks.is_empty();
-
-        let id = BasicBlockId(ctx.blocks.alloc(BasicBlock {
-            name: name_id,
-            is_first,
-            func_id: *self,
-            phis: vec![],
-            instructions: vec![],
-        }));
-
-        let func = ctx
-            .funcs
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
-        func.blocks.push(id);
-        func.block_names.insert(name_id);
-
-        Ok(id)
-    }
-}
+pub mod basic_block;
+pub mod context;
+pub mod function;
 
 pub struct Global {}
 
@@ -137,30 +21,6 @@ struct Module {
     globals: Vec<Global>,
     functions: Vec<FuncId>,
     func_names: FxHashSet<StrId>,
-}
-
-pub struct Context {
-    pub(crate) blocks: Arena<BasicBlock>,
-    funcs: Arena<Function>,
-    pub(crate) str_interner: StrInterner,
-    pub(crate) const_interner: ConstInterner,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Context {
-            blocks: Arena::default(),
-            funcs: Arena::default(),
-            str_interner: StrInterner::default(),
-            const_interner: ConstInterner::default(),
-        }
-    }
-}
-
-impl Context {
-    pub(crate) fn name_for_reg(&mut self, name: Option<&str>, func_id: FuncId) -> String {
-        todo!()
-    }
 }
 
 pub struct Cursor {
@@ -197,7 +57,7 @@ impl Builder {
             ));
         }
 
-        let id = FuncId(ctx.funcs.alloc(Function {
+        let id = FuncId::new(ctx.funcs.alloc(Function {
             name: name_id,
             blocks: vec![],
             block_names: FxHashSet::default(),
@@ -229,7 +89,10 @@ impl ControlFlowGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{Type, Value};
+    use crate::{
+        instruction::Instruction,
+        value::{Type, Value},
+    };
 
     /// A context and a builder, which every test below needs.
     fn fixture() -> (Context, Builder) {
@@ -255,7 +118,7 @@ mod tests {
         cursor.add_unconditional_br(entry, &mut ctx);
 
         assert_eq!(
-            ctx.blocks.get(entry.0).unwrap().instructions.len(),
+            ctx.blocks.get(entry.raw()).unwrap().instructions.len(),
             1,
             "the cursor writes into the block it was opened at"
         );
@@ -275,7 +138,7 @@ mod tests {
         let a = builder.add_function("a".to_string(), &mut ctx).unwrap();
         let b = builder.add_function("b".to_string(), &mut ctx).unwrap();
 
-        assert_ne!(a.0, b.0);
+        assert_ne!(a.raw(), b.raw());
         assert_eq!(builder.module.functions.len(), 2);
         assert_eq!(ctx.funcs.len(), 2);
     }
@@ -315,15 +178,15 @@ mod tests {
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
 
-        assert!(ctx.blocks.get(entry.0).unwrap().is_first);
-        assert!(!ctx.blocks.get(body.0).unwrap().is_first);
+        assert!(ctx.blocks.get(entry.raw()).unwrap().is_first);
+        assert!(!ctx.blocks.get(body.raw()).unwrap().is_first);
 
         // A second function's first block is an entry too — `is_first` is per
         // function, not per module.
         let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
         let g_entry = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
-        assert!(ctx.blocks.get(g_entry.0).unwrap().is_first);
+        assert!(ctx.blocks.get(g_entry.raw()).unwrap().is_first);
     }
 
     /// A block records which function it belongs to, and the function records the
@@ -334,8 +197,8 @@ mod tests {
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
-        assert_eq!(ctx.blocks.get(entry.0).unwrap().func_id.0, f.0);
-        assert_eq!(ctx.funcs.get(f.0).unwrap().blocks, vec![entry]);
+        assert_eq!(ctx.blocks.get(entry.raw()).unwrap().func_id.raw(), f.raw());
+        assert_eq!(ctx.funcs.get(f.raw()).unwrap().blocks, vec![entry]);
     }
 
     /// Two blocks sharing a label would make a branch to it ambiguous.
@@ -356,7 +219,7 @@ mod tests {
         );
 
         assert_eq!(
-            ctx.funcs.get(f.0).unwrap().blocks.len(),
+            ctx.funcs.get(f.raw()).unwrap().blocks.len(),
             1,
             "the refused block must not have been added"
         );
@@ -376,8 +239,8 @@ mod tests {
 
         // The name interns once even so, which is the point of interning it.
         assert_eq!(
-            ctx.blocks.get(in_f.0).unwrap().name,
-            ctx.blocks.get(in_g.0).unwrap().name
+            ctx.blocks.get(in_f.raw()).unwrap().name,
+            ctx.blocks.get(in_g.raw()).unwrap().name
         );
     }
 
@@ -395,7 +258,7 @@ mod tests {
         cursor.add_unconditional_br(body, &mut ctx);
         cursor.add_unconditional_br(entry, &mut ctx);
 
-        let instrs = &ctx.blocks.get(entry.0).unwrap().instructions;
+        let instrs = &ctx.blocks.get(entry.raw()).unwrap().instructions;
 
         assert_eq!(instrs.len(), 2);
 
@@ -405,7 +268,7 @@ mod tests {
         );
 
         assert!(
-            ctx.blocks.get(body.0).unwrap().instructions.is_empty(),
+            ctx.blocks.get(body.raw()).unwrap().instructions.is_empty(),
             "the other block is untouched"
         );
     }
