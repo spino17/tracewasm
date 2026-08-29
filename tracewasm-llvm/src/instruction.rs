@@ -13,13 +13,17 @@ pub struct PhiInstruction {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PhiInstrId {
+pub struct PhiInstrHandler {
     pub(crate) index: usize,
     pub(crate) block: BasicBlockId,
 }
 
-impl PhiInstrId {
-    pub(crate) fn add_branch(
+impl PhiInstrHandler {
+    pub fn basic_block(&self) -> BasicBlockId {
+        self.block
+    }
+
+    pub fn add_branch(
         &self,
         branch: (BasicBlockId, Value),
         ctx: &mut Context,
@@ -98,7 +102,7 @@ impl Cursor {
         branches: &[(BasicBlockId, Value)],
         reg: &str,
         ctx: &mut Context,
-    ) -> Result<(PhiInstrId, Value), BuildError> {
+    ) -> Result<(PhiInstrHandler, Value), BuildError> {
         if branches.is_empty() {
             return Err(BuildError::PhiInstructionWithNoBranches);
         }

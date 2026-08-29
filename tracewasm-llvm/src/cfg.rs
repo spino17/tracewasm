@@ -1,7 +1,7 @@
 use crate::{
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
-    instruction::{Instruction, PhiInstrId, PhiInstruction},
+    instruction::{Instruction, PhiInstrHandler, PhiInstruction},
     interner::{ConstInterner, StrId, StrInterner},
 };
 use id_arena::{Arena, Id};
@@ -46,7 +46,7 @@ impl BasicBlockId {
         &self,
         instr: PhiInstruction,
         ctx: &mut Context,
-    ) -> Result<PhiInstrId, BuildError> {
+    ) -> Result<PhiInstrHandler, BuildError> {
         let block = ctx
             .blocks
             .get_mut(self.0)
@@ -64,7 +64,7 @@ impl BasicBlockId {
 
         block.phis.push(instr);
 
-        Ok(PhiInstrId {
+        Ok(PhiInstrHandler {
             index: id,
             block: *self,
         })
