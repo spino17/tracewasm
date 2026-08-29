@@ -16,7 +16,7 @@ pub struct Function {
     pub(crate) block_names: FxHashSet<StrId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FuncId(Id<Function>);
 
 impl Clone for FuncId {

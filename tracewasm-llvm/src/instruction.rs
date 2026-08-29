@@ -128,7 +128,7 @@ impl Cursor {
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
             .func_id;
 
-        let reg_name = ctx.name_for_reg(Some(reg), func_id);
+        let reg_name = ctx.name_for_reg(Some(reg), func_id)?;
         let val = Value::from_register(reg_name, ref_ty, &mut ctx.str_interner)?;
 
         Ok((phi_id, val))

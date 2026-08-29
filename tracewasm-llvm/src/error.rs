@@ -35,6 +35,17 @@ pub enum BuildError {
     /// first branch says — so with none there is no type to give it either.
     #[error("a phi instruction needs at least one branch")]
     PhiInstructionWithNoBranches,
+    /// A requested register name is not an LLVM identifier.
+    ///
+    /// Unquoted locals are `[-a-zA-Z$._][-a-zA-Z$._0-9]*`; anything else would have
+    /// to be quoted in the emitted IR. A leading digit is refused for a second
+    /// reason: `%0` is the *unnamed* form, so a numeric name would collide with the
+    /// numbering rather than merely need quoting.
+    #[error(
+        "`{0}` is not a valid register name: an LLVM local is \
+         `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, and may not begin with a digit"
+    )]
+    InvalidRegisterName(String),
 }
 
 impl From<TracewasmUtilsError> for BuildError {
