@@ -79,35 +79,33 @@ impl FuncRegNameIndex {
     }
 
     fn name_from_hint(&mut self, hint: Option<&str>) -> Result<String, BuildError> {
-        let name = if let Some(hint) = hint {
-            let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
-
-            if !re.is_match(hint) {
-                return Err(BuildError::InvalidRegisterName(hint.to_string()));
-            }
-
-            let final_name = loop {
-                let index = self.next_named_index(hint);
-
-                let name = if index == 0 {
-                    hint.to_string()
-                } else {
-                    format!("{}{}", hint, index)
-                };
-
-                if !self.issued_names.contains(&name) {
-                    break name;
-                }
-            };
-
-            final_name
-        } else {
-            self.next_unnamed_index().to_string()
+        let Some(hint) = hint else {
+            return Ok(self.next_unnamed_index().to_string());
         };
 
-        self.issued_names.insert(name.clone());
+        let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
 
-        Ok(name)
+        if !re.is_match(hint) {
+            return Err(BuildError::InvalidRegisterName(hint.to_string()));
+        }
+
+        let final_name = loop {
+            let index = self.next_named_index(hint);
+
+            let name = if index == 0 {
+                hint.to_string()
+            } else {
+                format!("{}{}", hint, index)
+            };
+
+            if !self.issued_names.contains(&name) {
+                break name;
+            }
+        };
+
+        self.issued_names.insert(final_name.clone());
+
+        Ok(final_name)
     }
 }
 

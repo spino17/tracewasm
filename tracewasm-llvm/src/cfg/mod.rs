@@ -301,14 +301,12 @@ mod tests {
     }
 
     // The rest of the phi surface runs through `Cursor::add_phi`, which calls
-    // `Value::ty` and `Context::name_for_reg` — both `todo!()` today, so these
-    // panic before reaching what they assert. They are written against the current
-    // signature so they start working the moment those two land.
+    // `Value::ty` — `todo!()` today, so these panic before reaching what they
+    // assert. They pass as soon as it returns the value's type.
 
     /// The entry block has no predecessors, so a phi there has nothing to choose
     /// between.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn a_phi_cannot_go_in_the_entry_block() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
@@ -330,7 +328,6 @@ mod tests {
     /// with the block, since an index alone would mean different phis in different
     /// blocks.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn phis_in_a_later_block_are_indexed_within_that_block() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
@@ -358,7 +355,6 @@ mod tests {
     /// The phi's own type comes from its first branch, and the value it hands back
     /// carries that type — that is what makes the result usable downstream.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn a_phi_yields_a_value_of_its_branches_type() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
@@ -369,12 +365,11 @@ mod tests {
 
         let (_, result) = cursor.add_phi(&[(entry, v)], "merged", &mut ctx).unwrap();
 
-        assert_eq!(result.ty(), Type::I32, "an i32 branch makes an i32 phi");
+        assert_eq!(result.ty(), &Type::I32, "an i32 branch makes an i32 phi");
     }
 
     /// A phi produces one value, so every incoming value has to have its type.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn phi_branches_must_all_share_the_phis_type() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
@@ -404,7 +399,6 @@ mod tests {
     /// Phis have to precede every other instruction in their block, so once one
     /// has been emitted the window has closed.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn a_phi_cannot_follow_an_instruction() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
@@ -430,7 +424,6 @@ mod tests {
     /// A phi names one value per *predecessor*, so the same predecessor twice is a
     /// bug in the caller — and it is a different bug from an entry-block phi.
     #[test]
-    #[ignore = "blocked on Value::ty and Context::name_for_reg"]
     fn a_phi_takes_each_predecessor_once() {
         let (mut ctx, mut builder) = fixture();
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();

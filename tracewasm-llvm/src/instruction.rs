@@ -38,10 +38,10 @@ impl PhiInstrHandler {
 
         let branch_ty = branch.1.ty();
 
-        if branch_ty != instr.ref_ty {
+        if branch_ty != &instr.ref_ty {
             return Err(BuildError::PhiInstructionBranchTypeMismatch(
                 instr.ref_ty.clone(),
-                branch_ty,
+                branch_ty.clone(),
             ));
         }
 

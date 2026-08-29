@@ -115,8 +115,8 @@ pub struct Value {
 }
 
 impl Value {
-    pub fn ty(&self) -> Type {
-        todo!()
+    pub fn ty(&self) -> &Type {
+        &self.ty
     }
 
     pub fn into_i1(self) -> Result<I1Value, BuildError> {
@@ -152,13 +152,13 @@ impl Value {
 
     pub fn from_register(
         name: String,
-        ty: Type,
+        ty: &Type,
         interner: &mut StrInterner,
     ) -> Result<Self, BuildError> {
         let reg_id: StrId = interner.intern(name)?.into();
 
         Ok(Value {
-            ty,
+            ty: ty.clone(),
             kind: ValueKind::Reg(Register { name: reg_id }),
         })
     }
