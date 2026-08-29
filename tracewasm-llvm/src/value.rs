@@ -168,6 +168,7 @@ pub enum ConstValue {
     I64(i64),
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
+    NullPtr,
 }
 
 /// Two constants are the same constant only if they are the same *variant* and the
@@ -235,6 +236,9 @@ impl PartialEq for ConstValue {
                 } else {
                     false
                 }
+            }
+            ConstValue::NullPtr => {
+                matches!(other, ConstValue::NullPtr)
             }
         }
     }
@@ -394,6 +398,27 @@ impl Const for f64 {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct NullPtr;
+
+impl Const for NullPtr {
+    fn ty() -> Type {
+        Type::Ptr
+    }
+
+    fn into_const(self) -> ConstValue {
+        ConstValue::NullPtr
+    }
+
+    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
+        if &NullPtr::ty() != ty {
+            return None;
+        }
+
+        Some(self.into_const())
+    }
+}
+
 pub struct I1Value {
     kind: ValueKind,
 }
@@ -485,6 +510,120 @@ mod tests {
             Value::from_const(300i32, Some(Type::I8), &mut interner).is_ok(),
             "so the builder accepts it too"
         );
+    }
+
+    /// `null` is a `ptr` constant, which is the type it has to report for a value
+    /// built from it to be usable where a pointer is expected.
+    #[test]
+    fn a_null_pointer_is_typed_ptr() {
+        let mut interner = ConstInterner::default();
+
+        assert_eq!(NullPtr::ty(), Type::Ptr);
+        assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
+
+        let value = Value::from_const(NullPtr, None, &mut interner).unwrap();
+
+        assert_eq!(value.ty, Type::Ptr);
+        assert_eq!(interner.values(), [ConstValue::NullPtr]);
+    }
+
+    /// The only cast a null admits is the one that changes nothing. Anything else
+    /// would need a real instruction — `ptrtoint` to reach an integer.
+    #[test]
+    fn a_null_pointer_casts_only_to_ptr() {
+        assert_eq!(NullPtr.try_cast(&Type::Ptr), Some(ConstValue::NullPtr));
+
+        for ty in [
+            Type::I1,
+            Type::I8,
+            Type::I32,
+            Type::I64,
+            Type::Float,
+            Type::Double,
+            Type::Void,
+            Type::Array {
+                size: 1,
+                element_ty: Box::new(Type::I8),
+            },
+        ] {
+            assert_eq!(
+                NullPtr.try_cast(&ty),
+                None,
+                "null must not cast to `{ty}` without an instruction"
+            );
+        }
+    }
+
+    /// And nothing casts *to* a pointer either: an integer would need `inttoptr`,
+    /// so accepting one here would fold away a conversion that has to be emitted.
+    #[test]
+    fn nothing_else_casts_to_a_pointer() {
+        assert_eq!(0i8.try_cast(&Type::Ptr), None);
+        assert_eq!(0i32.try_cast(&Type::Ptr), None);
+        assert_eq!(0i64.try_cast(&Type::Ptr), None);
+        assert_eq!(0.0f32.try_cast(&Type::Ptr), None);
+        assert_eq!(0.0f64.try_cast(&Type::Ptr), None);
+        assert_eq!(false.try_cast(&Type::Ptr), None);
+    }
+
+    /// A null and an integer zero are different constants — `ptr null` is not
+    /// `i64 0`, whatever the target's representation happens to be — so they must
+    /// not share a pool entry.
+    #[test]
+    fn a_null_pointer_is_not_an_integer_zero() {
+        let mut interner = ConstInterner::default();
+
+        let null = interner.intern(ConstValue::NullPtr).unwrap();
+        let zero_64 = interner.intern(ConstValue::I64(0)).unwrap();
+        let zero_32 = interner.intern(ConstValue::I32(0)).unwrap();
+        let zero_1 = interner.intern(ConstValue::I1(0)).unwrap();
+
+        assert_ne!(null, zero_64);
+        assert_ne!(null, zero_32);
+        assert_ne!(null, zero_1);
+        assert_eq!(interner.len(), 4, "four distinct constants");
+    }
+
+    /// Every null is the same null, so the pool holds one however many times it is
+    /// asked for — the unit variant has no payload to tell two apart by.
+    #[test]
+    fn every_null_pointer_is_the_same_constant() {
+        let mut interner = ConstInterner::default();
+
+        let first = Value::from_const(NullPtr, None, &mut interner).unwrap();
+        let again = Value::from_const(NullPtr, Some(Type::Ptr), &mut interner).unwrap();
+
+        assert_eq!(first.ty, Type::Ptr);
+        assert_eq!(again.ty, Type::Ptr);
+
+        assert_eq!(
+            interner.len(),
+            1,
+            "interning null twice, once through a cast, still costs one entry"
+        );
+
+        assert_eq!(
+            ConstValue::NullPtr,
+            ConstValue::NullPtr,
+            "null equals itself"
+        );
+    }
+
+    /// A refused cast has to say what it refused, and null is the one constant
+    /// whose source type has no payload to print.
+    #[test]
+    fn a_refused_null_cast_names_both_types() {
+        let mut interner = ConstInterner::default();
+
+        let err = Value::from_const(NullPtr, Some(Type::I64), &mut interner)
+            .err()
+            .expect("null does not cast to i64");
+
+        let msg = err.to_string();
+
+        assert!(msg.contains("ptr"), "missing the source type: {msg}");
+        assert!(msg.contains("i64"), "missing the target type: {msg}");
+        assert_eq!(interner.len(), 0, "a failed cast interns nothing");
     }
 
     /// Ints and floats are not interchangeable, in either direction — a real
