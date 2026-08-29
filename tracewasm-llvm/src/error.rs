@@ -46,6 +46,20 @@ pub enum BuildError {
          `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, and may not begin with a digit"
     )]
     InvalidRegisterName(String),
+    /// `load` and `store` address memory through a pointer, so the operand naming
+    /// the location has to be one. Reaching memory from an integer needs an
+    /// `inttoptr` first.
+    #[error("expected a `ptr` operand, but got one of type `{0}`")]
+    PointerOperandExpected(Type),
+    /// A `load` or `store` moves a value of a known size, so the type has to have
+    /// one. `void` and function types do not — everything else does, aggregates
+    /// included, so `load {i32, i32}` is fine.
+    #[error("a value of type `{0}` cannot be loaded or stored: it has no size")]
+    TypeNotLoadable(Type),
+    /// An explicit alignment must be a power of two. `0` is not one — leaving the
+    /// alignment off is how the ABI default is asked for.
+    #[error("alignment must be a power of two, but got `{0}`")]
+    AlignmentNotPowerOfTwo(u32),
 }
 
 impl From<TracewasmUtilsError> for BuildError {

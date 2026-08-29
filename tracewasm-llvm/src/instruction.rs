@@ -10,6 +10,7 @@ pub struct PhiInstruction {
     pub(crate) branches: Vec<(BasicBlockId, Value)>,
     pub(crate) blocks: FxHashSet<BasicBlockId>,
     ref_ty: Type,
+    value: Value,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +59,7 @@ impl PhiInstrHandler {
     }
 }
 
-pub enum Instruction {
+pub enum InstructionKind {
     UnconditionalBr {
         label: BasicBlockId,
     },
@@ -67,40 +68,55 @@ pub enum Instruction {
         true_label: BasicBlockId,
         false_label: BasicBlockId,
     },
-    Alloca,
+    Load {
+        ty: Type,
+        ptr: Value,
+        align: Option<u32>,
+    },
+}
+
+pub struct Instruction {
+    pub(crate) kind: InstructionKind,
+    /// The register this instruction defines, for the `%x =` an emitter writes in
+    /// front of it. `None` for the instructions that produce no value.
+    pub(crate) value: Option<Value>,
 }
 
 impl Cursor {
-    pub fn add_unconditional_br(&mut self, label: BasicBlockId, ctx: &mut Context) {
-        self.block
-            .add_instruction(Instruction::UnconditionalBr { label }, ctx);
+    pub fn add_unconditional_br(&self, label: BasicBlockId, ctx: &mut Context) {
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::UnconditionalBr { label },
+                value: None,
+            },
+            ctx,
+        );
     }
 
     pub fn add_conditional_br(
-        &mut self,
+        &self,
         cond: I1Value,
         true_label: BasicBlockId,
         false_label: BasicBlockId,
         ctx: &mut Context,
     ) {
         self.block.add_instruction(
-            Instruction::ConditionalBr {
-                cond,
-                true_label,
-                false_label,
+            Instruction {
+                kind: InstructionKind::ConditionalBr {
+                    cond,
+                    true_label,
+                    false_label,
+                },
+                value: None,
             },
             ctx,
         );
     }
 
-    pub fn add_alloca(&mut self, ctx: &mut Context) {
-        self.block.add_instruction(Instruction::Alloca, ctx);
-    }
-
     pub fn add_phi(
-        &mut self,
+        &self,
         branches: &[(BasicBlockId, Value)],
-        reg: &str,
+        reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<(PhiInstrHandler, Value), BuildError> {
         if branches.is_empty() {
@@ -109,11 +125,21 @@ impl Cursor {
 
         let ref_ty = branches[0].1.ty();
 
+        let func_id = ctx
+            .blocks
+            .get(self.block.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+            .func_id;
+
+        let reg_name = ctx.name_for_reg(reg, func_id)?;
+        let val = Value::from_register(reg_name, ref_ty.clone(), &mut ctx.str_interner)?;
+
         let phi_id = self.block.add_phi(
             PhiInstruction {
                 branches: vec![],
                 blocks: FxHashSet::default(),
                 ref_ty: ref_ty.clone(),
+                value: val.clone(),
             },
             ctx,
         )?;
@@ -122,15 +148,52 @@ impl Cursor {
             phi_id.add_branch((*branch, val.clone()), ctx)?;
         }
 
+        Ok((phi_id, val))
+    }
+
+    pub fn add_load(
+        &self,
+        ty: Type,
+        ptr: Value,
+        align: Option<u32>,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, BuildError> {
+        let ptr_ty = ptr.ty();
+
+        if !ptr_ty.is_ptr() {
+            return Err(BuildError::PointerOperandExpected(ptr_ty.clone()));
+        }
+
+        if !ty.is_first_class() {
+            return Err(BuildError::TypeNotLoadable(ty));
+        }
+
+        if let Some(align) = align
+            && !align.is_power_of_two()
+        {
+            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+        }
+
         let func_id = ctx
             .blocks
             .get(self.block.raw())
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
             .func_id;
 
-        let reg_name = ctx.name_for_reg(Some(reg), func_id)?;
-        let val = Value::from_register(reg_name, ref_ty, &mut ctx.str_interner)?;
+        let reg_name = ctx.name_for_reg(reg, func_id)?;
+        let val = Value::from_register(reg_name, ty.clone(), &mut ctx.str_interner)?;
 
-        Ok((phi_id, val))
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Load { ty, ptr, align },
+                value: Some(val.clone()),
+            },
+            ctx,
+        );
+
+        // let val = add_instr!(InstructionKind::Load { ty, ptr, align }, ty)
+
+        Ok(val)
     }
 }

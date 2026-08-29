@@ -90,8 +90,8 @@ impl ControlFlowGraph {
 mod tests {
     use super::*;
     use crate::{
-        instruction::Instruction,
-        value::{Type, Value},
+        instruction::InstructionKind,
+        value::{NullPtr, Type, Value},
     };
 
     /// A context and a builder, which every test below needs.
@@ -113,7 +113,7 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let func = builder.add_function("sum".to_string(), &mut ctx).unwrap();
         let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let mut cursor = builder.cursor_at_block(entry);
+        let cursor = builder.cursor_at_block(entry);
 
         cursor.add_unconditional_br(entry, &mut ctx);
 
@@ -253,7 +253,7 @@ mod tests {
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
-        let mut cursor = builder.cursor_at_block(entry);
+        let cursor = builder.cursor_at_block(entry);
 
         cursor.add_unconditional_br(body, &mut ctx);
         cursor.add_unconditional_br(entry, &mut ctx);
@@ -263,8 +263,16 @@ mod tests {
         assert_eq!(instrs.len(), 2);
 
         assert!(
-            matches!(instrs[0], Instruction::UnconditionalBr { label } if label == body),
+            matches!(
+                instrs[0].kind,
+                InstructionKind::UnconditionalBr { label } if label == body
+            ),
             "the first instruction is the one added first"
+        );
+
+        assert!(
+            instrs.iter().all(|i| i.value.is_none()),
+            "a branch produces no value, so it defines no register"
         );
 
         assert!(
@@ -286,10 +294,10 @@ mod tests {
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
         let _entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .add_phi(&[], "result", &mut ctx)
+            .add_phi(&[], Some("result"), &mut ctx)
             .expect_err("a phi with no branches has no value and no type");
 
         assert!(matches!(err, BuildError::PhiInstructionWithNoBranches));
@@ -312,10 +320,10 @@ mod tests {
         let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
-        let mut cursor = builder.cursor_at_block(entry);
+        let cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .add_phi(&[(entry, v)], "result", &mut ctx)
+            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("no predecessors to choose between");
 
         assert!(matches!(
@@ -335,18 +343,18 @@ mod tests {
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let tail = f.add_basic_block("tail".to_string(), &mut ctx).unwrap();
         let (v1, v2, v3) = (value(1, &mut ctx), value(2, &mut ctx), value(3, &mut ctx));
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
-        let (first, _) = cursor.add_phi(&[(entry, v1)], "a", &mut ctx).unwrap();
-        let (second, _) = cursor.add_phi(&[(entry, v2)], "b", &mut ctx).unwrap();
+        let (first, _) = cursor.add_phi(&[(entry, v1)], Some("a"), &mut ctx).unwrap();
+        let (second, _) = cursor.add_phi(&[(entry, v2)], Some("b"), &mut ctx).unwrap();
 
         assert_eq!((first.index, first.block), (0, body));
         assert_eq!((second.index, second.block), (1, body));
 
         // A different block starts its own numbering, which is why the id has to
         // carry the block to be unambiguous.
-        let mut cursor = builder.cursor_at_block(tail);
-        let (elsewhere, _) = cursor.add_phi(&[(entry, v3)], "c", &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(tail);
+        let (elsewhere, _) = cursor.add_phi(&[(entry, v3)], Some("c"), &mut ctx).unwrap();
 
         assert_eq!((elsewhere.index, elsewhere.block), (0, tail));
         assert_ne!(elsewhere.block, first.block);
@@ -361,9 +369,11 @@ mod tests {
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
-        let (_, result) = cursor.add_phi(&[(entry, v)], "merged", &mut ctx).unwrap();
+        let (_, result) = cursor
+            .add_phi(&[(entry, v)], Some("merged"), &mut ctx)
+            .unwrap();
 
         assert_eq!(result.ty(), &Type::I32, "an i32 branch makes an i32 phi");
     }
@@ -380,10 +390,14 @@ mod tests {
         let an_i32 = value(1, &mut ctx);
         let an_i64 = Value::from_const(1i64, None, &mut ctx.const_interner).unwrap();
 
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .add_phi(&[(entry, an_i32), (other, an_i64)], "merged", &mut ctx)
+            .add_phi(
+                &[(entry, an_i32), (other, an_i64)],
+                Some("merged"),
+                &mut ctx,
+            )
             .expect_err("the second branch is an i64");
 
         assert!(
@@ -405,12 +419,12 @@ mod tests {
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
         cursor.add_unconditional_br(body, &mut ctx);
 
         let err = cursor
-            .add_phi(&[(entry, v)], "result", &mut ctx)
+            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("the block already has an instruction");
 
         assert!(matches!(err, BuildError::PhiInstructionAddError));
@@ -431,10 +445,10 @@ mod tests {
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let (v1, v2, v3) = (value(1, &mut ctx), value(2, &mut ctx), value(3, &mut ctx));
-        let mut cursor = builder.cursor_at_block(body);
+        let cursor = builder.cursor_at_block(body);
 
         let (phi, _) = cursor
-            .add_phi(&[(entry, v1), (other, v2)], "merged", &mut ctx)
+            .add_phi(&[(entry, v1), (other, v2)], Some("merged"), &mut ctx)
             .unwrap();
 
         let err = phi
@@ -452,6 +466,166 @@ mod tests {
 
         assert_eq!(stored.branches.len(), 2);
         assert_eq!(stored.blocks.len(), 2);
+    }
+
+    // ---- load -------------------------------------------------------------
+
+    /// A block with a pointer-typed value in hand, which every load test needs.
+    fn block_with_ptr(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value) {
+        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
+        let ptr = Value::from_const(NullPtr, None, &mut ctx.const_interner).unwrap();
+
+        (builder.cursor_at_block(entry), ptr)
+    }
+
+    /// A load yields a value of the type it *loaded*, not of the pointer it read
+    /// through — `%x = load i32, ptr %p` defines an `i32`.
+    #[test]
+    fn a_load_yields_a_value_of_the_loaded_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        let loaded = cursor
+            .add_load(Type::I32, ptr, None, Some("x"), &mut ctx)
+            .expect("loading an i32 through a ptr is fine");
+
+        assert_eq!(loaded.ty(), &Type::I32);
+    }
+
+    /// The instruction records the register it defines, which is what an emitter
+    /// writes in front of it.
+    #[test]
+    fn a_load_records_the_register_it_defines() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        cursor
+            .add_load(Type::I64, ptr, None, Some("x"), &mut ctx)
+            .unwrap();
+
+        let block = ctx.blocks.get(cursor.block.raw()).unwrap();
+
+        assert_eq!(block.instructions.len(), 1);
+        assert!(
+            block.instructions[0].value.is_some(),
+            "a load produces a value, so it defines a register"
+        );
+    }
+
+    /// Memory is addressed through a pointer. Reaching it from an integer needs an
+    /// `inttoptr` first, so a non-pointer operand is refused rather than folded.
+    #[test]
+    fn a_load_needs_a_pointer_operand() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+        let not_a_ptr = value(7, &mut ctx);
+
+        let err = cursor
+            .add_load(Type::I32, not_a_ptr, None, Some("x"), &mut ctx)
+            .expect_err("an i32 is not an address");
+
+        assert!(
+            matches!(&err, BuildError::PointerOperandExpected(t) if *t == Type::I32),
+            "the error must name the offending type, got: {err}"
+        );
+
+        assert!(
+            ctx.blocks.get(entry.raw()).unwrap().instructions.is_empty(),
+            "the refused load must not have been added"
+        );
+    }
+
+    /// `void` has no size, so there is nothing to load. `llvm-as` rejects it with
+    /// "void type only allowed for function results".
+    #[test]
+    fn only_sized_types_can_be_loaded() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        // `Type::Func` is the other unsized case; it is covered in `value.rs`,
+        // where a `FuncSignature` can be built.
+        let err = cursor
+            .add_load(Type::Void, ptr, None, None, &mut ctx)
+            .expect_err("`void` has no size");
+
+        assert!(
+            matches!(&err, BuildError::TypeNotLoadable(t) if *t == Type::Void),
+            "expected a not-loadable error, got: {err}"
+        );
+    }
+
+    /// Aggregates are loadable even though LLVM does not call them "first class" —
+    /// `load {i32, i32}` and `load [4 x i32]` both assemble.
+    #[test]
+    fn aggregates_can_be_loaded() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        for ty in [
+            Type::Struct {
+                fields: vec![Type::I32, Type::I32],
+                packed: false,
+            },
+            Type::Array {
+                size: 4,
+                element_ty: Box::new(Type::I32),
+            },
+            Type::Ptr,
+            Type::Double,
+        ] {
+            assert!(
+                cursor
+                    .add_load(ty.clone(), ptr.clone(), None, None, &mut ctx)
+                    .is_ok(),
+                "`{ty}` is loadable"
+            );
+        }
+    }
+
+    /// An explicit alignment must be a power of two. The cases below are the ones
+    /// `llvm-as` accepts and rejects — note `1` is valid (it is `2^0`) and `0` is
+    /// not, which an even-number test gets backwards in both directions.
+    #[test]
+    fn an_explicit_alignment_must_be_a_power_of_two() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        for align in [1, 2, 4, 8, 16, 4096] {
+            assert!(
+                cursor
+                    .add_load(Type::I32, ptr.clone(), Some(align), None, &mut ctx)
+                    .is_ok(),
+                "align {align} is a power of two"
+            );
+        }
+
+        for align in [0, 3, 6, 10, 12] {
+            let err = cursor
+                .add_load(Type::I32, ptr.clone(), Some(align), None, &mut ctx)
+                .expect_err("not a power of two");
+
+            assert!(
+                matches!(&err, BuildError::AlignmentNotPowerOfTwo(a) if *a == align),
+                "expected an alignment error for {align}, got: {err}"
+            );
+        }
+    }
+
+    /// Omitting the alignment is how the ABI default is asked for, and is always
+    /// allowed.
+    #[test]
+    fn an_omitted_alignment_is_allowed() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        assert!(
+            cursor
+                .add_load(Type::I32, ptr, None, None, &mut ctx)
+                .is_ok()
+        );
     }
 
     // ---- ids across contexts --------------------------------------------
@@ -474,7 +648,7 @@ mod tests {
 
         // `entry` indexes `ctx_a`'s block arena, so reaching for it in `ctx_b` must
         // not land on whatever block sits at the same position there.
-        let mut cursor = builder_a.cursor_at_block(entry);
+        let cursor = builder_a.cursor_at_block(entry);
 
         cursor.add_unconditional_br(entry, &mut ctx_b);
     }

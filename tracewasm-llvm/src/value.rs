@@ -97,8 +97,16 @@ impl Debug for Type {
 }
 
 impl Type {
-    fn is_i1(&self) -> bool {
+    pub fn is_i1(&self) -> bool {
         matches!(self, Type::I1)
+    }
+
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Type::Ptr)
+    }
+
+    pub fn is_first_class(&self) -> bool {
+        !matches!(self, Type::Void | Type::Func(_))
     }
 }
 
@@ -152,13 +160,13 @@ impl Value {
 
     pub fn from_register(
         name: String,
-        ty: &Type,
+        ty: Type,
         interner: &mut StrInterner,
     ) -> Result<Self, BuildError> {
         let reg_id: StrId = interner.intern(name)?.into();
 
         Ok(Value {
-            ty: ty.clone(),
+            ty,
             kind: ValueKind::Reg(Register { name: reg_id }),
         })
     }
@@ -909,6 +917,36 @@ mod tests {
             format!("{:?}", Type::Func(func(vec![Type::Double], Type::I64))),
             "i64 (double)"
         );
+    }
+
+    /// What `load` and `store` will accept: everything with a size. LLVM calls
+    /// only scalars "first class", but both instructions take aggregates too, so
+    /// the set this predicate names is the loadable one — `void` and function
+    /// types out, everything else in.
+    #[test]
+    fn only_void_and_function_types_are_unsized() {
+        assert!(!Type::Void.is_first_class());
+        assert!(!Type::Func(func(vec![Type::I32], Type::I32)).is_first_class());
+
+        for ty in [
+            Type::I1,
+            Type::I8,
+            Type::I64,
+            Type::Half,
+            Type::Float,
+            Type::Double,
+            Type::Ptr,
+            Type::Array {
+                size: 4,
+                element_ty: Box::new(Type::I32),
+            },
+            Type::Struct {
+                fields: vec![Type::I32, Type::Ptr],
+                packed: false,
+            },
+        ] {
+            assert!(ty.is_first_class(), "`{ty}` has a size and can be loaded");
+        }
     }
 
     /// Type rendering is what error messages and (later) emitted IR are built from,
