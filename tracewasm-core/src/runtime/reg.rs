@@ -314,7 +314,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        instruction::register::{MAX_MEMORY_OFFSETS, MemoryOffset, arena::Arena},
+        instruction::register::{MemoryOffset, arena::Arena},
         module::ValType,
         runtime::value::Val,
     };

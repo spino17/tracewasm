@@ -185,7 +185,12 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
-use std::{collections::hash_map::Entry, vec};
+use std::{
+    collections::hash_map::Entry,
+    hash::{Hash, Hasher},
+    mem::discriminant,
+    vec,
+};
 use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
@@ -262,12 +267,10 @@ enum BlockVariant {
 /// Identity is by **variant and bit pattern**, not by numeric equality — see the
 /// hand-written [`PartialEq`] below for why that is not merely pedantic.
 ///
-/// The float arms hold `OrderedFloat` because `f32`/`f64` are not `Hash`, and the
-/// derived `Hash` uses its canonicalising implementation. That is sound but not
-/// exact: it hashes `-0.0` as `+0.0` and every NaN alike, so those pairs collide.
-/// They are unequal, so the map separates them on comparison; the collision costs
-/// one extra comparison and nothing else.
-#[derive(Debug, Clone, Copy, Hash)]
+/// The float arms hold `OrderedFloat` only because `f32`/`f64` are not `Ord`; its
+/// own `Hash` is not used, since it canonicalises `-0.0` to `+0.0` and every NaN
+/// alike — see the hand-written [`Hash`] below.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
@@ -350,6 +353,27 @@ impl PartialEq for Const {
 }
 
 impl Eq for Const {}
+
+/// Hashes the same thing [`PartialEq`] compares: the variant, then the bits.
+///
+/// Written out because the derive would hash the float arms through
+/// `OrderedFloat`, which canonicalises — `-0.0` would land in `+0.0`'s bucket and
+/// every NaN in one. That is *sound* against a bit-comparing `PartialEq`, since
+/// unequal values may share a hash, but it puts values the pool deliberately keeps
+/// apart into the same bucket. Hashing the bits keeps them apart there too.
+impl Hash for Const {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        discriminant(self).hash(state);
+
+        match self {
+            Const::I32(v) => v.hash(state),
+            Const::I64(v) => v.hash(state),
+            Const::F32(v) => v.into_inner().to_bits().hash(state),
+            Const::F64(v) => v.into_inner().to_bits().hash(state),
+            Const::Ref(v) => v.hash(state),
+        }
+    }
+}
 
 impl Const {
     /// The value as it appears in a rendered instruction.
@@ -955,7 +979,9 @@ impl SimulatedStack {
         self.curr_register_index += 1;
 
         if self.curr_register_index > self.max_registers as usize {
-            if self.max_registers >= MAX_REGISTER_SLOTS {
+            // Widened for the same reason as `SpillArena::reserve_slot`: the cap
+            // is at `u16::MAX`, so a same-width `>=` is an equality in disguise.
+            if self.max_registers as u32 >= MAX_REGISTER_SLOTS as u32 {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
                     needed: self.max_registers as u32 + 1,

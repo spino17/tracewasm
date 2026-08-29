@@ -30,7 +30,7 @@ impl BasicBlockId {
 
 impl Clone for BasicBlockId {
     fn clone(&self) -> Self {
-        BasicBlockId(self.0)
+        *self
     }
 }
 

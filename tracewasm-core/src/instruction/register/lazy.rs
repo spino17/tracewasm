@@ -285,7 +285,10 @@ impl SpillArena {
             return Ok(SpillIndex(self.free_slots.pop().unwrap()));
         }
 
-        if self.allocation_len >= MAX_SPILLS {
+        // Widened because `MAX_SPILLS` sits at `u16::MAX`: at that width the
+        // comparison could only ever be an equality, and writing it as one would
+        // stop catching anything the moment the cap were lowered.
+        if self.allocation_len as u32 >= MAX_SPILLS as u32 {
             return Err(TraceWasmError::RegisterFrameTooLarge {
                 what: "spill slots",
                 needed: self.allocation_len as u32 + 1,

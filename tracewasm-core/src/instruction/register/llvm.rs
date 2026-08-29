@@ -26,9 +26,9 @@ impl Emitter for RegInstructionEmitter {
         let func = builder.add_function(ctx.func_name.to_string(), &mut context)?;
         let entry = func.add_basic_block("entry".to_string(), &mut context)?;
 
-        let cursor = builder.cursor_at_block(entry);
+        let _cursor = builder.cursor_at_block(entry);
 
-        for instr in stream {}
+        for _instr in stream {}
 
         Ok(builder.build())
     }

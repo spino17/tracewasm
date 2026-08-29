@@ -11,24 +11,13 @@ use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 
+#[derive(Default)]
 pub struct Context {
     pub(crate) blocks: Arena<BasicBlock>,
     pub(crate) funcs: Arena<Function>,
     pub(crate) str_interner: StrInterner,
     pub(crate) const_interner: ConstInterner,
     reg_name_assigner: FxHashMap<FuncId, FuncRegNameIndex>,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Context {
-            blocks: Arena::default(),
-            funcs: Arena::default(),
-            str_interner: StrInterner::default(),
-            const_interner: ConstInterner::default(),
-            reg_name_assigner: FxHashMap::default(),
-        }
-    }
 }
 
 impl Context {
@@ -112,7 +101,7 @@ impl FuncRegNameIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::Builder;
+    use crate::{cfg::Builder, test_support::fixture, value::Type};
 
     /// A context, a builder, and two functions to scope names against.
     fn two_functions() -> (Context, FuncId, FuncId) {
@@ -267,5 +256,49 @@ mod tests {
                 "`{hint}` is a legal identifier and is unused, so it comes back as-is"
             );
         }
+    }
+
+    /// A `Context` owns the arenas an id indexes, so an id from another one is not
+    /// silently written into the wrong block — `id_arena` catches it.
+    #[test]
+    #[should_panic(expected = "valid id are never constructed")]
+    fn an_id_from_another_context_panics_rather_than_writing_elsewhere() {
+        // A builder per context: a builder's duplicate-name set holds `StrId`s,
+        // which only mean anything against the context they were interned in.
+        let (mut ctx_a, mut builder_a) = fixture();
+        let (mut ctx_b, mut builder_b) = fixture();
+
+        let f = builder_a.add_function("f".to_string(), &mut ctx_a).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx_a).unwrap();
+        let g = builder_b.add_function("g".to_string(), &mut ctx_b).unwrap();
+
+        g.add_basic_block("entry".to_string(), &mut ctx_b).unwrap();
+
+        // `entry` indexes `ctx_a`'s block arena, so reaching for it in `ctx_b` must
+        // not land on whatever block sits at the same position there.
+        let cursor = builder_a.cursor_at_block(entry);
+
+        cursor.add_unconditional_br(entry, &mut ctx_b);
+    }
+
+    /// The string pool is shared across the whole context, so a name used by both
+    /// a function and a block costs one entry.
+    #[test]
+    fn names_are_interned_once_across_the_context() {
+        let (mut ctx, mut builder) = fixture();
+
+        let f = builder
+            .add_function("shared".to_string(), &mut ctx)
+            .unwrap();
+
+        f.add_basic_block("shared".to_string(), &mut ctx).unwrap();
+
+        assert_eq!(
+            ctx.str_interner.len(),
+            1,
+            "the function and the block share one pooled name"
+        );
+
+        let _ = Type::I1;
     }
 }

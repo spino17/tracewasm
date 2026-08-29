@@ -21,7 +21,7 @@ pub struct FuncId(Id<Function>);
 
 impl Clone for FuncId {
     fn clone(&self) -> Self {
-        FuncId(self.0)
+        *self
     }
 }
 
@@ -73,5 +73,85 @@ impl FuncId {
         func.block_names.insert(name_id);
 
         Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{error::BuildError, test_support::fixture};
+
+    /// `is_first` marks the entry block, which is the one a phi cannot go in. Only
+    /// the first block added to a function is it.
+    #[test]
+    fn only_the_first_block_of_a_function_is_the_entry() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+
+        assert!(ctx.blocks.get(entry.raw()).unwrap().is_first);
+        assert!(!ctx.blocks.get(body.raw()).unwrap().is_first);
+
+        // A second function's first block is an entry too — `is_first` is per
+        // function, not per module.
+        let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
+        let g_entry = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        assert!(ctx.blocks.get(g_entry.raw()).unwrap().is_first);
+    }
+
+    /// A block records which function it belongs to, and the function records the
+    /// block — the two have to agree or a later walk of the graph goes wrong.
+    #[test]
+    fn a_block_and_its_function_agree() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        assert_eq!(ctx.blocks.get(entry.raw()).unwrap().func_id.raw(), f.raw());
+        assert_eq!(ctx.funcs.get(f.raw()).unwrap().blocks, vec![entry]);
+    }
+
+    /// Two blocks sharing a label would make a branch to it ambiguous.
+    #[test]
+    fn a_duplicate_block_name_in_one_function_is_refused() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+
+        f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        let err = f
+            .add_basic_block("entry".to_string(), &mut ctx)
+            .expect_err("the name is taken in this function");
+
+        assert!(
+            matches!(&err, BuildError::DuplicateBasicBlockName(name) if name == "entry"),
+            "the error must name the collision, got: {err}"
+        );
+
+        assert_eq!(
+            ctx.funcs.get(f.raw()).unwrap().blocks.len(),
+            1,
+            "the refused block must not have been added"
+        );
+    }
+
+    /// The check is per function: an `entry` block in every function is the normal
+    /// case, so scoping it to the module would reject almost every real program.
+    #[test]
+    fn the_same_block_name_in_another_function_is_fine() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
+        let in_f = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let in_g = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        assert_ne!(in_f, in_g, "distinct blocks");
+
+        // The name interns once even so, which is the point of interning it.
+        assert_eq!(
+            ctx.blocks.get(in_f.raw()).unwrap().name,
+            ctx.blocks.get(in_g.raw()).unwrap().name
+        );
     }
 }

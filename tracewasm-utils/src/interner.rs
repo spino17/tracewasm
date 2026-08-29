@@ -1,8 +1,12 @@
 use crate::error::TracewasmUtilsError;
 use rustc_hash::FxHashMap;
-use std::{fmt::Debug, hash::Hash, marker::PhantomData};
+use std::{
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+};
 
-#[derive(Debug, Hash)]
+#[derive(Debug)]
 pub struct InternedId<T, C>(C, PhantomData<T>);
 
 impl<T, C: Capacity> InternedId<T, C> {
@@ -10,6 +14,10 @@ impl<T, C: Capacity> InternedId<T, C> {
         self.0
     }
 }
+
+// All four of these are written out rather than derived, because a derive would
+// bound them on `T` — the marker type, which is never inspected and need not be
+// `PartialEq` or `Hash` itself.
 
 impl<T, C: Capacity> PartialEq for InternedId<T, C> {
     fn eq(&self, other: &Self) -> bool {
@@ -19,9 +27,18 @@ impl<T, C: Capacity> PartialEq for InternedId<T, C> {
 
 impl<T, C: Capacity> Eq for InternedId<T, C> {}
 
+/// Hashes the position alone, matching what [`PartialEq`] compares. Derived, the
+/// two would still agree — `PhantomData` hashes nothing — but only by accident of
+/// the field order.
+impl<T, C: Capacity> Hash for InternedId<T, C> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
 impl<T, C: Capacity> Clone for InternedId<T, C> {
     fn clone(&self) -> Self {
-        InternedId(self.0, PhantomData)
+        *self
     }
 }
 
@@ -128,6 +145,11 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
 
     pub fn len(&self) -> usize {
         self.values.len()
+    }
+
+    /// Whether anything has been interned yet.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 
     pub fn into_values(self) -> Vec<T> {

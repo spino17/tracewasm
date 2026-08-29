@@ -3,7 +3,11 @@ use crate::{
     interner::{ConstId, ConstInterner, StrId, StrInterner},
 };
 use ordered_float::OrderedFloat;
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    mem::discriminant,
+};
 
 #[derive(PartialEq, Eq, Clone)]
 pub struct FuncSignature {
@@ -182,12 +186,10 @@ pub struct Register {
 /// Identity is by **variant and bit pattern**, not by numeric equality — see the
 /// hand-written [`PartialEq`] below for why that is not merely pedantic.
 ///
-/// The float arms hold `OrderedFloat` because `f32`/`f64` are not `Hash`, and the
-/// derived `Hash` uses its canonicalising implementation. That is sound but not
-/// exact: it hashes `-0.0` as `+0.0` and every NaN alike, so those pairs collide.
-/// They are unequal, so the map separates them on comparison; the collision costs
-/// one extra comparison and nothing else.
-#[derive(Clone, Copy, Hash, Debug)]
+/// The float arms hold `OrderedFloat` only because `f32`/`f64` are not `Ord`; its
+/// own `Hash` is not used, since it canonicalises `-0.0` to `+0.0` and every NaN
+/// alike — see the hand-written [`Hash`] below.
+#[derive(Clone, Copy, Debug)]
 pub enum ConstValue {
     I1(i8),
     I8(i8),
@@ -273,6 +275,29 @@ impl PartialEq for ConstValue {
 }
 
 impl Eq for ConstValue {}
+
+/// Hashes the same thing [`PartialEq`] compares: the variant, then the bits.
+///
+/// Written out because the derive would hash the float arms through
+/// `OrderedFloat`, which canonicalises — `-0.0` would land in `+0.0`'s bucket and
+/// every NaN in one. That is *sound* against a bit-comparing `PartialEq`, since
+/// unequal values may share a hash, but it puts values the pool deliberately keeps
+/// apart into the same bucket. Hashing the bits keeps them apart there too.
+impl Hash for ConstValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        discriminant(self).hash(state);
+
+        match self {
+            ConstValue::I1(v) | ConstValue::I8(v) => v.hash(state),
+            ConstValue::I16(v) => v.hash(state),
+            ConstValue::I32(v) => v.hash(state),
+            ConstValue::I64(v) => v.hash(state),
+            ConstValue::Float(v) => v.into_inner().to_bits().hash(state),
+            ConstValue::Double(v) => v.into_inner().to_bits().hash(state),
+            ConstValue::NullPtr => {}
+        }
+    }
+}
 
 pub trait Const {
     fn ty() -> Type;
@@ -447,6 +472,7 @@ impl Const for NullPtr {
     }
 }
 
+#[derive(Debug)]
 pub struct I1Value {
     kind: ValueKind,
 }
@@ -474,11 +500,11 @@ mod tests {
         let d = Value::from_const(true, Some(Type::I1), &mut interner);
         let e = Value::from_const(false, Some(Type::I32), &mut interner);
 
-        assert_eq!(a.is_ok(), true);
-        assert_eq!(b.is_err(), true);
-        assert_eq!(c.is_ok(), true);
-        assert_eq!(d.is_ok(), true);
-        assert_eq!(e.is_err(), true);
+        assert!(a.is_ok());
+        assert!(b.is_err());
+        assert!(c.is_ok());
+        assert!(d.is_ok());
+        assert!(e.is_err());
     }
 
     /// The type a value reports is the one it was cast *to*, not the one the Rust
@@ -644,8 +670,7 @@ mod tests {
         let mut interner = ConstInterner::default();
 
         let err = Value::from_const(NullPtr, Some(Type::I64), &mut interner)
-            .err()
-            .expect("null does not cast to i64");
+            .expect_err("null does not cast to i64");
 
         let msg = err.to_string();
 
@@ -689,8 +714,7 @@ mod tests {
         let mut interner = ConstInterner::default();
 
         let err = Value::from_const(1.0f64, Some(Type::I32), &mut interner)
-            .err()
-            .expect("f64 does not cast to i32");
+            .expect_err("f64 does not cast to i32");
 
         let msg = err.to_string();
 
@@ -710,7 +734,7 @@ mod tests {
         assert!(ok.into_i1().is_ok());
 
         let not_i1 = Value::from_const(1i32, None, &mut interner).unwrap();
-        let err = not_i1.into_i1().err().expect("i32 is not i1");
+        let err = not_i1.into_i1().expect_err("i32 is not i1");
 
         assert!(
             err.to_string().contains("i32"),

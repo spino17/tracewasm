@@ -5,3 +5,6 @@ pub mod error;
 pub mod instruction;
 pub mod interner;
 pub mod value;
+
+#[cfg(test)]
+mod test_support;
