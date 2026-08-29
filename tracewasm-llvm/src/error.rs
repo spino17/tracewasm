@@ -24,6 +24,17 @@ pub enum BuildError {
     /// label a branch names would be ambiguous.
     #[error("a basic block named `{0}` already exists in this function")]
     DuplicateBasicBlockName(String),
+    /// A phi is typed once and every incoming value has to have that type — the
+    /// instruction produces one value, so there is nothing for a second type to be.
+    ///
+    /// Fields: the type the phi was established with, and the one this branch
+    /// brought.
+    #[error("phi branch has type `{1}`, but the phi's type is `{0}`")]
+    PhiInstructionBranchTypeMismatch(Type, Type),
+    /// A phi with no incoming values selects nothing, and its type is whatever its
+    /// first branch says — so with none there is no type to give it either.
+    #[error("a phi instruction needs at least one branch")]
+    PhiInstructionWithNoBranches,
 }
 
 impl From<TracewasmUtilsError> for BuildError {

@@ -1,17 +1,17 @@
 use crate::{
     error::BuildError,
-    interner::{ConstId, ConstInterner, StrId},
+    interner::{ConstId, ConstInterner, StrId, StrInterner},
 };
 use ordered_float::OrderedFloat;
 use std::fmt::{Debug, Display};
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct FuncSignature {
     params: Vec<Type>,
     result: Box<Type>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub enum Type {
     I1,
     I8,
@@ -102,17 +102,23 @@ impl Type {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum ValueKind {
     Reg(Register),
     Const(ConstId),
 }
 
+#[derive(Debug, Clone)]
 pub struct Value {
     ty: Type,
     kind: ValueKind,
 }
 
 impl Value {
+    pub fn ty(&self) -> Type {
+        todo!()
+    }
+
     pub fn into_i1(self) -> Result<I1Value, BuildError> {
         if !self.ty.is_i1() {
             return Err(BuildError::ValueToI1ValueFailed(self.ty.to_string()));
@@ -143,8 +149,22 @@ impl Value {
             kind: ValueKind::Const(const_id.into()),
         })
     }
+
+    pub fn from_register(
+        name: String,
+        ty: Type,
+        interner: &mut StrInterner,
+    ) -> Result<Self, BuildError> {
+        let reg_id: StrId = interner.intern(name)?.into();
+
+        Ok(Value {
+            ty,
+            kind: ValueKind::Reg(Register { name: reg_id }),
+        })
+    }
 }
 
+#[derive(Debug, Clone)]
 pub struct Register {
     name: StrId,
 }
