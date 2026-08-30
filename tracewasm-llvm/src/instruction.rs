@@ -78,6 +78,11 @@ pub enum InstructionKind {
         ptr: Value,
         align: Option<u32>,
     },
+    Alloca {
+        ty: Type,
+        num_elements: Option<u32>,
+        align: Option<u32>,
+    },
 }
 
 pub struct Instruction {
@@ -244,7 +249,41 @@ impl Cursor {
             value
         };
 
-        // TODO: check ptr is actually pointer to the type as the value
+        let ptr_reg_name_id = match ptr.kind() {
+            ValueKind::Reg(ptr_reg) => ptr_reg.name,
+            ValueKind::Const(_) => {
+                todo!() // RAISE ERROR: null ptr passed!
+            }
+        };
+
+        let block = ctx
+            .blocks
+            .get(self.block.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+
+        let func_id = block.func_id;
+
+        let ptr_instr_index = *ctx
+            .register_def_instr_index
+            .get(&func_id)
+            .expect("this entry should exist for the func_id")
+            .get(&ptr_reg_name_id)
+            .expect("this entry should already be inserted when this ptr register was defined");
+
+        let InstructionKind::Alloca {
+            ty: ptr_ty,
+            num_elements: _,
+            align: _,
+        } = &block.instructions[ptr_instr_index].kind
+        else {
+            unreachable!(
+                "hitting this means the logic of tracking definition of registers is incorrect"
+            )
+        };
+
+        if ptr_ty != final_value.ty() {
+            todo!() // RAISE ERROR: the value type does not match with the type ptr points to!
+        }
 
         self.block.add_instruction(
             Instruction {
@@ -259,6 +298,17 @@ impl Cursor {
         );
 
         Ok(())
+    }
+
+    pub fn add_alloca(
+        &self,
+        ty: Type,
+        num_elements: Option<Value>,
+        align: Option<u32>,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, BuildError> {
+        todo!()
     }
 }
 
@@ -278,13 +328,23 @@ fn add_instruction_to_block_and_get_value(
     let reg_name = ctx.name_for_reg(reg, func_id)?;
     let val = Value::from_register(reg_name, result_ty, &mut ctx.str_interner)?;
 
-    block.add_instruction(
+    let ValueKind::Reg(reg) = val.kind() else {
+        unreachable!("value is made out of register name just above")
+    };
+
+    let reg_name_id = reg.name;
+
+    let instr_index = block.add_instruction(
         Instruction {
             kind,
             value: Some(val.clone()),
         },
         ctx,
     );
+
+    let register_def_index = ctx.register_def_instr_index.entry(func_id).or_default();
+
+    register_def_index.insert(reg_name_id, instr_index);
 
     Ok(val)
 }

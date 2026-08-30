@@ -184,9 +184,17 @@ impl Value {
     }
 }
 
+pub enum ConstExpr {
+    GetElementPtr {},
+    PtrToInt {},
+    IntToPtr {},
+    BitCast {},
+    Trunc {},
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Register {
-    name: StrId,
+    pub(crate) name: StrId,
 }
 
 /// A constant the module uses, interned into a per-context pool.
@@ -219,7 +227,13 @@ impl ConstValue {
             ConstValue::I64(val) => val.try_cast(ty),
             ConstValue::Float(val) => val.try_cast(ty),
             ConstValue::Double(val) => val.try_cast(ty),
-            ConstValue::NullPtr => None,
+            ConstValue::NullPtr => {
+                if ty.is_ptr() {
+                    Some(ConstValue::NullPtr)
+                } else {
+                    None
+                }
+            }
         }
     }
 }

@@ -37,13 +37,17 @@ impl Clone for BasicBlockId {
 impl Copy for BasicBlockId {}
 
 impl BasicBlockId {
-    pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) {
+    pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) -> usize {
         let block = ctx
             .blocks
             .get_mut(self.0)
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
 
+        let index = block.instructions.len();
+
         block.instructions.push(instr);
+
+        index
     }
 
     pub(crate) fn add_phi(

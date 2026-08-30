@@ -4,7 +4,7 @@ use crate::{
         function::{FuncId, Function},
     },
     error::BuildError,
-    interner::{ConstInterner, StrInterner},
+    interner::{ConstInterner, StrId, StrInterner},
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -17,7 +17,8 @@ pub struct Context {
     pub(crate) funcs: Arena<Function>,
     pub(crate) str_interner: StrInterner,
     pub(crate) const_interner: ConstInterner,
-    reg_name_assigner: FxHashMap<FuncId, FuncRegNameIndex>,
+    pub(crate) reg_name_assigner: FxHashMap<FuncId, FuncRegNameIndex>,
+    pub(crate) register_def_instr_index: FxHashMap<FuncId, FxHashMap<StrId, usize>>,
 }
 
 impl Context {
