@@ -83,36 +83,6 @@ pub struct Instruction {
 }
 
 impl Cursor {
-    pub fn add_unconditional_br(&self, label: BasicBlockId, ctx: &mut Context) {
-        self.block.add_instruction(
-            Instruction {
-                kind: InstructionKind::UnconditionalBr { label },
-                value: None,
-            },
-            ctx,
-        );
-    }
-
-    pub fn add_conditional_br(
-        &self,
-        cond: I1Value,
-        true_label: BasicBlockId,
-        false_label: BasicBlockId,
-        ctx: &mut Context,
-    ) {
-        self.block.add_instruction(
-            Instruction {
-                kind: InstructionKind::ConditionalBr {
-                    cond,
-                    true_label,
-                    false_label,
-                },
-                value: None,
-            },
-            ctx,
-        );
-    }
-
     pub fn add_phi(
         &self,
         branches: &[(BasicBlockId, Value)],
@@ -151,6 +121,36 @@ impl Cursor {
         Ok((phi_id, val))
     }
 
+    pub fn add_unconditional_br(&self, label: BasicBlockId, ctx: &mut Context) {
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::UnconditionalBr { label },
+                value: None,
+            },
+            ctx,
+        );
+    }
+
+    pub fn add_conditional_br(
+        &self,
+        cond: I1Value,
+        true_label: BasicBlockId,
+        false_label: BasicBlockId,
+        ctx: &mut Context,
+    ) {
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::ConditionalBr {
+                    cond,
+                    true_label,
+                    false_label,
+                },
+                value: None,
+            },
+            ctx,
+        );
+    }
+
     pub fn add_load(
         &self,
         ty: Type,
@@ -175,27 +175,45 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
-        let func_id = ctx
-            .blocks
-            .get(self.block.raw())
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-            .func_id;
-
-        let reg_name = ctx.name_for_reg(reg, func_id)?;
-        let val = Value::from_register(reg_name, ty.clone(), &mut ctx.str_interner)?;
-
-        self.block.add_instruction(
-            Instruction {
-                kind: InstructionKind::Load { ty, ptr, align },
-                value: Some(val.clone()),
+        Ok(add_instruction_to_block_and_get_value(
+            InstructionKind::Load {
+                ty: ty.clone(),
+                ptr,
+                align,
             },
+            ty,
+            self.block,
+            reg,
             ctx,
-        );
-
-        // let val = add_instr!(InstructionKind::Load { ty, ptr, align }, ty)
-
-        Ok(val)
+        )?)
     }
+}
+
+fn add_instruction_to_block_and_get_value(
+    kind: InstructionKind,
+    result_ty: Type,
+    block: BasicBlockId,
+    reg: Option<&str>,
+    ctx: &mut Context,
+) -> Result<Value, BuildError> {
+    let func_id = ctx
+        .blocks
+        .get(block.raw())
+        .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+        .func_id;
+
+    let reg_name = ctx.name_for_reg(reg, func_id)?;
+    let val = Value::from_register(reg_name, result_ty, &mut ctx.str_interner)?;
+
+    block.add_instruction(
+        Instruction {
+            kind,
+            value: Some(val.clone()),
+        },
+        ctx,
+    );
+
+    Ok(val)
 }
 
 #[cfg(test)]
