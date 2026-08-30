@@ -48,6 +48,12 @@ impl DerefMut for ConstInterner {
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ConstId(InternedId<ConstValue, u32>);
 
+impl ConstId {
+    pub(crate) fn raw(&self) -> InternedId<ConstValue, u32> {
+        self.0
+    }
+}
+
 impl From<InternedId<ConstValue, u32>> for ConstId {
     fn from(value: InternedId<ConstValue, u32>) -> Self {
         ConstId(value)

@@ -114,7 +114,7 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValueKind {
     Reg(Register),
     Const(ConstId),
@@ -127,8 +127,16 @@ pub struct Value {
 }
 
 impl Value {
+    pub(crate) fn new(ty: Type, kind: ValueKind) -> Self {
+        Value { ty, kind }
+    }
+
     pub fn ty(&self) -> &Type {
         &self.ty
+    }
+
+    pub fn kind(&self) -> ValueKind {
+        self.kind
     }
 
     pub fn into_i1(self) -> Result<I1Value, BuildError> {
@@ -176,7 +184,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Register {
     name: StrId,
 }
@@ -199,6 +207,21 @@ pub enum ConstValue {
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
     NullPtr,
+}
+
+impl ConstValue {
+    pub fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
+        match self {
+            ConstValue::I1(val) => val.try_cast(ty),
+            ConstValue::I8(val) => val.try_cast(ty),
+            ConstValue::I16(val) => val.try_cast(ty),
+            ConstValue::I32(val) => val.try_cast(ty),
+            ConstValue::I64(val) => val.try_cast(ty),
+            ConstValue::Float(val) => val.try_cast(ty),
+            ConstValue::Double(val) => val.try_cast(ty),
+            ConstValue::NullPtr => None,
+        }
+    }
 }
 
 /// Two constants are the same constant only if they are the same *variant* and the

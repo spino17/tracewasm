@@ -2,7 +2,7 @@ use crate::{
     cfg::{Cursor, basic_block::BasicBlockId, context::Context},
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
-    value::{I1Value, Type, Value},
+    value::{I1Value, Type, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -70,6 +70,11 @@ pub enum InstructionKind {
     },
     Load {
         ty: Type,
+        ptr: Value,
+        align: Option<u32>,
+    },
+    Store {
+        value: Value,
         ptr: Value,
         align: Option<u32>,
     },
@@ -186,6 +191,74 @@ impl Cursor {
             reg,
             ctx,
         )?)
+    }
+
+    pub fn add_store(
+        &self,
+        value: Value,
+        ptr: Value,
+        align: Option<u32>,
+        ty: Option<Type>,
+        ctx: &mut Context,
+    ) -> Result<(), BuildError> {
+        let ptr_ty = ptr.ty();
+
+        if !ptr_ty.is_ptr() {
+            return Err(BuildError::PointerOperandExpected(ptr_ty.clone()));
+        }
+
+        if let Some(align) = align
+            && !align.is_power_of_two()
+        {
+            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+        }
+
+        let final_value = if let Some(ty) = ty {
+            if !ty.is_first_class() {
+                return Err(BuildError::TypeNotLoadable(ty));
+            }
+
+            let val_ty = value.ty();
+
+            match value.kind() {
+                ValueKind::Const(const_id) => {
+                    let const_val = ctx.const_interner.value(const_id.raw());
+
+                    let Some(casted_const_val) = const_val.try_cast(&ty) else {
+                        todo!() // RAISE ERROR: const value cannot be casted into the provided type
+                    };
+
+                    let casted_const_id = ctx.const_interner.intern(casted_const_val)?.into();
+
+                    Value::new(ty, ValueKind::Const(casted_const_id))
+                }
+                ValueKind::Reg(_) => {
+                    if val_ty != &ty {
+                        todo!() // RAISE ERROR: type of register value not matching with provided type
+                    }
+
+                    value
+                }
+            }
+        } else {
+            value
+        };
+
+        // TODO: check ptr is actually pointer to the type as the value
+
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Store {
+                    value: final_value,
+                    ptr,
+                    align,
+                },
+                value: None,
+            },
+            ctx,
+        );
+
+        Ok(())
     }
 }
 
