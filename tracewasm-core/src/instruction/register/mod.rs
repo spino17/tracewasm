@@ -210,9 +210,14 @@ mod tests;
 // are, and that sum is checked once at the end of the body — three individually legal
 // regions can still add up to something no `Slot` could name.
 //
-// Nothing in wasm's own limits reaches these. `MAX_WASM_FUNCTION_LOCALS` is 50,000,
-// and a distinct constant or memory offset costs bytes of body, so a body would have
-// to be far past `MAX_WASM_FUNCTION_SIZE` to intern 65,536 of either.
+// Locals cannot reach these — `MAX_WASM_FUNCTION_LOCALS` is 50,000 — but the two
+// interned pools can, and do. A distinct constant or memory offset costs only a few
+// bytes of body, so a module that `wasmparser` validates can hold 65,536 of either;
+// `too_many_constants_is_reported_not_truncated` and
+// `too_many_memory_offsets_is_reported_not_truncated` are exactly that module. Which
+// is why both pools are reached through `Interner::try_intern` and not the panicking
+// `Interner::intern`: overflowing one is an input this crate has to answer for, and
+// the module still lowers under `Stack`.
 
 /// Distinct constants one body may intern.
 const MAX_CONSTS: u16 = u16::MAX;
@@ -221,12 +226,13 @@ const MAX_REGISTER_SLOTS: u16 = u16::MAX;
 /// Distinct memory offsets one body's loads and stores may name between them.
 pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 
-/// The static byte offset of one load or store, as its own type so that the
-/// [`Interner`] holding them names itself correctly in an error.
+/// The static byte offset of one load or store, as its own type so that the ids the
+/// pool hands out cannot be confused with another pool's.
 ///
-/// A bare `u32` would work as the interned value, but [`TyToString`] is implemented
-/// per type — so a second `Interner<u32>` for anything else would report its cap as
-/// "memory offsets".
+/// A bare `u32` would work as the interned value, but [`InternedId`] is generic over
+/// what was interned — so a second `Interner<u32, _>` for anything else would issue
+/// ids of the very same type, and one could be read against the wrong pool. The
+/// newtype makes that a compile error.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct MemoryOffset(pub u32);
 

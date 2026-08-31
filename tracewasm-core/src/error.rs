@@ -126,10 +126,11 @@ pub enum TraceWasmError {
     /// name between them.
     ///
     /// Distinct is the operative word — a pool holds one entry per *value*, however
-    /// many instructions use it — so reaching 65,536 takes a body far past what wasm
-    /// validation allows. Like [`Self::RegisterFrameTooLarge`] this is an
-    /// implementation limit, not a spec one, so a module rejected here may still run
-    /// under [`Stack`](crate::Stack).
+    /// many instructions use it — so a body needs 65,536 *different* constants or
+    /// offsets to get here. That is reachable: a module doing it validates fine, and
+    /// the register tests compile one. Like [`Self::RegisterFrameTooLarge`] this is
+    /// an implementation limit, not a spec one, so a module rejected here may still
+    /// run under [`Stack`](crate::Stack).
     ///
     /// Fields: which pool filled up, the count it reached, and its limit.
     #[error("too many unique {what}: reached {needed}, over the limit of {limit}")]

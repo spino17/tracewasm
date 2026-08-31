@@ -6,7 +6,9 @@ pub enum TracewasmUtilsError {
     ToManyUniqueValues {
         /// The number of distinct values that pool would have had to hold.
         needed: u32,
-        /// The most distinct values a 16-bit id can name.
+        /// The most distinct values the pool's id can name — its `Capacity::val`,
+        /// so `u16::MAX`, `u32::MAX` or `u64::MAX` depending on the id width the
+        /// pool was declared with.
         limit: u64,
     },
 }

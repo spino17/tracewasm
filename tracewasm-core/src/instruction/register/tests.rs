@@ -4792,8 +4792,8 @@ fn too_many_constants_is_reported_not_truncated() {
     let err = compile_register(&wat).expect_err("the pool cannot name this many");
 
     // The pool is an `Interner`, so its cap is reported by the interner rather than
-    // by the end-of-body frame-width check — and the `what` is what `Const`'s
-    // `TyToString` names it.
+    // by the end-of-body frame-width check — hence `UtilsError` wrapping
+    // `TracewasmUtilsError`, not `TraceWasmError::ToManyUniqueValues`.
     assert!(
         matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { needed, limit })
             if *needed == MAX_CONSTS as u32 + 1

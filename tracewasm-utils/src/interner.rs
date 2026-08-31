@@ -241,7 +241,9 @@ mod tests {
     }
 
     /// The cap is reported rather than silently truncating the id, which is the
-    /// whole reason `intern` is fallible.
+    /// whole reason [`Interner::try_intern`] exists alongside the panicking
+    /// [`Interner::intern`]: a caller whose values came from outside needs to answer
+    /// for an overrun, not die on it.
     #[test]
     fn exceeding_the_capacity_is_an_error() {
         let mut i: Interner<u32, u16> = Interner::new();
@@ -272,8 +274,28 @@ mod tests {
         );
     }
 
+    /// The other half of the pair: [`Interner::intern`] refuses the same value, by
+    /// panicking rather than returning. A caller reaches for it when the values are
+    /// its own, so an overrun there is a bug in the caller and there is nobody to
+    /// report it to.
+    #[test]
+    #[should_panic(expected = "too many unique interned values")]
+    fn exceeding_the_capacity_panics_on_the_infallible_intern() {
+        let mut i: Interner<u32, u16> = Interner::new();
+
+        for n in 0..u16::MAX as u32 {
+            i.intern(n);
+        }
+
+        i.intern(u32::MAX);
+    }
+
     /// A repeat must still succeed once the pool is full: it costs no entry, so
     /// refusing it would reject a program that fits.
+    ///
+    /// Asserted on **both** halves of the API, because this is what an
+    /// implementation that checked the capacity before the lookup would get wrong —
+    /// and under `intern` that mistake is not a rejection but a panic.
     #[test]
     fn a_repeat_still_succeeds_at_capacity() {
         let mut i: Interner<u32, u16> = Interner::new();
@@ -284,6 +306,14 @@ mod tests {
 
         assert!(i.try_intern(0).is_ok(), "0 is already interned");
         assert!(i.try_intern(u32::MAX).is_err(), "but a new value is not");
+
+        assert_eq!(
+            i.intern(0).raw(),
+            0,
+            "and `intern` returns it rather than panicking on a full pool"
+        );
+
+        assert_eq!(i.len(), u16::MAX as usize, "neither call grew the pool");
     }
 
     /// The id width follows `C`, so a wider capacity really can name more entries.
