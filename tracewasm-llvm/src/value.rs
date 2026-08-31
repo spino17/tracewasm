@@ -33,18 +33,8 @@ pub enum Type {
     Float,
     Double,
     Ptr,
-    /// `size` is a literal, not a value: LLVM has no variable-length array type, and
-    /// the length is part of this type's identity — so it has to be something two
-    /// spellings of `[4 x i32]` agree on. A runtime count belongs to `alloca`'s
-    /// `num_elements` operand instead.
-    Array {
-        size: u64,
-        element_ty: TyId,
-    },
-    Struct {
-        fields: Box<[TyId]>,
-        packed: bool,
-    },
+    Array { size: u64, element_ty: TyId },
+    Struct { fields: Box<[TyId]>, packed: bool },
     Func(FuncSignature),
     Void,
 }
@@ -235,14 +225,11 @@ impl Value {
                 let func_id = block.func_id;
                 let ptr_reg_name_id = reg.name;
 
-                let ptr_instr_index = *ctx
-                    .register_def_instr_index
-                    .get(&func_id)
-                    .expect("this entry should exist for the func_id")
-                    .get(&ptr_reg_name_id)
-                    .expect(
-                        "this entry should already be inserted when this ptr register was defined",
-                    );
+                let ptr_instr_index = *ctx.register_defs(func_id).get(&ptr_reg_name_id).expect(
+                    "this entry should already be inserted when this ptr register was defined",
+                );
+
+                let ptr_instr = &block.instructions[ptr_instr_index];
 
                 // TODO:
                 // match on all the instructions which can produce a pointer! like alloca,
