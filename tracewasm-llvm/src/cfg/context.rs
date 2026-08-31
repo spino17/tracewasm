@@ -21,7 +21,13 @@ pub struct Context {
     pub(crate) const_interner: ConstInterner,
     pub(crate) ty_interner: TyInterner,
     pub(crate) reg_name_assigner: FxHashMap<FuncId, FuncRegNameIndex>,
-    pub(crate) register_def_instr_index: FxHashMap<FuncId, FxHashMap<StrId, usize>>,
+    pub(crate) register_def_instr_index: FxHashMap<FuncId, FxHashMap<StrId, RegisterDef>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegisterDef {
+    pub(crate) block: BasicBlockId,
+    pub(crate) instr_index: usize,
 }
 
 impl Context {
@@ -60,7 +66,7 @@ impl Context {
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
-    pub(crate) fn register_defs(&self, func: FuncId) -> &FxHashMap<StrId, usize> {
+    pub(crate) fn register_defs(&self, func: FuncId) -> &FxHashMap<StrId, RegisterDef> {
         self.register_def_instr_index
             .get(&func)
             .expect("this entry should exist for the func_id")

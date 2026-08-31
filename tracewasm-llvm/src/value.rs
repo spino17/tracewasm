@@ -266,15 +266,18 @@ impl Value {
 
         match &self.kind {
             ValueKind::Reg(reg) => {
-                let block = ctx.get_block(block);
-                let func_id = block.func_id;
+                let func_id = ctx.get_block(block).func_id;
                 let ptr_reg_name_id = reg.name;
 
-                let ptr_instr_index = *ctx.register_defs(func_id).get(&ptr_reg_name_id).expect(
+                let def = *ctx.register_defs(func_id).get(&ptr_reg_name_id).expect(
                     "this entry should already be inserted when this ptr register was defined",
                 );
 
-                let ptr_instr = &block.instructions[ptr_instr_index];
+                // The block the register was *defined* in, which is not in general the
+                // one being written into: an `alloca` in the entry block is read from
+                // every block it dominates, and the index only means anything against
+                // the instruction list it came from.
+                let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 // TODO:
                 // match on all the instructions which can produce a pointer! like alloca,

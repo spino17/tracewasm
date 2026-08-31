@@ -1,5 +1,9 @@
 use crate::{
-    cfg::{Cursor, basic_block::BasicBlockId, context::Context},
+    cfg::{
+        Cursor,
+        basic_block::BasicBlockId,
+        context::{Context, RegisterDef},
+    },
     error::BuildError,
     interner::TyId,
     value::{I1Value, Type, Value, ValueKind},
@@ -220,8 +224,13 @@ impl Cursor {
         }
 
         let final_val = if let Some(ty) = ty {
-            let Some(casted_value) = value.try_cast(ty, ctx) else {
-                todo!() // RAISE ERROR: unable to cast the value in provided type
+            let value_ty = ctx.ty_interner.display(value.ty()).to_string();
+
+            let Some(casted_value) = value.try_cast(ty.clone(), ctx) else {
+                return Err(BuildError::StoredValueTypeMismatch(
+                    value_ty,
+                    ty.display(&ctx.ty_interner).to_string(),
+                ));
             };
 
             casted_value
@@ -232,7 +241,10 @@ impl Cursor {
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
             && pointee_ty != final_val.ty()
         {
-            todo!() // RAISE ERROR: the value type does not match with the type ptr points to!
+            return Err(BuildError::StoredValueDoesNotMatchPointee(
+                ctx.ty_interner.display(final_val.ty()).to_string(),
+                ctx.ty_interner.display(pointee_ty).to_string(),
+            ));
         }
 
         self.block.add_instruction(
@@ -258,6 +270,12 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
+        if !ty.is_first_class() {
+            return Err(BuildError::TypeNotAllocatable(
+                ty.display(&ctx.ty_interner).to_string(),
+            ));
+        }
+
         if let Some(align) = align
             && !align.is_power_of_two()
         {
@@ -268,16 +286,25 @@ impl Cursor {
 
         if let Some((count_val, count_expected_ty)) = count {
             if !count_val.is_integer(ctx) {
-                todo!() // count is not of type integer
+                return Err(BuildError::AllocaCountNotAnInteger(
+                    ctx.ty_interner.display(count_val.ty()).to_string(),
+                ));
             }
 
             let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
                 if !count_expected_ty.is_integer() {
-                    todo!() // RAISE ERROR: type passed for count is not integer
+                    return Err(BuildError::AllocaCountNotAnInteger(
+                        count_expected_ty.display(&ctx.ty_interner).to_string(),
+                    ));
                 }
 
-                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
-                    todo!() // RAISE ERROR: value casting to type failed!
+                let count_ty = ctx.ty_interner.display(count_val.ty()).to_string();
+
+                let Some(casted_val) = count_val.try_cast(count_expected_ty.clone(), ctx) else {
+                    return Err(BuildError::AllocaCountTypeMismatch(
+                        count_ty,
+                        count_expected_ty.display(&ctx.ty_interner).to_string(),
+                    ));
                 };
 
                 casted_val
@@ -329,7 +356,7 @@ fn add_instruction_to_block_and_get_value(
 
     let register_def_index = ctx.register_def_instr_index.entry(func_id).or_default();
 
-    register_def_index.insert(reg_name_id, instr_index);
+    register_def_index.insert(reg_name_id, RegisterDef { block, instr_index });
 
     Ok(val)
 }
@@ -340,7 +367,7 @@ mod tests {
     use crate::{
         cfg::{Builder, context::Context},
         test_support::{fixture, value},
-        value::NullPtr,
+        value::{ConstValue, NullPtr},
     };
 
     /// Interns `ty` and hands back its id, so a test can spell the shape it means
@@ -632,6 +659,260 @@ mod tests {
         (builder.cursor_at_block(entry), ptr)
     }
 
+    /// `store i64 %v` where `%v` is an `i32` is not a store LLVM will assemble, and
+    /// widening it would need a `zext`/`sext` the caller never asked for — so the
+    /// declared type has to match what the register actually holds.
+    #[test]
+    fn a_store_refuses_a_register_that_is_not_the_declared_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+        let reg = Value::from_register("v".to_string(), i32_ty, &mut ctx);
+
+        let err = cursor
+            .add_store(reg, ptr, None, Some(Type::I64), &mut ctx)
+            .expect_err("an i32 register is not an i64");
+
+        assert!(
+            matches!(&err, BuildError::StoredValueTypeMismatch(got, declared)
+                if got == "i32" && declared == "i64"),
+            "the error must name both types, got: {err}"
+        );
+    }
+
+    /// A constant, unlike a register, does fold into the declared type — the store
+    /// is of the widened constant, so no instruction is skipped.
+    #[test]
+    fn a_store_widens_a_constant_to_the_declared_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        cursor
+            .add_store(seven, ptr, None, Some(Type::I64), &mut ctx)
+            .expect("an i32 constant stores as an i64");
+
+        let block = ctx.blocks.get(cursor.block.raw()).unwrap();
+
+        let InstructionKind::Store { value, .. } = &block.instructions[0].kind else {
+            panic!("expected a store")
+        };
+
+        // The *stored* value is the widened one — a store of the original `i32`
+        // would be a different instruction than the caller asked for.
+        assert_eq!(ctx.ty_interner.display(value.ty()).to_string(), "i64");
+
+        let ValueKind::Const(id) = value.kind() else {
+            panic!("expected a constant")
+        };
+
+        assert_eq!(*ctx.const_interner.value(id.raw()), ConstValue::I64(7));
+    }
+
+    /// `alloca` reserves room for a value, so the type has to have a size. `llvm-as`
+    /// refuses `alloca void` ("void type only allowed for function results") and
+    /// `alloca` of a function type ("invalid type for alloca") — the same pair
+    /// `is_first_class` names, so this gates on the predicate that
+    /// `only_void_and_function_types_are_unsized` pins in `value.rs`.
+    #[test]
+    fn an_alloca_refuses_an_unsized_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let err = cursor
+            .add_alloca(Type::Void, None, None, None, &mut ctx)
+            .expect_err("`void` has no size");
+
+        assert!(
+            matches!(&err, BuildError::TypeNotAllocatable(t) if t == "void"),
+            "expected a not-allocatable error, got: {err}"
+        );
+    }
+
+    /// An aggregate is sized, so it allocates — the predicate is "has a size", not
+    /// LLVM's narrower "first class".
+    #[test]
+    fn an_alloca_accepts_an_aggregate_and_yields_a_pointer() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+
+        let slot = cursor
+            .add_alloca(
+                Type::Array {
+                    size: 4,
+                    element_ty: i32_ty,
+                },
+                None,
+                None,
+                Some("buf"),
+                &mut ctx,
+            )
+            .expect("`[4 x i32]` is sized");
+
+        assert_eq!(
+            ctx.ty_interner.display(slot.ty()).to_string(),
+            "ptr",
+            "an alloca yields a pointer, not the allocated type"
+        );
+    }
+
+    /// `llvm-as` rejects a non-integer element count with "element count must have
+    /// integer type", whether it is the value's own type or the one declared for it.
+    #[test]
+    fn an_alloca_count_must_be_an_integer() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .add_alloca(Type::I32, Some((a_float, None)), None, None, &mut ctx)
+            .expect_err("a float is not a count");
+
+        assert!(
+            matches!(&err, BuildError::AllocaCountNotAnInteger(t) if t == "float"),
+            "the error must name the offending type, got: {err}"
+        );
+
+        // The declared type is checked too, so a count that *is* an integer cannot be
+        // relabelled into something that is not.
+        let an_int = Value::from_const(4i32, None, &mut ctx).unwrap();
+
+        assert!(
+            matches!(
+                cursor.add_alloca(
+                    Type::I32,
+                    Some((an_int, Some(Type::Double))),
+                    None,
+                    None,
+                    &mut ctx
+                ),
+                Err(BuildError::AllocaCountNotAnInteger(_))
+            ),
+            "`double` is not an integer, whoever supplied it"
+        );
+    }
+
+    /// `i1` counts as an integer here because it does in LLVM: `alloca i32, i1 %c`
+    /// assembles.
+    #[test]
+    fn an_alloca_count_may_be_an_i1() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let one = Value::from_const(true, None, &mut ctx).unwrap();
+
+        assert!(
+            cursor
+                .add_alloca(Type::I32, Some((one, None)), None, None, &mut ctx)
+                .is_ok(),
+            "`alloca i32, i1 %c` is valid LLVM"
+        );
+    }
+
+    /// A register count is checked, not converted — the same rule as a stored value,
+    /// since widening one would need an instruction of its own.
+    #[test]
+    fn an_alloca_refuses_a_register_count_of_the_wrong_width() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+        let n = Value::from_register("n".to_string(), i32_ty, &mut ctx);
+
+        let err = cursor
+            .add_alloca(Type::I32, Some((n, Some(Type::I64))), None, None, &mut ctx)
+            .expect_err("an i32 register is not an i64 count");
+
+        assert!(
+            matches!(&err, BuildError::AllocaCountTypeMismatch(got, declared)
+                if got == "i32" && declared == "i64"),
+            "the error must name both types, got: {err}"
+        );
+    }
+
+    /// A register's definition is recorded with the block it was defined in, not just
+    /// the instruction index.
+    ///
+    /// The index is a position in *that block's* instruction list, so on its own it
+    /// says nothing — reading it against another block lands on an unrelated
+    /// instruction, or past the end when that block is shorter. This is the shape
+    /// `try_inferring_pointee_ty` depends on to walk back to an `alloca` in the entry
+    /// block from a `store` in a later one.
+    #[test]
+    fn a_register_definition_records_the_block_it_was_defined_in() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let ptr = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+
+        // Two instructions in `entry`, so the register in `body` gets an index that
+        // is only valid against `body` — index 0 of a one-instruction list.
+        let in_entry = builder.cursor_at_block(entry);
+
+        in_entry
+            .add_load(Type::I32, ptr.clone(), None, Some("a"), &mut ctx)
+            .unwrap();
+
+        let second = in_entry
+            .add_load(Type::I64, ptr.clone(), None, Some("b"), &mut ctx)
+            .unwrap();
+
+        let in_body = builder.cursor_at_block(body);
+
+        let third = in_body
+            .add_load(Type::Double, ptr, None, Some("c"), &mut ctx)
+            .unwrap();
+
+        let func_id = ctx.get_block(entry).func_id;
+
+        let def_of = |val: &Value, ctx: &Context| {
+            let ValueKind::Reg(reg) = val.kind() else {
+                panic!("a load defines a register")
+            };
+
+            *ctx.register_defs(func_id)
+                .get(&reg.name)
+                .expect("the definition was recorded")
+        };
+
+        let second_def = def_of(&second, &ctx);
+        let third_def = def_of(&third, &ctx);
+
+        assert_eq!(second_def.block, entry);
+        assert_eq!(second_def.instr_index, 1);
+        assert_eq!(third_def.block, body, "`c` belongs to the block it was in");
+        assert_eq!(third_def.instr_index, 0, "and `body` numbers from 0 again");
+
+        // The indices collide across blocks, which is exactly why the block has to be
+        // stored: `c`'s index resolved against `entry` reads `a`, a different
+        // instruction of a different type.
+        let loaded_ty_at = |b, index: usize, ctx: &Context| {
+            let InstructionKind::Load { ty, .. } = &ctx.get_block(b).instructions[index].kind
+            else {
+                panic!("expected a load")
+            };
+
+            ctx.ty_interner.display(*ty).to_string()
+        };
+
+        assert_eq!(
+            loaded_ty_at(third_def.block, third_def.instr_index, &ctx),
+            "double"
+        );
+
+        assert_eq!(
+            loaded_ty_at(entry, third_def.instr_index, &ctx),
+            "i32",
+            "the same index against the wrong block reads an unrelated instruction"
+        );
+    }
+
     /// A load yields a value of the type it *loaded*, not of the pointer it read
     /// through — `%x = load i32, ptr %p` defines an `i32`.
     #[test]
@@ -660,6 +941,7 @@ mod tests {
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
 
         assert_eq!(block.instructions.len(), 1);
+
         assert!(
             block.instructions[0].value.is_some(),
             "a load produces a value, so it defines a register"

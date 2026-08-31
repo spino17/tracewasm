@@ -65,6 +65,16 @@ pub enum BuildError {
     /// alignment off is how the ABI default is asked for.
     #[error("alignment must be a power of two, but got `{0}`")]
     AlignmentNotPowerOfTwo(u32),
+    #[error("a value of type `{0}` cannot be stored as `{1}`")]
+    StoredValueTypeMismatch(String, String),
+    #[error("a value of type `{0}` cannot be stored through a pointer to `{1}`")]
+    StoredValueDoesNotMatchPointee(String, String),
+    #[error("a value of type `{0}` cannot be allocated: `alloca` needs a sized type")]
+    TypeNotAllocatable(String),
+    #[error("an `alloca` element count must have an integer type, but got `{0}`")]
+    AllocaCountNotAnInteger(String),
+    #[error("an `alloca` element count of type `{0}` cannot be used as `{1}`")]
+    AllocaCountTypeMismatch(String, String),
 }
 
 impl From<TracewasmUtilsError> for BuildError {
