@@ -79,7 +79,7 @@ pub enum InstructionKind {
     },
     Alloca {
         ty: TyId,
-        num_elements: Option<u32>,
+        num_elements: Option<Value>,
         align: Option<u32>,
     },
 }
@@ -241,7 +241,7 @@ impl Cursor {
 
                     Value::new(ty_id, ValueKind::Const(casted_const_id))
                 }
-                ValueKind::Reg(_) => {
+                ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
                     let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
 
                     if val_ty != ty_id {
@@ -250,42 +250,14 @@ impl Cursor {
 
                     value
                 }
-                ValueKind::ConstExpr(const_expr) => todo!(),
             }
         } else {
             value
         };
 
-        let ptr_reg_name_id = match ptr.kind() {
-            ValueKind::Reg(ptr_reg) => ptr_reg.name,
-            ValueKind::Const(_) => {
-                todo!() // RAISE ERROR: null ptr passed!
-            }
-            ValueKind::ConstExpr(const_expr) => todo!(),
-        };
-
-        let block = ctx.get_block(self.block);
-        let func_id = block.func_id;
-
-        let ptr_instr_index = *ctx
-            .register_def_instr_index
-            .get(&func_id)
-            .expect("this entry should exist for the func_id")
-            .get(&ptr_reg_name_id)
-            .expect("this entry should already be inserted when this ptr register was defined");
-
-        let InstructionKind::Alloca {
-            ty: ptr_ty,
-            num_elements: _,
-            align: _,
-        } = &block.instructions[ptr_instr_index].kind
-        else {
-            unreachable!(
-                "hitting this means the logic of tracking definition of registers is incorrect"
-            )
-        };
-
-        if *ptr_ty != final_value.ty() {
+        if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
+            && pointee_ty != final_value.ty()
+        {
             todo!() // RAISE ERROR: the value type does not match with the type ptr points to!
         }
 
@@ -312,6 +284,7 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
+        // based on num of elements, the return type can be pointer to the provided type or array !
         todo!()
     }
 }
@@ -526,6 +499,56 @@ mod tests {
                     if phi == "i32" && branch == "i64"
             ),
             "the error must name both types, got: {err}"
+        );
+    }
+
+    /// The other side of the check above: two branches whose types were built
+    /// *separately* must still be accepted, because structurally equal types are one
+    /// pool entry and so one id.
+    ///
+    /// This is what a non-number array length would break. If `Type::Array` held a
+    /// `Value`, the two `[4 x i32]`s below would carry different constant ids, intern
+    /// as two entries, and this phi would be refused as a type mismatch — valid IR
+    /// rejected, with an error naming the same type twice.
+    #[test]
+    fn a_phi_accepts_branches_whose_equal_types_were_built_separately() {
+        let (mut ctx, mut builder) = fixture();
+        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+
+        let array = |ctx: &mut Context| {
+            intern(
+                Type::Array {
+                    size: 4,
+                    element_ty: i32_ty,
+                },
+                ctx,
+            )
+        };
+
+        // Built one at a time, as two unrelated parts of a module would build them.
+        let first_ty = array(&mut ctx);
+        let second_ty = array(&mut ctx);
+
+        assert_eq!(first_ty, second_ty, "`[4 x i32]` is one type, hence one id");
+
+        let a = Value::from_register("a".to_string(), first_ty, &mut ctx).unwrap();
+        let b = Value::from_register("b".to_string(), second_ty, &mut ctx).unwrap();
+
+        let cursor = builder.cursor_at_block(body);
+
+        let (_, merged) = cursor
+            .add_phi(&[(entry, a), (other, b)], Some("merged"), &mut ctx)
+            .expect("both branches are `[4 x i32]`");
+
+        assert_eq!(
+            ctx.ty_interner.display(merged.ty()).to_string(),
+            "[4 x i32]",
+            "and the phi carries that type"
         );
     }
 

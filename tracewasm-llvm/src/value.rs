@@ -33,8 +33,18 @@ pub enum Type {
     Float,
     Double,
     Ptr,
-    Array { size: u64, element_ty: TyId },
-    Struct { fields: Box<[TyId]>, packed: bool },
+    /// `size` is a literal, not a value: LLVM has no variable-length array type, and
+    /// the length is part of this type's identity — so it has to be something two
+    /// spellings of `[4 x i32]` agree on. A runtime count belongs to `alloca`'s
+    /// `num_elements` operand instead.
+    Array {
+        size: u64,
+        element_ty: TyId,
+    },
+    Struct {
+        fields: Box<[TyId]>,
+        packed: bool,
+    },
     Func(FuncSignature),
     Void,
 }
@@ -128,26 +138,6 @@ impl Type {
         matches!(self, Type::Ptr { .. })
     }
 
-    /*pub fn try_pointee_ty_for_ptr(&self) -> Option<&Type> {
-        let Type::Ptr { pointee_ty } = self else {
-            panic!("this method should be called only for ptr type");
-        };
-
-        if let Some(pointee_ty) = pointee_ty {
-            Some(pointee_ty)
-        } else {
-            None
-        }
-    }
-
-    pub fn set_pointee_ty_for_ptr(&mut self) {
-        let Type::Ptr { pointee_ty } = self else {
-            panic!("this method should be called only for ptr type");
-        };
-
-        todo!()
-    }*/
-
     pub fn is_first_class(&self) -> bool {
         !matches!(self, Type::Void | Type::Func(_))
     }
@@ -232,10 +222,10 @@ impl Value {
         })
     }
 
-    pub fn pointee_ty_for_ptr(&self, block: BasicBlockId, ctx: &mut Context) -> Option<Type> {
+    pub fn try_inferring_pointee_ty(&self, block: BasicBlockId, ctx: &mut Context) -> Option<TyId> {
         let ty = ctx.ty_interner.value(self.ty().raw());
 
-        if ty.is_ptr() {
+        if !ty.is_ptr() {
             return None;
         }
 
@@ -254,9 +244,19 @@ impl Value {
                         "this entry should already be inserted when this ptr register was defined",
                     );
 
+                // TODO:
+                // match on all the instructions which can produce a pointer! like alloca,
+                // getelementptr etc.
+                // and try infering pointee type from there
+
                 todo!()
             }
-            ValueKind::ConstExpr(const_expr) => {}
+            ValueKind::ConstExpr(const_expr) => {
+                // TODO:
+                // match on various kinds of const_expr only the ones which can
+                // produce a pointer! like getelementptr and for each case
+                // based on its operands construct the pointee type
+            }
             ValueKind::Const(_) => return None,
         };
 
@@ -1178,6 +1178,48 @@ mod tests {
         );
         assert_ne!(first, longer, "but `[8 x i32]` is a different one");
         assert_eq!(ctx.ty_interner.len(), 3, "i32, [4 x i32], [8 x i32]");
+    }
+
+    /// An array's length is part of its type's identity, so it is stored as a plain
+    /// number — the one representation on which two spellings of `[4 x i32]` agree.
+    ///
+    /// A `Value` there would carry its own type id and constant id, so a length that
+    /// arrived as an `i32 4` and one that arrived as an `i64 4` would be two pool
+    /// entries for the type LLVM writes one way. Since a `TyId` comparison is how
+    /// every downstream check now tests types, that would make them *reject valid
+    /// IR* rather than fail loudly — see the phi in `instruction.rs`.
+    ///
+    /// It is also the only thing LLVM can parse: there is no variable-length array
+    /// type, and `llvm-as` refuses `[%n x i32]` in the lexer. A runtime count is
+    /// `alloca`'s `num_elements` operand, which is a `Value`.
+    #[test]
+    fn an_array_length_is_a_number_so_one_length_is_one_type() {
+        let mut ctx = Context::default();
+        let i32_ty = intern(Type::I32, &mut ctx);
+
+        // The same length by four routes — a literal, a widened narrower integer, a
+        // computed one, and one that came from the width an `i32` constant has.
+        for size in [4u64, u64::from(4u8), 2 + 2, 4i32 as u64] {
+            let id = intern(
+                Type::Array {
+                    size,
+                    element_ty: i32_ty,
+                },
+                &mut ctx,
+            );
+
+            assert_eq!(
+                ctx.ty_interner.display(id).to_string(),
+                "[4 x i32]",
+                "every route to the length spells the same type"
+            );
+        }
+
+        assert_eq!(
+            ctx.ty_interner.len(),
+            2,
+            "i32 and one `[4 x i32]`: four spellings of the length, one pool entry"
+        );
     }
 
     /// What `load` and `store` will accept: everything with a size. LLVM calls
