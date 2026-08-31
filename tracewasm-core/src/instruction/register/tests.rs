@@ -4912,3 +4912,17 @@ fn a_frame_too_large_for_the_register_machine_still_lowers_for_the_stack_machine
         "and the stack machine must not"
     );
 }
+
+#[test]
+fn tmp_probe_too_many_load_offsets() {
+    let mut wat = String::from("(module (memory 1) (func (result i32)\n  i32.const 0\n");
+
+    for i in 0..(MAX_MEMORY_OFFSETS as u32 + 10) {
+        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
+    }
+
+    wat.push_str("))");
+
+    let r = compile_register(&wat);
+    println!("PROBE RESULT: {:?}", r.is_err());
+}

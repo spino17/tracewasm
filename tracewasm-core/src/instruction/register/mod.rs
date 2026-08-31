@@ -2795,7 +2795,7 @@ impl Instruction for RegInstruction {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
-                        .intern(MemoryOffset($memarg.offset as u32));
+                        .try_intern(MemoryOffset($memarg.offset as u32))?;
 
                     emit!(|sig| RegInstruction::$variant { offset, sig })
                 }};
