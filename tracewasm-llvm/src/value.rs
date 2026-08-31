@@ -201,8 +201,8 @@ impl Value {
             (val.into_const(), C::ty())
         };
 
-        let const_id = ctx.const_interner.intern(val)?;
-        let ty_id = ctx.ty_interner.intern(ty)?.into();
+        let const_id = ctx.const_interner.intern(val);
+        let ty_id = ctx.ty_interner.intern(ty).into();
 
         Ok(Value {
             ty: ty_id,
@@ -210,22 +210,22 @@ impl Value {
         })
     }
 
-    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Result<Self, BuildError> {
-        let reg_id: StrId = ctx.str_interner.intern(name)?.into();
+    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
+        let reg_id: StrId = ctx.str_interner.intern(name).into();
 
-        Ok(Value {
+        Value {
             ty,
             kind: ValueKind::Reg(Register { name: reg_id }),
-        })
+        }
     }
 
     pub fn is_integer(&self, ctx: &Context) -> bool {
         ctx.ty_interner.value(self.ty().raw()).is_integer()
     }
 
-    pub fn try_cast(&self, ty: Type, ctx: &mut Context) -> Result<Option<Self>, BuildError> {
+    pub fn try_cast(&self, ty: Type, ctx: &mut Context) -> Option<Self> {
         if !ty.is_first_class() {
-            return Ok(None);
+            return None;
         }
 
         let val_ty = self.ty();
@@ -235,26 +235,26 @@ impl Value {
                 let const_val = ctx.const_interner.value(const_id.raw());
 
                 let Some(casted_const_val) = const_val.try_cast(&ty) else {
-                    return Ok(None);
+                    return None;
                 };
 
-                let casted_const_id = ctx.const_interner.intern(casted_const_val)?.into();
-                let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
+                let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
+                let ty_id: TyId = ctx.ty_interner.intern(ty).into();
 
                 Value::new(ty_id, ValueKind::Const(casted_const_id))
             }
             ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
-                let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
+                let ty_id: TyId = ctx.ty_interner.intern(ty).into();
 
                 if val_ty != ty_id {
-                    return Ok(None);
+                    return None;
                 }
 
                 self.clone()
             }
         };
 
-        Ok(Some(final_value))
+        Some(final_value)
     }
 
     pub fn try_inferring_pointee_ty(&self, block: BasicBlockId, ctx: &mut Context) -> Option<TyId> {
@@ -666,7 +666,7 @@ mod tests {
     /// Interns `ty` and hands back its id, so a test can spell the shape it means
     /// instead of the pool bookkeeping that shape now costs.
     fn intern(ty: Type, ctx: &mut Context) -> TyId {
-        ctx.ty_interner.intern(ty).expect("the type interns").into()
+        ctx.ty_interner.intern(ty).into()
     }
 
     /// The type a value reports, resolved back out of the pool. A value holds an id,
@@ -825,10 +825,10 @@ mod tests {
     fn a_null_pointer_is_not_an_integer_zero() {
         let mut interner = ConstInterner::default();
 
-        let null = interner.intern(ConstValue::NullPtr).unwrap();
-        let zero_64 = interner.intern(ConstValue::I64(0)).unwrap();
-        let zero_32 = interner.intern(ConstValue::I32(0)).unwrap();
-        let zero_1 = interner.intern(ConstValue::I1(0)).unwrap();
+        let null = interner.intern(ConstValue::NullPtr);
+        let zero_64 = interner.intern(ConstValue::I64(0));
+        let zero_32 = interner.intern(ConstValue::I32(0));
+        let zero_1 = interner.intern(ConstValue::I1(0));
 
         assert_ne!(null, zero_64);
         assert_ne!(null, zero_32);
@@ -991,10 +991,10 @@ mod tests {
     fn constants_dedup_by_value_and_type() {
         let mut interner = ConstInterner::default();
 
-        let a = interner.intern(ConstValue::I32(0)).unwrap();
-        let b = interner.intern(ConstValue::I32(0)).unwrap();
-        let c = interner.intern(ConstValue::I8(0)).unwrap();
-        let d = interner.intern(ConstValue::I64(0)).unwrap();
+        let a = interner.intern(ConstValue::I32(0));
+        let b = interner.intern(ConstValue::I32(0));
+        let c = interner.intern(ConstValue::I8(0));
+        let d = interner.intern(ConstValue::I64(0));
 
         assert_eq!(a, b, "the same constant interns once");
         assert_ne!(a, c, "i32 0 and i8 0 are distinct");
@@ -1009,12 +1009,8 @@ mod tests {
     fn positive_and_negative_zero_are_distinct_constants() {
         let mut interner = ConstInterner::default();
 
-        let pos = interner
-            .intern(ConstValue::Float(OrderedFloat(0.0)))
-            .unwrap();
-        let neg = interner
-            .intern(ConstValue::Float(OrderedFloat(-0.0)))
-            .unwrap();
+        let pos = interner.intern(ConstValue::Float(OrderedFloat(0.0)));
+        let neg = interner.intern(ConstValue::Float(OrderedFloat(-0.0)));
 
         assert_ne!(pos, neg, "0.0 and -0.0 must not share a pool entry");
         assert_eq!(interner.len(), 2);
@@ -1040,15 +1036,9 @@ mod tests {
         let negative = -f64::NAN;
         let payload = f64::from_bits(f64::NAN.to_bits() | 0x3);
 
-        let a = interner
-            .intern(ConstValue::Double(OrderedFloat(quiet)))
-            .unwrap();
-        let b = interner
-            .intern(ConstValue::Double(OrderedFloat(negative)))
-            .unwrap();
-        let c = interner
-            .intern(ConstValue::Double(OrderedFloat(payload)))
-            .unwrap();
+        let a = interner.intern(ConstValue::Double(OrderedFloat(quiet)));
+        let b = interner.intern(ConstValue::Double(OrderedFloat(negative)));
+        let c = interner.intern(ConstValue::Double(OrderedFloat(payload)));
 
         assert_ne!(a, b, "a NaN's sign bit is part of its identity");
         assert_ne!(a, c, "so is its payload");
@@ -1057,9 +1047,7 @@ mod tests {
         // And a NaN still equals *itself*, which is what lets the pool find one it
         // has already interned — numeric equality could not do this.
         assert_eq!(
-            interner
-                .intern(ConstValue::Double(OrderedFloat(quiet)))
-                .unwrap(),
+            interner.intern(ConstValue::Double(OrderedFloat(quiet))),
             a,
             "re-interning the same NaN must reuse its entry"
         );

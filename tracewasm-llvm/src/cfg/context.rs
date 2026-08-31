@@ -5,7 +5,8 @@ use crate::{
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
-    interner::{ConstInterner, StrId, StrInterner, TyInterner},
+    interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
+    value::Type,
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -63,6 +64,10 @@ impl Context {
         self.register_def_instr_index
             .get(&func)
             .expect("this entry should exist for the func_id")
+    }
+
+    pub fn ptr_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::Ptr).into()
     }
 }
 

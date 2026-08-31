@@ -1282,7 +1282,7 @@ impl SimulatedStack {
 
     /// `i32.const` and friends: records the immediate, emitting nothing.
     fn push_const(&mut self, val: Const) -> Result<(), TraceWasmError> {
-        let id = self.const_interner.intern(val)?;
+        let id = self.const_interner.try_intern(val)?;
 
         self.stack.push(StackSlot::Const(id));
 
@@ -2795,7 +2795,7 @@ impl Instruction for RegInstruction {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
-                        .intern(MemoryOffset($memarg.offset as u32))?;
+                        .intern(MemoryOffset($memarg.offset as u32));
 
                     emit!(|sig| RegInstruction::$variant { offset, sig })
                 }};
@@ -2808,7 +2808,7 @@ impl Instruction for RegInstruction {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
-                        .intern(MemoryOffset($memarg.offset as u32))?;
+                        .try_intern(MemoryOffset($memarg.offset as u32))?;
 
                     emit!(|sig: Signature<2, 0>| RegInstruction::$variant {
                         offset,

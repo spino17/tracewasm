@@ -49,7 +49,7 @@ impl Builder {
     }
 
     pub fn add_function(&mut self, name: String, ctx: &mut Context) -> Result<FuncId, BuildError> {
-        let name_id: StrId = ctx.str_interner.intern(name)?.into();
+        let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if self.module.func_names.contains(&name_id) {
             return Err(BuildError::DuplicateFunctionName(

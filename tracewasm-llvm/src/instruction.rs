@@ -105,7 +105,7 @@ impl Cursor {
         let ref_ty = branches[0].1.ty();
         let func_id = ctx.get_block(self.block).func_id;
         let reg_name = ctx.name_for_reg(reg, func_id)?;
-        let val = Value::from_register(reg_name, ref_ty, ctx)?;
+        let val = Value::from_register(reg_name, ref_ty, ctx);
 
         let phi_id = self.block.add_phi(
             PhiInstruction {
@@ -182,7 +182,7 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
-        let ty_id = ctx.ty_interner.intern(ty)?.into();
+        let ty_id = ctx.ty_interner.intern(ty).into();
 
         Ok(add_instruction_to_block_and_get_value(
             InstructionKind::Load {
@@ -220,7 +220,7 @@ impl Cursor {
         }
 
         let final_val = if let Some(ty) = ty {
-            let Some(casted_value) = value.try_cast(ty, ctx)? else {
+            let Some(casted_value) = value.try_cast(ty, ctx) else {
                 todo!() // RAISE ERROR: unable to cast the value in provided type
             };
 
@@ -276,7 +276,7 @@ impl Cursor {
                     todo!() // RAISE ERROR: type passed for count is not integer
                 }
 
-                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx)? else {
+                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
                     todo!() // RAISE ERROR: value casting to type failed!
                 };
 
@@ -290,11 +290,11 @@ impl Cursor {
 
         Ok(add_instruction_to_block_and_get_value(
             InstructionKind::Alloca {
-                ty: ctx.ty_interner.intern(ty)?.into(),
+                ty: ctx.ty_interner.intern(ty).into(),
                 count: final_count,
                 align,
             },
-            ctx.ty_interner.intern(Type::Ptr)?.into(),
+            ctx.ptr_ty(),
             self.block,
             reg,
             ctx,
@@ -311,7 +311,7 @@ fn add_instruction_to_block_and_get_value(
 ) -> Result<Value, BuildError> {
     let func_id = ctx.get_block(block).func_id;
     let reg_name = ctx.name_for_reg(reg, func_id)?;
-    let val = Value::from_register(reg_name, result_ty, ctx)?;
+    let val = Value::from_register(reg_name, result_ty, ctx);
 
     let ValueKind::Reg(reg) = val.kind() else {
         unreachable!("value is made out of register name just above")
@@ -346,7 +346,7 @@ mod tests {
     /// Interns `ty` and hands back its id, so a test can spell the shape it means
     /// instead of the pool bookkeeping that shape now costs.
     fn intern(ty: Type, ctx: &mut Context) -> TyId {
-        ctx.ty_interner.intern(ty).expect("the type interns").into()
+        ctx.ty_interner.intern(ty).into()
     }
 
     /// How a type spells itself against `ctx`'s pool — which is the form an error
@@ -549,8 +549,8 @@ mod tests {
 
         assert_eq!(first_ty, second_ty, "`[4 x i32]` is one type, hence one id");
 
-        let a = Value::from_register("a".to_string(), first_ty, &mut ctx).unwrap();
-        let b = Value::from_register("b".to_string(), second_ty, &mut ctx).unwrap();
+        let a = Value::from_register("a".to_string(), first_ty, &mut ctx);
+        let b = Value::from_register("b".to_string(), second_ty, &mut ctx);
 
         let cursor = builder.cursor_at_block(body);
 

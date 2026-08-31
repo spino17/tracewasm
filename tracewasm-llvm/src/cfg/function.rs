@@ -40,7 +40,7 @@ impl FuncId {
         name: String,
         ctx: &mut Context,
     ) -> Result<BasicBlockId, BuildError> {
-        let name_id: StrId = ctx.str_interner.intern(name)?.into();
+        let name_id: StrId = ctx.str_interner.intern(name).into();
         let func = ctx.get_func_mut(*self);
 
         if func.block_names.contains(&name_id) {

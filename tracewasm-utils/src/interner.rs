@@ -119,7 +119,18 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         }
     }
 
-    pub fn intern(&mut self, val: T) -> Result<InternedId<T, C>, TracewasmUtilsError> {
+    /// Interns `val`, reporting the cap rather than exceeding it.
+    ///
+    /// This is the one to use when the values come from **outside** — a module being
+    /// compiled fills a pool from its own body, so overflow there is an input the
+    /// caller has to answer for, not a bug. `tracewasm-core`'s register machine
+    /// degrades to the stack machine on this error rather than failing the compile.
+    ///
+    /// Where the caller supplies the values itself, [`intern`](Self::intern) says the
+    /// same thing without the `?`.
+    pub fn try_intern(&mut self, val: T) -> Result<InternedId<T, C>, TracewasmUtilsError> {
+        // The lookup comes first so that a repeat still succeeds once the pool is
+        // full: it costs no entry, so refusing it would reject a program that fits.
         if let Some(id) = self.reverse_map.get(&val) {
             Ok(*id)
         } else {
@@ -137,6 +148,17 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
 
             Ok(id)
         }
+    }
+
+    /// Interns `val`, panicking if the pool is full.
+    ///
+    /// For callers that supply the values themselves — a lowering pass interning the
+    /// types and register names it just built — where overflow means a bug in this
+    /// crate rather than a file someone handed us, and threading a `Result` through
+    /// every call site buys nothing. Use [`try_intern`](Self::try_intern) for values
+    /// that came from outside.
+    pub fn intern(&mut self, val: T) -> InternedId<T, C> {
+        self.try_intern(val).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn value(&self, id: InternedId<T, C>) -> &T {
@@ -163,6 +185,8 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::TracewasmUtilsError;
+
     use super::*;
 
     /// Interning is only worth doing if a repeat is free, so this is the property
@@ -171,9 +195,9 @@ mod tests {
     fn a_repeat_returns_the_first_id_and_adds_nothing() {
         let mut i: Interner<String, u16> = Interner::new();
 
-        let a = i.intern("x".to_string()).unwrap();
-        let b = i.intern("y".to_string()).unwrap();
-        let a_again = i.intern("x".to_string()).unwrap();
+        let a = i.intern("x".to_string());
+        let b = i.intern("y".to_string());
+        let a_again = i.intern("x".to_string());
 
         assert_eq!(a, a_again, "the same value must get the same id");
         assert_ne!(a, b, "different values must get different ids");
@@ -188,13 +212,13 @@ mod tests {
 
         let ids: Vec<u16> = ["a", "b", "c"]
             .iter()
-            .map(|s| i.intern(s.to_string()).unwrap().raw())
+            .map(|s| i.intern(s.to_string()).raw())
             .collect();
 
         assert_eq!(ids, vec![0, 1, 2]);
 
         for (n, name) in ["a", "b", "c"].iter().enumerate() {
-            let id = i.intern(name.to_string()).unwrap();
+            let id = i.intern(name.to_string());
 
             assert_eq!(id.raw() as usize, n);
             assert_eq!(i.value(id), name);
@@ -210,7 +234,7 @@ mod tests {
         let mut i: Interner<String, u16> = Interner::new();
 
         for s in ["first", "second", "third"] {
-            i.intern(s.to_string()).unwrap();
+            i.intern(s.to_string());
         }
 
         assert_eq!(i.into_values(), vec!["first", "second", "third"]);
@@ -224,11 +248,13 @@ mod tests {
 
         // `Capacity::val` for `u16` is `u16::MAX`, so that many entries fit.
         for n in 0..u16::MAX as u32 {
-            i.intern(n)
+            i.try_intern(n)
                 .unwrap_or_else(|e| panic!("entry {n} should fit: {e}"));
         }
 
-        let err = i.intern(u32::MAX).expect_err("one past the cap must fail");
+        let err = i
+            .try_intern(u32::MAX)
+            .expect_err("one past the cap must fail");
 
         assert!(
             matches!(
@@ -253,11 +279,11 @@ mod tests {
         let mut i: Interner<u32, u16> = Interner::new();
 
         for n in 0..u16::MAX as u32 {
-            i.intern(n).unwrap();
+            i.intern(n);
         }
 
-        assert!(i.intern(0).is_ok(), "0 is already interned");
-        assert!(i.intern(u32::MAX).is_err(), "but a new value is not");
+        assert!(i.try_intern(0).is_ok(), "0 is already interned");
+        assert!(i.try_intern(u32::MAX).is_err(), "but a new value is not");
     }
 
     /// The id width follows `C`, so a wider capacity really can name more entries.
@@ -265,13 +291,13 @@ mod tests {
     #[test]
     fn a_u32_capacity_names_more_than_a_u16_id_could() {
         let mut i: Interner<u32, u32> = Interner::new();
-        let first = i.intern(0).unwrap();
+        let first = i.intern(0);
 
         for n in 1..=(u16::MAX as u32 + 1) {
-            i.intern(n).unwrap();
+            i.intern(n);
         }
 
-        let past_u16 = i.intern(u16::MAX as u32 + 1).unwrap();
+        let past_u16 = i.intern(u16::MAX as u32 + 1);
 
         assert_eq!(past_u16.raw(), u16::MAX as u32 + 1);
         assert_ne!(first, past_u16, "ids must not wrap");

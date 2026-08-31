@@ -4570,7 +4570,7 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 
     let ids: Vec<(&str, u16)> = all
         .iter()
-        .map(|(name, c)| (*name, interner.intern(*c).unwrap().raw()))
+        .map(|(name, c)| (*name, interner.intern(*c).raw()))
         .collect();
 
     assert_eq!(
@@ -4601,10 +4601,10 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 fn the_pool_keeps_bit_distinct_floats_apart() {
     let mut interner = Interner::<Const, u16>::default();
 
-    let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
-    let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
-    let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
-    let neg32 = interner.intern(Const::F32((-0.0f32).into())).unwrap();
+    let pos64 = interner.intern(Const::F64(0.0f64.into()));
+    let neg64 = interner.intern(Const::F64((-0.0f64).into()));
+    let pos32 = interner.intern(Const::F32(0.0f32.into()));
+    let neg32 = interner.intern(Const::F32((-0.0f32).into()));
 
     assert_ne!(
         pos64.raw(),
@@ -4629,9 +4629,9 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     let neg_nan = f64::from_bits(0xfff8_0000_0000_0001);
     let other_payload = f64::from_bits(0x7ff8_0000_dead_beef);
 
-    let a = interner.intern(Const::F64(nan.into())).unwrap();
-    let b = interner.intern(Const::F64(neg_nan.into())).unwrap();
-    let c = interner.intern(Const::F64(other_payload.into())).unwrap();
+    let a = interner.intern(Const::F64(nan.into()));
+    let b = interner.intern(Const::F64(neg_nan.into()));
+    let c = interner.intern(Const::F64(other_payload.into()));
 
     assert_ne!(
         a.raw(),
@@ -4646,7 +4646,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     );
 
     // interning the same bits twice must still dedup, or the pool grows per use
-    let again = interner.intern(Const::F64(nan.into())).unwrap();
+    let again = interner.intern(Const::F64(nan.into()));
 
     assert_eq!(
         a.raw(),
@@ -4662,9 +4662,9 @@ fn the_pool_still_dedups_equal_constants() {
     let mut interner = Interner::<Const, u16>::default();
 
     for _ in 0..4 {
-        interner.intern(Const::I32(7)).unwrap();
-        interner.intern(Const::F64(2.5f64.into())).unwrap();
-        interner.intern(Const::Ref(None)).unwrap();
+        interner.intern(Const::I32(7));
+        interner.intern(Const::F64(2.5f64.into()));
+        interner.intern(Const::Ref(None));
     }
 
     assert_eq!(
