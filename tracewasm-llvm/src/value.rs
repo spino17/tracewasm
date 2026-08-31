@@ -48,7 +48,7 @@ impl Display for Type {
             Type::Bfloat => f.write_str("bfloat"),
             Type::Float => f.write_str("float"),
             Type::Double => f.write_str("double"),
-            Type::Ptr => f.write_str("ptr"),
+            Type::Ptr { .. } => f.write_str("ptr"),
             Type::Void => f.write_str("void"),
             Type::Array { size, element_ty } => write!(f, "[{size} x {element_ty}]"),
             Type::Struct { fields, packed } => {
@@ -107,8 +107,28 @@ impl Type {
     }
 
     pub fn is_ptr(&self) -> bool {
-        matches!(self, Type::Ptr)
+        matches!(self, Type::Ptr { .. })
     }
+
+    /*pub fn try_pointee_ty_for_ptr(&self) -> Option<&Type> {
+        let Type::Ptr { pointee_ty } = self else {
+            panic!("this method should be called only for ptr type");
+        };
+
+        if let Some(pointee_ty) = pointee_ty {
+            Some(pointee_ty)
+        } else {
+            None
+        }
+    }
+
+    pub fn set_pointee_ty_for_ptr(&mut self) {
+        let Type::Ptr { pointee_ty } = self else {
+            panic!("this method should be called only for ptr type");
+        };
+
+        todo!()
+    }*/
 
     pub fn is_first_class(&self) -> bool {
         !matches!(self, Type::Void | Type::Func(_))
