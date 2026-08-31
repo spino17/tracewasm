@@ -1,4 +1,5 @@
 use crate::{
+    cfg::{basic_block::BasicBlockId, context::Context},
     error::BuildError,
     interner::{ConstId, ConstInterner, StrId, StrInterner},
 };
@@ -114,10 +115,11 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ValueKind {
     Reg(Register),
     Const(ConstId),
+    ConstExpr(ConstExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -135,8 +137,8 @@ impl Value {
         &self.ty
     }
 
-    pub fn kind(&self) -> ValueKind {
-        self.kind
+    pub fn kind(&self) -> &ValueKind {
+        &self.kind
     }
 
     pub fn into_i1(self) -> Result<I1Value, BuildError> {
@@ -182,8 +184,40 @@ impl Value {
             kind: ValueKind::Reg(Register { name: reg_id }),
         })
     }
+
+    pub fn pointee_ty_for_ptr(&self, block: BasicBlockId, ctx: &mut Context) -> Option<Type> {
+        if self.ty().is_ptr() {
+            return None;
+        }
+
+        match &self.kind {
+            ValueKind::Reg(reg) => {
+                let block = ctx.get_block(block);
+                let func_id = block.func_id;
+                let ptr_reg_name_id = reg.name;
+
+                let ptr_instr_index = *ctx
+                    .register_def_instr_index
+                    .get(&func_id)
+                    .expect("this entry should exist for the func_id")
+                    .get(&ptr_reg_name_id)
+                    .expect(
+                        "this entry should already be inserted when this ptr register was defined",
+                    );
+
+                todo!()
+            }
+            ValueKind::ConstExpr(const_expr) => {}
+            ValueKind::Const(_) => return None,
+        };
+
+        // ptr can be from reg or inlined const expr
+
+        todo!()
+    }
 }
 
+#[derive(Debug, Clone)]
 pub enum ConstExpr {
     GetElementPtr {},
     PtrToInt {},

@@ -1,6 +1,5 @@
 use crate::{
     cfg::{context::Context, function::FuncId},
-    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     instruction::{Instruction, PhiInstrHandler, PhiInstruction},
     interner::StrId,
@@ -38,10 +37,7 @@ impl Copy for BasicBlockId {}
 
 impl BasicBlockId {
     pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) -> usize {
-        let block = ctx
-            .blocks
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+        let block = ctx.get_block_mut(*self);
 
         let index = block.instructions.len();
 
@@ -55,10 +51,7 @@ impl BasicBlockId {
         instr: PhiInstruction,
         ctx: &mut Context,
     ) -> Result<PhiInstrHandler, BuildError> {
-        let block = ctx
-            .blocks
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+        let block = ctx.get_block_mut(*self);
 
         if block.is_first {
             return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);

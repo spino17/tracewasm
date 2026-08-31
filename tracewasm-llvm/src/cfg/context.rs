@@ -1,8 +1,9 @@
 use crate::{
     cfg::{
-        basic_block::BasicBlock,
+        basic_block::{BasicBlock, BasicBlockId},
         function::{FuncId, Function},
     },
+    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     interner::{ConstInterner, StrId, StrInterner},
 };
@@ -32,10 +33,34 @@ impl Context {
 
         Ok(name)
     }
+
+    pub(crate) fn get_block(&self, id: BasicBlockId) -> &BasicBlock {
+        self.blocks
+            .get(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
+    pub(crate) fn get_block_mut(&mut self, id: BasicBlockId) -> &mut BasicBlock {
+        self.blocks
+            .get_mut(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
+    pub(crate) fn get_func(&self, id: FuncId) -> &Function {
+        self.funcs
+            .get(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
+    pub(crate) fn get_func_mut(&mut self, id: FuncId) -> &mut Function {
+        self.funcs
+            .get_mut(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
 }
 
 #[derive(Default)]
-struct FuncRegNameIndex {
+pub(crate) struct FuncRegNameIndex {
     unnamed_index: u32,
     named_index: FxHashMap<String, u32>,
     issued_names: FxHashSet<String>,

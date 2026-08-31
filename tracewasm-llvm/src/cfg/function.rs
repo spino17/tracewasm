@@ -3,7 +3,6 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
     },
-    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     interner::StrId,
 };
@@ -42,11 +41,7 @@ impl FuncId {
         ctx: &mut Context,
     ) -> Result<BasicBlockId, BuildError> {
         let name_id: StrId = ctx.str_interner.intern(name)?.into();
-
-        let func = ctx
-            .funcs
-            .get(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+        let func = ctx.get_func_mut(*self);
 
         if func.block_names.contains(&name_id) {
             return Err(BuildError::DuplicateBasicBlockName(
@@ -64,10 +59,7 @@ impl FuncId {
             instructions: vec![],
         }));
 
-        let func = ctx
-            .funcs
-            .get_mut(self.0)
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
+        let func = ctx.get_func_mut(*self);
 
         func.blocks.push(id);
         func.block_names.insert(name_id);

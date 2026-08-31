@@ -1,6 +1,5 @@
 use crate::{
     cfg::{Cursor, basic_block::BasicBlockId, context::Context},
-    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     value::{I1Value, Type, Value, ValueKind},
 };
@@ -29,11 +28,7 @@ impl PhiInstrHandler {
         branch: (BasicBlockId, Value),
         ctx: &mut Context,
     ) -> Result<(), BuildError> {
-        let block = ctx
-            .blocks
-            .get_mut(self.block.raw())
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
+        let block = ctx.get_block_mut(self.block);
         let index = self.index;
         let instr = &mut block.phis[index];
 
@@ -104,13 +99,7 @@ impl Cursor {
         }
 
         let ref_ty = branches[0].1.ty();
-
-        let func_id = ctx
-            .blocks
-            .get(self.block.raw())
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-            .func_id;
-
+        let func_id = ctx.get_block(self.block).func_id;
         let reg_name = ctx.name_for_reg(reg, func_id)?;
         let val = Value::from_register(reg_name, ref_ty.clone(), &mut ctx.str_interner)?;
 
@@ -244,6 +233,7 @@ impl Cursor {
 
                     value
                 }
+                ValueKind::ConstExpr(const_expr) => todo!(),
             }
         } else {
             value
@@ -254,13 +244,10 @@ impl Cursor {
             ValueKind::Const(_) => {
                 todo!() // RAISE ERROR: null ptr passed!
             }
+            ValueKind::ConstExpr(const_expr) => todo!(),
         };
 
-        let block = ctx
-            .blocks
-            .get(self.block.raw())
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID);
-
+        let block = ctx.get_block(self.block);
         let func_id = block.func_id;
 
         let ptr_instr_index = *ctx
@@ -319,12 +306,7 @@ fn add_instruction_to_block_and_get_value(
     reg: Option<&str>,
     ctx: &mut Context,
 ) -> Result<Value, BuildError> {
-    let func_id = ctx
-        .blocks
-        .get(block.raw())
-        .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-        .func_id;
-
+    let func_id = ctx.get_block(block).func_id;
     let reg_name = ctx.name_for_reg(reg, func_id)?;
     let val = Value::from_register(reg_name, result_ty, &mut ctx.str_interner)?;
 
