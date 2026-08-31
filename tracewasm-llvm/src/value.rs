@@ -695,20 +695,30 @@ mod tests {
         ctx.ty_interner.value(value.ty().raw()).clone()
     }
 
-    /// How a type spells itself against `ctx`'s pool.
+    /// How an interned type spells itself against `ctx`'s pool.
     fn rendered(ty: TyId, ctx: &Context) -> String {
-        ty.display(&ctx).to_string()
+        ty.display(ctx).to_string()
+    }
+
+    /// Interns a shape written inline and renders it, since rendering now needs the
+    /// type to be in the pool first.
+    fn intern_rendered(ty: Type, ctx: &mut Context) -> String {
+        let id = intern(ty, ctx);
+
+        rendered(id, ctx)
     }
 
     #[test]
     fn value_from_constants() {
         let mut ctx = Context::default();
+        let i32_ty = ctx.i32_ty();
+        let i1_ty = ctx.i1_ty();
 
         let a = Value::from_const(32, None, &mut ctx);
-        let b = Value::from_const(2.3, Some(Type::I32), &mut ctx);
+        let b = Value::from_const(2.3, Some(i32_ty), &mut ctx);
         let c = Value::from_const(true, None, &mut ctx);
-        let d = Value::from_const(true, Some(Type::I1), &mut ctx);
-        let e = Value::from_const(false, Some(Type::I32), &mut ctx);
+        let d = Value::from_const(true, Some(i1_ty), &mut ctx);
+        let e = Value::from_const(false, Some(i32_ty), &mut ctx);
 
         assert!(a.is_ok());
         assert!(b.is_err());
@@ -723,8 +733,9 @@ mod tests {
     #[test]
     fn a_cast_sets_the_values_type_and_its_stored_variant() {
         let mut ctx = Context::default();
+        let i64_ty = ctx.i64_ty();
 
-        let widened = Value::from_const(7i8, Some(Type::I64), &mut ctx).unwrap();
+        let widened = Value::from_const(7i8, Some(i64_ty), &mut ctx).unwrap();
 
         assert_eq!(ty_of(&widened, &ctx), Type::I64);
         assert!(
@@ -764,18 +775,24 @@ mod tests {
     #[test]
     fn integer_casts_widen_and_narrow() {
         let mut ctx = Context::default();
+        let i8_ty = ctx.i8_ty();
+        let i16_ty = ctx.i16_ty();
+        let i32_ty = ctx.i32_ty();
 
         assert_eq!(
-            300i32.try_cast(&Type::I8),
+            300i32.try_cast(i8_ty, &mut ctx),
             Some(ConstValue::I8(300i32 as i8)),
             "narrowing truncates rather than refusing"
         );
 
-        assert_eq!(1i8.try_cast(&Type::I32), Some(ConstValue::I32(1)));
-        assert_eq!((-1i64).try_cast(&Type::I16), Some(ConstValue::I16(-1)));
+        assert_eq!(1i8.try_cast(i32_ty, &mut ctx), Some(ConstValue::I32(1)));
+        assert_eq!(
+            (-1i64).try_cast(i16_ty, &mut ctx),
+            Some(ConstValue::I16(-1))
+        );
 
         assert!(
-            Value::from_const(300i32, Some(Type::I8), &mut ctx).is_ok(),
+            Value::from_const(300i32, Some(i8_ty), &mut ctx).is_ok(),
             "so the builder accepts it too"
         );
     }
@@ -786,7 +803,7 @@ mod tests {
     fn a_null_pointer_is_typed_ptr() {
         let mut ctx = Context::default();
 
-        assert_eq!(NullPtr::ty(), Type::Ptr);
+        assert_eq!(rendered(NullPtr::ty(&mut ctx), &ctx), "ptr");
         assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
 
         let value = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -800,9 +817,13 @@ mod tests {
     #[test]
     fn a_null_pointer_casts_only_to_ptr() {
         let mut ctx = Context::default();
-        let i8_ty = intern(Type::I8, &mut ctx);
+        let i8_ty = ctx.i8_ty();
+        let ptr_ty = ctx.ptr_ty();
 
-        assert_eq!(NullPtr.try_cast(&Type::Ptr), Some(ConstValue::NullPtr));
+        assert_eq!(
+            NullPtr.try_cast(ptr_ty, &mut ctx),
+            Some(ConstValue::NullPtr)
+        );
 
         for ty in [
             Type::I1,
@@ -817,11 +838,13 @@ mod tests {
                 element_ty: i8_ty,
             },
         ] {
+            let id = intern(ty, &mut ctx);
+            let spelled = rendered(id, &ctx);
+
             assert_eq!(
-                NullPtr.try_cast(&ty),
+                NullPtr.try_cast(id, &mut ctx),
                 None,
-                "null must not cast to `{}` without an instruction",
-                rendered(&ty, &ctx)
+                "null must not cast to `{spelled}` without an instruction"
             );
         }
     }
@@ -830,12 +853,15 @@ mod tests {
     /// so accepting one here would fold away a conversion that has to be emitted.
     #[test]
     fn nothing_else_casts_to_a_pointer() {
-        assert_eq!(0i8.try_cast(&Type::Ptr), None);
-        assert_eq!(0i32.try_cast(&Type::Ptr), None);
-        assert_eq!(0i64.try_cast(&Type::Ptr), None);
-        assert_eq!(0.0f32.try_cast(&Type::Ptr), None);
-        assert_eq!(0.0f64.try_cast(&Type::Ptr), None);
-        assert_eq!(false.try_cast(&Type::Ptr), None);
+        let mut ctx = Context::default();
+        let ptr_ty = ctx.ptr_ty();
+
+        assert_eq!(0i8.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(0i32.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(0i64.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(0.0f32.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(0.0f64.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(false.try_cast(ptr_ty, &mut ctx), None);
     }
 
     /// A null and an integer zero are different constants — `ptr null` is not
@@ -862,8 +888,10 @@ mod tests {
     fn every_null_pointer_is_the_same_constant() {
         let mut ctx = Context::default();
 
+        let ptr_ty = ctx.ptr_ty();
+
         let first = Value::from_const(NullPtr, None, &mut ctx).unwrap();
-        let again = Value::from_const(NullPtr, Some(Type::Ptr), &mut ctx).unwrap();
+        let again = Value::from_const(NullPtr, Some(ptr_ty), &mut ctx).unwrap();
 
         assert_eq!(ty_of(&first, &ctx), Type::Ptr);
         assert_eq!(ty_of(&again, &ctx), Type::Ptr);
@@ -893,7 +921,9 @@ mod tests {
     fn a_refused_null_cast_names_both_types() {
         let mut ctx = Context::default();
 
-        let err = Value::from_const(NullPtr, Some(Type::I64), &mut ctx)
+        let i64_ty = ctx.i64_ty();
+
+        let err = Value::from_const(NullPtr, Some(i64_ty), &mut ctx)
             .expect_err("null does not cast to i64");
 
         let msg = err.to_string();
@@ -907,28 +937,40 @@ mod tests {
     /// conversion needs an `sitofp`/`fptosi` instruction, not a constant cast.
     #[test]
     fn casts_between_integers_and_floats_are_refused() {
-        assert_eq!(1i32.try_cast(&Type::Float), None);
-        assert_eq!(1i64.try_cast(&Type::Double), None);
-        assert_eq!(1.0f32.try_cast(&Type::I32), None);
-        assert_eq!(1.0f64.try_cast(&Type::I64), None);
-        assert_eq!(true.try_cast(&Type::I32), None);
+        let mut ctx = Context::default();
+        let f32_ty = ctx.f32_ty();
+        let f64_ty = ctx.f64_ty();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+
+        assert_eq!(1i32.try_cast(f32_ty, &mut ctx), None);
+        assert_eq!(1i64.try_cast(f64_ty, &mut ctx), None);
+        assert_eq!(1.0f32.try_cast(i32_ty, &mut ctx), None);
+        assert_eq!(1.0f64.try_cast(i64_ty, &mut ctx), None);
+        assert_eq!(true.try_cast(i32_ty, &mut ctx), None);
     }
 
     /// Floats cast between the two widths and nowhere else.
     #[test]
     fn float_casts_cover_both_widths_only() {
+        let mut ctx = Context::default();
+        let f32_ty = ctx.f32_ty();
+        let f64_ty = ctx.f64_ty();
+        let f16_ty = ctx.f16_ty();
+        let ptr_ty = ctx.ptr_ty();
+
         assert_eq!(
-            1.5f32.try_cast(&Type::Double),
+            1.5f32.try_cast(f64_ty, &mut ctx),
             Some(ConstValue::Double(OrderedFloat(1.5)))
         );
 
         assert_eq!(
-            1.5f64.try_cast(&Type::Float),
+            1.5f64.try_cast(f32_ty, &mut ctx),
             Some(ConstValue::Float(OrderedFloat(1.5)))
         );
 
-        assert_eq!(1.5f32.try_cast(&Type::Half), None);
-        assert_eq!(1.5f64.try_cast(&Type::Ptr), None);
+        assert_eq!(1.5f32.try_cast(f16_ty, &mut ctx), None);
+        assert_eq!(1.5f64.try_cast(ptr_ty, &mut ctx), None);
     }
 
     /// A failed cast names both ends, which is the only way to tell which side was
@@ -937,7 +979,9 @@ mod tests {
     fn a_failed_cast_reports_both_types() {
         let mut ctx = Context::default();
 
-        let err = Value::from_const(1.0f64, Some(Type::I32), &mut ctx)
+        let i32_ty = ctx.i32_ty();
+
+        let err = Value::from_const(1.0f64, Some(i32_ty), &mut ctx)
             .expect_err("f64 does not cast to i32");
 
         let msg = err.to_string();
@@ -956,10 +1000,13 @@ mod tests {
         let mut ctx = Context::default();
         let i32_ty = intern(Type::I32, &mut ctx);
 
-        let array = Type::Array {
-            size: 4,
-            element_ty: i32_ty,
-        };
+        let array = intern(
+            Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            },
+            &mut ctx,
+        );
 
         let err = Value::from_const(1i32, Some(array), &mut ctx)
             .expect_err("an i32 does not cast to an array");
@@ -1093,7 +1140,7 @@ mod tests {
         let signature = func(vec![Type::I8, Type::Ptr], Type::I32, &mut ctx);
 
         assert_eq!(
-            rendered(&Type::Func(signature), &ctx),
+            intern_rendered(Type::Func(signature), &mut ctx),
             "i32 (i8, ptr)",
             "the variant renders as its signature, with nothing added"
         );
@@ -1108,8 +1155,8 @@ mod tests {
         let void = Type::Func(func(vec![], Type::Void, &mut ctx));
         let i1 = Type::Func(func(vec![], Type::I1, &mut ctx));
 
-        assert_eq!(rendered(&void, &ctx), "void ()");
-        assert_eq!(rendered(&i1, &ctx), "i1 ()");
+        assert_eq!(intern_rendered(void, &mut ctx), "void ()");
+        assert_eq!(intern_rendered(i1, &mut ctx), "i1 ()");
     }
 
     /// Params may be aggregates, so the renderer has to compose with the array and
@@ -1138,7 +1185,7 @@ mod tests {
         );
 
         assert_eq!(
-            rendered(&Type::Func(signature), &ctx),
+            intern_rendered(Type::Func(signature), &mut ctx),
             "void ([4 x i32], { i8, ptr })"
         );
     }
@@ -1262,7 +1309,7 @@ mod tests {
             );
 
             assert_eq!(
-                ctx.ty_interner.display(id).to_string(),
+                rendered(id, &ctx),
                 "[4 x i32]",
                 "every route to the length spells the same type"
             );
@@ -1286,8 +1333,12 @@ mod tests {
         let i32_ty = intern(Type::I32, &mut ctx);
         let ptr_ty = intern(Type::Ptr, &mut ctx);
 
-        assert!(!Type::Void.is_first_class());
-        assert!(!Type::Func(func(vec![Type::I32], Type::I32, &mut ctx)).is_first_class());
+        let void = intern(Type::Void, &mut ctx);
+        let signature = Type::Func(func(vec![Type::I32], Type::I32, &mut ctx));
+        let signature = intern(signature, &mut ctx);
+
+        assert!(!void.is_first_class(&ctx));
+        assert!(!signature.is_first_class(&ctx));
 
         for ty in [
             Type::I1,
@@ -1306,10 +1357,12 @@ mod tests {
                 packed: false,
             },
         ] {
+            let id = intern(ty, &mut ctx);
+
             assert!(
-                ty.is_first_class(),
+                id.is_first_class(&ctx),
                 "`{}` has a size and can be loaded",
-                rendered(&ty, &ctx)
+                rendered(id, &ctx)
             );
         }
     }
@@ -1330,7 +1383,7 @@ mod tests {
             (Type::Ptr, "ptr"),
             (Type::Void, "void"),
         ] {
-            assert_eq!(rendered(&ty, &ctx), expected);
+            assert_eq!(intern_rendered(ty, &mut ctx), expected);
         }
 
         let i32_ty = intern(Type::I32, &mut ctx);
@@ -1338,45 +1391,45 @@ mod tests {
         let double_ty = intern(Type::Double, &mut ctx);
 
         assert_eq!(
-            rendered(
-                &Type::Array {
+            intern_rendered(
+                Type::Array {
                     size: 8,
                     element_ty: i32_ty,
                 },
-                &ctx
+                &mut ctx
             ),
             "[8 x i32]"
         );
 
         assert_eq!(
-            rendered(
-                &Type::Struct {
+            intern_rendered(
+                Type::Struct {
                     fields: Box::new([i32_ty, double_ty]),
                     packed: false,
                 },
-                &ctx
+                &mut ctx
             ),
             "{ i32, double }"
         );
 
         assert_eq!(
-            rendered(
-                &Type::Struct {
+            intern_rendered(
+                Type::Struct {
                     fields: Box::new([i8_ty]),
                     packed: true,
                 },
-                &ctx
+                &mut ctx
             ),
             "<{ i8 }>"
         );
 
         assert_eq!(
-            rendered(
-                &Type::Struct {
+            intern_rendered(
+                Type::Struct {
                     fields: Box::new([]),
                     packed: false,
                 },
-                &ctx
+                &mut ctx
             ),
             "{  }",
             "an empty struct still renders"
@@ -1410,12 +1463,12 @@ mod tests {
         );
 
         assert_eq!(
-            rendered(
-                &Type::Array {
+            intern_rendered(
+                Type::Array {
                     size: 2,
                     element_ty: fields,
                 },
-                &ctx
+                &mut ctx
             ),
             "[2 x <{ ptr, [3 x i16] }>]"
         );

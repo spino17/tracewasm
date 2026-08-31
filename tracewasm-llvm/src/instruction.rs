@@ -353,13 +353,19 @@ mod tests {
     use crate::{
         cfg::{Builder, context::Context},
         test_support::{fixture, value},
-        value::{ConstValue, NullPtr},
+        value::{ConstValue, NullPtr, Type},
     };
+
+    /// Interns `ty` and hands back its id, for the shapes that have no `Context`
+    /// shorthand.
+    fn intern(ty: Type, ctx: &mut Context) -> TyId {
+        ctx.ty_interner.intern(ty).into()
+    }
 
     /// How a type spells itself against `ctx`'s pool — which is the form an error
     /// carries, since `BuildError` holds the rendering rather than the type.
     fn rendered(ty: TyId, ctx: &Context) -> String {
-        ty.display(&ctx).to_string()
+        ty.display(ctx).to_string()
     }
 
     /// Instructions land in the block the cursor names, in order.
@@ -566,7 +572,7 @@ mod tests {
             .expect("both branches are `[4 x i32]`");
 
         assert_eq!(
-            ctx.ty_interner.display(merged.ty()).to_string(),
+            ctx.display(merged.ty()).to_string(),
             "[4 x i32]",
             "and the phi carries that type"
         );
@@ -647,11 +653,12 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
-        let i32_ty = intern(Type::I32, &mut ctx);
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
         let reg = Value::from_register("v".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .add_store(reg, ptr, None, Some(Type::I64), &mut ctx)
+            .add_store(reg, ptr, None, Some(i64_ty), &mut ctx)
             .expect_err("an i32 register is not an i64");
 
         assert!(
@@ -668,10 +675,11 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i64_ty = ctx.i64_ty();
         let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
         cursor
-            .add_store(seven, ptr, None, Some(Type::I64), &mut ctx)
+            .add_store(seven, ptr, None, Some(i64_ty), &mut ctx)
             .expect("an i32 constant stores as an i64");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -682,7 +690,7 @@ mod tests {
 
         // The *stored* value is the widened one — a store of the original `i32`
         // would be a different instruction than the caller asked for.
-        assert_eq!(ctx.ty_interner.display(value.ty()).to_string(), "i64");
+        assert_eq!(ctx.display(value.ty()).to_string(), "i64");
 
         let ValueKind::Const(id) = value.kind() else {
             panic!("expected a constant")
@@ -701,8 +709,10 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
 
+        let void_ty = ctx.void_ty();
+
         let err = cursor
-            .add_alloca(Type::Void, None, None, None, &mut ctx)
+            .add_alloca(void_ty, None, None, None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -718,23 +728,22 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
 
-        let i32_ty = intern(Type::I32, &mut ctx);
+        let i32_ty = ctx.i32_ty();
+
+        let array_ty = intern(
+            Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            },
+            &mut ctx,
+        );
 
         let slot = cursor
-            .add_alloca(
-                Type::Array {
-                    size: 4,
-                    element_ty: i32_ty,
-                },
-                None,
-                None,
-                Some("buf"),
-                &mut ctx,
-            )
+            .add_alloca(array_ty, None, None, Some("buf"), &mut ctx)
             .expect("`[4 x i32]` is sized");
 
         assert_eq!(
-            ctx.ty_interner.display(slot.ty()).to_string(),
+            ctx.display(slot.ty()).to_string(),
             "ptr",
             "an alloca yields a pointer, not the allocated type"
         );
@@ -747,10 +756,12 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_alloca(Type::I32, Some((a_float, None)), None, None, &mut ctx)
+            .add_alloca(i32_ty, Some((a_float, None)), None, None, &mut ctx)
             .expect_err("a float is not a count");
 
         assert!(
@@ -764,13 +775,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_alloca(
-                    Type::I32,
-                    Some((an_int, Some(Type::Double))),
-                    None,
-                    None,
-                    &mut ctx
-                ),
+                cursor.add_alloca(i32_ty, Some((an_int, Some(f64_ty))), None, None, &mut ctx),
                 Err(BuildError::AllocaCountNotAnInteger(_))
             ),
             "`double` is not an integer, whoever supplied it"
@@ -784,11 +789,12 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i32_ty = ctx.i32_ty();
         let one = Value::from_const(true, None, &mut ctx).unwrap();
 
         assert!(
             cursor
-                .add_alloca(Type::I32, Some((one, None)), None, None, &mut ctx)
+                .add_alloca(i32_ty, Some((one, None)), None, None, &mut ctx)
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -801,11 +807,12 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
 
-        let i32_ty = intern(Type::I32, &mut ctx);
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
         let n = Value::from_register("n".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .add_alloca(Type::I32, Some((n, Some(Type::I64))), None, None, &mut ctx)
+            .add_alloca(i32_ty, Some((n, Some(i64_ty))), None, None, &mut ctx)
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
@@ -835,18 +842,22 @@ mod tests {
         // is only valid against `body` — index 0 of a one-instruction list.
         let in_entry = builder.cursor_at_block(entry);
 
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f64_ty = ctx.f64_ty();
+
         in_entry
-            .add_load(Type::I32, ptr.clone(), None, Some("a"), &mut ctx)
+            .add_load(i32_ty, ptr.clone(), None, Some("a"), &mut ctx)
             .unwrap();
 
         let second = in_entry
-            .add_load(Type::I64, ptr.clone(), None, Some("b"), &mut ctx)
+            .add_load(i64_ty, ptr.clone(), None, Some("b"), &mut ctx)
             .unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .add_load(Type::Double, ptr, None, Some("c"), &mut ctx)
+            .add_load(f64_ty, ptr, None, Some("c"), &mut ctx)
             .unwrap();
 
         let func_id = ctx.get_block(entry).func_id;
@@ -878,7 +889,7 @@ mod tests {
                 panic!("expected a load")
             };
 
-            ctx.ty_interner.display(*ty).to_string()
+            ctx.display(*ty).to_string()
         };
 
         assert_eq!(
@@ -900,8 +911,10 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i32_ty = ctx.i32_ty();
+
         let loaded = cursor
-            .add_load(Type::I32, ptr, None, Some("x"), &mut ctx)
+            .add_load(i32_ty, ptr, None, Some("x"), &mut ctx)
             .expect("loading an i32 through a ptr is fine");
 
         assert_eq!(ctx.ty_interner.value(loaded.ty().raw()), &Type::I32);
@@ -914,8 +927,10 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i64_ty = ctx.i64_ty();
+
         cursor
-            .add_load(Type::I64, ptr, None, Some("x"), &mut ctx)
+            .add_load(i64_ty, ptr, None, Some("x"), &mut ctx)
             .unwrap();
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -938,8 +953,10 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
         let not_a_ptr = value(7, &mut ctx);
 
+        let i32_ty = ctx.i32_ty();
+
         let err = cursor
-            .add_load(Type::I32, not_a_ptr, None, Some("x"), &mut ctx)
+            .add_load(i32_ty, not_a_ptr, None, Some("x"), &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -962,8 +979,10 @@ mod tests {
 
         // `Type::Func` is the other unsized case; it is covered in `value.rs`,
         // where a `FuncSignature` can be built.
+        let void_ty = ctx.void_ty();
+
         let err = cursor
-            .add_load(Type::Void, ptr, None, None, &mut ctx)
+            .add_load(void_ty, ptr, None, None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -993,11 +1012,12 @@ mod tests {
             Type::Ptr,
             Type::Double,
         ] {
-            let spelled = rendered(&ty, &ctx);
+            let id = intern(ty, &mut ctx);
+            let spelled = rendered(id, &ctx);
 
             assert!(
                 cursor
-                    .add_load(ty, ptr.clone(), None, None, &mut ctx)
+                    .add_load(id, ptr.clone(), None, None, &mut ctx)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
@@ -1012,10 +1032,12 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i32_ty = ctx.i32_ty();
+
         for align in [1, 2, 4, 8, 16, 4096] {
             assert!(
                 cursor
-                    .add_load(Type::I32, ptr.clone(), Some(align), None, &mut ctx)
+                    .add_load(i32_ty, ptr.clone(), Some(align), None, &mut ctx)
                     .is_ok(),
                 "align {align} is a power of two"
             );
@@ -1023,7 +1045,7 @@ mod tests {
 
         for align in [0, 3, 6, 10, 12] {
             let err = cursor
-                .add_load(Type::I32, ptr.clone(), Some(align), None, &mut ctx)
+                .add_load(i32_ty, ptr.clone(), Some(align), None, &mut ctx)
                 .expect_err("not a power of two");
 
             assert!(
@@ -1040,10 +1062,8 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
-        assert!(
-            cursor
-                .add_load(Type::I32, ptr, None, None, &mut ctx)
-                .is_ok()
-        );
+        let i32_ty = ctx.i32_ty();
+
+        assert!(cursor.add_load(i32_ty, ptr, None, None, &mut ctx).is_ok());
     }
 }
