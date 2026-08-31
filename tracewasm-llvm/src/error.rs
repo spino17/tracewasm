@@ -9,18 +9,24 @@ use tracewasm_utils::error::TracewasmUtilsError;
 /// failure is rare enough that the allocation costs nothing that matters.
 #[derive(Error, Debug)]
 pub enum BuildError {
-    #[error("phi instructions should be added at the start of the basic block")]
-    PhiInstructionAddError,
-    #[error("phi instructions cannot be added to the first basic block of the function")]
-    PhiInstructionCannotBeAddedToEntryBasicBlock,
-    #[error("basic block branch already in phi instruction")]
-    BasicBlockBranchAlreadyInPhiInstruction,
+    #[error("{0}")]
+    TypeError(#[from] TypeError),
+    #[error("{0}")]
+    UtilsError(#[from] TracewasmUtilsError),
+    #[error("{0}")]
+    InstructionError(#[from] InstructionError),
+}
+
+#[derive(Error, Debug)]
+pub enum TypeError {
     #[error("value of type `{0}` cannot be converted into i1 value")]
     ValueToI1ValueFailed(String),
-    #[error("{0}")]
-    UtilsError(TracewasmUtilsError),
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(String, String),
+}
+
+#[derive(Error, Debug)]
+pub enum ContextError {
     /// Two functions cannot share a name: LLVM identifies a definition by it, so
     /// emitting both would produce two `@name` definitions in one module.
     #[error("a function named `{0}` already exists in this module")]
@@ -29,17 +35,6 @@ pub enum BuildError {
     /// label a branch names would be ambiguous.
     #[error("a basic block named `{0}` already exists in this function")]
     DuplicateBasicBlockName(String),
-    /// A phi is typed once and every incoming value has to have that type — the
-    /// instruction produces one value, so there is nothing for a second type to be.
-    ///
-    /// Fields: the type the phi was established with, and the one this branch
-    /// brought.
-    #[error("phi branch has type `{1}`, but the phi's type is `{0}`")]
-    PhiInstructionBranchTypeMismatch(String, String),
-    /// A phi with no incoming values selects nothing, and its type is whatever its
-    /// first branch says — so with none there is no type to give it either.
-    #[error("a phi instruction needs at least one branch")]
-    PhiInstructionWithNoBranches,
     /// A requested register name is not an LLVM identifier.
     ///
     /// Unquoted locals are `[-a-zA-Z$._][-a-zA-Z$._0-9]*`; anything else would have
@@ -51,6 +46,10 @@ pub enum BuildError {
          `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, and may not begin with a digit"
     )]
     InvalidRegisterName(String),
+}
+
+#[derive(Error, Debug)]
+pub enum InstructionError {
     /// `load` and `store` address memory through a pointer, so the operand naming
     /// the location has to be one. Reaching memory from an integer needs an
     /// `inttoptr` first.
@@ -65,10 +64,18 @@ pub enum BuildError {
     /// alignment off is how the ABI default is asked for.
     #[error("alignment must be a power of two, but got `{0}`")]
     AlignmentNotPowerOfTwo(u32),
-    #[error("a value of type `{0}` cannot be stored as `{1}`")]
-    StoredValueTypeMismatch(String, String),
-    #[error("a value of type `{0}` cannot be stored through a pointer to `{1}`")]
-    StoredValueDoesNotMatchPointee(String, String),
+    #[error("{0}")]
+    Alloca(#[from] AllocaError),
+    #[error("{0}")]
+    Store(#[from] StoreError),
+    #[error("{0}")]
+    Phi(#[from] PhiError),
+    #[error("{0}")]
+    Context(#[from] ContextError),
+}
+
+#[derive(Error, Debug)]
+pub enum AllocaError {
     #[error("a value of type `{0}` cannot be allocated: `alloca` needs a sized type")]
     TypeNotAllocatable(String),
     #[error("an `alloca` element count must have an integer type, but got `{0}`")]
@@ -77,8 +84,33 @@ pub enum BuildError {
     AllocaCountTypeMismatch(String, String),
 }
 
-impl From<TracewasmUtilsError> for BuildError {
-    fn from(value: TracewasmUtilsError) -> Self {
-        BuildError::UtilsError(value)
-    }
+#[derive(Error, Debug)]
+pub enum StoreError {
+    #[error("a value of type `{0}` cannot be stored as `{1}`")]
+    StoredValueTypeMismatch(String, String),
+    #[error("a value of type `{0}` cannot be stored through a pointer to `{1}`")]
+    StoredValueDoesNotMatchPointee(String, String),
+}
+
+#[derive(Error, Debug)]
+pub enum PhiError {
+    #[error("phi instructions should be added at the start of the basic block")]
+    PhiInstructionAddError,
+    #[error("phi instructions cannot be added to the first basic block of the function")]
+    PhiInstructionCannotBeAddedToEntryBasicBlock,
+    #[error("basic block branch already in phi instruction")]
+    BasicBlockBranchAlreadyInPhiInstruction,
+    /// A phi with no incoming values selects nothing, and its type is whatever its
+    /// first branch says — so with none there is no type to give it either.
+    #[error("a phi instruction needs at least one branch")]
+    PhiInstructionWithNoBranches,
+    /// A phi is typed once and every incoming value has to have that type — the
+    /// instruction produces one value, so there is nothing for a second type to be.
+    ///
+    /// Fields: the type the phi was established with, and the one this branch
+    /// brought.
+    #[error("phi branch has type `{1}`, but the phi's type is `{0}`")]
+    PhiInstructionBranchTypeMismatch(String, String),
+    #[error("{0}")]
+    Context(#[from] ContextError),
 }

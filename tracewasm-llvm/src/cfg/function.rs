@@ -3,7 +3,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
     },
-    error::BuildError,
+    error::ContextError,
     interner::StrId,
 };
 use id_arena::Id;
@@ -39,12 +39,12 @@ impl FuncId {
         &self,
         name: String,
         ctx: &mut Context,
-    ) -> Result<BasicBlockId, BuildError> {
+    ) -> Result<BasicBlockId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
         let func = ctx.get_func_mut(*self);
 
         if func.block_names.contains(&name_id) {
-            return Err(BuildError::DuplicateBasicBlockName(
+            return Err(ContextError::DuplicateBasicBlockName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
@@ -70,7 +70,7 @@ impl FuncId {
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::BuildError, test_support::fixture};
+    use crate::{error::ContextError, test_support::fixture};
 
     /// `is_first` marks the entry block, which is the one a phi cannot go in. Only
     /// the first block added to a function is it.
@@ -117,7 +117,7 @@ mod tests {
             .expect_err("the name is taken in this function");
 
         assert!(
-            matches!(&err, BuildError::DuplicateBasicBlockName(name) if name == "entry"),
+            matches!(&err, ContextError::DuplicateBasicBlockName(name) if name == "entry"),
             "the error must name the collision, got: {err}"
         );
 

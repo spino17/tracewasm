@@ -4,7 +4,7 @@ use crate::{
         context::Context,
         function::{FuncId, Function},
     },
-    error::BuildError,
+    error::ContextError,
     interner::StrId,
 };
 use rustc_hash::FxHashSet;
@@ -48,11 +48,15 @@ impl Builder {
         Cursor { block: id }
     }
 
-    pub fn add_function(&mut self, name: String, ctx: &mut Context) -> Result<FuncId, BuildError> {
+    pub fn add_function(
+        &mut self,
+        name: String,
+        ctx: &mut Context,
+    ) -> Result<FuncId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if self.module.func_names.contains(&name_id) {
-            return Err(BuildError::DuplicateFunctionName(
+            return Err(ContextError::DuplicateFunctionName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
@@ -137,7 +141,7 @@ mod tests {
             .expect_err("the name is taken");
 
         assert!(
-            matches!(&err, BuildError::DuplicateFunctionName(name) if name == "sum"),
+            matches!(&err, ContextError::DuplicateFunctionName(name) if name == "sum"),
             "the error must name the collision, got: {err}"
         );
 

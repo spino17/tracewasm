@@ -1,6 +1,6 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
-    error::BuildError,
+    error::TypeError,
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -179,9 +179,9 @@ impl Value {
         self.ty().is_ptr(ctx)
     }
 
-    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, BuildError> {
+    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
         if !self.ty().is_i1(ctx) {
-            return Err(BuildError::ValueToI1ValueFailed(
+            return Err(TypeError::ValueToI1ValueFailed(
                 self.ty().display(ctx).to_string(),
             ));
         }
@@ -198,10 +198,10 @@ impl Value {
         val: C,
         optional_cast: Option<TyId>,
         ctx: &mut Context,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, TypeError> {
         let (val, ty) = if let Some(ty) = optional_cast {
             let Some(c) = val.try_cast(ty, ctx) else {
-                return Err(BuildError::ConstantCastToProvidedTypeFailed(
+                return Err(TypeError::ConstantCastToProvidedTypeFailed(
                     C::ty(ctx).display(ctx).to_string(),
                     ty.display(ctx).to_string(),
                 ));

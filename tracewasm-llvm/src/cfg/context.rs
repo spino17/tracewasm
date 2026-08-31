@@ -4,7 +4,7 @@ use crate::{
         function::{FuncId, Function},
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
-    error::BuildError,
+    error::ContextError,
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
     value::{Type, TypeDisplay},
 };
@@ -35,7 +35,7 @@ impl Context {
         &mut self,
         name: Option<&str>,
         func_id: FuncId,
-    ) -> Result<String, BuildError> {
+    ) -> Result<String, ContextError> {
         let assigner = self.reg_name_assigner.entry(func_id).or_default();
         let name = assigner.name_from_hint(name)?;
 
@@ -151,7 +151,7 @@ impl FuncRegNameIndex {
         }
     }
 
-    fn name_from_hint(&mut self, hint: Option<&str>) -> Result<String, BuildError> {
+    fn name_from_hint(&mut self, hint: Option<&str>) -> Result<String, ContextError> {
         let Some(hint) = hint else {
             return Ok(self.next_unnamed_index().to_string());
         };
@@ -159,7 +159,7 @@ impl FuncRegNameIndex {
         let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
 
         if !re.is_match(hint) {
-            return Err(BuildError::InvalidRegisterName(hint.to_string()));
+            return Err(ContextError::InvalidRegisterName(hint.to_string()));
         }
 
         let final_name = loop {

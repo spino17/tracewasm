@@ -4,7 +4,7 @@ use crate::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
     },
-    error::BuildError,
+    error::{AllocaError, InstructionError, PhiError, StoreError},
     interner::TyId,
     value::{I1Value, Value, ValueKind},
 };
@@ -32,7 +32,7 @@ impl PhiInstrHandler {
         &self,
         branch: (BasicBlockId, Value),
         ctx: &mut Context,
-    ) -> Result<(), BuildError> {
+    ) -> Result<(), PhiError> {
         let index = self.index;
 
         // Read the phi's type through a shared borrow first: rendering a mismatch
@@ -42,7 +42,7 @@ impl PhiInstrHandler {
         let branch_ty = branch.1.ty();
 
         if branch_ty != ref_ty {
-            return Err(BuildError::PhiInstructionBranchTypeMismatch(
+            return Err(PhiError::PhiInstructionBranchTypeMismatch(
                 ctx.display(ref_ty).to_string(),
                 ctx.display(branch_ty).to_string(),
             ));
@@ -52,7 +52,7 @@ impl PhiInstrHandler {
         let instr = &mut ctx.get_block_mut(self.block).phis[index];
 
         if instr.blocks.contains(&block_id) {
-            return Err(BuildError::BasicBlockBranchAlreadyInPhiInstruction);
+            return Err(PhiError::BasicBlockBranchAlreadyInPhiInstruction);
         }
 
         instr.blocks.insert(block_id);
@@ -101,9 +101,9 @@ impl Cursor {
         branches: &[(BasicBlockId, Value)],
         reg: Option<&str>,
         ctx: &mut Context,
-    ) -> Result<(PhiInstrHandler, Value), BuildError> {
+    ) -> Result<(PhiInstrHandler, Value), PhiError> {
         if branches.is_empty() {
-            return Err(BuildError::PhiInstructionWithNoBranches);
+            return Err(PhiError::PhiInstructionWithNoBranches);
         }
 
         let ref_ty = branches[0].1.ty();
@@ -165,21 +165,23 @@ impl Cursor {
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
-    ) -> Result<Value, BuildError> {
+    ) -> Result<Value, InstructionError> {
         if !ptr.is_ptr(ctx) {
-            return Err(BuildError::PointerOperandExpected(
+            return Err(InstructionError::PointerOperandExpected(
                 ptr.ty().display(ctx).to_string(),
             ));
         }
 
         if !ty.is_first_class(ctx) {
-            return Err(BuildError::TypeNotLoadable(ty.display(ctx).to_string()));
+            return Err(InstructionError::TypeNotLoadable(
+                ty.display(ctx).to_string(),
+            ));
         }
 
         if let Some(align) = align
             && !align.is_power_of_two()
         {
-            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         add_instruction_to_block_and_get_value(
@@ -198,9 +200,9 @@ impl Cursor {
         align: Option<u32>,
         ty: Option<TyId>,
         ctx: &mut Context,
-    ) -> Result<(), BuildError> {
+    ) -> Result<(), InstructionError> {
         if !ptr.is_ptr(ctx) {
-            return Err(BuildError::PointerOperandExpected(
+            return Err(InstructionError::PointerOperandExpected(
                 ptr.ty().display(ctx).to_string(),
             ));
         }
@@ -208,17 +210,18 @@ impl Cursor {
         if let Some(align) = align
             && !align.is_power_of_two()
         {
-            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let final_val = if let Some(ty) = ty {
             let value_ty = ctx.display(value.ty()).to_string();
 
             let Some(casted_value) = value.try_cast(ty, ctx) else {
-                return Err(BuildError::StoredValueTypeMismatch(
+                return Err(StoreError::StoredValueTypeMismatch(
                     value_ty,
                     ty.display(ctx).to_string(),
-                ));
+                )
+                .into());
             };
 
             casted_value
@@ -229,10 +232,11 @@ impl Cursor {
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
             && pointee_ty != final_val.ty()
         {
-            return Err(BuildError::StoredValueDoesNotMatchPointee(
+            return Err(StoreError::StoredValueDoesNotMatchPointee(
                 ctx.display(final_val.ty()).to_string(),
                 ctx.display(pointee_ty).to_string(),
-            ));
+            )
+            .into());
         }
 
         self.block.add_instruction(
@@ -257,40 +261,43 @@ impl Cursor {
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
-    ) -> Result<Value, BuildError> {
+    ) -> Result<Value, InstructionError> {
         if !ty.is_first_class(ctx) {
-            return Err(BuildError::TypeNotAllocatable(ty.display(ctx).to_string()));
+            return Err(AllocaError::TypeNotAllocatable(ty.display(ctx).to_string()).into());
         }
 
         if let Some(align) = align
             && !align.is_power_of_two()
         {
-            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let mut final_count: Option<Value> = None;
 
         if let Some((count_val, count_expected_ty)) = count {
             if !count_val.is_integer(ctx) {
-                return Err(BuildError::AllocaCountNotAnInteger(
+                return Err(AllocaError::AllocaCountNotAnInteger(
                     ctx.display(count_val.ty()).to_string(),
-                ));
+                )
+                .into());
             }
 
             let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
                 if !count_expected_ty.is_integer(ctx) {
-                    return Err(BuildError::AllocaCountNotAnInteger(
+                    return Err(AllocaError::AllocaCountNotAnInteger(
                         count_expected_ty.display(ctx).to_string(),
-                    ));
+                    )
+                    .into());
                 }
 
                 let count_ty = ctx.display(count_val.ty()).to_string();
 
                 let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
-                    return Err(BuildError::AllocaCountTypeMismatch(
+                    return Err(AllocaError::AllocaCountTypeMismatch(
                         count_ty,
                         count_expected_ty.display(ctx).to_string(),
-                    ));
+                    )
+                    .into());
                 };
 
                 casted_val
@@ -323,7 +330,7 @@ fn add_instruction_to_block_and_get_value(
     block: BasicBlockId,
     reg: Option<&str>,
     ctx: &mut Context,
-) -> Result<Value, BuildError> {
+) -> Result<Value, InstructionError> {
     let func_id = ctx.get_block(block).func_id;
     let reg_name = ctx.name_for_reg(reg, func_id)?;
     let val = Value::from_register(reg_name, result_ty, ctx);
@@ -422,7 +429,7 @@ mod tests {
             .add_phi(&[], Some("result"), &mut ctx)
             .expect_err("a phi with no branches has no value and no type");
 
-        assert!(matches!(err, BuildError::PhiInstructionWithNoBranches));
+        assert!(matches!(err, PhiError::PhiInstructionWithNoBranches));
 
         assert!(
             ctx.blocks.get(body.raw()).unwrap().phis.is_empty(),
@@ -446,7 +453,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock
+            PhiError::PhiInstructionCannotBeAddedToEntryBasicBlock
         ));
     }
 
@@ -523,7 +530,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                BuildError::PhiInstructionBranchTypeMismatch(phi, branch)
+                PhiError::PhiInstructionBranchTypeMismatch(phi, branch)
                     if phi == "i32" && branch == "i64"
             ),
             "the error must name both types, got: {err}"
@@ -597,7 +604,7 @@ mod tests {
             .add_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("the block already has an instruction");
 
-        assert!(matches!(err, BuildError::PhiInstructionAddError));
+        assert!(matches!(err, PhiError::PhiInstructionAddError));
 
         assert!(
             ctx.blocks.get(body.raw()).unwrap().phis.is_empty(),
@@ -626,7 +633,7 @@ mod tests {
             .expect_err("`entry` is already a predecessor of this phi");
 
         assert!(
-            matches!(err, BuildError::BasicBlockBranchAlreadyInPhiInstruction),
+            matches!(err, PhiError::BasicBlockBranchAlreadyInPhiInstruction),
             "a repeated predecessor is not an entry-block error, got: {err}"
         );
 
@@ -664,7 +671,7 @@ mod tests {
             .expect_err("an i32 register is not an i64");
 
         assert!(
-            matches!(&err, BuildError::StoredValueTypeMismatch(got, declared)
+            matches!(&err, InstructionError::Store(StoreError::StoredValueTypeMismatch(got, declared))
                 if got == "i32" && declared == "i64"),
             "the error must name both types, got: {err}"
         );
@@ -718,7 +725,7 @@ mod tests {
             .expect_err("`void` has no size");
 
         assert!(
-            matches!(&err, BuildError::TypeNotAllocatable(t) if t == "void"),
+            matches!(&err, InstructionError::Alloca(AllocaError::TypeNotAllocatable(t)) if t == "void"),
             "expected a not-allocatable error, got: {err}"
         );
     }
@@ -767,7 +774,7 @@ mod tests {
             .expect_err("a float is not a count");
 
         assert!(
-            matches!(&err, BuildError::AllocaCountNotAnInteger(t) if t == "float"),
+            matches!(&err, InstructionError::Alloca(AllocaError::AllocaCountNotAnInteger(t)) if t == "float"),
             "the error must name the offending type, got: {err}"
         );
 
@@ -778,7 +785,9 @@ mod tests {
         assert!(
             matches!(
                 cursor.add_alloca(i32_ty, Some((an_int, Some(f64_ty))), None, None, &mut ctx),
-                Err(BuildError::AllocaCountNotAnInteger(_))
+                Err(InstructionError::Alloca(
+                    AllocaError::AllocaCountNotAnInteger(_)
+                ))
             ),
             "`double` is not an integer, whoever supplied it"
         );
@@ -818,7 +827,7 @@ mod tests {
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
-            matches!(&err, BuildError::AllocaCountTypeMismatch(got, declared)
+            matches!(&err, InstructionError::Alloca(AllocaError::AllocaCountTypeMismatch(got, declared))
                 if got == "i32" && declared == "i64"),
             "the error must name both types, got: {err}"
         );
@@ -962,7 +971,7 @@ mod tests {
             .expect_err("an i32 is not an address");
 
         assert!(
-            matches!(&err, BuildError::PointerOperandExpected(t) if t == "i32"),
+            matches!(&err, InstructionError::PointerOperandExpected(t) if t == "i32"),
             "the error must name the offending type, got: {err}"
         );
 
@@ -988,7 +997,7 @@ mod tests {
             .expect_err("`void` has no size");
 
         assert!(
-            matches!(&err, BuildError::TypeNotLoadable(t) if t == "void"),
+            matches!(&err, InstructionError::TypeNotLoadable(t) if t == "void"),
             "expected a not-loadable error, got: {err}"
         );
     }
@@ -1051,7 +1060,7 @@ mod tests {
                 .expect_err("not a power of two");
 
             assert!(
-                matches!(&err, BuildError::AlignmentNotPowerOfTwo(a) if *a == align),
+                matches!(&err, InstructionError::AlignmentNotPowerOfTwo(a) if *a == align),
                 "expected an alignment error for {align}, got: {err}"
             );
         }

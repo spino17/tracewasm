@@ -1,6 +1,6 @@
 use crate::{
     cfg::{context::Context, function::FuncId},
-    error::BuildError,
+    error::PhiError,
     instruction::{Instruction, PhiInstrHandler, PhiInstruction},
     interner::StrId,
 };
@@ -50,15 +50,15 @@ impl BasicBlockId {
         &self,
         instr: PhiInstruction,
         ctx: &mut Context,
-    ) -> Result<PhiInstrHandler, BuildError> {
+    ) -> Result<PhiInstrHandler, PhiError> {
         let block = ctx.get_block_mut(*self);
 
         if block.is_first {
-            return Err(BuildError::PhiInstructionCannotBeAddedToEntryBasicBlock);
+            return Err(PhiError::PhiInstructionCannotBeAddedToEntryBasicBlock);
         }
 
         if !block.instructions.is_empty() {
-            return Err(BuildError::PhiInstructionAddError);
+            return Err(PhiError::PhiInstructionAddError);
         }
 
         let id = block.phis.len();
