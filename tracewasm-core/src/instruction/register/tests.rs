@@ -4802,6 +4802,68 @@ fn too_many_constants_is_reported_not_truncated() {
     );
 }
 
+/// More distinct memory offsets than the pool can name.
+///
+/// Reported, not panicked: the offsets come from the module being compiled, so
+/// overflowing the pool is an input this crate has to answer for. `emit_load!` and
+/// `emit_store!` both reach the pool, and a panic on either would take down a
+/// compile that is supposed to fall back to the stack machine.
+///
+/// Every address here is `i32.const 0`, so the constant pool holds one entry and
+/// cannot be what overflows — the offsets are what this is about.
+#[test]
+fn too_many_memory_offsets_is_reported_not_truncated() {
+    let mut wat = String::from("(module (memory 1) (func\n");
+
+    for i in 0..(MAX_MEMORY_OFFSETS as u32 + 10) {
+        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the pool cannot name this many");
+
+    assert!(
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { needed, limit })
+            if *needed == MAX_MEMORY_OFFSETS as u32 + 1
+                && *limit == MAX_MEMORY_OFFSETS as u64),
+        "expected the memory-offset limit, got: {err}"
+    );
+}
+
+/// The cap counts loads and stores *together*, because one pool serves both.
+///
+/// Neither half below reaches the cap alone, so two per-instruction-kind pools would
+/// compile this happily. It is the sum that overflows — which is what
+/// [`MAX_MEMORY_OFFSETS`]'s "between them" means, and the reason a test filling the
+/// pool from loads alone would not pin it.
+#[test]
+fn loads_and_stores_share_one_memory_offset_pool() {
+    let half = MAX_MEMORY_OFFSETS as u32 / 2;
+
+    let mut wat = String::from("(module (memory 1) (func\n");
+
+    // Disjoint offset ranges, so nothing here dedups: the two halves together are
+    // one more distinct offset than the pool can name.
+    for i in 0..half {
+        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
+    }
+
+    for i in half..=(MAX_MEMORY_OFFSETS as u32) {
+        wat.push_str(&format!("  i32.const 0 i32.const 0 i32.store offset={i}\n"));
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the two halves together overrun the pool");
+
+    assert!(
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { limit, .. })
+            if *limit == MAX_MEMORY_OFFSETS as u64),
+        "expected the memory-offset limit, got: {err}"
+    );
+}
+
 /// More simultaneously-live operand registers than can be named.
 ///
 /// Each `local.get 0; i32.load` pair leaves one more register live — a run of
@@ -4911,18 +4973,4 @@ fn a_frame_too_large_for_the_register_machine_still_lowers_for_the_stack_machine
         crate::module::Module::<crate::Stack>::compile(&bytes).is_ok(),
         "and the stack machine must not"
     );
-}
-
-#[test]
-fn tmp_probe_too_many_load_offsets() {
-    let mut wat = String::from("(module (memory 1) (func (result i32)\n  i32.const 0\n");
-
-    for i in 0..(MAX_MEMORY_OFFSETS as u32 + 10) {
-        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
-    }
-
-    wat.push_str("))");
-
-    let r = compile_register(&wat);
-    println!("PROBE RESULT: {:?}", r.is_err());
 }
