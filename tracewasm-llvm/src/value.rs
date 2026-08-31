@@ -56,7 +56,7 @@ impl TyId {
     pub fn is_ptr(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.0);
 
-        matches!(ty_obj, Type::Ptr { .. })
+        matches!(ty_obj, Type::Ptr)
     }
 
     pub fn is_first_class(&self, ctx: &Context) -> bool {
@@ -105,7 +105,7 @@ impl Display for TypeDisplay<'_> {
             Type::Bfloat => f.write_str("bfloat"),
             Type::Float => f.write_str("float"),
             Type::Double => f.write_str("double"),
-            Type::Ptr { .. } => f.write_str("ptr"),
+            Type::Ptr => f.write_str("ptr"),
             Type::Void => f.write_str("void"),
             Type::Array { size, element_ty } => {
                 write!(f, "[{size} x {}]", nested(*element_ty))
@@ -175,14 +175,14 @@ impl Value {
         &self.kind
     }
 
-    pub fn is_ptr(&self, ctx: &mut Context) -> bool {
+    pub fn is_ptr(&self, ctx: &Context) -> bool {
         self.ty().is_ptr(ctx)
     }
 
     pub fn into_i1(self, ctx: &Context) -> Result<I1Value, BuildError> {
         if !self.ty().is_i1(ctx) {
             return Err(BuildError::ValueToI1ValueFailed(
-                self.ty().display(&ctx).to_string(),
+                self.ty().display(ctx).to_string(),
             ));
         }
 
@@ -202,8 +202,8 @@ impl Value {
         let (val, ty) = if let Some(ty) = optional_cast {
             let Some(c) = val.try_cast(ty, ctx) else {
                 return Err(BuildError::ConstantCastToProvidedTypeFailed(
-                    C::ty(ctx).display(&ctx).to_string(),
-                    ty.display(&ctx).to_string(),
+                    C::ty(ctx).display(ctx).to_string(),
+                    ty.display(ctx).to_string(),
                 ));
             };
 
@@ -244,10 +244,7 @@ impl Value {
             ValueKind::Const(const_id) => {
                 let const_val = *ctx.const_interner.value(const_id.raw());
 
-                let Some(casted_const_val) = const_val.try_cast(ty, ctx) else {
-                    return None;
-                };
-
+                let casted_const_val = const_val.try_cast(ty, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
 
                 Value::new(ty, ValueKind::Const(casted_const_id))
@@ -282,7 +279,7 @@ impl Value {
                 // one being written into: an `alloca` in the entry block is read from
                 // every block it dominates, and the index only means anything against
                 // the instruction list it came from.
-                let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
+                let _ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 // TODO:
                 // match on all the instructions which can produce a pointer! like alloca,
@@ -291,7 +288,7 @@ impl Value {
 
                 todo!()
             }
-            ValueKind::ConstExpr(const_expr) => {
+            ValueKind::ConstExpr(_const_expr) => {
                 // TODO:
                 // match on various kinds of const_expr only the ones which can
                 // produce a pointer! like getelementptr and for each case

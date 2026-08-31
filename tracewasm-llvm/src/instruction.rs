@@ -168,12 +168,12 @@ impl Cursor {
     ) -> Result<Value, BuildError> {
         if !ptr.is_ptr(ctx) {
             return Err(BuildError::PointerOperandExpected(
-                ptr.ty().display(&ctx).to_string(),
+                ptr.ty().display(ctx).to_string(),
             ));
         }
 
         if !ty.is_first_class(ctx) {
-            return Err(BuildError::TypeNotLoadable(ty.display(&ctx).to_string()));
+            return Err(BuildError::TypeNotLoadable(ty.display(ctx).to_string()));
         }
 
         if let Some(align) = align
@@ -182,13 +182,13 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
-        Ok(add_instruction_to_block_and_get_value(
+        add_instruction_to_block_and_get_value(
             InstructionKind::Load { ty, ptr, align },
             ty,
             self.block,
             reg,
             ctx,
-        )?)
+        )
     }
 
     pub fn add_store(
@@ -201,7 +201,7 @@ impl Cursor {
     ) -> Result<(), BuildError> {
         if !ptr.is_ptr(ctx) {
             return Err(BuildError::PointerOperandExpected(
-                ptr.ty().display(&ctx).to_string(),
+                ptr.ty().display(ctx).to_string(),
             ));
         }
 
@@ -217,7 +217,7 @@ impl Cursor {
             let Some(casted_value) = value.try_cast(ty, ctx) else {
                 return Err(BuildError::StoredValueTypeMismatch(
                     value_ty,
-                    ty.display(&ctx).to_string(),
+                    ty.display(ctx).to_string(),
                 ));
             };
 
@@ -259,7 +259,7 @@ impl Cursor {
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
         if !ty.is_first_class(ctx) {
-            return Err(BuildError::TypeNotAllocatable(ty.display(&ctx).to_string()));
+            return Err(BuildError::TypeNotAllocatable(ty.display(ctx).to_string()));
         }
 
         if let Some(align) = align
@@ -280,16 +280,16 @@ impl Cursor {
             let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
                 if !count_expected_ty.is_integer(ctx) {
                     return Err(BuildError::AllocaCountNotAnInteger(
-                        count_expected_ty.display(&ctx).to_string(),
+                        count_expected_ty.display(ctx).to_string(),
                     ));
                 }
 
                 let count_ty = ctx.display(count_val.ty()).to_string();
 
-                let Some(casted_val) = count_val.try_cast(count_expected_ty.clone(), ctx) else {
+                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
                     return Err(BuildError::AllocaCountTypeMismatch(
                         count_ty,
-                        count_expected_ty.display(&ctx).to_string(),
+                        count_expected_ty.display(ctx).to_string(),
                     ));
                 };
 
@@ -301,17 +301,19 @@ impl Cursor {
             final_count = Some(final_count_val);
         }
 
-        Ok(add_instruction_to_block_and_get_value(
+        let result_ty = ctx.ptr_ty();
+
+        add_instruction_to_block_and_get_value(
             InstructionKind::Alloca {
                 ty,
                 count: final_count,
                 align,
             },
-            ctx.ptr_ty(),
+            result_ty,
             self.block,
             reg,
             ctx,
-        )?)
+        )
     }
 }
 

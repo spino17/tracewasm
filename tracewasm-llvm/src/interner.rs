@@ -1,4 +1,4 @@
-use crate::value::{ConstValue, Type, TypeDisplay};
+use crate::value::{ConstValue, Type};
 use std::ops::{Deref, DerefMut};
 use tracewasm_utils::interner::{InternedId, Interner};
 
