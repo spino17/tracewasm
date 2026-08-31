@@ -243,7 +243,6 @@ impl Value {
         let final_value = match self.kind() {
             ValueKind::Const(const_id) => {
                 let const_val = *ctx.const_interner.value(const_id.raw());
-
                 let casted_const_val = const_val.try_cast(ty, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
 
@@ -279,7 +278,7 @@ impl Value {
                 // one being written into: an `alloca` in the entry block is read from
                 // every block it dominates, and the index only means anything against
                 // the instruction list it came from.
-                let _ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
+                let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 // TODO:
                 // match on all the instructions which can produce a pointer! like alloca,

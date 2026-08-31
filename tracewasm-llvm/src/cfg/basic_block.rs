@@ -38,7 +38,6 @@ impl Copy for BasicBlockId {}
 impl BasicBlockId {
     pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) -> usize {
         let block = ctx.get_block_mut(*self);
-
         let index = block.instructions.len();
 
         block.instructions.push(instr);
