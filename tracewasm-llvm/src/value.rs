@@ -1,7 +1,7 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::BuildError,
-    interner::{ConstId, StrId, TyId, TyInterner},
+    interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
 use std::{
@@ -39,29 +39,37 @@ pub enum Type {
     Void,
 }
 
-impl Type {
+impl TyId {
     /// Borrows this type together with `tys` so it can be printed. The ids in an
     /// aggregate arm have to have come from `tys`, which holds for any type built
     /// against one context.
-    pub fn display<'a>(&'a self, tys: &'a TyInterner) -> TypeDisplay<'a> {
-        TypeDisplay { ty: self, tys }
+    pub fn display<'a>(self, ctx: &'a Context) -> TypeDisplay<'a> {
+        TypeDisplay { ty: self, ctx }
     }
 
-    pub fn is_i1(&self) -> bool {
-        matches!(self, Type::I1)
+    pub fn is_i1(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.0);
+
+        matches!(ty_obj, Type::I1)
     }
 
-    pub fn is_ptr(&self) -> bool {
-        matches!(self, Type::Ptr { .. })
+    pub fn is_ptr(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.0);
+
+        matches!(ty_obj, Type::Ptr { .. })
     }
 
-    pub fn is_first_class(&self) -> bool {
-        !matches!(self, Type::Void | Type::Func(_))
+    pub fn is_first_class(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.0);
+
+        !matches!(ty_obj, Type::Void | Type::Func(_))
     }
 
-    pub fn is_integer(&self) -> bool {
+    pub fn is_integer(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.0);
+
         matches!(
-            self,
+            ty_obj,
             Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64
         )
     }
@@ -74,8 +82,8 @@ impl Type {
 /// interner that issued it. Rendering is therefore a borrow of both — obtained from
 /// [`Type::display`] or [`TyInterner::display`], never constructed directly.
 pub struct TypeDisplay<'a> {
-    ty: &'a Type,
-    tys: &'a TyInterner,
+    ty: TyId,
+    ctx: &'a Context,
 }
 
 impl Display for TypeDisplay<'_> {
@@ -84,9 +92,10 @@ impl Display for TypeDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Each child is resolved through the same pool, which is what lets a nested
         // aggregate render in full rather than as the id it is stored as.
-        let nested = |id: TyId| self.tys.display(id);
+        let ty_obj = self.ctx.ty_interner.value(self.ty.0);
+        let nested = |id: TyId| self.ctx.display(id);
 
-        match self.ty {
+        match ty_obj {
             Type::I1 => f.write_str("i1"),
             Type::I8 => f.write_str("i8"),
             Type::I16 => f.write_str("i16"),
@@ -166,12 +175,14 @@ impl Value {
         &self.kind
     }
 
-    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, BuildError> {
-        let ty = ctx.ty_interner.value(self.ty().raw());
+    pub fn is_ptr(&self, ctx: &mut Context) -> bool {
+        self.ty().is_ptr(ctx)
+    }
 
-        if !ty.is_i1() {
+    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, BuildError> {
+        if !self.ty().is_i1(ctx) {
             return Err(BuildError::ValueToI1ValueFailed(
-                ty.display(&ctx.ty_interner).to_string(),
+                self.ty().display(&ctx).to_string(),
             ));
         }
 
@@ -185,27 +196,26 @@ impl Value {
 
     pub fn from_const<C: Const>(
         val: C,
-        optional_cast: Option<Type>,
+        optional_cast: Option<TyId>,
         ctx: &mut Context,
     ) -> Result<Self, BuildError> {
         let (val, ty) = if let Some(ty) = optional_cast {
-            let Some(c) = val.try_cast(&ty) else {
+            let Some(c) = val.try_cast(ty, ctx) else {
                 return Err(BuildError::ConstantCastToProvidedTypeFailed(
-                    C::ty().display(&ctx.ty_interner).to_string(),
-                    ty.display(&ctx.ty_interner).to_string(),
+                    C::ty(ctx).display(&ctx).to_string(),
+                    ty.display(&ctx).to_string(),
                 ));
             };
 
             (c, ty)
         } else {
-            (val.into_const(), C::ty())
+            (val.into_const(), C::ty(ctx))
         };
 
         let const_id = ctx.const_interner.intern(val);
-        let ty_id = ctx.ty_interner.intern(ty).into();
 
         Ok(Value {
-            ty: ty_id,
+            ty,
             kind: ValueKind::Const(const_id.into()),
         })
     }
@@ -220,11 +230,11 @@ impl Value {
     }
 
     pub fn is_integer(&self, ctx: &Context) -> bool {
-        ctx.ty_interner.value(self.ty().raw()).is_integer()
+        self.ty().is_integer(ctx)
     }
 
-    pub fn try_cast(&self, ty: Type, ctx: &mut Context) -> Option<Self> {
-        if !ty.is_first_class() {
+    pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<Self> {
+        if !ty.is_first_class(ctx) {
             return None;
         }
 
@@ -232,21 +242,18 @@ impl Value {
 
         let final_value = match self.kind() {
             ValueKind::Const(const_id) => {
-                let const_val = ctx.const_interner.value(const_id.raw());
+                let const_val = *ctx.const_interner.value(const_id.raw());
 
-                let Some(casted_const_val) = const_val.try_cast(&ty) else {
+                let Some(casted_const_val) = const_val.try_cast(ty, ctx) else {
                     return None;
                 };
 
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
-                let ty_id: TyId = ctx.ty_interner.intern(ty).into();
 
-                Value::new(ty_id, ValueKind::Const(casted_const_id))
+                Value::new(ty, ValueKind::Const(casted_const_id))
             }
             ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
-                let ty_id: TyId = ctx.ty_interner.intern(ty).into();
-
-                if val_ty != ty_id {
+                if val_ty != ty {
                     return None;
                 }
 
@@ -258,9 +265,7 @@ impl Value {
     }
 
     pub fn try_inferring_pointee_ty(&self, block: BasicBlockId, ctx: &mut Context) -> Option<TyId> {
-        let ty = ctx.ty_interner.value(self.ty().raw());
-
-        if !ty.is_ptr() {
+        if !self.ty().is_ptr(ctx) {
             return None;
         }
 
@@ -349,17 +354,17 @@ impl ConstValue {
         }
     }
 
-    pub fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
+    pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
         match self {
-            ConstValue::I1(val) => val.try_cast(ty),
-            ConstValue::I8(val) => val.try_cast(ty),
-            ConstValue::I16(val) => val.try_cast(ty),
-            ConstValue::I32(val) => val.try_cast(ty),
-            ConstValue::I64(val) => val.try_cast(ty),
-            ConstValue::Float(val) => val.try_cast(ty),
-            ConstValue::Double(val) => val.try_cast(ty),
+            ConstValue::I1(val) => val.try_cast(ty, ctx),
+            ConstValue::I8(val) => val.try_cast(ty, ctx),
+            ConstValue::I16(val) => val.try_cast(ty, ctx),
+            ConstValue::I32(val) => val.try_cast(ty, ctx),
+            ConstValue::I64(val) => val.try_cast(ty, ctx),
+            ConstValue::Float(val) => val.try_cast(ty, ctx),
+            ConstValue::Double(val) => val.try_cast(ty, ctx),
             ConstValue::NullPtr => {
-                if ty.is_ptr() {
+                if ty.is_ptr(ctx) {
                     Some(ConstValue::NullPtr)
                 } else {
                     None
@@ -468,22 +473,22 @@ impl Hash for ConstValue {
 }
 
 pub trait Const {
-    fn ty() -> Type;
+    fn ty(ctx: &mut Context) -> TyId;
     fn into_const(self) -> ConstValue;
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue>;
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue>;
 }
 
 impl Const for bool {
-    fn ty() -> Type {
-        Type::I1
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.i1_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::I1(if self { 1 } else { 0 })
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        if matches!(ty, Type::I1) {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        if ty.is_i1(ctx) {
             Some(ConstValue::I1(if *self { 1 } else { 0 }))
         } else {
             None
@@ -492,16 +497,18 @@ impl Const for bool {
 }
 
 impl Const for i8 {
-    fn ty() -> Type {
-        Type::I8
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.i8_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::I8(self)
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self),
             Type::I16 => ConstValue::I16(*self as i16),
             Type::I32 => ConstValue::I32(*self as i32),
@@ -514,16 +521,18 @@ impl Const for i8 {
 }
 
 impl Const for i16 {
-    fn ty() -> Type {
-        Type::I16
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.i16_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::I16(self)
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
             Type::I16 => ConstValue::I16(*self),
             Type::I32 => ConstValue::I32(*self as i32),
@@ -536,16 +545,18 @@ impl Const for i16 {
 }
 
 impl Const for i32 {
-    fn ty() -> Type {
-        Type::I32
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.i32_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::I32(self)
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
             Type::I16 => ConstValue::I16(*self as i16),
             Type::I32 => ConstValue::I32(*self),
@@ -558,16 +569,18 @@ impl Const for i32 {
 }
 
 impl Const for i64 {
-    fn ty() -> Type {
-        Type::I64
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.i64_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::I64(self)
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
             Type::I16 => ConstValue::I16(*self as i16),
             Type::I32 => ConstValue::I32(*self as i32),
@@ -580,16 +593,18 @@ impl Const for i64 {
 }
 
 impl Const for f32 {
-    fn ty() -> Type {
-        Type::Float
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.f32_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::Float(OrderedFloat(self))
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::Float => ConstValue::Float(OrderedFloat(*self)),
             Type::Double => ConstValue::Double(OrderedFloat(*self as f64)),
             _ => return None,
@@ -600,16 +615,18 @@ impl Const for f32 {
 }
 
 impl Const for f64 {
-    fn ty() -> Type {
-        Type::Double
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.f64_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::Double(OrderedFloat(self))
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        let v = match ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        let ty_obj = ctx.ty_interner.value(ty.0);
+
+        let v = match ty_obj {
             Type::Float => ConstValue::Float(OrderedFloat(*self as f32)),
             Type::Double => ConstValue::Double(OrderedFloat(*self)),
             _ => return None,
@@ -623,16 +640,16 @@ impl Const for f64 {
 pub struct NullPtr;
 
 impl Const for NullPtr {
-    fn ty() -> Type {
-        Type::Ptr
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.ptr_ty()
     }
 
     fn into_const(self) -> ConstValue {
         ConstValue::NullPtr
     }
 
-    fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
-        if &NullPtr::ty() != ty {
+    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+        if NullPtr::ty(ctx) != ty {
             return None;
         }
 
@@ -679,8 +696,8 @@ mod tests {
     }
 
     /// How a type spells itself against `ctx`'s pool.
-    fn rendered(ty: &Type, ctx: &Context) -> String {
-        ty.display(&ctx.ty_interner).to_string()
+    fn rendered(ty: TyId, ctx: &Context) -> String {
+        ty.display(&ctx).to_string()
     }
 
     #[test]

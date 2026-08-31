@@ -77,14 +77,6 @@ impl DerefMut for TyInterner {
     }
 }
 
-impl TyInterner {
-    /// Resolves `id` and borrows it against this pool for rendering, which is the
-    /// only way an id becomes the type it names.
-    pub fn display(&self, id: TyId) -> TypeDisplay<'_> {
-        self.value(id.raw()).display(self)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct TyId(pub InternedId<Type, u32>);
 

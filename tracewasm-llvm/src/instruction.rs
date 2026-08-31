@@ -6,7 +6,7 @@ use crate::{
     },
     error::BuildError,
     interner::TyId,
-    value::{I1Value, Type, Value, ValueKind},
+    value::{I1Value, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -43,8 +43,8 @@ impl PhiInstrHandler {
 
         if branch_ty != ref_ty {
             return Err(BuildError::PhiInstructionBranchTypeMismatch(
-                ctx.ty_interner.display(ref_ty).to_string(),
-                ctx.ty_interner.display(branch_ty).to_string(),
+                ctx.display(ref_ty).to_string(),
+                ctx.display(branch_ty).to_string(),
             ));
         }
 
@@ -160,24 +160,20 @@ impl Cursor {
 
     pub fn add_load(
         &self,
-        ty: Type,
+        ty: TyId,
         ptr: Value,
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
-        let ptr_ty = ctx.ty_interner.value(ptr.ty().raw());
-
-        if !ptr_ty.is_ptr() {
+        if !ptr.is_ptr(ctx) {
             return Err(BuildError::PointerOperandExpected(
-                ptr_ty.display(&ctx.ty_interner).to_string(),
+                ptr.ty().display(&ctx).to_string(),
             ));
         }
 
-        if !ty.is_first_class() {
-            return Err(BuildError::TypeNotLoadable(
-                ty.display(&ctx.ty_interner).to_string(),
-            ));
+        if !ty.is_first_class(ctx) {
+            return Err(BuildError::TypeNotLoadable(ty.display(&ctx).to_string()));
         }
 
         if let Some(align) = align
@@ -186,15 +182,9 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
-        let ty_id = ctx.ty_interner.intern(ty).into();
-
         Ok(add_instruction_to_block_and_get_value(
-            InstructionKind::Load {
-                ty: ty_id,
-                ptr,
-                align,
-            },
-            ty_id,
+            InstructionKind::Load { ty, ptr, align },
+            ty,
             self.block,
             reg,
             ctx,
@@ -206,14 +196,12 @@ impl Cursor {
         value: Value,
         ptr: Value,
         align: Option<u32>,
-        ty: Option<Type>,
+        ty: Option<TyId>,
         ctx: &mut Context,
     ) -> Result<(), BuildError> {
-        let ptr_ty = ctx.ty_interner.value(ptr.ty().raw());
-
-        if !ptr_ty.is_ptr() {
+        if !ptr.is_ptr(ctx) {
             return Err(BuildError::PointerOperandExpected(
-                ptr_ty.display(&ctx.ty_interner).to_string(),
+                ptr.ty().display(&ctx).to_string(),
             ));
         }
 
@@ -224,12 +212,12 @@ impl Cursor {
         }
 
         let final_val = if let Some(ty) = ty {
-            let value_ty = ctx.ty_interner.display(value.ty()).to_string();
+            let value_ty = ctx.display(value.ty()).to_string();
 
-            let Some(casted_value) = value.try_cast(ty.clone(), ctx) else {
+            let Some(casted_value) = value.try_cast(ty, ctx) else {
                 return Err(BuildError::StoredValueTypeMismatch(
                     value_ty,
-                    ty.display(&ctx.ty_interner).to_string(),
+                    ty.display(&ctx).to_string(),
                 ));
             };
 
@@ -242,8 +230,8 @@ impl Cursor {
             && pointee_ty != final_val.ty()
         {
             return Err(BuildError::StoredValueDoesNotMatchPointee(
-                ctx.ty_interner.display(final_val.ty()).to_string(),
-                ctx.ty_interner.display(pointee_ty).to_string(),
+                ctx.display(final_val.ty()).to_string(),
+                ctx.display(pointee_ty).to_string(),
             ));
         }
 
@@ -264,16 +252,14 @@ impl Cursor {
 
     pub fn add_alloca(
         &self,
-        ty: Type,
-        count: Option<(Value, Option<Type>)>,
+        ty: TyId,
+        count: Option<(Value, Option<TyId>)>,
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
-        if !ty.is_first_class() {
-            return Err(BuildError::TypeNotAllocatable(
-                ty.display(&ctx.ty_interner).to_string(),
-            ));
+        if !ty.is_first_class(ctx) {
+            return Err(BuildError::TypeNotAllocatable(ty.display(&ctx).to_string()));
         }
 
         if let Some(align) = align
@@ -287,23 +273,23 @@ impl Cursor {
         if let Some((count_val, count_expected_ty)) = count {
             if !count_val.is_integer(ctx) {
                 return Err(BuildError::AllocaCountNotAnInteger(
-                    ctx.ty_interner.display(count_val.ty()).to_string(),
+                    ctx.display(count_val.ty()).to_string(),
                 ));
             }
 
             let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
-                if !count_expected_ty.is_integer() {
+                if !count_expected_ty.is_integer(ctx) {
                     return Err(BuildError::AllocaCountNotAnInteger(
-                        count_expected_ty.display(&ctx.ty_interner).to_string(),
+                        count_expected_ty.display(&ctx).to_string(),
                     ));
                 }
 
-                let count_ty = ctx.ty_interner.display(count_val.ty()).to_string();
+                let count_ty = ctx.display(count_val.ty()).to_string();
 
                 let Some(casted_val) = count_val.try_cast(count_expected_ty.clone(), ctx) else {
                     return Err(BuildError::AllocaCountTypeMismatch(
                         count_ty,
-                        count_expected_ty.display(&ctx.ty_interner).to_string(),
+                        count_expected_ty.display(&ctx).to_string(),
                     ));
                 };
 
@@ -317,7 +303,7 @@ impl Cursor {
 
         Ok(add_instruction_to_block_and_get_value(
             InstructionKind::Alloca {
-                ty: ctx.ty_interner.intern(ty).into(),
+                ty,
                 count: final_count,
                 align,
             },
@@ -370,16 +356,10 @@ mod tests {
         value::{ConstValue, NullPtr},
     };
 
-    /// Interns `ty` and hands back its id, so a test can spell the shape it means
-    /// instead of the pool bookkeeping that shape now costs.
-    fn intern(ty: Type, ctx: &mut Context) -> TyId {
-        ctx.ty_interner.intern(ty).into()
-    }
-
     /// How a type spells itself against `ctx`'s pool — which is the form an error
     /// carries, since `BuildError` holds the rendering rather than the type.
-    fn rendered(ty: &Type, ctx: &Context) -> String {
-        ty.display(&ctx.ty_interner).to_string()
+    fn rendered(ty: TyId, ctx: &Context) -> String {
+        ty.display(&ctx).to_string()
     }
 
     /// Instructions land in the block the cursor names, in order.

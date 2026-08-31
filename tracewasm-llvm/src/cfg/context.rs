@@ -6,7 +6,7 @@ use crate::{
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::BuildError,
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
-    value::Type,
+    value::{Type, TypeDisplay},
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -74,6 +74,46 @@ impl Context {
 
     pub fn ptr_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Ptr).into()
+    }
+
+    pub fn display(&self, id: TyId) -> TypeDisplay<'_> {
+        id.display(self)
+    }
+
+    pub fn i1_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::I1).into()
+    }
+
+    pub fn i8_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::I8).into()
+    }
+
+    pub fn i16_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::I16).into()
+    }
+
+    pub fn i32_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::I32).into()
+    }
+
+    pub fn i64_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::I64).into()
+    }
+
+    pub fn f16_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::Half).into()
+    }
+
+    pub fn f32_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::Float).into()
+    }
+
+    pub fn f64_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::Double).into()
+    }
+
+    pub fn void_ty(&mut self) -> TyId {
+        self.ty_interner.intern(Type::Void).into()
     }
 }
 
