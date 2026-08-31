@@ -79,7 +79,7 @@ pub enum InstructionKind {
     },
     Alloca {
         ty: TyId,
-        num_elements: Option<Value>,
+        count: Option<Value>,
         align: Option<u32>,
     },
 }
@@ -219,44 +219,18 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
-        let final_value = if let Some(ty) = ty {
-            if !ty.is_first_class() {
-                return Err(BuildError::TypeNotLoadable(
-                    ty.display(&ctx.ty_interner).to_string(),
-                ));
-            }
+        let final_val = if let Some(ty) = ty {
+            let Some(casted_value) = value.try_cast(ty, ctx)? else {
+                todo!() // RAISE ERROR: unable to cast the value in provided type
+            };
 
-            let val_ty = value.ty();
-
-            match value.kind() {
-                ValueKind::Const(const_id) => {
-                    let const_val = ctx.const_interner.value(const_id.raw());
-
-                    let Some(casted_const_val) = const_val.try_cast(&ty) else {
-                        todo!() // RAISE ERROR: const value cannot be casted into the provided type
-                    };
-
-                    let casted_const_id = ctx.const_interner.intern(casted_const_val)?.into();
-                    let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
-
-                    Value::new(ty_id, ValueKind::Const(casted_const_id))
-                }
-                ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
-                    let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
-
-                    if val_ty != ty_id {
-                        todo!() // RAISE ERROR: type of register value not matching with provided type
-                    }
-
-                    value
-                }
-            }
+            casted_value
         } else {
             value
         };
 
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
-            && pointee_ty != final_value.ty()
+            && pointee_ty != final_val.ty()
         {
             todo!() // RAISE ERROR: the value type does not match with the type ptr points to!
         }
@@ -264,7 +238,7 @@ impl Cursor {
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::Store {
-                    value: final_value,
+                    value: final_val,
                     ptr,
                     align,
                 },
@@ -279,13 +253,52 @@ impl Cursor {
     pub fn add_alloca(
         &self,
         ty: Type,
-        num_elements: Option<Value>,
+        count: Option<(Value, Option<Type>)>,
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
-        // based on num of elements, the return type can be pointer to the provided type or array !
-        todo!()
+        if let Some(align) = align
+            && !align.is_power_of_two()
+        {
+            return Err(BuildError::AlignmentNotPowerOfTwo(align));
+        }
+
+        let mut final_count: Option<Value> = None;
+
+        if let Some((count_val, count_expected_ty)) = count {
+            if !count_val.is_integer(ctx) {
+                todo!() // count is not of type integer
+            }
+
+            let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
+                if !count_expected_ty.is_integer() {
+                    todo!() // RAISE ERROR: type passed for count is not integer
+                }
+
+                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx)? else {
+                    todo!() // RAISE ERROR: value casting to type failed!
+                };
+
+                casted_val
+            } else {
+                count_val
+            };
+
+            final_count = Some(final_count_val);
+        }
+
+        Ok(add_instruction_to_block_and_get_value(
+            InstructionKind::Alloca {
+                ty: ctx.ty_interner.intern(ty)?.into(),
+                count: final_count,
+                align,
+            },
+            ctx.ty_interner.intern(Type::Ptr)?.into(),
+            self.block,
+            reg,
+            ctx,
+        )?)
     }
 }
 

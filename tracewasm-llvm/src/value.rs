@@ -39,6 +39,34 @@ pub enum Type {
     Void,
 }
 
+impl Type {
+    /// Borrows this type together with `tys` so it can be printed. The ids in an
+    /// aggregate arm have to have come from `tys`, which holds for any type built
+    /// against one context.
+    pub fn display<'a>(&'a self, tys: &'a TyInterner) -> TypeDisplay<'a> {
+        TypeDisplay { ty: self, tys }
+    }
+
+    pub fn is_i1(&self) -> bool {
+        matches!(self, Type::I1)
+    }
+
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Type::Ptr { .. })
+    }
+
+    pub fn is_first_class(&self) -> bool {
+        !matches!(self, Type::Void | Type::Func(_))
+    }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(
+            self,
+            Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64
+        )
+    }
+}
+
 /// A type paired with the pool its children live in, so that it can be rendered.
 ///
 /// [`Type`] cannot implement [`Display`] by itself: an aggregate arm holds [`TyId`]s
@@ -109,27 +137,6 @@ impl Display for TypeDisplay<'_> {
                 f.write_str(")")
             }
         }
-    }
-}
-
-impl Type {
-    /// Borrows this type together with `tys` so it can be printed. The ids in an
-    /// aggregate arm have to have come from `tys`, which holds for any type built
-    /// against one context.
-    pub fn display<'a>(&'a self, tys: &'a TyInterner) -> TypeDisplay<'a> {
-        TypeDisplay { ty: self, tys }
-    }
-
-    pub fn is_i1(&self) -> bool {
-        matches!(self, Type::I1)
-    }
-
-    pub fn is_ptr(&self) -> bool {
-        matches!(self, Type::Ptr { .. })
-    }
-
-    pub fn is_first_class(&self) -> bool {
-        !matches!(self, Type::Void | Type::Func(_))
     }
 }
 
@@ -212,6 +219,44 @@ impl Value {
         })
     }
 
+    pub fn is_integer(&self, ctx: &Context) -> bool {
+        ctx.ty_interner.value(self.ty().raw()).is_integer()
+    }
+
+    pub fn try_cast(&self, ty: Type, ctx: &mut Context) -> Result<Option<Self>, BuildError> {
+        if !ty.is_first_class() {
+            return Ok(None);
+        }
+
+        let val_ty = self.ty();
+
+        let final_value = match self.kind() {
+            ValueKind::Const(const_id) => {
+                let const_val = ctx.const_interner.value(const_id.raw());
+
+                let Some(casted_const_val) = const_val.try_cast(&ty) else {
+                    return Ok(None);
+                };
+
+                let casted_const_id = ctx.const_interner.intern(casted_const_val)?.into();
+                let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
+
+                Value::new(ty_id, ValueKind::Const(casted_const_id))
+            }
+            ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
+                let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
+
+                if val_ty != ty_id {
+                    return Ok(None);
+                }
+
+                self.clone()
+            }
+        };
+
+        Ok(Some(final_value))
+    }
+
     pub fn try_inferring_pointee_ty(&self, block: BasicBlockId, ctx: &mut Context) -> Option<TyId> {
         let ty = ctx.ty_interner.value(self.ty().raw());
 
@@ -288,6 +333,19 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    pub fn is_sign_positive(&self) -> bool {
+        match self {
+            ConstValue::I1(val) => val.is_positive(),
+            ConstValue::I8(val) => val.is_positive(),
+            ConstValue::I16(val) => val.is_positive(),
+            ConstValue::I32(val) => val.is_positive(),
+            ConstValue::I64(val) => val.is_positive(),
+            ConstValue::Float(val) => val.is_sign_positive(),
+            ConstValue::Double(val) => val.is_sign_positive(),
+            ConstValue::NullPtr => false,
+        }
+    }
+
     pub fn try_cast(&self, ty: &Type) -> Option<ConstValue> {
         match self {
             ConstValue::I1(val) => val.try_cast(ty),
