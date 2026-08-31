@@ -230,11 +230,11 @@ impl Cursor {
         };
 
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
-            && pointee_ty != final_val.ty()
+            && pointee_ty.ty != final_val.ty()
         {
             return Err(StoreError::StoredValueDoesNotMatchPointee(
                 ctx.display(final_val.ty()).to_string(),
-                ctx.display(pointee_ty).to_string(),
+                ctx.display(pointee_ty.ty).to_string(),
             )
             .into());
         }

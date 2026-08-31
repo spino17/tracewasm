@@ -1,6 +1,7 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::TypeError,
+    instruction::InstructionKind,
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -260,12 +261,16 @@ impl Value {
         Some(final_value)
     }
 
-    pub fn try_inferring_pointee_ty(&self, block: BasicBlockId, ctx: &mut Context) -> Option<TyId> {
+    pub(crate) fn try_inferring_pointee_ty(
+        &self,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Option<PointeeType> {
         if !self.ty().is_ptr(ctx) {
             return None;
         }
 
-        match &self.kind {
+        let pointee_ty = match &self.kind {
             ValueKind::Reg(reg) => {
                 let func_id = ctx.get_block(block).func_id;
                 let ptr_reg_name_id = reg.name;
@@ -274,32 +279,41 @@ impl Value {
                     "this entry should already be inserted when this ptr register was defined",
                 );
 
-                // The block the register was *defined* in, which is not in general the
-                // one being written into: an `alloca` in the entry block is read from
-                // every block it dominates, and the index only means anything against
-                // the instruction list it came from.
                 let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 // TODO:
                 // match on all the instructions which can produce a pointer! like alloca,
                 // getelementptr etc.
                 // and try infering pointee type from there
-
-                todo!()
+                match &ptr_instr.kind {
+                    InstructionKind::Alloca {
+                        ty,
+                        count,
+                        align: _,
+                    } => PointeeType {
+                        ty: *ty,
+                        count: count.clone(),
+                    },
+                    _ => unreachable!("only ptr producing instructions should match"),
+                }
             }
-            ValueKind::ConstExpr(_const_expr) => {
+            ValueKind::ConstExpr(const_expr) => {
                 // TODO:
                 // match on various kinds of const_expr only the ones which can
                 // produce a pointer! like getelementptr and for each case
                 // based on its operands construct the pointee type
+                todo!()
             }
             ValueKind::Const(_) => return None,
         };
 
-        // ptr can be from reg or inlined const expr
-
-        todo!()
+        Some(pointee_ty)
     }
+}
+
+pub(crate) struct PointeeType {
+    pub ty: TyId,
+    pub count: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
