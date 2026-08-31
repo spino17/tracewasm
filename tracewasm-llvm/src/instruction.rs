@@ -1,6 +1,7 @@
 use crate::{
     cfg::{Cursor, basic_block::BasicBlockId, context::Context},
     error::BuildError,
+    interner::TyId,
     value::{I1Value, Type, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
@@ -8,7 +9,7 @@ use rustc_hash::FxHashSet;
 pub struct PhiInstruction {
     pub(crate) branches: Vec<(BasicBlockId, Value)>,
     pub(crate) blocks: FxHashSet<BasicBlockId>,
-    ref_ty: Type,
+    ref_ty: TyId,
     value: Value,
 }
 
@@ -28,20 +29,23 @@ impl PhiInstrHandler {
         branch: (BasicBlockId, Value),
         ctx: &mut Context,
     ) -> Result<(), BuildError> {
-        let block = ctx.get_block_mut(self.block);
         let index = self.index;
-        let instr = &mut block.phis[index];
 
+        // Read the phi's type through a shared borrow first: rendering a mismatch
+        // needs the type pool, which cannot be reached while the block is borrowed
+        // mutably. An id is `Copy`, so nothing is held across the switch.
+        let ref_ty = ctx.get_block(self.block).phis[index].ref_ty;
         let branch_ty = branch.1.ty();
 
-        if branch_ty != &instr.ref_ty {
+        if branch_ty != ref_ty {
             return Err(BuildError::PhiInstructionBranchTypeMismatch(
-                instr.ref_ty.clone(),
-                branch_ty.clone(),
+                ctx.ty_interner.display(ref_ty).to_string(),
+                ctx.ty_interner.display(branch_ty).to_string(),
             ));
         }
 
         let block_id = branch.0;
+        let instr = &mut ctx.get_block_mut(self.block).phis[index];
 
         if instr.blocks.contains(&block_id) {
             return Err(BuildError::BasicBlockBranchAlreadyInPhiInstruction);
@@ -64,7 +68,7 @@ pub enum InstructionKind {
         false_label: BasicBlockId,
     },
     Load {
-        ty: Type,
+        ty: TyId,
         ptr: Value,
         align: Option<u32>,
     },
@@ -74,7 +78,7 @@ pub enum InstructionKind {
         align: Option<u32>,
     },
     Alloca {
-        ty: Type,
+        ty: TyId,
         num_elements: Option<u32>,
         align: Option<u32>,
     },
@@ -101,13 +105,13 @@ impl Cursor {
         let ref_ty = branches[0].1.ty();
         let func_id = ctx.get_block(self.block).func_id;
         let reg_name = ctx.name_for_reg(reg, func_id)?;
-        let val = Value::from_register(reg_name, ref_ty.clone(), &mut ctx.str_interner)?;
+        let val = Value::from_register(reg_name, ref_ty, ctx)?;
 
         let phi_id = self.block.add_phi(
             PhiInstruction {
                 branches: vec![],
                 blocks: FxHashSet::default(),
-                ref_ty: ref_ty.clone(),
+                ref_ty,
                 value: val.clone(),
             },
             ctx,
@@ -158,14 +162,18 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, BuildError> {
-        let ptr_ty = ptr.ty();
+        let ptr_ty = ctx.ty_interner.value(ptr.ty().raw());
 
         if !ptr_ty.is_ptr() {
-            return Err(BuildError::PointerOperandExpected(ptr_ty.clone()));
+            return Err(BuildError::PointerOperandExpected(
+                ptr_ty.display(&ctx.ty_interner).to_string(),
+            ));
         }
 
         if !ty.is_first_class() {
-            return Err(BuildError::TypeNotLoadable(ty));
+            return Err(BuildError::TypeNotLoadable(
+                ty.display(&ctx.ty_interner).to_string(),
+            ));
         }
 
         if let Some(align) = align
@@ -174,13 +182,15 @@ impl Cursor {
             return Err(BuildError::AlignmentNotPowerOfTwo(align));
         }
 
+        let ty_id = ctx.ty_interner.intern(ty)?.into();
+
         Ok(add_instruction_to_block_and_get_value(
             InstructionKind::Load {
-                ty: ty.clone(),
+                ty: ty_id,
                 ptr,
                 align,
             },
-            ty,
+            ty_id,
             self.block,
             reg,
             ctx,
@@ -195,10 +205,12 @@ impl Cursor {
         ty: Option<Type>,
         ctx: &mut Context,
     ) -> Result<(), BuildError> {
-        let ptr_ty = ptr.ty();
+        let ptr_ty = ctx.ty_interner.value(ptr.ty().raw());
 
         if !ptr_ty.is_ptr() {
-            return Err(BuildError::PointerOperandExpected(ptr_ty.clone()));
+            return Err(BuildError::PointerOperandExpected(
+                ptr_ty.display(&ctx.ty_interner).to_string(),
+            ));
         }
 
         if let Some(align) = align
@@ -209,7 +221,9 @@ impl Cursor {
 
         let final_value = if let Some(ty) = ty {
             if !ty.is_first_class() {
-                return Err(BuildError::TypeNotLoadable(ty));
+                return Err(BuildError::TypeNotLoadable(
+                    ty.display(&ctx.ty_interner).to_string(),
+                ));
             }
 
             let val_ty = value.ty();
@@ -223,11 +237,14 @@ impl Cursor {
                     };
 
                     let casted_const_id = ctx.const_interner.intern(casted_const_val)?.into();
+                    let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
 
-                    Value::new(ty, ValueKind::Const(casted_const_id))
+                    Value::new(ty_id, ValueKind::Const(casted_const_id))
                 }
                 ValueKind::Reg(_) => {
-                    if val_ty != &ty {
+                    let ty_id: TyId = ctx.ty_interner.intern(ty)?.into();
+
+                    if val_ty != ty_id {
                         todo!() // RAISE ERROR: type of register value not matching with provided type
                     }
 
@@ -268,7 +285,7 @@ impl Cursor {
             )
         };
 
-        if ptr_ty != final_value.ty() {
+        if *ptr_ty != final_value.ty() {
             todo!() // RAISE ERROR: the value type does not match with the type ptr points to!
         }
 
@@ -301,14 +318,14 @@ impl Cursor {
 
 fn add_instruction_to_block_and_get_value(
     kind: InstructionKind,
-    result_ty: Type,
+    result_ty: TyId,
     block: BasicBlockId,
     reg: Option<&str>,
     ctx: &mut Context,
 ) -> Result<Value, BuildError> {
     let func_id = ctx.get_block(block).func_id;
     let reg_name = ctx.name_for_reg(reg, func_id)?;
-    let val = Value::from_register(reg_name, result_ty, &mut ctx.str_interner)?;
+    let val = Value::from_register(reg_name, result_ty, ctx)?;
 
     let ValueKind::Reg(reg) = val.kind() else {
         unreachable!("value is made out of register name just above")
@@ -339,6 +356,18 @@ mod tests {
         test_support::{fixture, value},
         value::NullPtr,
     };
+
+    /// Interns `ty` and hands back its id, so a test can spell the shape it means
+    /// instead of the pool bookkeeping that shape now costs.
+    fn intern(ty: Type, ctx: &mut Context) -> TyId {
+        ctx.ty_interner.intern(ty).expect("the type interns").into()
+    }
+
+    /// How a type spells itself against `ctx`'s pool — which is the form an error
+    /// carries, since `BuildError` holds the rendering rather than the type.
+    fn rendered(ty: &Type, ctx: &Context) -> String {
+        ty.display(&ctx.ty_interner).to_string()
+    }
 
     /// Instructions land in the block the cursor names, in order.
     #[test]
@@ -463,7 +492,11 @@ mod tests {
             .add_phi(&[(entry, v)], Some("merged"), &mut ctx)
             .unwrap();
 
-        assert_eq!(result.ty(), &Type::I32, "an i32 branch makes an i32 phi");
+        assert_eq!(
+            ctx.ty_interner.value(result.ty().raw()),
+            &Type::I32,
+            "an i32 branch makes an i32 phi"
+        );
     }
 
     /// A phi produces one value, so every incoming value has to have its type.
@@ -474,10 +507,8 @@ mod tests {
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
-
         let an_i32 = value(1, &mut ctx);
-        let an_i64 = Value::from_const(1i64, None, &mut ctx.const_interner).unwrap();
-
+        let an_i64 = Value::from_const(1i64, None, &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(body);
 
         let err = cursor
@@ -492,7 +523,7 @@ mod tests {
             matches!(
                 &err,
                 BuildError::PhiInstructionBranchTypeMismatch(phi, branch)
-                    if *phi == Type::I32 && *branch == Type::I64
+                    if phi == "i32" && branch == "i64"
             ),
             "the error must name both types, got: {err}"
         );
@@ -560,7 +591,7 @@ mod tests {
     fn block_with_ptr(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value) {
         let f = builder.add_function("f".to_string(), ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
-        let ptr = Value::from_const(NullPtr, None, &mut ctx.const_interner).unwrap();
+        let ptr = Value::from_const(NullPtr, None, ctx).unwrap();
 
         (builder.cursor_at_block(entry), ptr)
     }
@@ -576,7 +607,7 @@ mod tests {
             .add_load(Type::I32, ptr, None, Some("x"), &mut ctx)
             .expect("loading an i32 through a ptr is fine");
 
-        assert_eq!(loaded.ty(), &Type::I32);
+        assert_eq!(ctx.ty_interner.value(loaded.ty().raw()), &Type::I32);
     }
 
     /// The instruction records the register it defines, which is what an emitter
@@ -614,7 +645,7 @@ mod tests {
             .expect_err("an i32 is not an address");
 
         assert!(
-            matches!(&err, BuildError::PointerOperandExpected(t) if *t == Type::I32),
+            matches!(&err, BuildError::PointerOperandExpected(t) if t == "i32"),
             "the error must name the offending type, got: {err}"
         );
 
@@ -638,7 +669,7 @@ mod tests {
             .expect_err("`void` has no size");
 
         assert!(
-            matches!(&err, BuildError::TypeNotLoadable(t) if *t == Type::Void),
+            matches!(&err, BuildError::TypeNotLoadable(t) if t == "void"),
             "expected a not-loadable error, got: {err}"
         );
     }
@@ -650,23 +681,27 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
 
+        let i32_ty = intern(Type::I32, &mut ctx);
+
         for ty in [
             Type::Struct {
-                fields: vec![Type::I32, Type::I32],
+                fields: Box::new([i32_ty, i32_ty]),
                 packed: false,
             },
             Type::Array {
                 size: 4,
-                element_ty: Box::new(Type::I32),
+                element_ty: i32_ty,
             },
             Type::Ptr,
             Type::Double,
         ] {
+            let spelled = rendered(&ty, &ctx);
+
             assert!(
                 cursor
-                    .add_load(ty.clone(), ptr.clone(), None, None, &mut ctx)
+                    .add_load(ty, ptr.clone(), None, None, &mut ctx)
                     .is_ok(),
-                "`{ty}` is loadable"
+                "`{spelled}` is loadable"
             );
         }
     }

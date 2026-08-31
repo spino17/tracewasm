@@ -1,22 +1,27 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::BuildError,
-    interner::{ConstId, ConstInterner, StrId, StrInterner},
+    interner::{ConstId, StrId, TyId, TyInterner},
 };
 use ordered_float::OrderedFloat;
 use std::{
-    fmt::{Debug, Display},
+    fmt::Display,
     hash::{Hash, Hasher},
     mem::discriminant,
 };
 
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
-    params: Vec<Type>,
-    result: Box<Type>,
+    params: Vec<TyId>,
+    result: Box<TyId>,
 }
 
-#[derive(PartialEq, Eq, Clone)]
+/// One node of a type. An aggregate arm names its children by [`TyId`] rather than
+/// holding them, so a type is flat and `Copy`-cheap to compare — two structurally
+/// equal types are one pool entry, hence one id.
+///
+/// The cost is that a type no longer knows how to print itself; see [`TypeDisplay`].
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Type {
     I1,
     I8,
@@ -28,17 +33,32 @@ pub enum Type {
     Float,
     Double,
     Ptr,
-    Array { size: u64, element_ty: Box<Type> },
-    Struct { fields: Vec<Type>, packed: bool },
+    Array { size: u64, element_ty: TyId },
+    Struct { fields: Box<[TyId]>, packed: bool },
     Func(FuncSignature),
     Void,
 }
 
-impl Display for Type {
+/// A type paired with the pool its children live in, so that it can be rendered.
+///
+/// [`Type`] cannot implement [`Display`] by itself: an aggregate arm holds [`TyId`]s
+/// rather than whole types, and turning one back into something printable needs the
+/// interner that issued it. Rendering is therefore a borrow of both — obtained from
+/// [`Type::display`] or [`TyInterner::display`], never constructed directly.
+pub struct TypeDisplay<'a> {
+    ty: &'a Type,
+    tys: &'a TyInterner,
+}
+
+impl Display for TypeDisplay<'_> {
     /// Writes the type as LLVM spells it, so a rendered error reads the same as the
     /// IR it is about.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        // Each child is resolved through the same pool, which is what lets a nested
+        // aggregate render in full rather than as the id it is stored as.
+        let nested = |id: TyId| self.tys.display(id);
+
+        match self.ty {
             Type::I1 => f.write_str("i1"),
             Type::I8 => f.write_str("i8"),
             Type::I16 => f.write_str("i16"),
@@ -50,7 +70,9 @@ impl Display for Type {
             Type::Double => f.write_str("double"),
             Type::Ptr { .. } => f.write_str("ptr"),
             Type::Void => f.write_str("void"),
-            Type::Array { size, element_ty } => write!(f, "[{size} x {element_ty}]"),
+            Type::Array { size, element_ty } => {
+                write!(f, "[{size} x {}]", nested(*element_ty))
+            }
             Type::Struct { fields, packed } => {
                 let (open, close) = if *packed {
                     ("<{ ", " }>")
@@ -65,43 +87,39 @@ impl Display for Type {
                         f.write_str(", ")?;
                     }
 
-                    write!(f, "{field}")?;
+                    write!(f, "{}", nested(*field))?;
                 }
 
                 f.write_str(close)
             }
-            Type::Func(signature) => write!(f, "{signature}"),
-        }
-    }
-}
+            // `<result> (<params>)`, the order LLVM writes a function type in —
+            // result first, which is the opposite of how the signature reads in
+            // source.
+            Type::Func(signature) => {
+                write!(f, "{} (", nested(*signature.result))?;
 
-impl Display for FuncSignature {
-    /// `<result> (<params>)`, the order LLVM writes a function type in — result
-    /// first, which is the opposite of how the signature reads in source.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (", self.result)?;
+                for (i, param) in signature.params.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(", ")?;
+                    }
 
-        for (i, param) in self.params.iter().enumerate() {
-            if i != 0 {
-                f.write_str(", ")?;
+                    write!(f, "{}", nested(*param))?;
+                }
+
+                f.write_str(")")
             }
-
-            write!(f, "{param}")?;
         }
-
-        f.write_str(")")
-    }
-}
-
-impl Debug for Type {
-    /// The same rendering as [`Display`]. `BuildError` carries a `Type`, so a
-    /// `Debug`-formatted error — which is what `unwrap` prints — has to work too.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(self, f)
     }
 }
 
 impl Type {
+    /// Borrows this type together with `tys` so it can be printed. The ids in an
+    /// aggregate arm have to have come from `tys`, which holds for any type built
+    /// against one context.
+    pub fn display<'a>(&'a self, tys: &'a TyInterner) -> TypeDisplay<'a> {
+        TypeDisplay { ty: self, tys }
+    }
+
     pub fn is_i1(&self) -> bool {
         matches!(self, Type::I1)
     }
@@ -144,39 +162,51 @@ pub enum ValueKind {
 
 #[derive(Debug, Clone)]
 pub struct Value {
-    ty: Type,
+    ty: TyId,
     kind: ValueKind,
 }
 
 impl Value {
-    pub(crate) fn new(ty: Type, kind: ValueKind) -> Self {
+    pub(crate) fn new(ty: TyId, kind: ValueKind) -> Self {
         Value { ty, kind }
     }
 
-    pub fn ty(&self) -> &Type {
-        &self.ty
+    pub fn ty(&self) -> TyId {
+        self.ty
     }
 
     pub fn kind(&self) -> &ValueKind {
         &self.kind
     }
 
-    pub fn into_i1(self) -> Result<I1Value, BuildError> {
-        if !self.ty.is_i1() {
-            return Err(BuildError::ValueToI1ValueFailed(self.ty.to_string()));
+    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, BuildError> {
+        let ty = ctx.ty_interner.value(self.ty().raw());
+
+        if !ty.is_i1() {
+            return Err(BuildError::ValueToI1ValueFailed(
+                ty.display(&ctx.ty_interner).to_string(),
+            ));
         }
 
-        Ok(I1Value { kind: self.kind })
+        // The check above is what makes carrying the id sound: it is the pool's `i1`,
+        // so converting back needs no interner and cannot fail.
+        Ok(I1Value {
+            ty: self.ty,
+            kind: self.kind,
+        })
     }
 
     pub fn from_const<C: Const>(
         val: C,
         optional_cast: Option<Type>,
-        interner: &mut ConstInterner,
+        ctx: &mut Context,
     ) -> Result<Self, BuildError> {
         let (val, ty) = if let Some(ty) = optional_cast {
             let Some(c) = val.try_cast(&ty) else {
-                return Err(BuildError::ConstantCastToProvidedTypeFailed(C::ty(), ty));
+                return Err(BuildError::ConstantCastToProvidedTypeFailed(
+                    C::ty().display(&ctx.ty_interner).to_string(),
+                    ty.display(&ctx.ty_interner).to_string(),
+                ));
             };
 
             (c, ty)
@@ -184,20 +214,17 @@ impl Value {
             (val.into_const(), C::ty())
         };
 
-        let const_id = interner.intern(val)?;
+        let const_id = ctx.const_interner.intern(val)?;
+        let ty_id = ctx.ty_interner.intern(ty)?.into();
 
         Ok(Value {
-            ty,
+            ty: ty_id,
             kind: ValueKind::Const(const_id.into()),
         })
     }
 
-    pub fn from_register(
-        name: String,
-        ty: Type,
-        interner: &mut StrInterner,
-    ) -> Result<Self, BuildError> {
-        let reg_id: StrId = interner.intern(name)?.into();
+    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Result<Self, BuildError> {
+        let reg_id: StrId = ctx.str_interner.intern(name)?.into();
 
         Ok(Value {
             ty,
@@ -206,7 +233,9 @@ impl Value {
     }
 
     pub fn pointee_ty_for_ptr(&self, block: BasicBlockId, ctx: &mut Context) -> Option<Type> {
-        if self.ty().is_ptr() {
+        let ty = ctx.ty_interner.value(self.ty().raw());
+
+        if ty.is_ptr() {
             return None;
         }
 
@@ -563,15 +592,22 @@ impl Const for NullPtr {
     }
 }
 
+/// A value already known to be an `i1`, so a conditional branch cannot be handed
+/// anything else.
+///
+/// It keeps the pool id it was narrowed from rather than re-deriving `i1` on the way
+/// back: [`Value::into_i1`] has already resolved and checked that id, so converting
+/// back needs neither the interner nor a second chance to fail.
 #[derive(Debug)]
 pub struct I1Value {
+    ty: TyId,
     kind: ValueKind,
 }
 
 impl From<I1Value> for Value {
     fn from(value: I1Value) -> Self {
         Value {
-            ty: Type::I1,
+            ty: value.ty,
             kind: value.kind,
         }
     }
@@ -580,16 +616,34 @@ impl From<I1Value> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interner::ConstInterner;
+
+    /// Interns `ty` and hands back its id, so a test can spell the shape it means
+    /// instead of the pool bookkeeping that shape now costs.
+    fn intern(ty: Type, ctx: &mut Context) -> TyId {
+        ctx.ty_interner.intern(ty).expect("the type interns").into()
+    }
+
+    /// The type a value reports, resolved back out of the pool. A value holds an id,
+    /// so every assertion about "what type is this" goes through here.
+    fn ty_of(value: &Value, ctx: &Context) -> Type {
+        ctx.ty_interner.value(value.ty().raw()).clone()
+    }
+
+    /// How a type spells itself against `ctx`'s pool.
+    fn rendered(ty: &Type, ctx: &Context) -> String {
+        ty.display(&ctx.ty_interner).to_string()
+    }
 
     #[test]
     fn value_from_constants() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let a = Value::from_const(32, None, &mut interner);
-        let b = Value::from_const(2.3, Some(Type::I32), &mut interner);
-        let c = Value::from_const(true, None, &mut interner);
-        let d = Value::from_const(true, Some(Type::I1), &mut interner);
-        let e = Value::from_const(false, Some(Type::I32), &mut interner);
+        let a = Value::from_const(32, None, &mut ctx);
+        let b = Value::from_const(2.3, Some(Type::I32), &mut ctx);
+        let c = Value::from_const(true, None, &mut ctx);
+        let d = Value::from_const(true, Some(Type::I1), &mut ctx);
+        let e = Value::from_const(false, Some(Type::I32), &mut ctx);
 
         assert!(a.is_ok());
         assert!(b.is_err());
@@ -603,36 +657,40 @@ mod tests {
     /// answer.
     #[test]
     fn a_cast_sets_the_values_type_and_its_stored_variant() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let widened = Value::from_const(7i8, Some(Type::I64), &mut interner).unwrap();
+        let widened = Value::from_const(7i8, Some(Type::I64), &mut ctx).unwrap();
 
-        assert_eq!(widened.ty, Type::I64);
+        assert_eq!(ty_of(&widened, &ctx), Type::I64);
         assert!(
             matches!(widened.kind, ValueKind::Const(_)),
             "a constant value holds a pool id"
         );
 
         // The stored constant is widened too, not left as the i8 it came from.
-        assert_eq!(interner.values(), [ConstValue::I64(7)]);
+        assert_eq!(ctx.const_interner.values(), [ConstValue::I64(7)]);
     }
 
     /// No cast means the value keeps the source type, which is what `Const::ty`
     /// says it is.
     #[test]
     fn without_a_cast_the_source_type_is_kept() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        for (value, expected) in [
-            (Value::from_const(1i8, None, &mut interner), Type::I8),
-            (Value::from_const(1i16, None, &mut interner), Type::I16),
-            (Value::from_const(1i32, None, &mut interner), Type::I32),
-            (Value::from_const(1i64, None, &mut interner), Type::I64),
-            (Value::from_const(1.0f32, None, &mut interner), Type::Float),
-            (Value::from_const(1.0f64, None, &mut interner), Type::Double),
-            (Value::from_const(true, None, &mut interner), Type::I1),
-        ] {
-            assert_eq!(value.unwrap().ty, expected);
+        // Built first, then checked: resolving an id back needs a shared borrow of
+        // the context the values were built through.
+        let cases = [
+            (Value::from_const(1i8, None, &mut ctx), Type::I8),
+            (Value::from_const(1i16, None, &mut ctx), Type::I16),
+            (Value::from_const(1i32, None, &mut ctx), Type::I32),
+            (Value::from_const(1i64, None, &mut ctx), Type::I64),
+            (Value::from_const(1.0f32, None, &mut ctx), Type::Float),
+            (Value::from_const(1.0f64, None, &mut ctx), Type::Double),
+            (Value::from_const(true, None, &mut ctx), Type::I1),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(ty_of(&value.unwrap(), &ctx), expected);
         }
     }
 
@@ -640,7 +698,7 @@ mod tests {
     /// value the way LLVM's `trunc` would.
     #[test]
     fn integer_casts_widen_and_narrow() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
         assert_eq!(
             300i32.try_cast(&Type::I8),
@@ -652,7 +710,7 @@ mod tests {
         assert_eq!((-1i64).try_cast(&Type::I16), Some(ConstValue::I16(-1)));
 
         assert!(
-            Value::from_const(300i32, Some(Type::I8), &mut interner).is_ok(),
+            Value::from_const(300i32, Some(Type::I8), &mut ctx).is_ok(),
             "so the builder accepts it too"
         );
     }
@@ -661,21 +719,24 @@ mod tests {
     /// built from it to be usable where a pointer is expected.
     #[test]
     fn a_null_pointer_is_typed_ptr() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
         assert_eq!(NullPtr::ty(), Type::Ptr);
         assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
 
-        let value = Value::from_const(NullPtr, None, &mut interner).unwrap();
+        let value = Value::from_const(NullPtr, None, &mut ctx).unwrap();
 
-        assert_eq!(value.ty, Type::Ptr);
-        assert_eq!(interner.values(), [ConstValue::NullPtr]);
+        assert_eq!(ty_of(&value, &ctx), Type::Ptr);
+        assert_eq!(ctx.const_interner.values(), [ConstValue::NullPtr]);
     }
 
     /// The only cast a null admits is the one that changes nothing. Anything else
     /// would need a real instruction — `ptrtoint` to reach an integer.
     #[test]
     fn a_null_pointer_casts_only_to_ptr() {
+        let mut ctx = Context::default();
+        let i8_ty = intern(Type::I8, &mut ctx);
+
         assert_eq!(NullPtr.try_cast(&Type::Ptr), Some(ConstValue::NullPtr));
 
         for ty in [
@@ -688,13 +749,14 @@ mod tests {
             Type::Void,
             Type::Array {
                 size: 1,
-                element_ty: Box::new(Type::I8),
+                element_ty: i8_ty,
             },
         ] {
             assert_eq!(
                 NullPtr.try_cast(&ty),
                 None,
-                "null must not cast to `{ty}` without an instruction"
+                "null must not cast to `{}` without an instruction",
+                rendered(&ty, &ctx)
             );
         }
     }
@@ -733,16 +795,22 @@ mod tests {
     /// asked for — the unit variant has no payload to tell two apart by.
     #[test]
     fn every_null_pointer_is_the_same_constant() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let first = Value::from_const(NullPtr, None, &mut interner).unwrap();
-        let again = Value::from_const(NullPtr, Some(Type::Ptr), &mut interner).unwrap();
+        let first = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let again = Value::from_const(NullPtr, Some(Type::Ptr), &mut ctx).unwrap();
 
-        assert_eq!(first.ty, Type::Ptr);
-        assert_eq!(again.ty, Type::Ptr);
+        assert_eq!(ty_of(&first, &ctx), Type::Ptr);
+        assert_eq!(ty_of(&again, &ctx), Type::Ptr);
 
         assert_eq!(
-            interner.len(),
+            first.ty(),
+            again.ty(),
+            "and one `ptr` entry in the type pool, so the two ids are the same id"
+        );
+
+        assert_eq!(
+            ctx.const_interner.len(),
             1,
             "interning null twice, once through a cast, still costs one entry"
         );
@@ -758,16 +826,16 @@ mod tests {
     /// whose source type has no payload to print.
     #[test]
     fn a_refused_null_cast_names_both_types() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let err = Value::from_const(NullPtr, Some(Type::I64), &mut interner)
+        let err = Value::from_const(NullPtr, Some(Type::I64), &mut ctx)
             .expect_err("null does not cast to i64");
 
         let msg = err.to_string();
 
         assert!(msg.contains("ptr"), "missing the source type: {msg}");
         assert!(msg.contains("i64"), "missing the target type: {msg}");
-        assert_eq!(interner.len(), 0, "a failed cast interns nothing");
+        assert_eq!(ctx.const_interner.len(), 0, "a failed cast interns nothing");
     }
 
     /// Ints and floats are not interchangeable, in either direction — a real
@@ -802,30 +870,53 @@ mod tests {
     /// wrong from the message alone.
     #[test]
     fn a_failed_cast_reports_both_types() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let err = Value::from_const(1.0f64, Some(Type::I32), &mut interner)
+        let err = Value::from_const(1.0f64, Some(Type::I32), &mut ctx)
             .expect_err("f64 does not cast to i32");
 
         let msg = err.to_string();
 
         assert!(msg.contains("double"), "missing the source type: {msg}");
         assert!(msg.contains("i32"), "missing the target type: {msg}");
-        assert_eq!(interner.len(), 0, "a failed cast interns nothing");
+        assert_eq!(ctx.const_interner.len(), 0, "a failed cast interns nothing");
+    }
+
+    /// The rendering an error carries has to resolve the ids inside an aggregate, not
+    /// print them. This is the property the old `Debug`-renders-like-`Display` impl
+    /// on `Type` protected; `BuildError` now carries the rendering rather than the
+    /// type, so it is the failing path that has to reach the pool.
+    #[test]
+    fn a_refused_cast_spells_an_aggregate_target_in_full() {
+        let mut ctx = Context::default();
+        let i32_ty = intern(Type::I32, &mut ctx);
+
+        let array = Type::Array {
+            size: 4,
+            element_ty: i32_ty,
+        };
+
+        let err = Value::from_const(1i32, Some(array), &mut ctx)
+            .expect_err("an i32 does not cast to an array");
+
+        assert!(
+            err.to_string().contains("[4 x i32]"),
+            "the message must spell the aggregate out, got: {err}"
+        );
     }
 
     /// `into_i1` gates the conditional-branch operand, so it has to reject a
     /// non-`i1` by *returning*, not by panicking while building the message.
     #[test]
     fn into_i1_accepts_only_i1() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let ok = Value::from_const(true, None, &mut interner).unwrap();
+        let ok = Value::from_const(true, None, &mut ctx).unwrap();
+        let not_i1 = Value::from_const(1i32, None, &mut ctx).unwrap();
 
-        assert!(ok.into_i1().is_ok());
+        assert!(ok.into_i1(&ctx).is_ok());
 
-        let not_i1 = Value::from_const(1i32, None, &mut interner).unwrap();
-        let err = not_i1.into_i1().expect_err("i32 is not i1");
+        let err = not_i1.into_i1(&ctx).expect_err("i32 is not i1");
 
         assert!(
             err.to_string().contains("i32"),
@@ -833,17 +924,19 @@ mod tests {
         );
     }
 
-    /// Round-tripping through `I1Value` must come back as an `i1`.
+    /// Round-tripping through `I1Value` must come back as an `i1` — and as the *same*
+    /// `i1`, since the id is carried across rather than re-derived.
     #[test]
     fn an_i1_value_converts_back_to_a_value() {
-        let mut interner = ConstInterner::default();
+        let mut ctx = Context::default();
 
-        let i1 = Value::from_const(true, None, &mut interner)
-            .unwrap()
-            .into_i1()
-            .unwrap();
+        let value = Value::from_const(true, None, &mut ctx).unwrap();
+        let ty = value.ty();
+        let i1 = value.into_i1(&ctx).unwrap();
+        let back = Value::from(i1);
 
-        assert_eq!(Value::from(i1).ty, Type::I1);
+        assert_eq!(ty_of(&back, &ctx), Type::I1);
+        assert_eq!(back.ty(), ty, "the pool id survives the round trip");
     }
 
     /// Equal constants share a pool entry; constants that differ in *type* do not,
@@ -925,14 +1018,16 @@ mod tests {
             a,
             "re-interning the same NaN must reuse its entry"
         );
+
         assert_eq!(interner.len(), 3);
     }
 
-    /// A signature, so the function-type tests below read as the types they mean.
-    fn func(params: Vec<Type>, result: Type) -> FuncSignature {
+    /// A signature, so the function-type tests below read as the types they mean
+    /// rather than as the ids those types are stored under.
+    fn func(params: Vec<Type>, result: Type, ctx: &mut Context) -> FuncSignature {
         FuncSignature {
-            params,
-            result: Box::new(result),
+            params: params.into_iter().map(|p| intern(p, ctx)).collect(),
+            result: Box::new(intern(result, ctx)),
         }
     }
 
@@ -941,12 +1036,11 @@ mod tests {
     /// parses as a different type rather than failing.
     #[test]
     fn a_function_type_renders_its_result_before_its_params() {
-        let signature = func(vec![Type::I8, Type::Ptr], Type::I32);
-
-        assert_eq!(signature.to_string(), "i32 (i8, ptr)");
+        let mut ctx = Context::default();
+        let signature = func(vec![Type::I8, Type::Ptr], Type::I32, &mut ctx);
 
         assert_eq!(
-            Type::Func(signature).to_string(),
+            rendered(&Type::Func(signature), &ctx),
             "i32 (i8, ptr)",
             "the variant renders as its signature, with nothing added"
         );
@@ -956,82 +1050,134 @@ mod tests {
     /// any other.
     #[test]
     fn a_function_type_with_no_params_keeps_its_parens() {
-        assert_eq!(func(vec![], Type::Void).to_string(), "void ()");
-        assert_eq!(func(vec![], Type::I1).to_string(), "i1 ()");
+        let mut ctx = Context::default();
+
+        let void = Type::Func(func(vec![], Type::Void, &mut ctx));
+        let i1 = Type::Func(func(vec![], Type::I1, &mut ctx));
+
+        assert_eq!(rendered(&void, &ctx), "void ()");
+        assert_eq!(rendered(&i1, &ctx), "i1 ()");
     }
 
     /// Params may be aggregates, so the renderer has to compose with the array and
     /// struct arms rather than assume a scalar.
     #[test]
     fn a_function_type_composes_with_aggregate_params() {
+        let mut ctx = Context::default();
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+        let i8_ty = intern(Type::I8, &mut ctx);
+        let ptr_ty = intern(Type::Ptr, &mut ctx);
+
         let signature = func(
             vec![
                 Type::Array {
                     size: 4,
-                    element_ty: Box::new(Type::I32),
+                    element_ty: i32_ty,
                 },
                 Type::Struct {
-                    fields: vec![Type::I8, Type::Ptr],
+                    fields: Box::new([i8_ty, ptr_ty]),
                     packed: false,
                 },
             ],
             Type::Void,
+            &mut ctx,
         );
 
-        assert_eq!(signature.to_string(), "void ([4 x i32], { i8, ptr })");
+        assert_eq!(
+            rendered(&Type::Func(signature), &ctx),
+            "void ([4 x i32], { i8, ptr })"
+        );
     }
 
     /// The parameter list is part of the type, arity included. Comparing the two
     /// lists positionally would stop at the shorter one and call these the same.
     #[test]
     fn function_types_differ_on_arity() {
-        let one = Type::Func(func(vec![Type::I32], Type::Void));
-        let two = Type::Func(func(vec![Type::I32, Type::I64], Type::Void));
-        let none = Type::Func(func(vec![], Type::Void));
+        let mut ctx = Context::default();
+
+        let one = Type::Func(func(vec![Type::I32], Type::Void, &mut ctx));
+        let two = Type::Func(func(vec![Type::I32, Type::I64], Type::Void, &mut ctx));
+        let none = Type::Func(func(vec![], Type::Void, &mut ctx));
 
         assert_ne!(one, two, "a prefix of a longer list is a different type");
         assert_ne!(none, one, "and so is the empty list");
     }
 
     /// The rest of the identity: which params, in which order, and the result.
+    ///
+    /// Comparing whole `Type`s here is comparing lists of ids, which is exactly the
+    /// property interning has to preserve — equal component types are equal ids, so
+    /// two spellings of one signature must still compare equal.
     #[test]
     fn function_types_differ_on_params_order_and_result() {
-        let base = || func(vec![Type::I32, Type::I64], Type::Void);
+        let mut ctx = Context::default();
 
-        assert_eq!(
-            Type::Func(base()),
-            Type::Func(base()),
-            "the same signature twice is the same type"
-        );
+        let base = |ctx: &mut Context| func(vec![Type::I32, Type::I64], Type::Void, ctx);
+
+        let first = Type::Func(base(&mut ctx));
+        let second = Type::Func(base(&mut ctx));
+
+        assert_eq!(first, second, "the same signature twice is the same type");
 
         assert_ne!(
-            Type::Func(base()),
-            Type::Func(func(vec![Type::I64, Type::I32], Type::Void)),
+            first,
+            Type::Func(func(vec![Type::I64, Type::I32], Type::Void, &mut ctx)),
             "parameter order matters"
         );
 
         assert_ne!(
-            Type::Func(base()),
-            Type::Func(func(vec![Type::I32, Type::I32], Type::Void)),
+            first,
+            Type::Func(func(vec![Type::I32, Type::I32], Type::Void, &mut ctx)),
             "so do the parameter types"
         );
 
         assert_ne!(
-            Type::Func(base()),
-            Type::Func(func(vec![Type::I32, Type::I64], Type::I32)),
+            first,
+            Type::Func(func(vec![Type::I32, Type::I64], Type::I32, &mut ctx)),
             "and the result"
         );
     }
 
-    /// `BuildError` renders a `Type` through `Debug`, so a function type has to be
-    /// printable on that path too — it is the one variant whose payload is not
-    /// itself `Debug`.
+    /// Structurally equal types are one pool entry, so a second spelling of a type
+    /// costs nothing and — the part the `==`s above depend on — comes back as the
+    /// very same id.
     #[test]
-    fn a_function_type_is_debug_printable() {
-        assert_eq!(
-            format!("{:?}", Type::Func(func(vec![Type::Double], Type::I64))),
-            "i64 (double)"
+    fn an_equal_type_interns_to_the_same_id() {
+        let mut ctx = Context::default();
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+
+        let first = intern(
+            Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            },
+            &mut ctx,
         );
+
+        let again = intern(
+            Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            },
+            &mut ctx,
+        );
+
+        let longer = intern(
+            Type::Array {
+                size: 8,
+                element_ty: i32_ty,
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            first, again,
+            "`[4 x i32]` is one type however often it is built"
+        );
+        assert_ne!(first, longer, "but `[8 x i32]` is a different one");
+        assert_eq!(ctx.ty_interner.len(), 3, "i32, [4 x i32], [8 x i32]");
     }
 
     /// What `load` and `store` will accept: everything with a size. LLVM calls
@@ -1040,8 +1186,13 @@ mod tests {
     /// types out, everything else in.
     #[test]
     fn only_void_and_function_types_are_unsized() {
+        let mut ctx = Context::default();
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+        let ptr_ty = intern(Type::Ptr, &mut ctx);
+
         assert!(!Type::Void.is_first_class());
-        assert!(!Type::Func(func(vec![Type::I32], Type::I32)).is_first_class());
+        assert!(!Type::Func(func(vec![Type::I32], Type::I32, &mut ctx)).is_first_class());
 
         for ty in [
             Type::I1,
@@ -1053,14 +1204,18 @@ mod tests {
             Type::Ptr,
             Type::Array {
                 size: 4,
-                element_ty: Box::new(Type::I32),
+                element_ty: i32_ty,
             },
             Type::Struct {
-                fields: vec![Type::I32, Type::Ptr],
+                fields: Box::new([i32_ty, ptr_ty]),
                 packed: false,
             },
         ] {
-            assert!(ty.is_first_class(), "`{ty}` has a size and can be loaded");
+            assert!(
+                ty.is_first_class(),
+                "`{}` has a size and can be loaded",
+                rendered(&ty, &ctx)
+            );
         }
     }
 
@@ -1068,87 +1223,106 @@ mod tests {
     /// so every shape has to spell itself the way LLVM does.
     #[test]
     fn types_render_as_llvm_spells_them() {
-        assert_eq!(Type::I1.to_string(), "i1");
-        assert_eq!(Type::I64.to_string(), "i64");
-        assert_eq!(Type::Half.to_string(), "half");
-        assert_eq!(Type::Bfloat.to_string(), "bfloat");
-        assert_eq!(Type::Float.to_string(), "float");
-        assert_eq!(Type::Double.to_string(), "double");
-        assert_eq!(Type::Ptr.to_string(), "ptr");
-        assert_eq!(Type::Void.to_string(), "void");
+        let mut ctx = Context::default();
+
+        for (ty, expected) in [
+            (Type::I1, "i1"),
+            (Type::I64, "i64"),
+            (Type::Half, "half"),
+            (Type::Bfloat, "bfloat"),
+            (Type::Float, "float"),
+            (Type::Double, "double"),
+            (Type::Ptr, "ptr"),
+            (Type::Void, "void"),
+        ] {
+            assert_eq!(rendered(&ty, &ctx), expected);
+        }
+
+        let i32_ty = intern(Type::I32, &mut ctx);
+        let i8_ty = intern(Type::I8, &mut ctx);
+        let double_ty = intern(Type::Double, &mut ctx);
 
         assert_eq!(
-            Type::Array {
-                size: 8,
-                element_ty: Box::new(Type::I32),
-            }
-            .to_string(),
+            rendered(
+                &Type::Array {
+                    size: 8,
+                    element_ty: i32_ty,
+                },
+                &ctx
+            ),
             "[8 x i32]"
         );
 
         assert_eq!(
-            Type::Struct {
-                fields: vec![Type::I32, Type::Double],
-                packed: false,
-            }
-            .to_string(),
+            rendered(
+                &Type::Struct {
+                    fields: Box::new([i32_ty, double_ty]),
+                    packed: false,
+                },
+                &ctx
+            ),
             "{ i32, double }"
         );
 
         assert_eq!(
-            Type::Struct {
-                fields: vec![Type::I8],
-                packed: true,
-            }
-            .to_string(),
+            rendered(
+                &Type::Struct {
+                    fields: Box::new([i8_ty]),
+                    packed: true,
+                },
+                &ctx
+            ),
             "<{ i8 }>"
         );
 
         assert_eq!(
-            Type::Struct {
-                fields: vec![],
-                packed: false,
-            }
-            .to_string(),
+            rendered(
+                &Type::Struct {
+                    fields: Box::new([]),
+                    packed: false,
+                },
+                &ctx
+            ),
             "{  }",
             "an empty struct still renders"
         );
-
-        // Nesting has to compose, since a struct field may be any type.
-        assert_eq!(
-            Type::Array {
-                size: 2,
-                element_ty: Box::new(Type::Struct {
-                    fields: vec![
-                        Type::Ptr,
-                        Type::Array {
-                            size: 3,
-                            element_ty: Box::new(Type::I16),
-                        },
-                    ],
-                    packed: true,
-                }),
-            }
-            .to_string(),
-            "[2 x <{ ptr, [3 x i16] }>]"
-        );
     }
 
-    /// `BuildError` carries a `Type`, so `Debug` — which is what `unwrap` prints —
-    /// must render rather than panic.
+    /// Nesting has to compose: a child is an id, so every level of an aggregate is
+    /// one more resolution through the pool. Rendering only the outermost node would
+    /// pass every assertion above and fail here.
     #[test]
-    fn a_type_is_debug_printable() {
-        assert_eq!(format!("{:?}", Type::I32), "i32");
+    fn a_nested_aggregate_renders_through_every_level() {
+        let mut ctx = Context::default();
+
+        let i16_ty = intern(Type::I16, &mut ctx);
+        let ptr_ty = intern(Type::Ptr, &mut ctx);
+
+        let inner = intern(
+            Type::Array {
+                size: 3,
+                element_ty: i16_ty,
+            },
+            &mut ctx,
+        );
+
+        let fields = intern(
+            Type::Struct {
+                fields: Box::new([ptr_ty, inner]),
+                packed: true,
+            },
+            &mut ctx,
+        );
 
         assert_eq!(
-            format!(
-                "{:?}",
-                Type::Array {
-                    size: 1,
-                    element_ty: Box::new(Type::Float)
-                }
+            rendered(
+                &Type::Array {
+                    size: 2,
+                    element_ty: fields,
+                },
+                &ctx
             ),
-            "[1 x float]"
+            "[2 x <{ ptr, [3 x i16] }>]"
         );
     }
 }

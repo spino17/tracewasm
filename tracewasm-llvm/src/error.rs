@@ -1,7 +1,12 @@
-use crate::value::Type;
 use thiserror::Error;
 use tracewasm_utils::error::TracewasmUtilsError;
 
+/// Every variant naming a type carries it **already rendered**, not as a `Type` or a
+/// `TyId`. Neither can print itself — an aggregate names its children by id, so
+/// spelling one out needs the `TyInterner` that issued them, which an error cannot
+/// borrow and outlive. So the failing path renders through
+/// [`TyInterner::display`](crate::interner::TyInterner::display) on the way out; a
+/// failure is rare enough that the allocation costs nothing that matters.
 #[derive(Error, Debug)]
 pub enum BuildError {
     #[error("phi instructions should be added at the start of the basic block")]
@@ -15,7 +20,7 @@ pub enum BuildError {
     #[error("{0}")]
     UtilsError(TracewasmUtilsError),
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
-    ConstantCastToProvidedTypeFailed(Type, Type),
+    ConstantCastToProvidedTypeFailed(String, String),
     /// Two functions cannot share a name: LLVM identifies a definition by it, so
     /// emitting both would produce two `@name` definitions in one module.
     #[error("a function named `{0}` already exists in this module")]
@@ -30,7 +35,7 @@ pub enum BuildError {
     /// Fields: the type the phi was established with, and the one this branch
     /// brought.
     #[error("phi branch has type `{1}`, but the phi's type is `{0}`")]
-    PhiInstructionBranchTypeMismatch(Type, Type),
+    PhiInstructionBranchTypeMismatch(String, String),
     /// A phi with no incoming values selects nothing, and its type is whatever its
     /// first branch says — so with none there is no type to give it either.
     #[error("a phi instruction needs at least one branch")]
@@ -50,12 +55,12 @@ pub enum BuildError {
     /// the location has to be one. Reaching memory from an integer needs an
     /// `inttoptr` first.
     #[error("expected a `ptr` operand, but got one of type `{0}`")]
-    PointerOperandExpected(Type),
+    PointerOperandExpected(String),
     /// A `load` or `store` moves a value of a known size, so the type has to have
     /// one. `void` and function types do not — everything else does, aggregates
     /// included, so `load {i32, i32}` is fine.
     #[error("a value of type `{0}` cannot be loaded or stored: it has no size")]
-    TypeNotLoadable(Type),
+    TypeNotLoadable(String),
     /// An explicit alignment must be a power of two. `0` is not one — leaving the
     /// alignment off is how the ABI default is asked for.
     #[error("alignment must be a power of two, but got `{0}`")]

@@ -20,5 +20,5 @@ pub(crate) fn fixture() -> (Context, Builder) {
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather
 /// than the value flowing through it.
 pub(crate) fn value(n: i32, ctx: &mut Context) -> Value {
-    Value::from_const(n, None, &mut ctx.const_interner).expect("constant interns")
+    Value::from_const(n, None, ctx).expect("constant interns")
 }
