@@ -49,25 +49,25 @@ impl TyId {
     }
 
     pub fn is_i1(&self, ctx: &Context) -> bool {
-        let ty_obj = ctx.ty_interner.value(self.0);
+        let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::I1)
     }
 
     pub fn is_ptr(&self, ctx: &Context) -> bool {
-        let ty_obj = ctx.ty_interner.value(self.0);
+        let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::Ptr)
     }
 
     pub fn is_first_class(&self, ctx: &Context) -> bool {
-        let ty_obj = ctx.ty_interner.value(self.0);
+        let ty_obj = ctx.ty_interner.value(self.raw());
 
         !matches!(ty_obj, Type::Void | Type::Func(_))
     }
 
     pub fn is_integer(&self, ctx: &Context) -> bool {
-        let ty_obj = ctx.ty_interner.value(self.0);
+        let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(
             ty_obj,
@@ -93,7 +93,7 @@ impl Display for TypeDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Each child is resolved through the same pool, which is what lets a nested
         // aggregate render in full rather than as the id it is stored as.
-        let ty_obj = self.ctx.ty_interner.value(self.ty.0);
+        let ty_obj = self.ctx.ty_interner.value(self.ty.raw());
         let nested = |id: TyId| self.ctx.display(id);
 
         match ty_obj {
@@ -178,6 +178,16 @@ impl Value {
 
     pub fn is_ptr(&self, ctx: &Context) -> bool {
         self.ty().is_ptr(ctx)
+    }
+
+    pub fn try_const<'a>(&self, ctx: &'a Context) -> Option<&'a ConstValue> {
+        if let ValueKind::Const(const_val) = self.kind() {
+            let const_val = ctx.const_interner.value(const_val.raw());
+
+            Some(const_val)
+        } else {
+            None
+        }
     }
 
     pub fn into_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
@@ -351,6 +361,19 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    pub fn try_integer(&self) -> Option<i32> {
+        let val = match self {
+            ConstValue::I1(val) => *val as i32,
+            ConstValue::I8(val) => *val as i32,
+            ConstValue::I16(val) => *val as i32,
+            ConstValue::I32(val) => *val,
+            ConstValue::I64(val) => *val as i32,
+            _ => return None,
+        };
+
+        Some(val)
+    }
+
     pub fn is_sign_positive(&self) -> bool {
         match self {
             ConstValue::I1(val) => val.is_positive(),
@@ -516,7 +539,7 @@ impl Const for i8 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self),
@@ -540,7 +563,7 @@ impl Const for i16 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
@@ -564,7 +587,7 @@ impl Const for i32 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
@@ -588,7 +611,7 @@ impl Const for i64 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::I8 => ConstValue::I8(*self as i8),
@@ -612,7 +635,7 @@ impl Const for f32 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::Float => ConstValue::Float(OrderedFloat(*self)),
@@ -634,7 +657,7 @@ impl Const for f64 {
     }
 
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
-        let ty_obj = ctx.ty_interner.value(ty.0);
+        let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
             Type::Float => ConstValue::Float(OrderedFloat(*self as f32)),

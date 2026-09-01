@@ -78,7 +78,7 @@ impl DerefMut for TyInterner {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub struct TyId(pub InternedId<Type, u32>);
+pub struct TyId(InternedId<Type, u32>);
 
 impl TyId {
     pub(crate) fn raw(&self) -> InternedId<Type, u32> {

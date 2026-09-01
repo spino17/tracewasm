@@ -71,6 +71,8 @@ pub enum InstructionError {
     #[error("{0}")]
     Phi(#[from] PhiError),
     #[error("{0}")]
+    Gep(#[from] GepError),
+    #[error("{0}")]
     Context(#[from] ContextError),
 }
 
@@ -114,3 +116,6 @@ pub enum PhiError {
     #[error("{0}")]
     Context(#[from] ContextError),
 }
+
+#[derive(Error, Debug)]
+pub enum GepError {}

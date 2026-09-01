@@ -4,9 +4,9 @@ use crate::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
     },
-    error::{AllocaError, InstructionError, PhiError, StoreError},
+    error::{AllocaError, GepError, InstructionError, PhiError, StoreError},
     interner::TyId,
-    value::{I1Value, Value, ValueKind},
+    value::{I1Value, Type, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -85,6 +85,12 @@ pub enum InstructionKind {
         ty: TyId,
         count: Option<Value>,
         align: Option<u32>,
+    },
+    GetElementPtr {
+        source_ty: Option<TyId>,
+        ptr: Value,
+        indices: Box<[Value]>,
+        inbounds: bool,
     },
 }
 
@@ -321,6 +327,129 @@ impl Cursor {
             reg,
             ctx,
         )
+    }
+
+    pub fn add_get_element_ptr(
+        &self,
+        source_ty: Option<TyId>,
+        ptr: Value,
+        indices: Vec<Value>,
+        inbounds: Option<bool>,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, InstructionError> {
+        let inbounds = if let Some(inbounds) = inbounds {
+            inbounds
+        } else {
+            false
+        };
+
+        if !ptr.is_ptr(ctx) {
+            todo!() // RAISE ERROR: value is not of pointer type!
+        }
+
+        for index in &indices {
+            if !index.is_integer(ctx) {
+                todo!() // RAISE ERROR: index does not have an integer type!
+            }
+        }
+
+        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
+
+        let final_source_ty = if let Some(source_ty) = source_ty {
+            if !source_ty.is_first_class(ctx) {
+                todo!() // RAISE ERROR: not a first class type!
+            }
+
+            if let Some(pointee_ty) = pointee_ty {
+                if source_ty != pointee_ty.ty {
+                    todo!() // RAISE ERROR: provided source type does not match with inferred pointee type from the pointer
+                }
+
+                source_ty
+            } else {
+                source_ty
+            }
+        } else {
+            if let Some(pointee_ty) = pointee_ty {
+                pointee_ty.ty
+            } else {
+                todo!() // RAISE ERROR: no source type provided and pointee type cannot be inferred from the polnter value!
+            }
+        };
+
+        if indices.len() > 1 {
+            let _ = self.walk_pointee_ty_in_gep(final_source_ty, &indices[1..], ctx)?;
+        }
+
+        let result_ty = ctx.ptr_ty();
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::GetElementPtr {
+                source_ty,
+                ptr,
+                indices: indices.into_boxed_slice(),
+                inbounds,
+            },
+            result_ty,
+            self.block,
+            reg,
+            ctx,
+        )
+    }
+
+    fn walk_pointee_ty_in_gep(
+        &self,
+        curr_pointee_ty: TyId,
+        indices: &[Value],
+        ctx: &mut Context,
+    ) -> Result<TyId, GepError> {
+        if indices.is_empty() {
+            return Ok(curr_pointee_ty);
+        }
+
+        let index = &indices[0];
+        let ty_obj = ctx.ty_interner.value(curr_pointee_ty.raw());
+
+        match ty_obj {
+            Type::Struct { fields, packed: _ } => {
+                let total_fields = fields.len();
+
+                let Some(const_val) = index.try_const(ctx) else {
+                    todo!() // RAISE ERROR: index into a struct should be compile time constant integer!
+                };
+
+                let Some(index) = const_val.try_integer() else {
+                    todo!() // RAISE ERROR: index into a struct should be compile time constant integer!
+                };
+
+                let index = index as u32 as usize;
+
+                if index >= total_fields {
+                    todo!() // RAISE ERROR: index greater than the fields of the struct
+                }
+
+                let field_ty = fields[index];
+
+                Ok(self.walk_pointee_ty_in_gep(field_ty, &indices[1..], ctx)?)
+            }
+            Type::Array { size, element_ty } => {
+                let size = *size;
+
+                if let Some(const_val) = index.try_const(ctx) {
+                    if let Some(index) = const_val.try_integer() {
+                        let index = index as u32 as u64;
+
+                        if index >= size {
+                            todo!() // RAISE ERROR: index greater than the size of the error!
+                        }
+                    }
+                }
+
+                Ok(self.walk_pointee_ty_in_gep(*element_ty, &indices[1..], ctx)?)
+            }
+            _ => todo!(), // RAISE ERROR: type not indexable!
+        }
     }
 }
 
