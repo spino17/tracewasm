@@ -5,7 +5,7 @@ use crate::{
     },
     instruction::{
         AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands, PhiInstruction,
-        StoreOperands, UnconditionalBrOperands,
+        RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{ConstValue, Value, ValueKind},
 };
@@ -214,6 +214,26 @@ impl CfgVisitor for IREmitter {
             ctx.display(instr.ref_ty),
             branches.join(", ")
         ));
+
+        Ok(())
+    }
+
+    fn visit_ret(
+        &mut self,
+        operands: &RetOperands,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // `ret void` carries no operand; every other result is `ret <ty> <val>`, and
+        // the type comes from the instruction rather than the value so a `void`
+        // return still spells its type.
+        match &operands.value {
+            Some(value) => {
+                self.push_line(&format!("ret {}", Self::typed_operand(value, ctx)?));
+            }
+            None => {
+                self.push_line(&format!("ret {}", ctx.display(operands.ty)));
+            }
+        }
 
         Ok(())
     }
@@ -435,7 +455,7 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .add_load(f64_ty, elem.clone(), Some(8), Some("d"), &mut ctx)
+            .add_load(elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
             .unwrap();
 
         in_entry
@@ -484,9 +504,12 @@ mod tests {
             .add_conditional_br(cond, body, exit, &mut ctx)
             .unwrap();
 
-        // No `ret` exists in the builder yet, so `exit` terminates with a self-loop.
-        let in_exit = builder.cursor_at_block(exit);
-        in_exit.add_unconditional_br(exit, &mut ctx).unwrap();
+        let answer = Value::from_const(0i32, None, &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(exit)
+            .add_ret(Some(i32_ty), Some(answer), &mut ctx)
+            .unwrap();
 
         let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
 
@@ -509,7 +532,7 @@ mod tests {
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
             "    br i1 true, label %body, label %exit\n",
             "exit:\n",
-            "    br label %exit\n",
+            "    ret i32 0\n",
             "}\n",
             "\n",
         );

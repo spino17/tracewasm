@@ -64,6 +64,13 @@ pub enum InstructionError {
     /// included, so `load {i32, i32}` is fine.
     #[error("a value of type `{0}` cannot be loaded or stored: it has no size")]
     TypeNotLoadable(String),
+    #[error("loading `{0}` through a pointer to `{1}`")]
+    LoadedTypeDoesNotMatchPointee(String, String),
+    #[error(
+        "a `load` needs a type: none was given, and none could be inferred from the \
+         pointer operand"
+    )]
+    LoadedTypeUnknown,
     /// An explicit alignment must be a power of two. `0` is not one — leaving the
     /// alignment off is how the ABI default is asked for.
     #[error("alignment must be a power of two, but got `{0}`")]
@@ -74,6 +81,8 @@ pub enum InstructionError {
     Alloca(#[from] AllocaError),
     #[error("{0}")]
     Store(#[from] StoreError),
+    #[error("{0}")]
+    Ret(#[from] RetError),
     #[error("{0}")]
     Phi(#[from] PhiError),
     #[error("{0}")]
@@ -90,6 +99,20 @@ pub enum AllocaError {
     AllocaCountNotAnInteger(String),
     #[error("an `alloca` element count of type `{0}` cannot be used as `{1}`")]
     AllocaCountTypeMismatch(String, String),
+}
+
+#[derive(Error, Debug)]
+pub enum RetError {
+    #[error("`ret void` takes no value, but one of type `{0}` was given")]
+    ValueGivenForVoid(String),
+    #[error("a value of type `{0}` cannot be returned as `{1}`")]
+    ReturnedValueTypeMismatch(String, String),
+    #[error("returning no value needs the `void` type, but `{0}` was given")]
+    NonVoidTypeWithoutValue(String),
+    #[error("a `ret` needs either a type or a value, and neither was given")]
+    TypeAndValueBothAbsent,
+    #[error("`{0}` returns `{1}`, so it cannot return `{2}`")]
+    DoesNotMatchFunctionResult(String, String, String),
 }
 
 #[derive(Error, Debug)]

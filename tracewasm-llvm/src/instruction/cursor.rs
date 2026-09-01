@@ -3,7 +3,7 @@ use crate::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
     },
-    error::{AllocaError, GepError, InstructionError, PhiError, StoreError},
+    error::{AllocaError, GepError, InstructionError, PhiError, RetError, StoreError},
     instruction::{
         AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction, InstructionKind,
         LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
@@ -99,33 +99,62 @@ impl Cursor {
         val: Option<Value>,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
-        let (val, ty) = if let Some(ty) = ty {
-            if let Some(val) = val {
+        let (val, ty) = match (ty, val) {
+            (Some(ty), Some(val)) => {
                 if ty.is_void(ctx) {
-                    todo!() // RAISE ERROR: value is provided for void type
+                    return Err(
+                        RetError::ValueGivenForVoid(ctx.display(val.ty()).to_string()).into(),
+                    );
                 }
 
+                let val_ty = ctx.display(val.ty()).to_string();
+
                 let Some(casted_val) = val.try_cast(ty, ctx) else {
-                    todo!() // RAISE ERROR: value cannot be casted into the provided type!
+                    return Err(RetError::ReturnedValueTypeMismatch(
+                        val_ty,
+                        ty.display(ctx).to_string(),
+                    )
+                    .into());
                 };
 
                 (Some(casted_val), ty)
-            } else {
+            }
+            (Some(ty), None) => {
                 if !ty.is_void(ctx) {
-                    todo!() // type is not void for non value
+                    return Err(
+                        RetError::NonVoidTypeWithoutValue(ty.display(ctx).to_string()).into(),
+                    );
                 }
 
                 (None, ty)
             }
-        } else {
-            if let Some(val) = val {
+            (None, Some(val)) => {
                 let ty = val.ty();
 
                 (Some(val), ty)
-            } else {
-                todo!() // RAISE ERROR: both are absent
             }
+            (None, None) => return Err(RetError::TypeAndValueBothAbsent.into()),
         };
+
+        // LLVM checks the return against the *function's* result type, not just
+        // against whatever the caller passed here: `define i32 @f() { ret void }` is
+        // refused with "value doesn't match function result type".
+        let func_id = ctx.get_block(self.block).func_id;
+        let result_ty = ctx.get_func(func_id).result;
+
+        if ty != result_ty {
+            let func_name = ctx
+                .str_interner
+                .value(ctx.get_func(func_id).name.0)
+                .to_string();
+
+            return Err(RetError::DoesNotMatchFunctionResult(
+                func_name,
+                ctx.display(result_ty).to_string(),
+                ctx.display(ty).to_string(),
+            )
+            .into());
+        }
 
         self.block.add_instruction(
             Instruction {
@@ -138,6 +167,75 @@ impl Cursor {
         self.block.set_locked(ctx);
 
         Ok(())
+    }
+
+    pub fn add_alloca(
+        &self,
+        ty: TyId,
+        count: Option<(Value, Option<TyId>)>,
+        align: Option<u32>,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, InstructionError> {
+        if !ty.is_first_class(ctx) {
+            return Err(AllocaError::TypeNotAllocatable(ty.display(ctx).to_string()).into());
+        }
+
+        if let Some(align) = align
+            && !align.is_power_of_two()
+        {
+            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
+        }
+
+        let mut final_count: Option<Value> = None;
+
+        if let Some((count_val, count_expected_ty)) = count {
+            if !count_val.is_integer(ctx) {
+                return Err(AllocaError::AllocaCountNotAnInteger(
+                    ctx.display(count_val.ty()).to_string(),
+                )
+                .into());
+            }
+
+            let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
+                if !count_expected_ty.is_integer(ctx) {
+                    return Err(AllocaError::AllocaCountNotAnInteger(
+                        count_expected_ty.display(ctx).to_string(),
+                    )
+                    .into());
+                }
+
+                let count_ty = ctx.display(count_val.ty()).to_string();
+
+                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
+                    return Err(AllocaError::AllocaCountTypeMismatch(
+                        count_ty,
+                        count_expected_ty.display(ctx).to_string(),
+                    )
+                    .into());
+                };
+
+                casted_val
+            } else {
+                count_val
+            };
+
+            final_count = Some(final_count_val);
+        }
+
+        let result_ty = ctx.ptr_ty();
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::Alloca(AllocaOperands {
+                ty,
+                count: final_count,
+                align,
+            }),
+            result_ty,
+            self.block,
+            reg,
+            ctx,
+        )
     }
 
     pub fn add_load(
@@ -172,14 +270,17 @@ impl Cursor {
             if let Some(pointee_ty) = pointee_ty
                 && pointee_ty.ty != ty
             {
-                todo!() // RAISE ERROR: pointee ty not matching the provided type!
+                return Err(InstructionError::LoadedTypeDoesNotMatchPointee(
+                    ty.display(ctx).to_string(),
+                    ctx.display(pointee_ty.ty).to_string(),
+                ));
             }
 
             ty
         } else if let Some(pointee_ty) = pointee_ty {
             pointee_ty.ty
         } else {
-            todo!() // RAISE ERROR: ptr ponintee type cannot be inferred and explicit type not provided.
+            return Err(InstructionError::LoadedTypeUnknown);
         };
 
         add_instruction_to_block_and_get_value(
@@ -254,75 +355,6 @@ impl Cursor {
         )?;
 
         Ok(())
-    }
-
-    pub fn add_alloca(
-        &self,
-        ty: TyId,
-        count: Option<(Value, Option<TyId>)>,
-        align: Option<u32>,
-        reg: Option<&str>,
-        ctx: &mut Context,
-    ) -> Result<Value, InstructionError> {
-        if !ty.is_first_class(ctx) {
-            return Err(AllocaError::TypeNotAllocatable(ty.display(ctx).to_string()).into());
-        }
-
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
-        }
-
-        let mut final_count: Option<Value> = None;
-
-        if let Some((count_val, count_expected_ty)) = count {
-            if !count_val.is_integer(ctx) {
-                return Err(AllocaError::AllocaCountNotAnInteger(
-                    ctx.display(count_val.ty()).to_string(),
-                )
-                .into());
-            }
-
-            let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
-                if !count_expected_ty.is_integer(ctx) {
-                    return Err(AllocaError::AllocaCountNotAnInteger(
-                        count_expected_ty.display(ctx).to_string(),
-                    )
-                    .into());
-                }
-
-                let count_ty = ctx.display(count_val.ty()).to_string();
-
-                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
-                    return Err(AllocaError::AllocaCountTypeMismatch(
-                        count_ty,
-                        count_expected_ty.display(ctx).to_string(),
-                    )
-                    .into());
-                };
-
-                casted_val
-            } else {
-                count_val
-            };
-
-            final_count = Some(final_count_val);
-        }
-
-        let result_ty = ctx.ptr_ty();
-
-        add_instruction_to_block_and_get_value(
-            InstructionKind::Alloca(AllocaOperands {
-                ty,
-                count: final_count,
-                align,
-            }),
-            result_ty,
-            self.block,
-            reg,
-            ctx,
-        )
     }
 
     pub fn add_get_element_ptr(
@@ -879,7 +911,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_load(i32_ty, ptr.clone(), None, None, &mut ctx)
+                .add_load(ptr.clone(), Some(i32_ty), None, None, &mut ctx)
                 .map(|_| ()),
             "load",
         );
@@ -992,6 +1024,208 @@ mod tests {
         assert_eq!(block.phis.len(), 1);
         assert_eq!(block.instructions.len(), 2);
         assert!(block.is_locked, "closed only at the end");
+    }
+
+    /// A `ret` has to match the *function's* result type, not merely the type the
+    /// caller passed alongside the value. `llvm-as` refuses every mismatch with
+    /// "value doesn't match function result type".
+    #[test]
+    fn a_ret_must_match_the_function_result() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        // `define i32 @f() { ret void }`
+        let err = builder
+            .cursor_at_block(entry)
+            .add_ret(Some(void_ty), None, &mut ctx)
+            .expect_err("an i32 function does not return void");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Ret(RetError::DoesNotMatchFunctionResult(name, want, got))
+                    if name == "f" && want == "i32" && got == "void"
+            ),
+            "the error must name the function and both types, got: {err}"
+        );
+
+        // `ret i64 0` from the same function is refused for the same reason, even
+        // though the value and its declared type agree with each other.
+        let wide = Value::from_const(1i64, None, &mut ctx).unwrap();
+
+        assert!(
+            matches!(
+                builder
+                    .cursor_at_block(entry)
+                    .add_ret(Some(i64_ty), Some(wide), &mut ctx),
+                Err(InstructionError::Ret(RetError::DoesNotMatchFunctionResult(
+                    ..
+                )))
+            ),
+            "a self-consistent value of the wrong width is still the wrong result"
+        );
+
+        assert!(
+            !ctx.blocks.get(entry.raw()).unwrap().is_locked,
+            "a refused ret must not close the block"
+        );
+    }
+
+    /// The shapes a `ret` is built from: an explicit type with a matching value, the
+    /// type inferred from the value, and `void` with no value at all.
+    #[test]
+    fn a_ret_accepts_its_three_well_formed_shapes() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let returns_i32 = builder
+            .add_function("a".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let with_ty = returns_i32
+            .add_basic_block("with_ty".to_string(), &mut ctx)
+            .unwrap();
+
+        let inferred = returns_i32
+            .add_basic_block("inferred".to_string(), &mut ctx)
+            .unwrap();
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+        let eight = Value::from_const(8i32, None, &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(with_ty)
+            .add_ret(Some(i32_ty), Some(seven), &mut ctx)
+            .expect("the type and the value agree");
+
+        builder
+            .cursor_at_block(inferred)
+            .add_ret(None, Some(eight), &mut ctx)
+            .expect("with no type given it comes from the value");
+
+        let returns_void = builder
+            .add_function("b".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let empty = returns_void
+            .add_basic_block("entry".to_string(), &mut ctx)
+            .unwrap();
+
+        builder
+            .cursor_at_block(empty)
+            .add_ret(Some(void_ty), None, &mut ctx)
+            .expect("`ret void` takes no value");
+
+        for block in [with_ty, inferred, empty] {
+            assert!(
+                ctx.blocks.get(block.raw()).unwrap().is_locked,
+                "a ret terminates its block"
+            );
+        }
+    }
+
+    /// The malformed combinations, each with its own error rather than one catch-all.
+    #[test]
+    fn a_ret_refuses_its_malformed_shapes() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let a = f.add_basic_block("a".to_string(), &mut ctx).unwrap();
+        let b = f.add_basic_block("b".to_string(), &mut ctx).unwrap();
+        let c = f.add_basic_block("c".to_string(), &mut ctx).unwrap();
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        // `ret void` with a value.
+        let err = builder
+            .cursor_at_block(a)
+            .add_ret(Some(void_ty), Some(seven), &mut ctx)
+            .expect_err("`void` takes no value");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Ret(RetError::ValueGivenForVoid(t)) if t == "i32"
+            ),
+            "got: {err}"
+        );
+
+        // A non-`void` type with no value.
+        let err = builder
+            .cursor_at_block(b)
+            .add_ret(Some(i32_ty), None, &mut ctx)
+            .expect_err("`i32` needs a value");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Ret(RetError::NonVoidTypeWithoutValue(t)) if t == "i32"
+            ),
+            "got: {err}"
+        );
+
+        // Neither: there is nothing to infer a return from.
+        let err = builder
+            .cursor_at_block(c)
+            .add_ret(None, None, &mut ctx)
+            .expect_err("neither a type nor a value");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Ret(RetError::TypeAndValueBothAbsent)
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// A `ret` locks its block like the branches do, so nothing follows it.
+    #[test]
+    fn a_ret_locks_its_block() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .add_ret(Some(void_ty), None, &mut ctx)
+            .unwrap();
+
+        assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
+
+        let err = builder
+            .cursor_at_block(entry)
+            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .expect_err("`entry` already returned");
+
+        assert!(
+            matches!(&err, InstructionError::BasicBlockAlreadyTerminated(name) if name == "entry"),
+            "got: {err}"
+        );
     }
 
     /// A phi names one value per *predecessor*, so the same predecessor twice is a
@@ -1442,7 +1676,7 @@ mod tests {
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .add_load(tys.i64, elem.clone(), None, Some("v"), &mut ctx)
+            .add_load(elem.clone(), Some(tys.i64), None, Some("v"), &mut ctx)
             .expect("an i64 is loadable");
 
         assert_eq!(ctx.display(loaded.ty()).to_string(), "i64");
@@ -1473,7 +1707,7 @@ mod tests {
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
         let loaded_ptr = cursor
-            .add_load(tys.ptr, ptr_field, None, Some("q"), &mut ctx)
+            .add_load(ptr_field, Some(tys.ptr), None, Some("q"), &mut ctx)
             .expect("a ptr is loadable");
 
         assert!(
@@ -1966,17 +2200,17 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         in_entry
-            .add_load(i32_ty, ptr.clone(), None, Some("a"), &mut ctx)
+            .add_load(ptr.clone(), Some(i32_ty), None, Some("a"), &mut ctx)
             .unwrap();
 
         let second = in_entry
-            .add_load(i64_ty, ptr.clone(), None, Some("b"), &mut ctx)
+            .add_load(ptr.clone(), Some(i64_ty), None, Some("b"), &mut ctx)
             .unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .add_load(f64_ty, ptr, None, Some("c"), &mut ctx)
+            .add_load(ptr, Some(f64_ty), None, Some("c"), &mut ctx)
             .unwrap();
 
         let func_id = ctx.get_block(entry).func_id;
@@ -2034,7 +2268,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let loaded = cursor
-            .add_load(i32_ty, ptr, None, Some("x"), &mut ctx)
+            .add_load(ptr, Some(i32_ty), None, Some("x"), &mut ctx)
             .expect("loading an i32 through a ptr is fine");
 
         assert_eq!(ctx.ty_interner.value(loaded.ty().raw()), &Type::I32);
@@ -2050,7 +2284,7 @@ mod tests {
         let i64_ty = ctx.i64_ty();
 
         cursor
-            .add_load(i64_ty, ptr, None, Some("x"), &mut ctx)
+            .add_load(ptr, Some(i64_ty), None, Some("x"), &mut ctx)
             .unwrap();
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -2076,7 +2310,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let err = cursor
-            .add_load(i32_ty, not_a_ptr, None, Some("x"), &mut ctx)
+            .add_load(not_a_ptr, Some(i32_ty), None, Some("x"), &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -2102,7 +2336,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = cursor
-            .add_load(void_ty, ptr, None, None, &mut ctx)
+            .add_load(ptr, Some(void_ty), None, None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -2137,7 +2371,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .add_load(id, ptr.clone(), None, None, &mut ctx)
+                    .add_load(ptr.clone(), Some(id), None, None, &mut ctx)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
@@ -2157,7 +2391,7 @@ mod tests {
         for align in [1, 2, 4, 8, 16, 4096] {
             assert!(
                 cursor
-                    .add_load(i32_ty, ptr.clone(), Some(align), None, &mut ctx)
+                    .add_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
                     .is_ok(),
                 "align {align} is a power of two"
             );
@@ -2165,7 +2399,7 @@ mod tests {
 
         for align in [0, 3, 6, 10, 12] {
             let err = cursor
-                .add_load(i32_ty, ptr.clone(), Some(align), None, &mut ctx)
+                .add_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
                 .expect_err("not a power of two");
 
             assert!(
@@ -2184,6 +2418,10 @@ mod tests {
 
         let i32_ty = ctx.i32_ty();
 
-        assert!(cursor.add_load(i32_ty, ptr, None, None, &mut ctx).is_ok());
+        assert!(
+            cursor
+                .add_load(ptr, Some(i32_ty), None, None, &mut ctx)
+                .is_ok()
+        );
     }
 }

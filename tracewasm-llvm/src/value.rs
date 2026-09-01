@@ -381,6 +381,7 @@ impl Value {
                 let func_id = ctx.get_block(block).func_id;
                 let ptr_reg_name_id = reg.name;
 
+                // TODO: remove this! because params are defined without any instruction!
                 let def = *ctx.register_defs(func_id).get(&ptr_reg_name_id).expect(
                     "this entry should already be inserted when this ptr register was defined",
                 );

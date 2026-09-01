@@ -7,7 +7,7 @@ use crate::{
     },
     instruction::{
         AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, InstructionKind,
-        LoadOperands, PhiInstruction, StoreOperands, UnconditionalBrOperands,
+        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::Value,
 };
@@ -19,6 +19,12 @@ pub trait CfgVisitor {
     fn visit_phi(
         &mut self,
         instr: &PhiInstruction,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
+    fn visit_ret(
+        &mut self,
+        operands: &RetOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -98,6 +104,7 @@ pub trait CfgVisitor {
             let val = instr.value.as_ref();
 
             instr_results.push(match instr_kind {
+                InstructionKind::Ret(operands) => self.visit_ret(operands, ctx)?,
                 InstructionKind::UnconditionalBr(operands) => {
                     self.visit_unconditional_br(operands, ctx)?
                 }
