@@ -1,6 +1,5 @@
 use crate::{
     cfg::{
-        Cursor,
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
     },
@@ -122,6 +121,10 @@ impl GetElementPtrOperands {
             .walk_pointee_ty_in_gep(&self.indices[1..], ctx)
             .ok()
     }
+}
+
+pub struct Cursor {
+    pub(crate) block: BasicBlockId,
 }
 
 impl Cursor {
@@ -465,7 +468,7 @@ fn add_instruction_to_block_and_get_value(
 mod tests {
     use super::*;
     use crate::{
-        cfg::{Builder, context::Context},
+        cfg::{builder::Builder, context::Context},
         test_support::{fixture, value},
         value::{ConstExpr, ConstValue, NullPtr, Type},
     };

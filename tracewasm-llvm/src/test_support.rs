@@ -5,7 +5,7 @@
 //! how a context or a value is built is one edit, not four.
 
 use crate::{
-    cfg::{Builder, context::Context},
+    cfg::{builder::Builder, context::Context},
     value::Value,
 };
 

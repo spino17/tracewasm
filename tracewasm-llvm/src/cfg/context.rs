@@ -185,7 +185,7 @@ impl FuncRegNameIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{cfg::Builder, test_support::fixture, value::Type};
+    use crate::{cfg::builder::Builder, test_support::fixture, value::Type};
 
     /// A context, a builder, and two functions to scope names against.
     fn two_functions() -> (Context, FuncId, FuncId) {
