@@ -70,6 +70,23 @@ impl FuncId {
 
         Ok(id)
     }
+
+    pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<&'a Value> {
+        let func = ctx.get_func(*self);
+        let params = &func.params;
+
+        if n >= params.len() {
+            return None;
+        }
+
+        Some(&params[n])
+    }
+
+    pub fn return_ty(&self, ctx: &Context) -> TyId {
+        let func = ctx.get_func(*self);
+
+        func.result
+    }
 }
 
 #[cfg(test)]
