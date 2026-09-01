@@ -15,12 +15,15 @@ pub struct ControlFlowGraph {
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::ContextError, test_support::fixture};
+    use crate::{
+        error::ContextError,
+        test_support::{add_fn, fixture},
+    };
 
     #[test]
     fn simple_api_usage() {
         let (mut ctx, mut builder) = fixture();
-        let func = builder.add_function("sum".to_string(), &mut ctx).unwrap();
+        let func = add_fn("sum", &mut builder, &mut ctx).unwrap();
         let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
@@ -42,8 +45,8 @@ mod tests {
     #[test]
     fn functions_get_distinct_ids_in_order() {
         let (mut ctx, mut builder) = fixture();
-        let a = builder.add_function("a".to_string(), &mut ctx).unwrap();
-        let b = builder.add_function("b".to_string(), &mut ctx).unwrap();
+        let a = add_fn("a", &mut builder, &mut ctx).unwrap();
+        let b = add_fn("b", &mut builder, &mut ctx).unwrap();
 
         assert_ne!(a.raw(), b.raw());
         assert_eq!(builder.module.functions.len(), 2);
@@ -56,11 +59,9 @@ mod tests {
     fn a_duplicate_function_name_is_refused() {
         let (mut ctx, mut builder) = fixture();
 
-        builder.add_function("sum".to_string(), &mut ctx).unwrap();
+        add_fn("sum", &mut builder, &mut ctx).unwrap();
 
-        let err = builder
-            .add_function("sum".to_string(), &mut ctx)
-            .expect_err("the name is taken");
+        let err = add_fn("sum", &mut builder, &mut ctx).expect_err("the name is taken");
 
         assert!(
             matches!(&err, ContextError::DuplicateFunctionName(name) if name == "sum"),

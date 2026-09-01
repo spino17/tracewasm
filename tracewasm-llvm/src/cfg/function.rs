@@ -12,7 +12,7 @@ use rustc_hash::FxHashSet;
 
 pub struct Function {
     pub(crate) name: StrId,
-    pub(crate) params: Box<[Value]>,
+    pub(crate) params: Vec<Value>,
     pub(crate) result: TyId,
     pub(crate) blocks: Vec<BasicBlockId>,
     pub(crate) block_names: FxHashSet<StrId>,
@@ -73,14 +73,17 @@ impl FuncId {
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::ContextError, test_support::fixture};
+    use crate::{
+        error::ContextError,
+        test_support::{add_fn, fixture},
+    };
 
     /// `is_first` marks the entry block, which is the one a phi cannot go in. Only
     /// the first block added to a function is it.
     #[test]
     fn only_the_first_block_of_a_function_is_the_entry() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
 
@@ -89,7 +92,7 @@ mod tests {
 
         // A second function's first block is an entry too — `is_first` is per
         // function, not per module.
-        let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
+        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
         let g_entry = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         assert!(ctx.blocks.get(g_entry.raw()).unwrap().is_first);
@@ -100,7 +103,7 @@ mod tests {
     #[test]
     fn a_block_and_its_function_agree() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         assert_eq!(ctx.blocks.get(entry.raw()).unwrap().func_id.raw(), f.raw());
@@ -111,7 +114,7 @@ mod tests {
     #[test]
     fn a_duplicate_block_name_in_one_function_is_refused() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
 
         f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
@@ -136,8 +139,8 @@ mod tests {
     #[test]
     fn the_same_block_name_in_another_function_is_fine() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
-        let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
         let in_f = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let in_g = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 

@@ -5,7 +5,8 @@
 //! how a context or a value is built is one edit, not four.
 
 use crate::{
-    cfg::{builder::Builder, context::Context},
+    cfg::{builder::Builder, context::Context, function::FuncId},
+    error::ContextError,
     value::Value,
 };
 
@@ -15,6 +16,18 @@ pub(crate) fn fixture() -> (Context, Builder) {
         Context::default(),
         Builder::new("arm64-apple-macosx".to_string(), String::new()),
     )
+}
+
+/// A function taking nothing and returning `void`, for the tests whose subject is
+/// the graph rather than the signature.
+pub(crate) fn add_fn(
+    name: &str,
+    builder: &mut Builder,
+    ctx: &mut Context,
+) -> Result<FuncId, ContextError> {
+    let void_ty = ctx.void_ty();
+
+    builder.add_function(name.to_string(), &[], void_ty, ctx)
 }
 
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather

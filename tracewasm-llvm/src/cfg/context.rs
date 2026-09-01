@@ -185,15 +185,19 @@ impl FuncRegNameIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{cfg::builder::Builder, test_support::fixture, value::Type};
+    use crate::{
+        cfg::builder::Builder,
+        test_support::{add_fn, fixture},
+        value::Type,
+    };
 
     /// A context, a builder, and two functions to scope names against.
     fn two_functions() -> (Context, FuncId, FuncId) {
         let mut ctx = Context::default();
         let mut builder = Builder::new(String::new(), String::new());
 
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
-        let g = builder.add_function("g".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
 
         (ctx, f, g)
     }
@@ -352,9 +356,9 @@ mod tests {
         let (mut ctx_a, mut builder_a) = fixture();
         let (mut ctx_b, mut builder_b) = fixture();
 
-        let f = builder_a.add_function("f".to_string(), &mut ctx_a).unwrap();
+        let f = add_fn("f", &mut builder_a, &mut ctx_a).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx_a).unwrap();
-        let g = builder_b.add_function("g".to_string(), &mut ctx_b).unwrap();
+        let g = add_fn("g", &mut builder_b, &mut ctx_b).unwrap();
 
         g.add_basic_block("entry".to_string(), &mut ctx_b).unwrap();
 
@@ -371,9 +375,7 @@ mod tests {
     fn names_are_interned_once_across_the_context() {
         let (mut ctx, mut builder) = fixture();
 
-        let f = builder
-            .add_function("shared".to_string(), &mut ctx)
-            .unwrap();
+        let f = add_fn("shared", &mut builder, &mut ctx).unwrap();
 
         f.add_basic_block("shared".to_string(), &mut ctx).unwrap();
 

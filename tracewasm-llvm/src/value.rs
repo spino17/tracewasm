@@ -14,7 +14,13 @@ use std::{
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
     params: Vec<TyId>,
-    result: Box<TyId>,
+    result: TyId,
+}
+
+impl FuncSignature {
+    pub(crate) fn new(params: Vec<TyId>, result: TyId) -> Self {
+        FuncSignature { params, result }
+    }
 }
 
 /// One node of a type. An aggregate arm names its children by [`TyId`] rather than
@@ -211,7 +217,7 @@ impl Display for TypeDisplay<'_> {
             // result first, which is the opposite of how the signature reads in
             // source.
             Type::Func(signature) => {
-                write!(f, "{} (", nested(*signature.result))?;
+                write!(f, "{} (", nested(signature.result))?;
 
                 for (i, param) in signature.params.iter().enumerate() {
                     if i != 0 {
@@ -1257,7 +1263,7 @@ mod tests {
     fn func(params: Vec<Type>, result: Type, ctx: &mut Context) -> FuncSignature {
         FuncSignature {
             params: params.into_iter().map(|p| intern(p, ctx)).collect(),
-            result: Box::new(intern(result, ctx)),
+            result: intern(result, ctx),
         }
     }
 

@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::{
         cfg::{builder::Builder, context::Context},
-        test_support::{fixture, value},
+        test_support::{add_fn, fixture, value},
         value::{ConstExpr, ConstValue, NullPtr, Type},
     };
 
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn instructions_append_in_order_to_the_open_block() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn a_phi_needs_at_least_one_branch() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let _entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(body);
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn a_phi_cannot_go_in_the_entry_block() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
         let cursor = builder.cursor_at_block(entry);
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn phis_in_a_later_block_are_indexed_within_that_block() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let tail = f.add_basic_block("tail".to_string(), &mut ctx).unwrap();
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn a_phi_yields_a_value_of_its_branches_type() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn phi_branches_must_all_share_the_phis_type() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn a_phi_accepts_branches_whose_equal_types_were_built_separately() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn a_phi_cannot_follow_an_instruction() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn a_phi_takes_each_predecessor_once() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -645,7 +645,7 @@ mod tests {
 
     /// A block with a pointer-typed value in hand, which every load test needs.
     fn block_with_ptr(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value) {
-        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let f = add_fn("f", builder, ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
         let ptr = Value::from_const(NullPtr, None, ctx).unwrap();
 
@@ -655,7 +655,7 @@ mod tests {
     /// A `{ i32, double }` slot on the stack, plus the cursor to build against — the
     /// shape every struct-indexing test below needs.
     fn block_with_struct_slot(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value, TyId) {
-        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let f = add_fn("f", builder, ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
@@ -683,7 +683,7 @@ mod tests {
         ctx: &mut Context,
         builder: &mut Builder,
     ) -> (Cursor, Value, TyId, TyId) {
-        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let f = add_fn("f", builder, ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
@@ -870,7 +870,7 @@ mod tests {
     /// `0,1,1,1,2` assembles and one index further is refused, which is what pins the
     /// last level to a scalar.
     fn block_with_deep_slot(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value, DeepTys) {
-        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let f = add_fn("f", builder, ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
@@ -1568,7 +1568,7 @@ mod tests {
     #[test]
     fn a_register_definition_records_the_block_it_was_defined_in() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let ptr = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
     #[test]
     fn a_load_needs_a_pointer_operand() {
         let (mut ctx, mut builder) = fixture();
-        let f = builder.add_function("f".to_string(), &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
         let not_a_ptr = value(7, &mut ctx);

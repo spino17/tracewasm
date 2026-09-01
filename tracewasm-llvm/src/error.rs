@@ -46,6 +46,10 @@ pub enum ContextError {
          `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, and may not begin with a digit"
     )]
     InvalidRegisterName(String),
+    #[error("a function parameter cannot have type `{0}`: it has no size")]
+    FunctionParamTypeNotSized(String),
+    #[error("a function cannot return type `{0}`")]
+    FunctionResultTypeInvalid(String),
 }
 
 #[derive(Error, Debug)]
