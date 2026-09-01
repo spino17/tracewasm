@@ -1,6 +1,6 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
-    error::TypeError,
+    error::{GepError, TypeError},
     instruction::InstructionKind,
     interner::{ConstId, StrId, TyId},
 };
@@ -73,6 +73,81 @@ impl TyId {
             ty_obj,
             Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64
         )
+    }
+
+    pub(crate) fn walk_pointee_ty_in_gep(
+        self,
+        block: BasicBlockId,
+        indices: &[Value],
+        ctx: &mut Context,
+    ) -> Result<TyId, GepError> {
+        if indices.is_empty() {
+            return Ok(self);
+        }
+
+        let index = &indices[0];
+
+        // Taken before the pool is borrowed below, since interning needs `&mut`.
+        let i32_ty = ctx.i32_ty();
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        match ty_obj {
+            Type::Struct { fields, packed: _ } => {
+                let total_fields = fields.len();
+
+                // A struct index must be a constant `i32` — not merely a constant
+                // integer. `llvm-as` refuses an `i64` one with "invalid getelementptr
+                // indices", even though array indices may be any width, because the
+                // index names a field rather than scaling an offset.
+                if index.ty() != i32_ty {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
+                }
+
+                let Some(const_val) = index.try_const(ctx) else {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
+                };
+
+                let Some(field_index) = const_val.try_integer() else {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
+                };
+
+                // Checked as a signed value: a negative index is out of range rather
+                // than a huge one, which is what `as u32` would turn it into.
+                if field_index < 0 || field_index as usize >= total_fields {
+                    return Err(GepError::StructIndexOutOfRange {
+                        index: field_index,
+                        fields: total_fields,
+                    });
+                }
+
+                let field_ty = fields[field_index as usize];
+
+                field_ty.walk_pointee_ty_in_gep(block, &indices[1..], ctx)
+            }
+            Type::Array { size, element_ty } => {
+                let size = *size;
+                let element_ty = *element_ty;
+
+                if let Some(const_val) = index.try_const(ctx)
+                    && let Some(element_index) = const_val.try_integer()
+                    && (element_index < 0 || element_index as u64 >= size)
+                {
+                    return Err(GepError::ArrayIndexOutOfRange {
+                        index: element_index as u64,
+                        size,
+                    });
+                }
+
+                element_ty.walk_pointee_ty_in_gep(block, &indices[1..], ctx)
+            }
+            _ => Err(GepError::TypeNotIndexable(ctx.display(self).to_string())),
+        }
     }
 }
 
