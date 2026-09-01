@@ -245,6 +245,48 @@ impl Value {
         Value { ty, kind }
     }
 
+    pub fn from_const<C: Const>(
+        val: C,
+        optional_cast: Option<TyId>,
+        ctx: &mut Context,
+    ) -> Result<Self, TypeError> {
+        let (val, ty) = if let Some(ty) = optional_cast {
+            let Some(c) = val.try_cast(ty, ctx) else {
+                return Err(TypeError::ConstantCastToProvidedTypeFailed(
+                    C::ty(ctx).display(ctx).to_string(),
+                    ty.display(ctx).to_string(),
+                ));
+            };
+
+            (c, ty)
+        } else {
+            (val.into_const(), C::ty(ctx))
+        };
+
+        let const_id = ctx.const_interner.intern(val);
+
+        Ok(Value {
+            ty,
+            kind: ValueKind::Const(const_id.into()),
+        })
+    }
+
+    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
+        let reg_id: StrId = ctx.str_interner.intern(name).into();
+
+        Value {
+            ty,
+            kind: ValueKind::Reg(Register { name: reg_id }),
+        }
+    }
+
+    pub fn from_const_expr(expr: ConstExpr, ctx: &mut Context) -> Self {
+        Value {
+            ty: expr.ty(ctx),
+            kind: ValueKind::ConstExpr(expr),
+        }
+    }
+
     pub fn ty(&self) -> TyId {
         self.ty
     }
@@ -280,41 +322,6 @@ impl Value {
             ty: self.ty,
             kind: self.kind,
         })
-    }
-
-    pub fn from_const<C: Const>(
-        val: C,
-        optional_cast: Option<TyId>,
-        ctx: &mut Context,
-    ) -> Result<Self, TypeError> {
-        let (val, ty) = if let Some(ty) = optional_cast {
-            let Some(c) = val.try_cast(ty, ctx) else {
-                return Err(TypeError::ConstantCastToProvidedTypeFailed(
-                    C::ty(ctx).display(ctx).to_string(),
-                    ty.display(ctx).to_string(),
-                ));
-            };
-
-            (c, ty)
-        } else {
-            (val.into_const(), C::ty(ctx))
-        };
-
-        let const_id = ctx.const_interner.intern(val);
-
-        Ok(Value {
-            ty,
-            kind: ValueKind::Const(const_id.into()),
-        })
-    }
-
-    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
-        let reg_id: StrId = ctx.str_interner.intern(name).into();
-
-        Value {
-            ty,
-            kind: ValueKind::Reg(Register { name: reg_id }),
-        }
     }
 
     pub fn is_integer(&self, ctx: &Context) -> bool {
@@ -389,7 +396,7 @@ impl Value {
                     ty: operands.result_pointee_ty(ctx)?,
                     count: None,
                 },
-                ConstExpr::IntToPtr {} => todo!(),
+                ConstExpr::IntToPtr { .. } => return None,
                 _ => return None,
             },
             ValueKind::Const(_) => return None,
@@ -409,8 +416,20 @@ pub enum ConstExpr {
     GetElementPtr(Box<GetElementPtrOperands>),
     PtrToInt {},
     IntToPtr {},
-    BitCast {},
-    Trunc {},
+    BitCast { ty: TyId },
+    Trunc { target_ty: TyId },
+}
+
+impl ConstExpr {
+    pub fn ty(&self, ctx: &mut Context) -> TyId {
+        match self {
+            ConstExpr::GetElementPtr(_) => ctx.ptr_ty(),
+            ConstExpr::PtrToInt { .. } => ctx.i32_ty(),
+            ConstExpr::IntToPtr { .. } => ctx.ptr_ty(),
+            ConstExpr::BitCast { ty } => *ty,
+            ConstExpr::Trunc { target_ty } => *target_ty,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
