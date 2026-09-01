@@ -1,3 +1,5 @@
+//! The cursor: a position in a basic block, and the builders that write into it.
+
 use crate::{
     cfg::{
         basic_block::BasicBlockId,
@@ -14,11 +16,62 @@ use crate::{
 };
 use rustc_hash::FxHashSet;
 
+/// Writes instructions into one basic block.
+///
+/// Obtained from [`Builder::cursor_at_block`](crate::cfg::builder::Builder::cursor_at_block).
+/// Every builder appends to the end of the block, so instructions land in the order
+/// they are added.
+///
+/// # Ending a block
+///
+/// The three terminator builders — [`add_unconditional_br`](Self::add_unconditional_br),
+/// [`add_conditional_br`](Self::add_conditional_br) and [`add_ret`](Self::add_ret) —
+/// take `self` **by value**. Once a block is ended, that cursor is gone, and the
+/// compiler enforces it:
+///
+/// ```compile_fail
+/// # use tracewasm_llvm::cfg::{builder::Builder, context::Context};
+/// # let mut ctx = Context::default();
+/// # let mut builder = Builder::new(String::new(), String::new());
+/// # let void_ty = ctx.void_ty();
+/// # let f = builder.add_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
+/// # let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+/// let cursor = builder.cursor_at_block(entry);
+/// cursor.add_unconditional_br(entry, &mut ctx)?;
+/// cursor.add_unconditional_br(entry, &mut ctx)?;  // cursor was moved
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// That cannot see a *second* cursor opened at the same block, so the block also
+/// carries a flag: any builder on an ended block returns
+/// [`InstructionError::BasicBlockAlreadyTerminated`].
+///
+/// # Naming
+///
+/// Builders that define a register take a `reg: Option<&str>` name hint. `None` gives
+/// the value LLVM's next unnamed number; a hint is used as given, suffixed if it is
+/// already taken.
 pub struct Cursor {
     pub(crate) block: BasicBlockId,
 }
 
 impl Cursor {
+    /// Adds a phi node, returning a handle for adding later branches and the register
+    /// it defines.
+    ///
+    /// The phi's type comes from the **first** branch; every branch given here, and
+    /// every one added later through the handle, is checked against it.
+    ///
+    /// # Errors
+    ///
+    /// - [`PhiError::PhiInstructionWithNoBranches`] — a phi with no incoming values
+    ///   selects nothing, and there would be no type to give it.
+    /// - [`PhiError::PhiInstructionCannotBeAddedToEntryBasicBlock`] — the entry block
+    ///   has no predecessors.
+    /// - [`PhiError::PhiInstructionAddError`] — phis come first in a block.
+    /// - [`PhiError::BasicBlockAlreadyTerminated`] — the block already ended.
+    /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — a branch disagrees with the
+    ///   phi's type.
     pub fn add_phi(
         &self,
         branches: &[(BasicBlockId, Value)],
@@ -51,6 +104,14 @@ impl Cursor {
         Ok((phi_id, val))
     }
 
+    /// Adds `br label %target`, ending the block.
+    ///
+    /// Consumes the cursor.
+    ///
+    /// # Errors
+    ///
+    /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
+    /// already ended this block.
     pub fn add_unconditional_br(
         self,
         label: BasicBlockId,
@@ -69,6 +130,15 @@ impl Cursor {
         Ok(())
     }
 
+    /// Adds `br i1 %c, label %t, label %f`, ending the block.
+    ///
+    /// Consumes the cursor. The condition is an [`I1Value`], so the `i1` requirement
+    /// was already checked by [`Value::into_i1`](crate::value::Value::into_i1).
+    ///
+    /// # Errors
+    ///
+    /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
+    /// already ended this block.
     pub fn add_conditional_br(
         self,
         cond: I1Value,
@@ -93,6 +163,28 @@ impl Cursor {
         Ok(())
     }
 
+    /// Adds `ret <ty> %v` or `ret void`, ending the block.
+    ///
+    /// Consumes the cursor. The three well-formed shapes are:
+    ///
+    /// | `val` | `ty` | result |
+    /// |---|---|---|
+    /// | `Some(v)` | `Some(t)` | `v` folded into `t` |
+    /// | `Some(v)` | `None` | type taken from `v` |
+    /// | `None` | `Some(void)` | `ret void` |
+    ///
+    /// # Errors
+    ///
+    /// - [`RetError::DoesNotMatchFunctionResult`] — the return disagrees with the
+    ///   enclosing function's declared result. Checked against the *function*, so
+    ///   `ret i64 0` is refused inside an `i32` function even though the value and its
+    ///   type agree with each other.
+    /// - [`RetError::ValueGivenForVoid`] — `ret void` takes no value.
+    /// - [`RetError::NonVoidTypeWithoutValue`] — a non-`void` return needs one.
+    /// - [`RetError::TypeAndValueBothAbsent`] — nothing to return and nothing to infer
+    ///   a type from.
+    /// - [`RetError::ReturnedValueTypeMismatch`] — the value does not fold into `ty`.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn add_ret(
         self,
         val: Option<Value>,
@@ -169,6 +261,25 @@ impl Cursor {
         Ok(())
     }
 
+    /// Adds `%x = alloca <ty>`, returning the pointer to the new slot.
+    ///
+    /// The result is a `ptr`, not `ty` — and the `alloca` records what it allocated,
+    /// so a later `load` or `store` through that pointer can have its type inferred
+    /// rather than restated.
+    ///
+    /// `count` allocates room for several elements: the value, and optionally a type
+    /// to give it. `align` must be a power of two; `None` means the ABI default.
+    ///
+    /// # Errors
+    ///
+    /// - [`AllocaError::TypeNotAllocatable`] — `void` and function types have no size.
+    /// - [`AllocaError::AllocaCountNotAnInteger`] — the count, or the type given for
+    ///   it, is not an integer.
+    /// - [`AllocaError::AllocaCountTypeMismatch`] — the count does not fold into the
+    ///   type given for it.
+    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`; leaving
+    ///   `align` off is how the default is asked for.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn add_alloca(
         &self,
         ty: TyId,
@@ -238,6 +349,23 @@ impl Cursor {
         )
     }
 
+    /// Adds `%x = load <ty>, ptr %p`, returning the loaded value.
+    ///
+    /// `ty` may be omitted when the pointer can be traced back to what it points at —
+    /// an `alloca` or a `getelementptr`. A pointer that arrived as a function
+    /// parameter cannot be, so there the type is required.
+    ///
+    /// # Errors
+    ///
+    /// - [`InstructionError::PointerOperandExpected`] — the operand is not a `ptr`.
+    /// - [`InstructionError::TypeNotLoadable`] — `void` and function types have no
+    ///   size. Aggregates do: `load {i32, i32}` assembles.
+    /// - [`InstructionError::LoadedTypeDoesNotMatchPointee`] — the given type
+    ///   disagrees with what the pointer was traced to. Stricter than LLVM, which
+    ///   allows a load to reinterpret.
+    /// - [`InstructionError::LoadedTypeUnknown`] — no type given and none inferable.
+    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn add_load(
         &self,
         ptr: Value,
@@ -296,6 +424,21 @@ impl Cursor {
         )
     }
 
+    /// Adds `store <ty> %v, ptr %p`.
+    ///
+    /// Produces no value, so it defines no register. With `ty` given, the value is
+    /// folded into it — a constant widens, a register must already match. Without,
+    /// the value keeps its own type.
+    ///
+    /// # Errors
+    ///
+    /// - [`InstructionError::PointerOperandExpected`] — the destination is not a
+    ///   `ptr`.
+    /// - [`StoreError::StoredValueTypeMismatch`] — the value does not fold into `ty`.
+    /// - [`StoreError::StoredValueDoesNotMatchPointee`] — the value disagrees with
+    ///   what the pointer was traced to. Stricter than LLVM.
+    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn add_store(
         &self,
         ptr: Value,
@@ -357,6 +500,35 @@ impl Cursor {
         Ok(())
     }
 
+    /// Adds `%x = getelementptr <ty>, ptr %p, ...`, returning the computed pointer.
+    ///
+    /// Address arithmetic only — nothing is read from memory. The result is always a
+    /// `ptr`, and it records what it points at, so a chain of `getelementptr`s can
+    /// each infer their source type from the one before.
+    ///
+    /// # Indices
+    ///
+    /// The **first** index steps over `source_ty` as pointer arithmetic rather than
+    /// into it: `getelementptr %T, ptr %p, i32 1` addresses the *next* `%T`. Only the
+    /// remaining indices descend, one aggregate level each. So walking into field 1
+    /// of a struct is `[0, 1]`, not `[1]`.
+    ///
+    /// `source_ty` may be omitted when the pointer can be traced back to what it
+    /// points at; a pointer that arrived as a function parameter cannot be.
+    ///
+    /// # Errors
+    ///
+    /// - [`InstructionError::PointerOperandExpected`] — the base is not a `ptr`.
+    /// - [`GepError::IndexNotAnInteger`] — every index scales an offset.
+    /// - [`GepError::SourceTypeNotSized`] / [`GepError::SourceTypeUnknown`] /
+    ///   [`GepError::SourceTypeDoesNotMatchPointee`] — about `source_ty` itself.
+    /// - [`GepError::StructIndexNotAConstantI32`] — a struct index names a field, so
+    ///   it must be known now and be an `i32` specifically.
+    /// - [`GepError::StructIndexOutOfRange`] / [`GepError::ArrayIndexOutOfRange`] —
+    ///   the array case is stricter than LLVM, which treats it as runtime UB.
+    /// - [`GepError::TypeNotIndexable`] — indices remain but the walk reached a
+    ///   scalar.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn add_get_element_ptr(
         &self,
         ptr: Value,
@@ -434,6 +606,12 @@ impl Cursor {
     }
 }
 
+/// Appends an instruction that defines a register, and records where it was defined.
+///
+/// Shared by every value-producing builder. Recording the definition — block *and*
+/// index — is what later lets [`Value::try_inferring_pointee_ty`](crate::value::Value)
+/// walk back from a pointer to the instruction that produced it. The index alone
+/// would be meaningless, since each block numbers its instructions from zero.
 fn add_instruction_to_block_and_get_value(
     kind: InstructionKind,
     result_ty: TyId,

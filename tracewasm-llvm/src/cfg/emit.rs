@@ -1,3 +1,5 @@
+//! Rendering a finished graph as textual LLVM IR.
+
 use crate::{
     cfg::{
         ControlFlowGraph, basic_block::BasicBlock, basic_block::BasicBlockId, context::Context,
@@ -11,12 +13,27 @@ use crate::{
 };
 use anyhow::bail;
 
+/// Renders a [`ControlFlowGraph`] as textual `.ll`.
+///
+/// A [`CfgVisitor`] that appends to a string as it walks. The output is what
+/// `llvm-as` accepts: the crate's own test builds a module using every instruction
+/// and checks that `llvm-as` both parses **and** verifies it.
+///
+/// Nothing is validated here — a block without a terminator, or a phi missing an
+/// entry for a predecessor, is emitted as-is and reported by `llvm-as`.
 pub struct IREmitter {
     ir: String,
     indentation: bool,
 }
 
 impl IREmitter {
+    /// Renders `cfg` and returns the IR.
+    ///
+    /// # Errors
+    ///
+    /// If the graph contains something the emitter cannot spell — currently only a
+    /// constant-expression operand, which is refused rather than written as a
+    /// placeholder `llvm-as` could not parse.
     pub fn emit(cfg: ControlFlowGraph, ctx: &Context) -> Result<String, anyhow::Error> {
         let mut emitter = IREmitter {
             ir: String::default(),
@@ -28,14 +45,20 @@ impl IREmitter {
         Ok(emitter.ir)
     }
 
+    /// Indents subsequent lines, for instructions under a label.
     fn set_indentation(&mut self) {
         self.indentation = true;
     }
 
+    /// Returns to the margin, for labels and `define`.
     fn unset_indentation(&mut self) {
         self.indentation = false;
     }
 
+    /// Appends text, prefixed by the current indentation.
+    ///
+    /// Because the prefix goes on *every* call, a line has to be built as one
+    /// string — see [`push_line`](Self::push_line).
     fn push_str(&mut self, s: &str) {
         self.ir.push_str(&format!(
             "{}{}",
@@ -51,6 +74,7 @@ impl IREmitter {
     }
 
     /// A register's `%name`, or the literal a constant is spelled as.
+    /// A register's `%name`, or the literal a constant is spelled as.
     fn operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         match value.kind() {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
@@ -63,6 +87,7 @@ impl IREmitter {
         }
     }
 
+    /// `<type> <operand>`, the form an operand takes almost everywhere in LLVM.
     /// `<type> <operand>`, the form an operand takes almost everywhere in LLVM.
     fn typed_operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!(
@@ -101,10 +126,12 @@ impl IREmitter {
     }
 
     /// `label %name`, which is how a branch and a phi both name a block.
+    /// `%name`, how a branch or a phi names a block.
     fn label(id: BasicBlockId, ctx: &Context) -> String {
         format!("%{}", Self::block_name(id, ctx))
     }
 
+    /// A block's label without the sigil.
     fn block_name(id: BasicBlockId, ctx: &Context) -> String {
         let block = ctx.get_block(id);
 
@@ -112,10 +139,12 @@ impl IREmitter {
     }
 
     /// The `%x = ` an instruction that defines a register is prefixed with.
+    /// The `%x = ` prefix for an instruction that defines a register.
     fn assignment(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!("{} = ", Self::operand(value, ctx)?))
     }
 
+    /// `, align N`, or nothing when the ABI default is wanted.
     fn alignment(align: Option<u32>) -> String {
         match align {
             Some(align) => format!(", align {align}"),

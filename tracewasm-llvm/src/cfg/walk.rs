@@ -1,3 +1,5 @@
+//! Traversing a finished graph.
+
 use crate::{
     cfg::{
         ControlFlowGraph,
@@ -12,34 +14,70 @@ use crate::{
     value::Value,
 };
 
+/// Walks a [`ControlFlowGraph`], visiting each construct in emission order.
+///
+/// Implement the `visit_*` methods; the `walk_*` methods drive the traversal and are
+/// provided. [`IREmitter`](crate::cfg::emit::IREmitter) is the implementation that
+/// renders text, but the trait is equally usable for analysis or validation.
+///
+/// # Order
+///
+/// A construct is visited **before** its children, and the matching `post_*_visit`
+/// hook runs after them. That pairing is what lets an emitter write `define …{` in
+/// `visit_func` and `}` in [`post_func_visit`](Self::post_func_visit) without
+/// tracking depth itself.
+///
+/// ```text
+/// visit_cfg
+///   visit_func              for each function
+///     visit_basic_block     for each block
+///       visit_phi           for each phi, then
+///       visit_<instr>       for each instruction
+///     post_block_visit
+///   post_func_visit
+/// post_module_visit
+/// ```
+///
+/// The `post_*` hooks default to returning `OkType::default()`, so an implementation
+/// only overrides the ones it needs.
 pub trait CfgVisitor {
+    /// What each visit returns. Collected and handed to the `post_*` hooks, so a
+    /// visitor that accumulates results can use them; an emitter that writes as it
+    /// goes uses `()`.
     type OkType: Default;
+
+    /// How a visit fails. The walk stops at the first error.
     type ErrType;
 
+    /// Visits a phi node.
     fn visit_phi(
         &mut self,
         instr: &PhiInstruction,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `ret`. A terminator: it ends its block.
     fn visit_ret(
         &mut self,
         operands: &RetOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `br label`. A terminator.
     fn visit_unconditional_br(
         &mut self,
         operands: &UnconditionalBrOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `br i1`. A terminator.
     fn visit_conditional_br(
         &mut self,
         operands: &ConditionalBrOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `load`. `value` is the register it defines.
     fn visit_load(
         &mut self,
         operands: &LoadOperands,
@@ -47,12 +85,14 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `store`, which defines no register.
     fn visit_store(
         &mut self,
         operands: &StoreOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an `alloca`. `value` is the pointer it defines.
     fn visit_alloca(
         &mut self,
         operands: &AllocaOperands,
@@ -60,6 +100,7 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `getelementptr`. `value` is the pointer it defines.
     fn visit_get_element_ptr(
         &mut self,
         operands: &GetElementPtrOperands,
@@ -67,21 +108,27 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
         block: &BasicBlock,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a function, before its blocks.
     fn visit_func(&mut self, func: &Function, ctx: &Context)
     -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits the module, before its functions.
     fn visit_cfg(
         &mut self,
         module: &ControlFlowGraph,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Walks one block: the block itself, then its phis, then its instructions.
+    ///
+    /// Provided; override only to change the traversal, not to observe it.
     fn walk_basic_block(
         &mut self,
         id: BasicBlockId,
@@ -125,6 +172,7 @@ pub trait CfgVisitor {
         self.post_block_visit(block.func_id, id, phi_results, instr_results)
     }
 
+    /// Walks one function: the function itself, then its blocks in creation order.
     fn walk_func(
         &mut self,
         func_id: FuncId,
@@ -146,6 +194,7 @@ pub trait CfgVisitor {
         self.post_func_visit(func_id, block_results)
     }
 
+    /// Walks the whole module. This is the entry point.
     fn walk_cfg(
         &mut self,
         cfg: &ControlFlowGraph,
@@ -165,6 +214,7 @@ pub trait CfgVisitor {
         self.post_module_visit(func_results)
     }
 
+    /// Runs after a block's phis and instructions, with what each visit returned.
     fn post_block_visit(
         &mut self,
         _func: FuncId,
@@ -175,6 +225,7 @@ pub trait CfgVisitor {
         Ok(Self::OkType::default())
     }
 
+    /// Runs after a function's blocks — where an emitter writes the closing `}`.
     fn post_func_visit(
         &mut self,
         _func: FuncId,
@@ -183,6 +234,8 @@ pub trait CfgVisitor {
         Ok(Self::OkType::default())
     }
 
+    /// Runs after every function. Its return value is what [`walk_cfg`](Self::walk_cfg)
+    /// yields.
     fn post_module_visit(
         &mut self,
         _func_results: Vec<Self::OkType>,

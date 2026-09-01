@@ -13,11 +13,22 @@ use crate::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Builds a module: adds functions and opens cursors onto their blocks.
+///
+/// The builder owns the module's own contents — its target settings and the list of
+/// functions — while the [`Context`] owns the storage everything is allocated in. The
+/// two are threaded together through every call, and
+/// [`build`](Self::build) consumes the builder to produce the finished
+/// [`ControlFlowGraph`].
 pub struct Builder {
     pub(crate) module: Module,
 }
 
 impl Builder {
+    /// An empty module for the given target.
+    ///
+    /// Either string may be empty, meaning "unset": the emitter then omits the
+    /// corresponding `target` line rather than writing an empty one.
     pub fn new(triple: String, data_layout: String) -> Self {
         Builder {
             module: Module {
@@ -30,10 +41,39 @@ impl Builder {
         }
     }
 
+    /// Opens a cursor that writes into `id`.
+    ///
+    /// A cursor is a position, not a lock: several may be opened at one block over
+    /// time. What prevents writing past a terminator is that the terminator builders
+    /// consume the cursor, plus the block's own
+    /// [`is_locked`](crate::cfg::basic_block::BasicBlock) flag for cursors opened
+    /// afterwards.
     pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor {
         Cursor { block: id }
     }
 
+    /// Declares a function and its signature.
+    ///
+    /// Each parameter is a type and an optional name hint. A named parameter keeps
+    /// its hint; an unnamed one draws the next number from the function's counter, so
+    /// `&[(i32_ty, None), (i32_ty, None)]` yields `%0` and `%1` and the body's first
+    /// unnamed temporary is `%2`. Named parameters consume no numbers.
+    ///
+    /// The returned [`FuncId`] is how blocks are added and how the function is read
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContextError::DuplicateFunctionName`] — LLVM identifies a definition by
+    ///   name, so two `@name`s in one module is a build error rather than something
+    ///   `llvm-as` finds later.
+    /// - [`ContextError::FunctionParamTypeNotSized`] — a parameter is passed by
+    ///   value, so it needs a size; aggregates are fine, `void` and function types
+    ///   are not.
+    /// - [`ContextError::FunctionResultTypeInvalid`] — a result may be `void` but not
+    ///   a function type.
+    /// - [`ContextError::InvalidRegisterName`] — a parameter's name hint is not a
+    ///   legal LLVM local.
     pub fn add_function(
         &mut self,
         name: String,
@@ -108,6 +148,14 @@ impl Builder {
         Ok(id)
     }
 
+    /// Finishes the module.
+    ///
+    /// Consumes the builder, so nothing more can be added. The [`Context`] is still
+    /// needed to read the result, since everything inside it is an id.
+    ///
+    /// Nothing is verified here: whether each block ends in a terminator, and whether
+    /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
+    /// reports both.
     pub fn build(self) -> ControlFlowGraph {
         ControlFlowGraph {
             module: self.module,

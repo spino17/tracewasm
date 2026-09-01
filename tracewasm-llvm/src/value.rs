@@ -1,3 +1,14 @@
+//! Types and the values that carry them.
+//!
+//! A [`Value`] is what an instruction operates on: a type plus how the value is
+//! obtained — a register, a pooled constant, or a constant expression. Both the type
+//! and the constant are ids, so a `Value` is small and cheap to clone.
+//!
+//! [`Type`] describes one node of a type; its children are [`TyId`]s, so the whole
+//! type graph lives in the pool rather than in nested boxes. Nearly everything a
+//! caller needs is on [`TyId`] rather than on `Type`, because answering "is this a
+//! pointer?" or "how does this spell itself?" needs the pool.
+
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::{GepError, TypeError},
@@ -11,6 +22,11 @@ use std::{
     mem::discriminant,
 };
 
+/// The parameter types and result of a function type.
+///
+/// Note that LLVM writes a function type **result first** — `i32 (i8, ptr)` — which is
+/// the reverse of how a signature reads in source. Getting it backwards produces IR
+/// that parses as a *different* type rather than failing.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
     params: Vec<TyId>,
@@ -18,6 +34,7 @@ pub struct FuncSignature {
 }
 
 impl FuncSignature {
+    /// Builds a signature from already-interned parameter and result types.
     pub(crate) fn new(params: Vec<TyId>, result: TyId) -> Self {
         FuncSignature { params, result }
     }
@@ -28,50 +45,106 @@ impl FuncSignature {
 /// equal types are one pool entry, hence one id.
 ///
 /// The cost is that a type no longer knows how to print itself; see [`TypeDisplay`].
+///
+/// A `Type` is normally built inline and interned immediately; the predicates and the
+/// renderer live on [`TyId`], and [`Context`] has shorthands
+/// ([`i32_ty`](Context::i32_ty), [`ptr_ty`](Context::ptr_ty), …) for the scalars.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Type {
+    /// The type of a comparison result and a conditional branch's condition.
     I1,
+    /// 8-bit integer.
     I8,
+    /// 16-bit integer.
     I16,
+    /// 32-bit integer.
     I32,
+    /// 64-bit integer.
     I64,
+    /// 16-bit IEEE-754 float.
     Half,
+    /// 16-bit brain float.
     Bfloat,
+    /// 32-bit IEEE-754 float.
     Float,
+    /// 64-bit IEEE-754 float.
     Double,
+    /// An opaque pointer.
+    ///
+    /// Since LLVM 15 a pointer carries no pointee: `ptr` is the whole type. What is
+    /// pointed at belongs to the *instruction* — `alloca`'s allocated type, a
+    /// `getelementptr`'s source type, a `load`'s result — which is what the pointee
+    /// inference in this module reconstructs.
     Ptr,
-    Array { size: u64, element_ty: TyId },
-    Struct { fields: Box<[TyId]>, packed: bool },
+    /// A fixed-length array.
+    ///
+    /// `size` is a literal because LLVM has no variable-length array type — the
+    /// length is part of this type's identity, so it has to be something two
+    /// spellings of `[4 x i32]` agree on. A runtime count belongs to `alloca`'s
+    /// element-count operand instead.
+    Array {
+        /// Number of elements.
+        size: u64,
+        /// The element type.
+        element_ty: TyId,
+    },
+    /// A literal struct, packed or not.
+    Struct {
+        /// Field types, in declaration order.
+        fields: Box<[TyId]>,
+        /// Whether the struct is packed — `<{ i8 }>` rather than `{ i8 }`.
+        packed: bool,
+    },
+    /// A function type. Not first class: it cannot be loaded, stored or allocated.
     Func(FuncSignature),
+    /// The absence of a value. Legal only as a function result.
     Void,
 }
 
 impl TyId {
-    /// Borrows this type together with `tys` so it can be printed. The ids in an
-    /// aggregate arm have to have come from `tys`, which holds for any type built
-    /// against one context.
+    /// Borrows this type together with `ctx` so it can be printed.
+    ///
+    /// Rendering needs the pool: an aggregate names its children by id, and spelling
+    /// one out means resolving every level. The ids inside have to have come from
+    /// `ctx`, which holds for any type built against one context.
+    ///
+    /// The result renders the way LLVM spells the type — `[2 x <{ ptr, [3 x i16] }>]`,
+    /// `i32 (i8, ptr)` — so it can be dropped straight into an error or into emitted
+    /// IR.
     pub fn display<'a>(self, ctx: &'a Context) -> TypeDisplay<'a> {
         TypeDisplay { ty: self, ctx }
     }
 
+    /// Whether this is `i1`, the type a conditional branch's condition must have.
     pub fn is_i1(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::I1)
     }
 
+    /// Whether this is `ptr`.
     pub fn is_ptr(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::Ptr)
     }
 
+    /// Whether this type has a size — everything except `void` and function types.
+    ///
+    /// This is the predicate that gates `load`, `store`, `alloca`, function
+    /// parameters and a `getelementptr` source type. LLVM reserves "first class" for
+    /// scalars only, but `load {i32, i32}` and `alloca [4 x i32]` both assemble, so
+    /// the set named here is the loadable one: aggregates in, `void` and functions
+    /// out.
     pub fn is_first_class(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         !matches!(ty_obj, Type::Void | Type::Func(_))
     }
 
+    /// Whether this is an integer of any width.
+    ///
+    /// `i1` counts, matching LLVM: `alloca i32, i1 %c` assembles.
     pub fn is_integer(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -81,18 +154,30 @@ impl TyId {
         )
     }
 
+    /// Whether this is `i32` specifically.
+    ///
+    /// Narrower than [`is_integer`](Self::is_integer) because a `getelementptr` index
+    /// into a *struct* must be an `i32` — `llvm-as` refuses an `i64` one with
+    /// "invalid getelementptr indices", even though array indices may be any width.
     pub fn is_i32(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::I32)
     }
 
+    /// Whether this is `void`.
     pub fn is_void(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::Void)
     }
 
+    /// Descends this type by `indices`, returning what the walk lands on.
+    ///
+    /// Used by `getelementptr` to type-check its indices and to work out what the
+    /// resulting pointer points at. **Callers pass `indices[1..]`**: the first index
+    /// steps over the source type as pointer arithmetic rather than into it, so a
+    /// `getelementptr` with one index or none points at its source type unchanged.
     pub(crate) fn walk_pointee_ty_in_gep(
         &self,
         indices: &[Value],
@@ -170,7 +255,7 @@ impl TyId {
 /// [`Type`] cannot implement [`Display`] by itself: an aggregate arm holds [`TyId`]s
 /// rather than whole types, and turning one back into something printable needs the
 /// interner that issued it. Rendering is therefore a borrow of both — obtained from
-/// [`Type::display`] or [`TyInterner::display`], never constructed directly.
+/// [`TyId::display`], never constructed directly.
 pub struct TypeDisplay<'a> {
     ty: TyId,
     ctx: &'a Context,
@@ -239,13 +324,22 @@ impl Display for TypeDisplay<'_> {
     }
 }
 
+/// How a [`Value`] is obtained — the three forms an LLVM operand can take.
 #[derive(Debug, Clone)]
 pub enum ValueKind {
+    /// A named register, `%x`, defined by some instruction or a parameter.
     Reg(Register),
+    /// A literal, interned in the constant pool: `i32 7`, `null`, `true`.
     Const(ConstId),
+    /// A constant folded from other constants, written inline in the IR rather than
+    /// computed by an instruction. See [`ConstExpr`].
     ConstExpr(ConstExpr),
 }
 
+/// An operand: a type, and where the value comes from.
+///
+/// Both halves are ids, so a `Value` is cheap to clone and cheap to compare. The type
+/// is the value's *own* type — for a pointer that means `ptr`, not what it points at.
 #[derive(Debug, Clone)]
 pub struct Value {
     ty: TyId,
@@ -253,10 +347,27 @@ pub struct Value {
 }
 
 impl Value {
+    /// Builds a value from an already-interned type and a kind.
     pub(crate) fn new(ty: TyId, kind: ValueKind) -> Self {
         Value { ty, kind }
     }
 
+    /// Interns a Rust literal as an LLVM constant.
+    ///
+    /// With `optional_cast` as `None` the value keeps the type [`Const::ty`] gives it
+    /// — `7i32` becomes `i32 7`. With a type given, the constant is folded into it
+    /// *now*: `Value::from_const(7i8, Some(i64_ty), ctx)` interns `i64 7`, not an
+    /// `i8` to be widened later.
+    ///
+    /// Widths convert freely among integers, and between `float` and `double`.
+    /// Crossing between integers and floats, or reaching a pointer, is refused —
+    /// those need a real `sitofp`/`inttoptr` instruction, and folding them here would
+    /// silently drop it.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ConstantCastToProvidedTypeFailed`] if the literal does not fold
+    /// into the requested type.
     pub fn from_const<C: Const>(
         val: C,
         optional_cast: Option<TyId>,
@@ -283,6 +394,12 @@ impl Value {
         })
     }
 
+    /// Interns `name` and builds a register of the given type.
+    ///
+    /// Crate-private because a register has to be *defined* by something: the
+    /// builders call this after `name_for_reg` has issued a unique name, and record
+    /// the definition so the pointee of a pointer can later be traced back.
+    /// Constructing one freely would produce a `%name` that no instruction defines.
     pub(crate) fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
         let reg_id: StrId = ctx.str_interner.intern(name).into();
 
@@ -292,6 +409,8 @@ impl Value {
         }
     }
 
+    /// Wraps a constant expression as an operand, taking its type from the
+    /// expression.
     pub fn from_const_expr(expr: ConstExpr, ctx: &mut Context) -> Self {
         Value {
             ty: expr.ty(ctx),
@@ -299,18 +418,26 @@ impl Value {
         }
     }
 
+    /// The value's own type. For a pointer this is `ptr`, not the pointee.
     pub fn ty(&self) -> TyId {
         self.ty
     }
 
+    /// Where the value comes from.
     pub fn kind(&self) -> &ValueKind {
         &self.kind
     }
 
+    /// Whether this value is a pointer.
     pub fn is_ptr(&self, ctx: &Context) -> bool {
         self.ty().is_ptr(ctx)
     }
 
+    /// The pooled constant behind this value, or `None` if it is a register or a
+    /// constant expression.
+    ///
+    /// Used where a value has to be known *now* rather than at run time — a
+    /// `getelementptr` struct index, for instance.
     pub fn try_const<'a>(&self, ctx: &'a Context) -> Option<&'a ConstValue> {
         if let ValueKind::Const(const_val) = self.kind() {
             let const_val = ctx.const_interner.value(const_val.raw());
@@ -321,6 +448,14 @@ impl Value {
         }
     }
 
+    /// Narrows to an [`I1Value`], the operand a conditional branch takes.
+    ///
+    /// Checking once here means [`Cursor::add_conditional_br`](crate::instruction::cursor::Cursor::add_conditional_br)
+    /// cannot be handed anything else.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ValueToI1ValueFailed`] if the value is not an `i1`.
     pub fn into_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
         if !self.ty().is_i1(ctx) {
             return Err(TypeError::ValueToI1ValueFailed(
@@ -336,10 +471,23 @@ impl Value {
         })
     }
 
+    /// Whether this value's type is an integer.
     pub fn is_integer(&self, ctx: &Context) -> bool {
         self.ty().is_integer(ctx)
     }
 
+    /// Gives this value the type `ty`, if it can have it.
+    ///
+    /// The two kinds behave differently, and deliberately:
+    ///
+    /// - A **constant** is folded into the new type and re-interned, so the result is
+    ///   a genuinely different constant — `i32 7` cast to `i64` becomes `i64 7`.
+    /// - A **register** or constant expression is only *checked*. Nothing converts it,
+    ///   because widening a register needs a real `zext`/`sext`, and folding one here
+    ///   would emit IR that skips the instruction the caller never asked for.
+    ///
+    /// `None` covers all of: an unsized target type, a constant that does not fold,
+    /// and a register whose type does not already match.
     pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<Self> {
         if !ty.is_first_class(ctx) {
             return None;
@@ -367,6 +515,18 @@ impl Value {
         Some(final_value)
     }
 
+    /// Works out what this pointer points at, by walking back to the instruction
+    /// that produced it.
+    ///
+    /// Opaque pointers carry no pointee, so the only way to recover one is to find
+    /// where the pointer came from: an `alloca` knows its allocated type, a
+    /// `getelementptr` knows what its indices landed on. That is what lets a `load`
+    /// or `store` omit its type and be checked against the slot it addresses.
+    ///
+    /// **Best-effort — `None` is a normal answer, not a failure.** It covers a
+    /// pointer produced by an instruction that records no pointee, a constant `null`,
+    /// and a **function parameter**, which nothing in this function defined. When
+    /// inference declines, the caller's explicit type stands.
     pub(crate) fn try_inferring_pointee_ty(
         &self,
         block: BasicBlockId,
@@ -419,21 +579,47 @@ impl Value {
     }
 }
 
+/// What a pointer was traced back to.
 pub(crate) struct PointeeTy {
+    /// The type pointed at.
     pub ty: TyId,
+    /// How many of them, when the pointer came from an `alloca` with an element
+    /// count. `None` for a single element and for pointers from other instructions.
     pub count: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
+/// A constant folded from other constants, written inline in the IR.
+///
+/// LLVM allows a limited set of operations to appear where a constant is expected,
+/// computed at link time rather than by an instruction. They are useful for global
+/// initialisers and for addresses known statically.
+///
+/// Only [`GetElementPtr`](Self::GetElementPtr) is modelled so far; the rest are
+/// placeholders, and the emitter refuses any of them as an operand rather than
+/// writing IR it cannot spell.
 pub enum ConstExpr {
+    /// A `getelementptr` over constant operands. Its pointee is recoverable, so it
+    /// participates in pointee inference like the instruction does.
     GetElementPtr(Box<GetElementPtrOperands>),
+    /// Not yet modelled.
     PtrToInt {},
+    /// Not yet modelled.
     IntToPtr {},
-    BitCast { ty: TyId },
-    Trunc { target_ty: TyId },
+    /// Not yet modelled.
+    BitCast {
+        /// The type being cast to.
+        ty: TyId,
+    },
+    /// Not yet modelled.
+    Trunc {
+        /// The narrower type being truncated to.
+        target_ty: TyId,
+    },
 }
 
 impl ConstExpr {
+    /// The type the expression evaluates to.
     pub fn ty(&self, ctx: &mut Context) -> TyId {
         match self {
             ConstExpr::GetElementPtr(_) => ctx.ptr_ty(),
@@ -446,7 +632,13 @@ impl ConstExpr {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// A named local, `%x`.
+///
+/// The name alone is not an identity: names are interned per *context*, so `%sum` in
+/// two functions is one [`StrId`]. What makes a register unique is that name together
+/// with the function it belongs to.
 pub struct Register {
+    /// The interned name, without the leading `%`.
     pub(crate) name: StrId,
 }
 
@@ -460,13 +652,22 @@ pub struct Register {
 /// alike — see the hand-written [`Hash`] below.
 #[derive(Clone, Copy, Debug)]
 pub enum ConstValue {
+    /// `i1 true` / `i1 false`, stored as 0 or 1.
     I1(i8),
+    /// `i8`.
     I8(i8),
+    /// `i16`.
     I16(i16),
+    /// `i32`.
     I32(i32),
+    /// `i64`.
     I64(i64),
+    /// `float`. Wrapped only because `f32` is not `Ord`; the wrapper's own `Hash` is
+    /// deliberately not used — see the hand-written [`Hash`] impl below.
     Float(OrderedFloat<f32>),
+    /// `double`, with the same caveat as [`Float`](Self::Float).
     Double(OrderedFloat<f64>),
+    /// `null`.
     NullPtr,
 }
 
@@ -615,9 +816,23 @@ impl Hash for ConstValue {
     }
 }
 
+/// A Rust literal that can be used as an LLVM constant.
+///
+/// Implemented for `bool`, the signed integers, `f32`/`f64` and [`NullPtr`], which is
+/// what lets [`Value::from_const`] be called with a plain literal.
 pub trait Const {
+    /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
     fn ty(ctx: &mut Context) -> TyId;
+
+    /// Wraps the literal as a pool value at its default type.
     fn into_const(self) -> ConstValue;
+
+    /// Folds the literal into `ty`, or `None` if it does not belong there.
+    ///
+    /// Integers narrow and widen among themselves, truncating the way LLVM's `trunc`
+    /// would; floats convert between `float` and `double`. Nothing crosses between
+    /// integers and floats, and nothing reaches a pointer — those need a real
+    /// conversion instruction.
     fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue>;
 }
 
@@ -780,6 +995,10 @@ impl Const for f64 {
 }
 
 #[derive(Clone, Copy)]
+/// The `null` pointer constant, as something [`Value::from_const`] can take.
+///
+/// A unit type because `null` has no payload: every null is the same null, so the
+/// pool holds one however many times it is asked for.
 pub struct NullPtr;
 
 impl Const for NullPtr {

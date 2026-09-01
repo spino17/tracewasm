@@ -1,3 +1,5 @@
+//! Function definitions and the handle that addresses them.
+
 use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
@@ -10,6 +12,12 @@ use crate::{
 use id_arena::Id;
 use rustc_hash::FxHashSet;
 
+/// One function definition.
+///
+/// Parameters are stored as [`Value`]s rather than bare types, because that is what
+/// they are once the function exists: registers the caller supplied, usable directly
+/// as operands. `blocks` is in creation order, which is the order the emitter writes
+/// them in — the first is the entry block.
 pub struct Function {
     pub(crate) name: StrId,
     pub(crate) params: Vec<Value>,
@@ -18,6 +26,10 @@ pub struct Function {
     pub(crate) block_names: FxHashSet<StrId>,
 }
 
+/// A handle to a [`Function`] in a [`Context`]'s arena.
+///
+/// Carries the methods that read or extend the function, so `f.add_basic_block(..)`
+/// reads like a method call even though the storage lives in the context.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FuncId(Id<Function>);
 
@@ -30,14 +42,27 @@ impl Clone for FuncId {
 impl Copy for FuncId {}
 
 impl FuncId {
+    /// Wraps an arena id. Only [`Builder::add_function`](crate::cfg::builder::Builder::add_function)
+    /// calls this, so an id always names a function that exists.
     pub(crate) fn new(id: Id<Function>) -> Self {
         FuncId(id)
     }
 
+    /// The underlying arena id.
     pub(crate) fn raw(&self) -> Id<Function> {
         self.0
     }
 
+    /// Appends a basic block to this function.
+    ///
+    /// The **first** block added becomes the entry block, which matters: LLVM gives
+    /// the entry block no predecessors, so a phi cannot go in it.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextError::DuplicateBasicBlockName`] if this function already has a block
+    /// with that name — the label a branch names would otherwise be ambiguous. The
+    /// check is per function, so an `entry` block in every function is fine.
     pub fn add_basic_block(
         &self,
         name: String,
@@ -71,6 +96,12 @@ impl FuncId {
         Ok(id)
     }
 
+    /// This function's `n`th parameter, or `None` past the end.
+    ///
+    /// Parameters are registers, usable directly as operands. A pointer parameter has
+    /// no defining instruction, so
+    /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
+    /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
     pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<&'a Value> {
         let func = ctx.get_func(*self);
         let params = &func.params;
@@ -82,6 +113,9 @@ impl FuncId {
         Some(&params[n])
     }
 
+    /// The declared result type, `void` included.
+    ///
+    /// Every `ret` in this function is checked against it.
     pub fn return_ty(&self, ctx: &Context) -> TyId {
         let func = ctx.get_func(*self);
 

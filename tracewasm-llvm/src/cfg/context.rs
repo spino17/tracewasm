@@ -1,3 +1,5 @@
+//! Storage for everything a module's ids point into.
+
 use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
@@ -13,6 +15,18 @@ use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 
+/// Everything one module's ids point into: the block and function arenas, the three
+/// interner pools, and the per-function register bookkeeping.
+///
+/// **An id only means anything against the context that issued it.** A [`TyId`] is a
+/// position in *this* `ty_interner`, so resolving one against another context reads
+/// whatever type happens to sit at that position — silently, since an id carries no
+/// provenance. The same holds for [`StrId`] and the arena ids, though those at least
+/// panic rather than acting on the wrong entry.
+///
+/// In practice: one context per module, threaded through every builder call. That is
+/// why so much of this crate takes `&mut Context` rather than the individual pool it
+/// happens to need.
 #[derive(Default)]
 pub struct Context {
     pub(crate) blocks: Arena<BasicBlock>,
@@ -24,13 +38,34 @@ pub struct Context {
     pub(crate) register_def_instr_index: FxHashMap<FuncId, FxHashMap<StrId, RegisterDef>>,
 }
 
+/// Where a register was defined.
+///
+/// Both halves are needed. The index is a position in *that block's* instruction
+/// list, so on its own it means nothing: read against another block it lands on an
+/// unrelated instruction, or past the end. This is what
+/// [`Value::try_inferring_pointee_ty`](crate::value::Value) follows to reach an
+/// `alloca` in the entry block from a `store` several blocks later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RegisterDef {
+    /// The block holding the defining instruction.
     pub(crate) block: BasicBlockId,
+    /// Its position in that block's instruction list.
     pub(crate) instr_index: usize,
 }
 
 impl Context {
+    /// Issues a unique register name within `func_id`.
+    ///
+    /// With a hint, the name is the hint — suffixed if it is taken. Without one, the
+    /// next unnamed index, which is how LLVM's `%0`, `%1`, … numbering is produced.
+    ///
+    /// The counter is per function and **parameters draw from it first**, so a body's
+    /// first unnamed temporary continues where the parameter list stopped. A *named*
+    /// parameter consumes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextError::InvalidRegisterName`] if the hint is not a legal LLVM local.
     pub(crate) fn name_for_reg(
         &mut self,
         name: Option<&str>,
@@ -42,81 +77,112 @@ impl Context {
         Ok(name)
     }
 
+    /// Resolves a block id. Panics only if the id came from another context.
     pub(crate) fn get_block(&self, id: BasicBlockId) -> &BasicBlock {
         self.blocks
             .get(id.raw())
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
+    /// Resolves a block id mutably. Panics only if the id came from another context.
     pub(crate) fn get_block_mut(&mut self, id: BasicBlockId) -> &mut BasicBlock {
         self.blocks
             .get_mut(id.raw())
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
+    /// Resolves a function id. Panics only if the id came from another context.
     pub(crate) fn get_func(&self, id: FuncId) -> &Function {
         self.funcs
             .get(id.raw())
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
+    /// Resolves a function id mutably. Panics only if the id came from another
+    /// context.
     pub(crate) fn get_func_mut(&mut self, id: FuncId) -> &mut Function {
         self.funcs
             .get_mut(id.raw())
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
+    /// Every register `func` has defined, by name.
+    ///
+    /// The map is created by [`Builder::add_function`](crate::cfg::builder::Builder::add_function),
+    /// so it exists — empty — from the moment the function does. That is what the
+    /// `expect` here relies on; without it, a function whose first instruction reads
+    /// a parameter pointer would panic before it could define anything.
+    ///
+    /// Parameters are *not* in the map: nothing in the function defines them.
     pub(crate) fn register_defs(&self, func: FuncId) -> &FxHashMap<StrId, RegisterDef> {
         self.register_def_instr_index
             .get(&func)
             .expect("this entry should exist for the func_id")
     }
 
+    /// Interns `ptr` and returns its id.
     pub fn ptr_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Ptr).into()
     }
 
+    /// Borrows a type for printing. See [`TyId::display`](crate::interner::TyId).
     pub fn display(&self, id: TyId) -> TypeDisplay<'_> {
         id.display(self)
     }
 
+    /// Interns `i1` and returns its id.
     pub fn i1_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::I1).into()
     }
 
+    /// Interns `i8` and returns its id.
     pub fn i8_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::I8).into()
     }
 
+    /// Interns `i16` and returns its id.
     pub fn i16_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::I16).into()
     }
 
+    /// Interns `i32` and returns its id.
     pub fn i32_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::I32).into()
     }
 
+    /// Interns `i64` and returns its id.
     pub fn i64_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::I64).into()
     }
 
+    /// Interns `half` and returns its id.
     pub fn f16_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Half).into()
     }
 
+    /// Interns `float` and returns its id.
     pub fn f32_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Float).into()
     }
 
+    /// Interns `double` and returns its id.
     pub fn f64_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Double).into()
     }
 
+    /// Interns `void` and returns its id.
     pub fn void_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Void).into()
     }
 }
 
+/// Hands out unique register names within one function.
+///
+/// Two schemes at once, matching LLVM: unnamed values get consecutive numbers from
+/// `%0`, and a hinted name is used as given unless it is taken, in which case a
+/// numeric suffix is appended. `issued_names` guards the case where a *hint* collides
+/// with a suffix this assigner would generate — asking for `x` twice yields `x` and
+/// `x1`, so a later request for `x1` must not produce a duplicate.
 #[derive(Default)]
 pub(crate) struct FuncRegNameIndex {
     unnamed_index: u32,
@@ -125,6 +191,7 @@ pub(crate) struct FuncRegNameIndex {
 }
 
 impl FuncRegNameIndex {
+    /// The next `%N` for an unnamed value.
     fn next_unnamed_index(&mut self) -> u32 {
         let index = self.unnamed_index;
 
@@ -133,6 +200,8 @@ impl FuncRegNameIndex {
         index
     }
 
+    /// How many times `name` has been asked for. `0` the first time, so the first
+    /// request keeps the hint unsuffixed.
     fn next_named_index(&mut self, name: &str) -> u32 {
         match self.named_index.entry(name.to_string()) {
             Entry::Occupied(mut occ) => {
@@ -151,6 +220,15 @@ impl FuncRegNameIndex {
         }
     }
 
+    /// Turns an optional hint into a name no other register in this function has.
+    ///
+    /// A hint must be a legal unquoted LLVM local — `[-a-zA-Z$._][-a-zA-Z$._0-9]*`.
+    /// A leading digit is refused for a second reason beyond quoting: `%0` is the
+    /// *unnamed* form, so a numeric hint would collide with the counter rather than
+    /// merely need quotes.
+    ///
+    /// The loop retries suffixes until it finds one not already issued, which is what
+    /// keeps a requested `x1` distinct from the `x1` generated for a second `x`.
     fn name_from_hint(&mut self, hint: Option<&str>) -> Result<String, ContextError> {
         let Some(hint) = hint else {
             return Ok(self.next_unnamed_index().to_string());

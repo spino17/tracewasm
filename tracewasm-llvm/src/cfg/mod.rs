@@ -1,3 +1,16 @@
+//! The module being built: functions, blocks, and the context they live in.
+//!
+//! The pieces divide up like this:
+//!
+//! - [`context::Context`] owns the storage — arenas for blocks and functions, the
+//!   interner pools, and the register bookkeeping.
+//! - [`builder::Builder`] owns the module's own contents and hands out cursors.
+//! - [`function::FuncId`] and [`basic_block::BasicBlockId`] are handles into the
+//!   arenas; both carry their own methods, so `f.add_basic_block(..)` reads like a
+//!   method on the function even though the storage lives in the context.
+//! - [`walk::CfgVisitor`] traverses a finished graph, and [`emit::IREmitter`] is the
+//!   implementation that renders it as text.
+
 use crate::cfg::module::Module;
 
 pub mod basic_block;
@@ -9,6 +22,12 @@ pub mod global;
 pub mod module;
 pub mod walk;
 
+/// A finished module, ready to be walked or emitted.
+///
+/// Produced by [`Builder::build`](builder::Builder::build), which consumes the
+/// builder — the graph is done being constructed, so nothing can be added to it. The
+/// [`Context`](context::Context) it was built against is still needed to read it,
+/// since everything inside is an id.
 pub struct ControlFlowGraph {
     pub(crate) module: Module,
 }
