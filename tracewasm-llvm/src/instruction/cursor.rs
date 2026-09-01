@@ -4,124 +4,14 @@ use crate::{
         context::{Context, RegisterDef},
     },
     error::{AllocaError, GepError, InstructionError, PhiError, StoreError},
+    instruction::{
+        AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction, InstructionKind,
+        LoadOperands, PhiInstrHandler, PhiInstruction, StoreOperands, UnconditionalBrOperands,
+    },
     interner::TyId,
     value::{I1Value, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
-
-pub struct PhiInstruction {
-    pub(crate) branches: Vec<(BasicBlockId, Value)>,
-    pub(crate) blocks: FxHashSet<BasicBlockId>,
-    ref_ty: TyId,
-    value: Value,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct PhiInstrHandler {
-    pub(crate) index: usize,
-    pub(crate) block: BasicBlockId,
-}
-
-impl PhiInstrHandler {
-    pub fn basic_block(&self) -> BasicBlockId {
-        self.block
-    }
-
-    pub fn add_branch(
-        &self,
-        branch: (BasicBlockId, Value),
-        ctx: &mut Context,
-    ) -> Result<(), PhiError> {
-        let index = self.index;
-
-        // Read the phi's type through a shared borrow first: rendering a mismatch
-        // needs the type pool, which cannot be reached while the block is borrowed
-        // mutably. An id is `Copy`, so nothing is held across the switch.
-        let ref_ty = ctx.get_block(self.block).phis[index].ref_ty;
-        let branch_ty = branch.1.ty();
-
-        if branch_ty != ref_ty {
-            return Err(PhiError::PhiInstructionBranchTypeMismatch(
-                ctx.display(ref_ty).to_string(),
-                ctx.display(branch_ty).to_string(),
-            ));
-        }
-
-        let block_id = branch.0;
-        let instr = &mut ctx.get_block_mut(self.block).phis[index];
-
-        if instr.blocks.contains(&block_id) {
-            return Err(PhiError::BasicBlockBranchAlreadyInPhiInstruction);
-        }
-
-        instr.blocks.insert(block_id);
-        instr.branches.push(branch);
-
-        Ok(())
-    }
-}
-
-pub enum InstructionKind {
-    UnconditionalBr {
-        label: BasicBlockId,
-    },
-    ConditionalBr {
-        cond: I1Value,
-        true_label: BasicBlockId,
-        false_label: BasicBlockId,
-    },
-    Load {
-        ty: TyId,
-        ptr: Value,
-        align: Option<u32>,
-    },
-    Store {
-        value: Value,
-        ptr: Value,
-        align: Option<u32>,
-    },
-    Alloca {
-        ty: TyId,
-        count: Option<Value>,
-        align: Option<u32>,
-    },
-    GetElementPtr(GetElementPtrOperands),
-}
-
-pub struct Instruction {
-    pub(crate) kind: InstructionKind,
-    /// The register this instruction defines, for the `%x =` an emitter writes in
-    /// front of it. `None` for the instructions that produce no value.
-    pub(crate) value: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct GetElementPtrOperands {
-    pub source_ty: TyId,
-    pub ptr: Value,
-    pub indices: Box<[Value]>,
-    pub inbounds: bool,
-}
-
-impl GetElementPtrOperands {
-    /// What the pointer this `getelementptr` produces points at.
-    ///
-    /// The first index steps over the source type as pointer arithmetic rather than
-    /// descending into it, so with one index or none the pointee is the source type
-    /// unchanged; only `indices[1..]` walk inwards.
-    ///
-    /// `None` when the walk does not typecheck, which a `getelementptr` built through
-    /// [`Cursor::add_get_element_ptr`] cannot be — it is validated there.
-    pub(crate) fn result_pointee_ty(&self, ctx: &Context) -> Option<TyId> {
-        if self.indices.len() <= 1 {
-            return Some(self.source_ty);
-        }
-
-        self.source_ty
-            .walk_pointee_ty_in_gep(&self.indices[1..], ctx)
-            .ok()
-    }
-}
 
 pub struct Cursor {
     pub(crate) block: BasicBlockId,
@@ -163,7 +53,7 @@ impl Cursor {
     pub fn add_unconditional_br(&self, label: BasicBlockId, ctx: &mut Context) {
         self.block.add_instruction(
             Instruction {
-                kind: InstructionKind::UnconditionalBr { label },
+                kind: InstructionKind::UnconditionalBr(UnconditionalBrOperands { label }),
                 value: None,
             },
             ctx,
@@ -179,11 +69,11 @@ impl Cursor {
     ) {
         self.block.add_instruction(
             Instruction {
-                kind: InstructionKind::ConditionalBr {
+                kind: InstructionKind::ConditionalBr(ConditionalBrOperands {
                     cond,
                     true_label,
                     false_label,
-                },
+                }),
                 value: None,
             },
             ctx,
@@ -217,7 +107,7 @@ impl Cursor {
         }
 
         add_instruction_to_block_and_get_value(
-            InstructionKind::Load { ty, ptr, align },
+            InstructionKind::Load(LoadOperands { ty, ptr, align }),
             ty,
             self.block,
             reg,
@@ -273,11 +163,11 @@ impl Cursor {
 
         self.block.add_instruction(
             Instruction {
-                kind: InstructionKind::Store {
+                kind: InstructionKind::Store(StoreOperands {
                     value: final_val,
                     ptr,
                     align,
-                },
+                }),
                 value: None,
             },
             ctx,
@@ -343,11 +233,11 @@ impl Cursor {
         let result_ty = ctx.ptr_ty();
 
         add_instruction_to_block_and_get_value(
-            InstructionKind::Alloca {
+            InstructionKind::Alloca(AllocaOperands {
                 ty,
                 count: final_count,
                 align,
-            },
+            }),
             result_ty,
             self.block,
             reg,
@@ -504,7 +394,7 @@ mod tests {
         assert!(
             matches!(
                 instrs[0].kind,
-                InstructionKind::UnconditionalBr { label } if label == body
+                InstructionKind::UnconditionalBr(UnconditionalBrOperands{ label }) if label == body
             ),
             "the first instruction is the one added first"
         );
@@ -1526,7 +1416,8 @@ mod tests {
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
 
-        let InstructionKind::Store { value, .. } = &block.instructions[0].kind else {
+        let InstructionKind::Store(StoreOperands { value, .. }) = &block.instructions[0].kind
+        else {
             panic!("expected a store")
         };
 
@@ -1728,7 +1619,8 @@ mod tests {
         // stored: `c`'s index resolved against `entry` reads `a`, a different
         // instruction of a different type.
         let loaded_ty_at = |b, index: usize, ctx: &Context| {
-            let InstructionKind::Load { ty, .. } = &ctx.get_block(b).instructions[index].kind
+            let InstructionKind::Load(LoadOperands { ty, .. }) =
+                &ctx.get_block(b).instructions[index].kind
             else {
                 panic!("expected a load")
             };

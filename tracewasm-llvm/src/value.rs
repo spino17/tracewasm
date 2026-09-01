@@ -1,7 +1,7 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::{GepError, TypeError},
-    instruction::{GetElementPtrOperands, InstructionKind},
+    instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind},
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -376,11 +376,11 @@ impl Value {
                 let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 match &ptr_instr.kind {
-                    InstructionKind::Alloca {
+                    InstructionKind::Alloca(AllocaOperands {
                         ty,
                         count,
                         align: _,
-                    } => PointeeTy {
+                    }) => PointeeTy {
                         ty: *ty,
                         count: count.clone(),
                     },

@@ -1,4 +1,5 @@
-use crate::cfg::{basic_block::BasicBlockId, module::Module};
+use crate::cfg::module::Module;
+
 pub mod basic_block;
 pub mod builder;
 pub mod context;
@@ -6,6 +7,7 @@ pub mod emit;
 pub mod function;
 pub mod global;
 pub mod module;
+pub mod walk;
 
 pub struct ControlFlowGraph {
     pub(crate) module: Module,

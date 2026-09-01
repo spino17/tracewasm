@@ -7,7 +7,7 @@ use crate::{
         module::Module,
     },
     error::ContextError,
-    instruction::Cursor,
+    instruction::cursor::Cursor,
     interner::StrId,
 };
 use rustc_hash::FxHashSet;
