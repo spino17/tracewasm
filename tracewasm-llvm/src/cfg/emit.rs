@@ -350,3 +350,218 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        interner::TyId,
+        test_support::fixture,
+        value::{NullPtr, Type},
+    };
+
+    /// Every instruction the builder can produce, in one module, compared against the
+    /// exact text.
+    ///
+    /// The expected string is not hand-written: it is what the emitter produced, then
+    /// checked with `llvm-as`, which reported "parsed and verified". So this pins the
+    /// output against a known-assembling module rather than against my reading of the
+    /// LangRef — a spacing or keyword-order slip that still looks plausible would show
+    /// up here as a diff.
+    #[test]
+    fn a_module_emits_ir_that_llvm_assembles() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f32_ty = ctx.f32_ty();
+        let f64_ty = ctx.f64_ty();
+        let ptr_ty = ctx.ptr_ty();
+
+        let array_ty: TyId = ctx
+            .ty_interner
+            .intern(Type::Array {
+                size: 4,
+                element_ty: f64_ty,
+            })
+            .into();
+
+        let struct_ty: TyId = ctx
+            .ty_interner
+            .intern(Type::Struct {
+                fields: Box::new([i32_ty, array_ty]),
+                packed: false,
+            })
+            .into();
+
+        let f = builder
+            .add_function(
+                "main".to_string(),
+                &[(i32_ty, Some("n".to_string())), (ptr_ty, None)],
+                i32_ty,
+                &mut ctx,
+            )
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let exit = f.add_basic_block("exit".to_string(), &mut ctx).unwrap();
+
+        let in_entry = builder.cursor_at_block(entry);
+
+        let slot = in_entry
+            .add_alloca(struct_ty, None, Some(8), Some("s"), &mut ctx)
+            .unwrap();
+
+        let count = Value::from_const(4i32, None, &mut ctx).unwrap();
+
+        in_entry
+            .add_alloca(i64_ty, Some((count, None)), None, None, &mut ctx)
+            .unwrap();
+
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let one = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        let elem = in_entry
+            .add_get_element_ptr(
+                None,
+                slot,
+                vec![zero, one, two],
+                Some(true),
+                Some("e"),
+                &mut ctx,
+            )
+            .unwrap();
+
+        let loaded = in_entry
+            .add_load(f64_ty, elem.clone(), Some(8), Some("d"), &mut ctx)
+            .unwrap();
+
+        in_entry
+            .add_store(loaded.clone(), elem, Some(8), None, &mut ctx)
+            .unwrap();
+
+        // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
+        // `llvm-as` with "floating point constant invalid for type".
+        let a_float = Value::from_const(0.1f32, None, &mut ctx).unwrap();
+
+        let float_slot = in_entry
+            .add_alloca(f32_ty, None, None, Some("fs"), &mut ctx)
+            .unwrap();
+
+        in_entry
+            .add_store(a_float, float_slot, None, None, &mut ctx)
+            .unwrap();
+
+        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+
+        let ptr_slot = in_entry
+            .add_alloca(ptr_ty, None, None, Some("np"), &mut ctx)
+            .unwrap();
+
+        in_entry
+            .add_store(null, ptr_slot, None, None, &mut ctx)
+            .unwrap();
+        in_entry.add_unconditional_br(body, &mut ctx);
+
+        let in_body = builder.cursor_at_block(body);
+
+        let (phi_handler, phi) = in_body
+            .add_phi(&[(entry, loaded)], Some("m"), &mut ctx)
+            .unwrap();
+
+        // `body` reaches itself, so that edge needs its own incoming value — LLVM
+        // requires one phi entry per predecessor.
+        phi_handler.add_branch((body, phi), &mut ctx).unwrap();
+
+        let cond = Value::from_const(true, None, &mut ctx)
+            .unwrap()
+            .into_i1(&ctx)
+            .unwrap();
+
+        in_body.add_conditional_br(cond, body, exit, &mut ctx);
+
+        // No `ret` exists in the builder yet, so `exit` terminates with a self-loop.
+        let in_exit = builder.cursor_at_block(exit);
+        in_exit.add_unconditional_br(exit, &mut ctx);
+
+        let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
+
+        let expected = concat!(
+            "target triple = \"arm64-apple-macosx\"\n",
+            "\n",
+            "define i32 @main(i32 %n, ptr %0) {\n",
+            "entry:\n",
+            "    %s = alloca { i32, [4 x double] }, align 8\n",
+            "    %1 = alloca i64, i32 4\n",
+            "    %e = getelementptr inbounds { i32, [4 x double] }, ptr %s, i32 0, i32 1, i32 2\n",
+            "    %d = load double, ptr %e, align 8\n",
+            "    store double %d, ptr %e, align 8\n",
+            "    %fs = alloca float\n",
+            "    store float 0x3FB99999A0000000, ptr %fs\n",
+            "    %np = alloca ptr\n",
+            "    store ptr null, ptr %np\n",
+            "    br label %body\n",
+            "body:\n",
+            "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
+            "    br i1 true, label %body, label %exit\n",
+            "exit:\n",
+            "    br label %exit\n",
+            "}\n",
+            "\n",
+        );
+
+        assert_eq!(ir, expected, "\n--- emitted ---\n{ir}");
+    }
+
+    /// A `float` and a `double` holding the same number encode differently: the hex
+    /// digits for a `float` are its value *widened to f64*, which is the form
+    /// `llvm-as` reads back. Writing the f32 bits directly would be a different
+    /// number.
+    #[test]
+    fn a_float_constant_is_encoded_as_its_widened_bits() {
+        assert_eq!(
+            IREmitter::constant(&ConstValue::Float(0.1f32.into())),
+            "0x3FB99999A0000000"
+        );
+
+        assert_eq!(
+            IREmitter::constant(&ConstValue::Double(0.1f64.into())),
+            "0x3FB999999999999A",
+            "the same decimal is a different constant at double width"
+        );
+
+        // The one place the two agree, so a test that only used `1.0` would not tell
+        // the encodings apart.
+        assert_eq!(
+            IREmitter::constant(&ConstValue::Float(1.0f32.into())),
+            IREmitter::constant(&ConstValue::Double(1.0f64.into()))
+        );
+    }
+
+    /// `i1` renders as `true`/`false`, and a null pointer as `null`.
+    #[test]
+    fn scalar_constants_render_as_llvm_spells_them() {
+        assert_eq!(IREmitter::constant(&ConstValue::I1(1)), "true");
+        assert_eq!(IREmitter::constant(&ConstValue::I1(0)), "false");
+        assert_eq!(IREmitter::constant(&ConstValue::I32(-7)), "-7");
+        assert_eq!(
+            IREmitter::constant(&ConstValue::I64(1 << 40)),
+            "1099511627776"
+        );
+        assert_eq!(IREmitter::constant(&ConstValue::NullPtr), "null");
+    }
+
+    /// An empty triple and data layout are omitted rather than emitted as empty
+    /// strings — `target triple = ""` is not what "unset" means.
+    #[test]
+    fn an_unset_target_emits_no_target_lines() {
+        let ctx = Context::default();
+        let builder = crate::cfg::builder::Builder::new(String::new(), String::new());
+
+        let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
+
+        assert_eq!(ir, "", "an empty module emits nothing at all");
+    }
+}
