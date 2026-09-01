@@ -67,6 +67,7 @@ pub enum InstructionKind {
     Store(StoreOperands),
     Alloca(AllocaOperands),
     GetElementPtr(GetElementPtrOperands),
+    Ret(RetOperands),
 }
 
 pub struct Instruction {
@@ -84,6 +85,11 @@ pub struct ConditionalBrOperands {
     pub cond: I1Value,
     pub true_label: BasicBlockId,
     pub false_label: BasicBlockId,
+}
+
+pub struct RetOperands {
+    pub ty: TyId,
+    pub value: Option<Value>,
 }
 
 pub struct LoadOperands {

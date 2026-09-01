@@ -6,7 +6,8 @@ use crate::{
     error::{AllocaError, GepError, InstructionError, PhiError, StoreError},
     instruction::{
         AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction, InstructionKind,
-        LoadOperands, PhiInstrHandler, PhiInstruction, StoreOperands, UnconditionalBrOperands,
+        LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
+        UnconditionalBrOperands,
     },
     interner::TyId,
     value::{I1Value, Value, ValueKind},
@@ -92,10 +93,57 @@ impl Cursor {
         Ok(())
     }
 
+    pub fn add_ret(
+        self,
+        ty: Option<TyId>,
+        val: Option<Value>,
+        ctx: &mut Context,
+    ) -> Result<(), InstructionError> {
+        let (val, ty) = if let Some(ty) = ty {
+            if let Some(val) = val {
+                if ty.is_void(ctx) {
+                    todo!() // RAISE ERROR: value is provided for void type
+                }
+
+                let Some(casted_val) = val.try_cast(ty, ctx) else {
+                    todo!() // RAISE ERROR: value cannot be casted into the provided type!
+                };
+
+                (Some(casted_val), ty)
+            } else {
+                if !ty.is_void(ctx) {
+                    todo!() // type is not void for non value
+                }
+
+                (None, ty)
+            }
+        } else {
+            if let Some(val) = val {
+                let ty = val.ty();
+
+                (Some(val), ty)
+            } else {
+                todo!() // RAISE ERROR: both are absent
+            }
+        };
+
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Ret(RetOperands { ty, value: val }),
+                value: None,
+            },
+            ctx,
+        )?;
+
+        self.block.set_locked(ctx);
+
+        Ok(())
+    }
+
     pub fn add_load(
         &self,
-        ty: TyId,
         ptr: Value,
+        ty: Option<TyId>,
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
@@ -106,21 +154,41 @@ impl Cursor {
             ));
         }
 
-        if !ty.is_first_class(ctx) {
-            return Err(InstructionError::TypeNotLoadable(
-                ty.display(ctx).to_string(),
-            ));
-        }
-
         if let Some(align) = align
             && !align.is_power_of_two()
         {
             return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
+        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
+
+        let final_ty = if let Some(ty) = ty {
+            if !ty.is_first_class(ctx) {
+                return Err(InstructionError::TypeNotLoadable(
+                    ty.display(ctx).to_string(),
+                ));
+            }
+
+            if let Some(pointee_ty) = pointee_ty
+                && pointee_ty.ty != ty
+            {
+                todo!() // RAISE ERROR: pointee ty not matching the provided type!
+            }
+
+            ty
+        } else if let Some(pointee_ty) = pointee_ty {
+            pointee_ty.ty
+        } else {
+            todo!() // RAISE ERROR: ptr ponintee type cannot be inferred and explicit type not provided.
+        };
+
         add_instruction_to_block_and_get_value(
-            InstructionKind::Load(LoadOperands { ty, ptr, align }),
-            ty,
+            InstructionKind::Load(LoadOperands {
+                ty: final_ty,
+                ptr,
+                align,
+            }),
+            final_ty,
             self.block,
             reg,
             ctx,

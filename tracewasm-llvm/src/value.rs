@@ -87,6 +87,12 @@ impl TyId {
         matches!(ty_obj, Type::I32)
     }
 
+    pub fn is_void(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        matches!(ty_obj, Type::Void)
+    }
+
     pub(crate) fn walk_pointee_ty_in_gep(
         &self,
         indices: &[Value],
