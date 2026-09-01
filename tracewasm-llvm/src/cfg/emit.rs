@@ -445,8 +445,8 @@ mod tests {
 
         let elem = in_entry
             .add_get_element_ptr(
-                None,
                 slot,
+                None,
                 vec![zero, one, two],
                 Some(true),
                 Some("e"),
@@ -459,7 +459,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .add_store(loaded.clone(), elem, Some(8), None, &mut ctx)
+            .add_store(elem, loaded.clone(), None, Some(8), &mut ctx)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
@@ -471,7 +471,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .add_store(a_float, float_slot, None, None, &mut ctx)
+            .add_store(float_slot, a_float, None, None, &mut ctx)
             .unwrap();
 
         let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -481,7 +481,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .add_store(null, ptr_slot, None, None, &mut ctx)
+            .add_store(ptr_slot, null, None, None, &mut ctx)
             .unwrap();
         in_entry.add_unconditional_br(body, &mut ctx).unwrap();
 
@@ -508,7 +508,7 @@ mod tests {
 
         builder
             .cursor_at_block(exit)
-            .add_ret(Some(i32_ty), Some(answer), &mut ctx)
+            .add_ret(Some(answer), Some(i32_ty), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(), &ctx).unwrap();

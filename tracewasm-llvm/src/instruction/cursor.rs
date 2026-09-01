@@ -919,14 +919,14 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_store(seven, ptr.clone(), None, None, &mut ctx),
+                .add_store(ptr.clone(), seven, None, None, &mut ctx),
             "store",
         );
 
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_get_element_ptr(Some(i32_ty), ptr, vec![zero], None, None, &mut ctx)
+                .add_get_element_ptr(ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
                 .map(|_| ()),
             "getelementptr",
         );
@@ -1046,7 +1046,7 @@ mod tests {
         // `define i32 @f() { ret void }`
         let err = builder
             .cursor_at_block(entry)
-            .add_ret(Some(void_ty), None, &mut ctx)
+            .add_ret(None, Some(void_ty), &mut ctx)
             .expect_err("an i32 function does not return void");
 
         assert!(
@@ -1066,7 +1066,7 @@ mod tests {
             matches!(
                 builder
                     .cursor_at_block(entry)
-                    .add_ret(Some(i64_ty), Some(wide), &mut ctx),
+                    .add_ret(Some(wide), Some(i64_ty), &mut ctx),
                 Err(InstructionError::Ret(RetError::DoesNotMatchFunctionResult(
                     ..
                 )))
@@ -1106,12 +1106,12 @@ mod tests {
 
         builder
             .cursor_at_block(with_ty)
-            .add_ret(Some(i32_ty), Some(seven), &mut ctx)
+            .add_ret(Some(seven), Some(i32_ty), &mut ctx)
             .expect("the type and the value agree");
 
         builder
             .cursor_at_block(inferred)
-            .add_ret(None, Some(eight), &mut ctx)
+            .add_ret(Some(eight), None, &mut ctx)
             .expect("with no type given it comes from the value");
 
         let returns_void = builder
@@ -1124,7 +1124,7 @@ mod tests {
 
         builder
             .cursor_at_block(empty)
-            .add_ret(Some(void_ty), None, &mut ctx)
+            .add_ret(None, Some(void_ty), &mut ctx)
             .expect("`ret void` takes no value");
 
         for block in [with_ty, inferred, empty] {
@@ -1156,7 +1156,7 @@ mod tests {
         // `ret void` with a value.
         let err = builder
             .cursor_at_block(a)
-            .add_ret(Some(void_ty), Some(seven), &mut ctx)
+            .add_ret(Some(seven), Some(void_ty), &mut ctx)
             .expect_err("`void` takes no value");
 
         assert!(
@@ -1170,7 +1170,7 @@ mod tests {
         // A non-`void` type with no value.
         let err = builder
             .cursor_at_block(b)
-            .add_ret(Some(i32_ty), None, &mut ctx)
+            .add_ret(None, Some(i32_ty), &mut ctx)
             .expect_err("`i32` needs a value");
 
         assert!(
@@ -1212,7 +1212,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_ret(Some(void_ty), None, &mut ctx)
+            .add_ret(None, Some(void_ty), &mut ctx)
             .unwrap();
 
         assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
@@ -1349,8 +1349,8 @@ mod tests {
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
             .add_get_element_ptr(
-                None,
                 slot,
+                None,
                 vec![zero.clone(), one],
                 None,
                 Some("f"),
@@ -1361,7 +1361,7 @@ mod tests {
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
         // so it has to come from the gep above.
         let elem = cursor
-            .add_get_element_ptr(None, field, vec![zero, two], None, Some("e"), &mut ctx)
+            .add_get_element_ptr(field, None, vec![zero, two], None, Some("e"), &mut ctx)
             .expect("the first gep says what it points to");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -1381,13 +1381,13 @@ mod tests {
 
         assert!(
             cursor
-                .add_store(a_double, elem.clone(), None, None, &mut ctx)
+                .add_store(elem.clone(), a_double, None, None, &mut ctx)
                 .is_ok(),
             "the element is a double"
         );
 
         let err = cursor
-            .add_store(an_i32, elem, None, None, &mut ctx)
+            .add_store(elem, an_i32, None, None, &mut ctx)
             .expect_err("an i32 is not what this points to");
 
         assert!(
@@ -1448,7 +1448,7 @@ mod tests {
 
         // `%n = gep { i32, [4 x double] }, ptr %s, i32 1` — the *next* struct along.
         let next = cursor
-            .add_get_element_ptr(None, slot, vec![one], None, Some("n"), &mut ctx)
+            .add_get_element_ptr(slot, None, vec![one], None, Some("n"), &mut ctx)
             .expect("a single index is pointer arithmetic over the source type");
 
         let pointee = next
@@ -1592,7 +1592,7 @@ mod tests {
             }
 
             let elem = cursor
-                .add_get_element_ptr(None, slot.clone(), indices, None, None, &mut ctx)
+                .add_get_element_ptr(slot.clone(), None, indices, None, None, &mut ctx)
                 .unwrap_or_else(|e| panic!("gep 0,{tail:?} should walk: {e}"));
 
             let pointee = elem
@@ -1636,7 +1636,7 @@ mod tests {
         ];
 
         let err = cursor
-            .add_get_element_ptr(None, slot.clone(), too_deep, None, None, &mut ctx)
+            .add_get_element_ptr(slot.clone(), None, too_deep, None, None, &mut ctx)
             .expect_err("an i64 has no elements");
 
         assert!(
@@ -1649,7 +1649,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(None, slot, past_double, None, None, &mut ctx),
+                cursor.add_get_element_ptr(slot, None, past_double, None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
             ),
             "a double has no elements either"
@@ -1672,7 +1672,7 @@ mod tests {
         ];
 
         let elem = cursor
-            .add_get_element_ptr(None, slot, deep, None, Some("e"), &mut ctx)
+            .add_get_element_ptr(slot, None, deep, None, Some("e"), &mut ctx)
             .expect("the walk reaches the i64");
 
         let loaded = cursor
@@ -1685,7 +1685,7 @@ mod tests {
         // Storing the loaded value straight back is the round trip, and the pointee
         // check has to accept it.
         assert!(
-            cursor.add_store(loaded, elem, None, None, &mut ctx).is_ok(),
+            cursor.add_store(elem, loaded, None, None, &mut ctx).is_ok(),
             "what was loaded from a slot must store back into it"
         );
     }
@@ -1702,7 +1702,7 @@ mod tests {
         let ptr_field = vec![idx(0, &mut ctx), idx(2, &mut ctx)];
 
         let ptr_field = cursor
-            .add_get_element_ptr(None, slot, ptr_field, None, Some("p"), &mut ctx)
+            .add_get_element_ptr(slot, None, ptr_field, None, Some("p"), &mut ctx)
             .expect("field 2 is the pointer");
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
@@ -1720,7 +1720,7 @@ mod tests {
         let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
 
         let err = cursor
-            .add_get_element_ptr(None, loaded_ptr.clone(), indices, None, None, &mut ctx)
+            .add_get_element_ptr(loaded_ptr.clone(), None, indices, None, None, &mut ctx)
             .expect_err("nothing can be inferred through a load");
 
         assert!(
@@ -1734,8 +1734,8 @@ mod tests {
 
         let elem = cursor
             .add_get_element_ptr(
-                Some(tys.inner),
                 loaded_ptr,
+                Some(tys.inner),
                 indices,
                 None,
                 Some("r"),
@@ -1768,7 +1768,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(Some(i32_ty), not_a_ptr, vec![zero], None, None, &mut ctx)
+            .add_get_element_ptr(not_a_ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -1787,7 +1787,7 @@ mod tests {
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(Some(i32_ty), ptr, vec![a_float], None, None, &mut ctx)
+            .add_get_element_ptr(ptr, Some(i32_ty), vec![a_float], None, None, &mut ctx)
             .expect_err("a float is not an index");
 
         assert!(
@@ -1806,7 +1806,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(None, ptr, vec![zero], None, None, &mut ctx)
+            .add_get_element_ptr(ptr, None, vec![zero], None, None, &mut ctx)
             .expect_err("null says nothing about its pointee");
 
         assert!(
@@ -1826,7 +1826,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(Some(i32_ty), slot, vec![zero], None, None, &mut ctx)
+            .add_get_element_ptr(slot, Some(i32_ty), vec![zero], None, None, &mut ctx)
             .expect_err("the slot holds a struct, not an i32");
 
         assert!(
@@ -1850,7 +1850,7 @@ mod tests {
         let field = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let elem = cursor
-            .add_get_element_ptr(None, slot, vec![zero, field], None, Some("f"), &mut ctx)
+            .add_get_element_ptr(slot, None, vec![zero, field], None, Some("f"), &mut ctx)
             .expect("the pointee is inferable from the alloca");
 
         assert_eq!(
@@ -1892,8 +1892,8 @@ mod tests {
 
         let err = cursor
             .add_get_element_ptr(
-                None,
                 slot.clone(),
+                None,
                 vec![zero.clone(), wide],
                 None,
                 None,
@@ -1914,7 +1914,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(None, slot, vec![zero, reg], None, None, &mut ctx),
+                cursor.add_get_element_ptr(slot, None, vec![zero, reg], None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::StructIndexNotAConstantI32(
                     _
                 )))
@@ -1936,8 +1936,8 @@ mod tests {
 
         let err = cursor
             .add_get_element_ptr(
-                None,
                 slot.clone(),
+                None,
                 vec![zero.clone(), past_end],
                 None,
                 None,
@@ -1956,7 +1956,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(None, slot, vec![zero, negative], None, None, &mut ctx),
+                cursor.add_get_element_ptr(slot, None, vec![zero, negative], None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::StructIndexOutOfRange {
                     index: -1,
                     ..
@@ -1983,7 +1983,7 @@ mod tests {
         let one = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(None, slot, vec![zero, one], None, None, &mut ctx)
+            .add_get_element_ptr(slot, None, vec![zero, one], None, None, &mut ctx)
             .expect_err("an i32 has no elements");
 
         assert!(
@@ -2008,7 +2008,7 @@ mod tests {
         let reg = Value::from_register("v".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .add_store(reg, ptr, None, Some(i64_ty), &mut ctx)
+            .add_store(ptr, reg, Some(i64_ty), None, &mut ctx)
             .expect_err("an i32 register is not an i64");
 
         assert!(
@@ -2029,7 +2029,7 @@ mod tests {
         let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
         cursor
-            .add_store(seven, ptr, None, Some(i64_ty), &mut ctx)
+            .add_store(ptr, seven, Some(i64_ty), None, &mut ctx)
             .expect("an i32 constant stores as an i64");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
