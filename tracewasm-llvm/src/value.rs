@@ -283,7 +283,7 @@ impl Value {
         })
     }
 
-    pub fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
+    pub(crate) fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
         let reg_id: StrId = ctx.str_interner.intern(name).into();
 
         Value {
@@ -381,10 +381,10 @@ impl Value {
                 let func_id = ctx.get_block(block).func_id;
                 let ptr_reg_name_id = reg.name;
 
-                // TODO: remove this! because params are defined without any instruction!
-                let def = *ctx.register_defs(func_id).get(&ptr_reg_name_id).expect(
-                    "this entry should already be inserted when this ptr register was defined",
-                );
+                let Some(def) = ctx.register_defs(func_id).get(&ptr_reg_name_id) else {
+                    // params would hit this!
+                    return None;
+                };
 
                 let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 

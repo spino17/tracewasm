@@ -11,7 +11,7 @@ use crate::{
     interner::{StrId, TyId},
     value::Value,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub struct Builder {
     pub(crate) module: Module,
@@ -101,6 +101,9 @@ impl Builder {
 
         self.module.func_names.insert(name_id);
         self.module.functions.push(id);
+
+        ctx.register_def_instr_index
+            .insert(id, FxHashMap::default());
 
         Ok(id)
     }

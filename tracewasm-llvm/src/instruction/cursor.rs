@@ -1228,6 +1228,142 @@ mod tests {
         );
     }
 
+    /// A pointer that arrives as a **parameter** has no defining instruction, so
+    /// inference declines rather than failing — and the caller's explicit type stands.
+    ///
+    /// This is the first instruction in the function on purpose: the definition map is
+    /// keyed by function, and before this was fixed the entry did not exist until
+    /// something had defined a register, so reaching here panicked.
+    #[test]
+    fn a_parameter_pointer_declines_inference_rather_than_panicking() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let ptr_ty = ctx.ptr_ty();
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function(
+                "f".to_string(),
+                &[(ptr_ty, Some("base".to_string()))],
+                void_ty,
+                &mut ctx,
+            )
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+        let base = ctx.get_func(f).params[0].clone();
+
+        assert!(
+            base.try_inferring_pointee_ty(entry, &mut ctx).is_none(),
+            "nothing in this function defined the parameter, so there is nothing to walk back to"
+        );
+
+        cursor
+            .add_load(base, Some(i32_ty), None, Some("v"), &mut ctx)
+            .expect("the explicit type stands when inference declines");
+    }
+
+    /// Because inference declines, one base pointer can be read and written at several
+    /// different types — the check only fires when a pointee is actually known.
+    #[test]
+    fn a_parameter_pointer_accepts_several_types_through_one_base() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f64_ty = ctx.f64_ty();
+        let ptr_ty = ctx.ptr_ty();
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function(
+                "f".to_string(),
+                &[(ptr_ty, Some("base".to_string()))],
+                void_ty,
+                &mut ctx,
+            )
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+        let base = ctx.get_func(f).params[0].clone();
+
+        for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
+            let loaded = cursor
+                .add_load(base.clone(), Some(ty), None, Some(reg), &mut ctx)
+                .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
+
+            assert_eq!(loaded.ty(), ty, "the load has the type it was given");
+        }
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        cursor
+            .add_store(base.clone(), seven, None, None, &mut ctx)
+            .expect("storing through a parameter works for the same reason");
+
+        // And a `getelementptr` needs its source type given, since there is none to
+        // infer — but it is accepted once supplied.
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+
+        assert!(
+            matches!(
+                cursor.add_get_element_ptr(
+                    base.clone(),
+                    None,
+                    vec![zero.clone()],
+                    None,
+                    None,
+                    &mut ctx
+                ),
+                Err(InstructionError::Gep(GepError::SourceTypeUnknown))
+            ),
+            "with nothing to infer from, a source type is required"
+        );
+
+        cursor
+            .add_get_element_ptr(base, Some(i32_ty), vec![zero], None, Some("g"), &mut ctx)
+            .expect("and supplying it is enough");
+    }
+
+    /// The definition map has an entry for a function as soon as it exists, not only
+    /// once something has defined a register in it. That is the invariant
+    /// `Context::register_defs` asserts, and it has to hold from the start.
+    #[test]
+    fn a_function_has_a_definition_map_before_any_instruction() {
+        let (mut ctx, mut builder) = fixture();
+
+        let void_ty = ctx.void_ty();
+
+        let f = builder
+            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        assert!(
+            ctx.register_defs(f).is_empty(),
+            "the map exists and is empty before anything is built"
+        );
+
+        // A second function gets its own, so the entry is per function rather than
+        // created once by whoever built first.
+        let g = builder
+            .add_function("g".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .cursor_at_block(entry)
+            .add_alloca(i32_ty, None, None, Some("x"), &mut ctx)
+            .unwrap();
+
+        assert_eq!(ctx.register_defs(f).len(), 1, "`f` recorded its alloca");
+        assert!(ctx.register_defs(g).is_empty(), "`g` is untouched");
+    }
+
     /// A phi names one value per *predecessor*, so the same predecessor twice is a
     /// bug in the caller — and it is a different bug from an entry-block phi.
     #[test]
