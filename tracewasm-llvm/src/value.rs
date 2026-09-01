@@ -801,8 +801,8 @@ impl Const for NullPtr {
 /// back needs neither the interner nor a second chance to fail.
 #[derive(Debug)]
 pub struct I1Value {
-    ty: TyId,
-    kind: ValueKind,
+    pub(crate) ty: TyId,
+    pub(crate) kind: ValueKind,
 }
 
 impl From<I1Value> for Value {

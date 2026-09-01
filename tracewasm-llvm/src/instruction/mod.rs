@@ -11,8 +11,8 @@ pub mod cursor;
 pub struct PhiInstruction {
     pub(crate) branches: Vec<(BasicBlockId, Value)>,
     pub(crate) blocks: FxHashSet<BasicBlockId>,
-    ref_ty: TyId,
-    value: Value,
+    pub(crate) ref_ty: TyId,
+    pub(crate) value: Value,
 }
 
 #[derive(Debug, Clone, Copy)]
