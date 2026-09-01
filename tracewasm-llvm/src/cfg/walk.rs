@@ -1,9 +1,9 @@
 use crate::{
     cfg::{
+        ControlFlowGraph,
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::{FuncId, Function},
-        module::Module,
     },
     instruction::{
         AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, InstructionKind,
@@ -70,9 +70,9 @@ pub trait CfgVisitor {
     fn visit_func(&mut self, func: &Function, ctx: &Context)
     -> Result<Self::OkType, Self::ErrType>;
 
-    fn visit_module(
+    fn visit_cfg(
         &mut self,
-        module: &Module,
+        module: &ControlFlowGraph,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -139,15 +139,15 @@ pub trait CfgVisitor {
         self.post_func_visit(func_id, block_results)
     }
 
-    fn walk_module(
+    fn walk_cfg(
         &mut self,
-        module: &Module,
+        cfg: &ControlFlowGraph,
         ctx: &mut Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        let funcs = &module.functions;
+        let funcs = &cfg.module.functions;
         let mut func_results = vec![];
 
-        let _res = self.visit_module(module, ctx)?;
+        let _res = self.visit_cfg(cfg, ctx)?;
 
         for func_id in funcs {
             let func = ctx.get_func(*func_id);
