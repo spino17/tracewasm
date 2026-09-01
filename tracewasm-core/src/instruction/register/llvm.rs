@@ -1,6 +1,6 @@
 use crate::instruction::register::{RegFrameLayout, RegInstruction};
 use tracewasm_llvm::{
-    cfg::{Builder, ControlFlowGraph, context::Context},
+    cfg::{ControlFlowGraph, builder::Builder, context::Context},
     emit::Emitter,
 };
 
