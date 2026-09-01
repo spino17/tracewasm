@@ -6,7 +6,7 @@ use crate::{
     },
     error::{AllocaError, GepError, InstructionError, PhiError, StoreError},
     interner::TyId,
-    value::{I1Value, Type, Value, ValueKind},
+    value::{I1Value, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -86,12 +86,7 @@ pub enum InstructionKind {
         count: Option<Value>,
         align: Option<u32>,
     },
-    GetElementPtr {
-        source_ty: TyId,
-        ptr: Value,
-        indices: Box<[Value]>,
-        inbounds: bool,
-    },
+    GetElementPtr(GetElementPtrOperands),
 }
 
 pub struct Instruction {
@@ -99,6 +94,34 @@ pub struct Instruction {
     /// The register this instruction defines, for the `%x =` an emitter writes in
     /// front of it. `None` for the instructions that produce no value.
     pub(crate) value: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetElementPtrOperands {
+    pub source_ty: TyId,
+    pub ptr: Value,
+    pub indices: Box<[Value]>,
+    pub inbounds: bool,
+}
+
+impl GetElementPtrOperands {
+    /// What the pointer this `getelementptr` produces points at.
+    ///
+    /// The first index steps over the source type as pointer arithmetic rather than
+    /// descending into it, so with one index or none the pointee is the source type
+    /// unchanged; only `indices[1..]` walk inwards.
+    ///
+    /// `None` when the walk does not typecheck, which a `getelementptr` built through
+    /// [`Cursor::add_get_element_ptr`] cannot be — it is validated there.
+    pub(crate) fn result_pointee_ty(&self, ctx: &Context) -> Option<TyId> {
+        if self.indices.len() <= 1 {
+            return Some(self.source_ty);
+        }
+
+        self.source_ty
+            .walk_pointee_ty_in_gep(&self.indices[1..], ctx)
+            .ok()
+    }
 }
 
 impl Cursor {
@@ -383,13 +406,13 @@ impl Cursor {
         // The first index steps over the source type as pointer arithmetic rather than
         // descending into it, so the walk starts at the second.
         if indices.len() > 1 {
-            final_source_ty.walk_pointee_ty_in_gep(self.block, &indices[1..], ctx)?;
+            final_source_ty.walk_pointee_ty_in_gep(&indices[1..], ctx)?;
         }
 
         let result_ty = ctx.ptr_ty();
 
         add_instruction_to_block_and_get_value(
-            InstructionKind::GetElementPtr {
+            InstructionKind::GetElementPtr(GetElementPtrOperands {
                 // The resolved type, not the caller's `Option`: when it was inferred
                 // from the pointer, that is the type the instruction has to be emitted
                 // with, and it is the one the walk above validated.
@@ -397,7 +420,7 @@ impl Cursor {
                 ptr,
                 indices: indices.into_boxed_slice(),
                 inbounds,
-            },
+            }),
             result_ty,
             self.block,
             reg,
@@ -444,7 +467,7 @@ mod tests {
     use crate::{
         cfg::{Builder, context::Context},
         test_support::{fixture, value},
-        value::{ConstValue, NullPtr, Type},
+        value::{ConstExpr, ConstValue, NullPtr, Type},
     };
 
     /// Interns `ty` and hands back its id, for the shapes that have no `Context`
@@ -761,6 +784,173 @@ mod tests {
         (cursor, slot, struct_ty)
     }
 
+    /// A `{ i32, [4 x double] }` slot, for the tests that chain a `getelementptr`
+    /// through a nested aggregate. Returns the cursor, the slot, and the two types.
+    fn block_with_nested_slot(
+        ctx: &mut Context,
+        builder: &mut Builder,
+    ) -> (Cursor, Value, TyId, TyId) {
+        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
+
+        let array_ty = intern(
+            Type::Array {
+                size: 4,
+                element_ty: f64_ty,
+            },
+            ctx,
+        );
+
+        let struct_ty = intern(
+            Type::Struct {
+                fields: Box::new([i32_ty, array_ty]),
+                packed: false,
+            },
+            ctx,
+        );
+
+        let slot = cursor
+            .add_alloca(struct_ty, None, None, Some("s"), ctx)
+            .expect("a struct is allocatable");
+
+        (cursor, slot, array_ty, f64_ty)
+    }
+
+    /// A `getelementptr` produces a pointer, so the *next* one has to be able to trace
+    /// its pointee back through it — which is what makes a chain like
+    /// `gep` → `gep` → `store` work without the caller restating the type each time.
+    ///
+    /// Before `GetElementPtr` was handled in the inference, this panicked rather than
+    /// resolving: only `alloca` was matched.
+    #[test]
+    fn a_gep_through_a_gep_infers_its_pointee() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, array_ty, _) = block_with_nested_slot(&mut ctx, &mut builder);
+
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let one = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
+        let field = cursor
+            .add_get_element_ptr(
+                None,
+                slot,
+                vec![zero.clone(), one],
+                None,
+                Some("f"),
+                &mut ctx,
+            )
+            .expect("the alloca says what it points to");
+
+        // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
+        // so it has to come from the gep above.
+        let elem = cursor
+            .add_get_element_ptr(None, field, vec![zero, two], None, Some("e"), &mut ctx)
+            .expect("the first gep says what it points to");
+
+        let block = ctx.blocks.get(cursor.block.raw()).unwrap();
+
+        let InstructionKind::GetElementPtr(second) = &block.instructions[2].kind else {
+            panic!("expected a gep")
+        };
+
+        assert_eq!(
+            second.source_ty, array_ty,
+            "the second gep's source type is the first one's result pointee"
+        );
+
+        // And the chain lands on a `double`, which is what a store through it must be.
+        let a_double = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let an_i32 = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        assert!(
+            cursor
+                .add_store(a_double, elem.clone(), None, None, &mut ctx)
+                .is_ok(),
+            "the element is a double"
+        );
+
+        let err = cursor
+            .add_store(an_i32, elem, None, None, &mut ctx)
+            .expect_err("an i32 is not what this points to");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Store(StoreError::StoredValueDoesNotMatchPointee(value, pointee))
+                    if value == "i32" && pointee == "double"
+            ),
+            "the error must name both types, got: {err}"
+        );
+    }
+
+    /// The same inference from a `getelementptr` *constant expression* rather than an
+    /// instruction. Nothing builds one yet, so this pins the arm before a builder
+    /// exists to reach it.
+    #[test]
+    fn a_gep_constant_expression_reports_its_pointee() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _, array_ty, f64_ty) = block_with_nested_slot(&mut ctx, &mut builder);
+
+        let ptr_ty = ctx.ptr_ty();
+        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        // `getelementptr ([4 x double], ptr null, i32 0, i32 2)` — points at a double.
+        let const_gep = Value::new(
+            ptr_ty,
+            ValueKind::ConstExpr(ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
+                source_ty: array_ty,
+                ptr: null,
+                indices: Box::new([zero, two]),
+                inbounds: false,
+            }))),
+        );
+
+        let pointee = const_gep
+            .try_inferring_pointee_ty(cursor.block, &mut ctx)
+            .expect("a gep constant expression says what it points to");
+
+        assert_eq!(pointee.ty, f64_ty, "index 2 of `[4 x double]` is a double");
+
+        assert_eq!(
+            ctx.display(pointee.ty).to_string(),
+            "double",
+            "and it renders as one"
+        );
+    }
+
+    /// A `getelementptr` with one index or none does not descend: the first index
+    /// steps over the source type as pointer arithmetic, so the pointee is unchanged.
+    #[test]
+    fn a_gep_with_a_single_index_still_points_at_its_source_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, _, _) = block_with_nested_slot(&mut ctx, &mut builder);
+
+        let one = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        // `%n = gep { i32, [4 x double] }, ptr %s, i32 1` — the *next* struct along.
+        let next = cursor
+            .add_get_element_ptr(None, slot, vec![one], None, Some("n"), &mut ctx)
+            .expect("a single index is pointer arithmetic over the source type");
+
+        let pointee = next
+            .try_inferring_pointee_ty(cursor.block, &mut ctx)
+            .expect("still traceable");
+
+        assert_eq!(
+            ctx.display(pointee.ty).to_string(),
+            "{ i32, [4 x double] }",
+            "one index steps over the type rather than into it"
+        );
+    }
+
     /// Memory is reached through a pointer, so `getelementptr` refuses anything else
     /// for the same reason `load` does.
     #[test]
@@ -866,7 +1056,13 @@ mod tests {
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
 
-        let InstructionKind::GetElementPtr { source_ty, .. } = &block.instructions[1].kind else {
+        let InstructionKind::GetElementPtr(GetElementPtrOperands {
+            source_ty,
+            ptr: _,
+            indices: _,
+            inbounds: _,
+        }) = &block.instructions[1].kind
+        else {
             panic!("expected a gep")
         };
 

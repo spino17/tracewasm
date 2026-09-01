@@ -1,7 +1,7 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::{GepError, TypeError},
-    instruction::InstructionKind,
+    instruction::{GetElementPtrOperands, InstructionKind},
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -75,20 +75,22 @@ impl TyId {
         )
     }
 
+    pub fn is_i32(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        matches!(ty_obj, Type::I32)
+    }
+
     pub(crate) fn walk_pointee_ty_in_gep(
-        self,
-        block: BasicBlockId,
+        &self,
         indices: &[Value],
-        ctx: &mut Context,
+        ctx: &Context,
     ) -> Result<TyId, GepError> {
         if indices.is_empty() {
-            return Ok(self);
+            return Ok(*self);
         }
 
         let index = &indices[0];
-
-        // Taken before the pool is borrowed below, since interning needs `&mut`.
-        let i32_ty = ctx.i32_ty();
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         match ty_obj {
@@ -99,7 +101,7 @@ impl TyId {
                 // integer. `llvm-as` refuses an `i64` one with "invalid getelementptr
                 // indices", even though array indices may be any width, because the
                 // index names a field rather than scaling an offset.
-                if index.ty() != i32_ty {
+                if !index.ty().is_i32(ctx) {
                     return Err(GepError::StructIndexNotAConstantI32(
                         ctx.display(index.ty()).to_string(),
                     ));
@@ -128,7 +130,7 @@ impl TyId {
 
                 let field_ty = fields[field_index as usize];
 
-                field_ty.walk_pointee_ty_in_gep(block, &indices[1..], ctx)
+                field_ty.walk_pointee_ty_in_gep(&indices[1..], ctx)
             }
             Type::Array { size, element_ty } => {
                 let size = *size;
@@ -144,9 +146,9 @@ impl TyId {
                     });
                 }
 
-                element_ty.walk_pointee_ty_in_gep(block, &indices[1..], ctx)
+                element_ty.walk_pointee_ty_in_gep(&indices[1..], ctx)
             }
-            _ => Err(GepError::TypeNotIndexable(ctx.display(self).to_string())),
+            _ => Err(GepError::TypeNotIndexable(ctx.display(*self).to_string())),
         }
     }
 }
@@ -350,7 +352,7 @@ impl Value {
         &self,
         block: BasicBlockId,
         ctx: &mut Context,
-    ) -> Option<PointeeType> {
+    ) -> Option<PointeeTy> {
         if !self.ty().is_ptr(ctx) {
             return None;
         }
@@ -366,29 +368,30 @@ impl Value {
 
                 let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
-                // TODO:
-                // match on all the instructions which can produce a pointer! like alloca,
-                // getelementptr etc.
-                // and try infering pointee type from there
                 match &ptr_instr.kind {
                     InstructionKind::Alloca {
                         ty,
                         count,
                         align: _,
-                    } => PointeeType {
+                    } => PointeeTy {
                         ty: *ty,
                         count: count.clone(),
                     },
-                    _ => unreachable!("only ptr producing instructions should match"),
+                    InstructionKind::GetElementPtr(operands) => PointeeTy {
+                        ty: operands.result_pointee_ty(ctx)?,
+                        count: None,
+                    },
+                    _ => return None,
                 }
             }
-            ValueKind::ConstExpr(const_expr) => {
-                // TODO:
-                // match on various kinds of const_expr only the ones which can
-                // produce a pointer! like getelementptr and for each case
-                // based on its operands construct the pointee type
-                todo!()
-            }
+            ValueKind::ConstExpr(const_expr) => match const_expr {
+                ConstExpr::GetElementPtr(operands) => PointeeTy {
+                    ty: operands.result_pointee_ty(ctx)?,
+                    count: None,
+                },
+                ConstExpr::IntToPtr {} => todo!(),
+                _ => return None,
+            },
             ValueKind::Const(_) => return None,
         };
 
@@ -396,14 +399,14 @@ impl Value {
     }
 }
 
-pub(crate) struct PointeeType {
+pub(crate) struct PointeeTy {
     pub ty: TyId,
     pub count: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConstExpr {
-    GetElementPtr {},
+    GetElementPtr(Box<GetElementPtrOperands>),
     PtrToInt {},
     IntToPtr {},
     BitCast {},
