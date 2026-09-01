@@ -1,4 +1,4 @@
-use crate::cfg::walk::CfgVisitor;
+use crate::cfg::{ControlFlowGraph, context::Context, walk::CfgVisitor};
 
 pub struct IREmitter {
     ir: String,
@@ -6,11 +6,15 @@ pub struct IREmitter {
 }
 
 impl IREmitter {
-    pub fn new() -> Self {
-        IREmitter {
+    pub fn emit(cfg: ControlFlowGraph, ctx: &Context) -> Result<String, anyhow::Error> {
+        let mut emitter = IREmitter {
             ir: String::default(),
             indentation: false,
-        }
+        };
+
+        emitter.walk_cfg(&cfg, ctx)?;
+
+        Ok(emitter.ir)
     }
 
     fn set_indentation(&mut self) {

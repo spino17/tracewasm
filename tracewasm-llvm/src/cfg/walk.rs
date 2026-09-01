@@ -142,7 +142,7 @@ pub trait CfgVisitor {
     fn walk_cfg(
         &mut self,
         cfg: &ControlFlowGraph,
-        ctx: &mut Context,
+        ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         let funcs = &cfg.module.functions;
         let mut func_results = vec![];
