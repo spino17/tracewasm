@@ -1,8 +1,5 @@
 use crate::instruction::register::{RegFrameLayout, RegInstruction};
-use tracewasm_llvm::{
-    cfg::{ControlFlowGraph, builder::Builder, context::Context},
-    emit::Emitter,
-};
+use tracewasm_llvm::{cfg::ControlFlowGraph, emit::Emitter};
 
 pub(crate) struct RegInstructionEmitter {}
 
@@ -17,8 +14,8 @@ impl Emitter for RegInstructionEmitter {
 
     fn emit_cfg(
         self,
-        stream: &[RegInstruction],
-        ctx: &RegInstructionCtx,
+        _stream: &[RegInstruction],
+        _ctx: &RegInstructionCtx,
     ) -> Result<ControlFlowGraph, anyhow::Error> {
         todo!()
     }

@@ -3,19 +3,22 @@ use crate::{
     interner::StrId,
 };
 use rustc_hash::FxHashSet;
+use std::fmt::Display;
 
 pub struct Triple {}
 
-impl ToString for Triple {
-    fn to_string(&self) -> String {
+// `Display` rather than `ToString` directly: the blanket impl gives `to_string` for
+// free, and implementing it by hand opts out of every formatting context.
+impl Display for Triple {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
 }
 
 pub struct DataLayout {}
 
-impl ToString for DataLayout {
-    fn to_string(&self) -> String {
+impl Display for DataLayout {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         todo!()
     }
 }
