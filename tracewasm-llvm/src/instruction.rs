@@ -87,7 +87,7 @@ pub enum InstructionKind {
         align: Option<u32>,
     },
     GetElementPtr {
-        source_ty: Option<TyId>,
+        source_ty: TyId,
         ptr: Value,
         indices: Box<[Value]>,
         inbounds: bool,
@@ -338,19 +338,19 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
-        let inbounds = if let Some(inbounds) = inbounds {
-            inbounds
-        } else {
-            false
-        };
+        let inbounds = inbounds.unwrap_or(false);
 
         if !ptr.is_ptr(ctx) {
-            todo!() // RAISE ERROR: value is not of pointer type!
+            return Err(InstructionError::PointerOperandExpected(
+                ptr.ty().display(ctx).to_string(),
+            ));
         }
 
         for index in &indices {
             if !index.is_integer(ctx) {
-                todo!() // RAISE ERROR: index does not have an integer type!
+                return Err(
+                    GepError::IndexNotAnInteger(ctx.display(index.ty()).to_string()).into(),
+                );
             }
         }
 
@@ -358,35 +358,42 @@ impl Cursor {
 
         let final_source_ty = if let Some(source_ty) = source_ty {
             if !source_ty.is_first_class(ctx) {
-                todo!() // RAISE ERROR: not a first class type!
+                return Err(
+                    GepError::SourceTypeNotSized(source_ty.display(ctx).to_string()).into(),
+                );
             }
 
-            if let Some(pointee_ty) = pointee_ty {
-                if source_ty != pointee_ty.ty {
-                    todo!() // RAISE ERROR: provided source type does not match with inferred pointee type from the pointer
-                }
-
-                source_ty
-            } else {
-                source_ty
+            if let Some(pointee_ty) = pointee_ty
+                && source_ty != pointee_ty.ty
+            {
+                return Err(GepError::SourceTypeDoesNotMatchPointee(
+                    source_ty.display(ctx).to_string(),
+                    ctx.display(pointee_ty.ty).to_string(),
+                )
+                .into());
             }
+
+            source_ty
+        } else if let Some(pointee_ty) = pointee_ty {
+            pointee_ty.ty
         } else {
-            if let Some(pointee_ty) = pointee_ty {
-                pointee_ty.ty
-            } else {
-                todo!() // RAISE ERROR: no source type provided and pointee type cannot be inferred from the polnter value!
-            }
+            return Err(GepError::SourceTypeUnknown.into());
         };
 
+        // The first index steps over the source type as pointer arithmetic rather than
+        // descending into it, so the walk starts at the second.
         if indices.len() > 1 {
-            let _ = self.walk_pointee_ty_in_gep(final_source_ty, &indices[1..], ctx)?;
+            self.walk_pointee_ty_in_gep(final_source_ty, &indices[1..], ctx)?;
         }
 
         let result_ty = ctx.ptr_ty();
 
         add_instruction_to_block_and_get_value(
             InstructionKind::GetElementPtr {
-                source_ty,
+                // The resolved type, not the caller's `Option`: when it was inferred
+                // from the pointer, that is the type the instruction has to be emitted
+                // with, and it is the one the walk above validated.
+                source_ty: final_source_ty,
                 ptr,
                 indices: indices.into_boxed_slice(),
                 inbounds,
@@ -409,46 +416,69 @@ impl Cursor {
         }
 
         let index = &indices[0];
+
+        // Taken before the pool is borrowed below, since interning needs `&mut`.
+        let i32_ty = ctx.i32_ty();
         let ty_obj = ctx.ty_interner.value(curr_pointee_ty.raw());
 
         match ty_obj {
             Type::Struct { fields, packed: _ } => {
                 let total_fields = fields.len();
 
-                let Some(const_val) = index.try_const(ctx) else {
-                    todo!() // RAISE ERROR: index into a struct should be compile time constant integer!
-                };
-
-                let Some(index) = const_val.try_integer() else {
-                    todo!() // RAISE ERROR: index into a struct should be compile time constant integer!
-                };
-
-                let index = index as u32 as usize;
-
-                if index >= total_fields {
-                    todo!() // RAISE ERROR: index greater than the fields of the struct
+                // A struct index must be a constant `i32` — not merely a constant
+                // integer. `llvm-as` refuses an `i64` one with "invalid getelementptr
+                // indices", even though array indices may be any width, because the
+                // index names a field rather than scaling an offset.
+                if index.ty() != i32_ty {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
                 }
 
-                let field_ty = fields[index];
+                let Some(const_val) = index.try_const(ctx) else {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
+                };
 
-                Ok(self.walk_pointee_ty_in_gep(field_ty, &indices[1..], ctx)?)
+                let Some(field_index) = const_val.try_integer() else {
+                    return Err(GepError::StructIndexNotAConstantI32(
+                        ctx.display(index.ty()).to_string(),
+                    ));
+                };
+
+                // Checked as a signed value: a negative index is out of range rather
+                // than a huge one, which is what `as u32` would turn it into.
+                if field_index < 0 || field_index as usize >= total_fields {
+                    return Err(GepError::StructIndexOutOfRange {
+                        index: field_index,
+                        fields: total_fields,
+                    });
+                }
+
+                let field_ty = fields[field_index as usize];
+
+                self.walk_pointee_ty_in_gep(field_ty, &indices[1..], ctx)
             }
             Type::Array { size, element_ty } => {
                 let size = *size;
+                let element_ty = *element_ty;
 
-                if let Some(const_val) = index.try_const(ctx) {
-                    if let Some(index) = const_val.try_integer() {
-                        let index = index as u32 as u64;
-
-                        if index >= size {
-                            todo!() // RAISE ERROR: index greater than the size of the error!
-                        }
-                    }
+                if let Some(const_val) = index.try_const(ctx)
+                    && let Some(element_index) = const_val.try_integer()
+                    && (element_index < 0 || element_index as u64 >= size)
+                {
+                    return Err(GepError::ArrayIndexOutOfRange {
+                        index: element_index as u64,
+                        size,
+                    });
                 }
 
-                Ok(self.walk_pointee_ty_in_gep(*element_ty, &indices[1..], ctx)?)
+                self.walk_pointee_ty_in_gep(element_ty, &indices[1..], ctx)
             }
-            _ => todo!(), // RAISE ERROR: type not indexable!
+            _ => Err(GepError::TypeNotIndexable(
+                ctx.display(curr_pointee_ty).to_string(),
+            )),
         }
     }
 }
@@ -781,6 +811,264 @@ mod tests {
         let ptr = Value::from_const(NullPtr, None, ctx).unwrap();
 
         (builder.cursor_at_block(entry), ptr)
+    }
+
+    /// A `{ i32, double }` slot on the stack, plus the cursor to build against — the
+    /// shape every struct-indexing test below needs.
+    fn block_with_struct_slot(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value, TyId) {
+        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
+
+        let struct_ty = intern(
+            Type::Struct {
+                fields: Box::new([i32_ty, f64_ty]),
+                packed: false,
+            },
+            ctx,
+        );
+
+        let slot = cursor
+            .add_alloca(struct_ty, None, None, Some("s"), ctx)
+            .expect("a struct is allocatable");
+
+        (cursor, slot, struct_ty)
+    }
+
+    /// Memory is reached through a pointer, so `getelementptr` refuses anything else
+    /// for the same reason `load` does.
+    #[test]
+    fn a_gep_needs_a_pointer_operand() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let not_a_ptr = value(7, &mut ctx);
+        let zero = value(0, &mut ctx);
+
+        let err = cursor
+            .add_get_element_ptr(Some(i32_ty), not_a_ptr, vec![zero], None, None, &mut ctx)
+            .expect_err("an i32 is not an address");
+
+        assert!(
+            matches!(&err, InstructionError::PointerOperandExpected(t) if t == "i32"),
+            "the error must name the offending type, got: {err}"
+        );
+    }
+
+    /// Every index scales an offset, so every one of them has to be an integer.
+    #[test]
+    fn a_gep_index_must_be_an_integer() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .add_get_element_ptr(Some(i32_ty), ptr, vec![a_float], None, None, &mut ctx)
+            .expect_err("a float is not an index");
+
+        assert!(
+            matches!(&err, InstructionError::Gep(GepError::IndexNotAnInteger(t)) if t == "float"),
+            "the error must name the offending type, got: {err}"
+        );
+    }
+
+    /// With no source type given and a pointer nothing can be traced back to — a
+    /// `null` constant — there is no type to emit the instruction with.
+    #[test]
+    fn a_gep_without_a_source_type_needs_an_inferable_pointer() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, ptr) = block_with_ptr(&mut ctx, &mut builder);
+
+        let zero = value(0, &mut ctx);
+
+        let err = cursor
+            .add_get_element_ptr(None, ptr, vec![zero], None, None, &mut ctx)
+            .expect_err("null says nothing about its pointee");
+
+        assert!(
+            matches!(&err, InstructionError::Gep(GepError::SourceTypeUnknown)),
+            "expected an unknown-source-type error, got: {err}"
+        );
+    }
+
+    /// When the pointer *can* be traced back, a source type that disagrees with it is
+    /// refused rather than silently preferred.
+    #[test]
+    fn a_gep_source_type_must_match_the_inferred_pointee() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, _) = block_with_struct_slot(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let zero = value(0, &mut ctx);
+
+        let err = cursor
+            .add_get_element_ptr(Some(i32_ty), slot, vec![zero], None, None, &mut ctx)
+            .expect_err("the slot holds a struct, not an i32");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Gep(GepError::SourceTypeDoesNotMatchPointee(given, inferred))
+                    if given == "i32" && inferred == "{ i32, double }"
+            ),
+            "the error must name both types, got: {err}"
+        );
+    }
+
+    /// Omitting the source type is allowed when the pointer says what it points to —
+    /// and the *inferred* type is what the instruction is emitted with, not `None`.
+    #[test]
+    fn a_gep_emits_the_inferred_source_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, struct_ty) = block_with_struct_slot(&mut ctx, &mut builder);
+
+        let zero = value(0, &mut ctx);
+        let field = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        let elem = cursor
+            .add_get_element_ptr(None, slot, vec![zero, field], None, Some("f"), &mut ctx)
+            .expect("the pointee is inferable from the alloca");
+
+        assert_eq!(
+            ctx.display(elem.ty()).to_string(),
+            "ptr",
+            "a gep yields a pointer"
+        );
+
+        let block = ctx.blocks.get(cursor.block.raw()).unwrap();
+
+        let InstructionKind::GetElementPtr { source_ty, .. } = &block.instructions[1].kind else {
+            panic!("expected a gep")
+        };
+
+        assert_eq!(
+            *source_ty, struct_ty,
+            "the resolved type is emitted, not the caller's `None`"
+        );
+    }
+
+    /// LLVM requires a struct index to be a constant `i32` specifically — `llvm-as`
+    /// refuses an `i64` one with "invalid getelementptr indices" — even though array
+    /// indices may be any width, because the index names a field rather than scaling
+    /// an offset.
+    #[test]
+    fn a_struct_index_must_be_a_constant_i32() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, _) = block_with_struct_slot(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let zero = value(0, &mut ctx);
+        let wide = Value::from_const(1i64, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .add_get_element_ptr(
+                None,
+                slot.clone(),
+                vec![zero.clone(), wide],
+                None,
+                None,
+                &mut ctx,
+            )
+            .expect_err("an i64 struct index is not valid LLVM");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Gep(GepError::StructIndexNotAConstantI32(t)) if t == "i64"
+            ),
+            "the error must name the offending type, got: {err}"
+        );
+
+        // A register is refused for the same reason: the field has to be known now.
+        let reg = Value::from_register("n".to_string(), i32_ty, &mut ctx);
+
+        assert!(
+            matches!(
+                cursor.add_get_element_ptr(None, slot, vec![zero, reg], None, None, &mut ctx),
+                Err(InstructionError::Gep(GepError::StructIndexNotAConstantI32(
+                    _
+                )))
+            ),
+            "a non-constant struct index names no field"
+        );
+    }
+
+    /// A field index past the end names nothing, which `llvm-as` also refuses.
+    /// Negative is the same error and not a huge positive one.
+    #[test]
+    fn a_struct_index_must_be_in_range() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, _) = block_with_struct_slot(&mut ctx, &mut builder);
+
+        let zero = value(0, &mut ctx);
+        let past_end = Value::from_const(5i32, None, &mut ctx).unwrap();
+        let negative = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .add_get_element_ptr(
+                None,
+                slot.clone(),
+                vec![zero.clone(), past_end],
+                None,
+                None,
+                &mut ctx,
+            )
+            .expect_err("a two-field struct has no field 5");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Gep(GepError::StructIndexOutOfRange { index, fields })
+                    if *index == 5 && *fields == 2
+            ),
+            "the error must name the index and the arity, got: {err}"
+        );
+
+        assert!(
+            matches!(
+                cursor.add_get_element_ptr(None, slot, vec![zero, negative], None, None, &mut ctx),
+                Err(InstructionError::Gep(GepError::StructIndexOutOfRange {
+                    index: -1,
+                    ..
+                }))
+            ),
+            "a negative index is out of range, not a large one"
+        );
+    }
+
+    /// Only aggregates have anything to descend into: a second index against a scalar
+    /// names nothing, and `llvm-as` refuses it too.
+    #[test]
+    fn only_an_aggregate_can_be_indexed_into() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_with_ptr(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+
+        let slot = cursor
+            .add_alloca(i32_ty, None, None, Some("p"), &mut ctx)
+            .unwrap();
+
+        let zero = value(0, &mut ctx);
+        let one = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .add_get_element_ptr(None, slot, vec![zero, one], None, None, &mut ctx)
+            .expect_err("an i32 has no elements");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Gep(GepError::TypeNotIndexable(t)) if t == "i32"
+            ),
+            "the error must name the type, got: {err}"
+        );
     }
 
     /// `store i64 %v` where `%v` is an `i32` is not a store LLVM will assemble, and

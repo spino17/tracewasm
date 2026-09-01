@@ -118,4 +118,27 @@ pub enum PhiError {
 }
 
 #[derive(Error, Debug)]
-pub enum GepError {}
+pub enum GepError {
+    #[error("a `getelementptr` index must have an integer type, but got `{0}`")]
+    IndexNotAnInteger(String),
+    #[error("a `getelementptr` source type must be sized, but got `{0}`")]
+    SourceTypeNotSized(String),
+    #[error(
+        "the source type `{0}` does not match `{1}`, the pointee type inferred from \
+         the pointer operand"
+    )]
+    SourceTypeDoesNotMatchPointee(String, String),
+    #[error(
+        "a `getelementptr` needs a source type: none was given, and none could be \
+         inferred from the pointer operand"
+    )]
+    SourceTypeUnknown,
+    #[error("an index into a struct must be a constant `i32`, but got `{0}`")]
+    StructIndexNotAConstantI32(String),
+    #[error("index `{index}` is out of range for a struct with `{fields}` field(s)")]
+    StructIndexOutOfRange { index: i32, fields: usize },
+    #[error("index `{index}` is out of range for an array of `{size}` element(s)")]
+    ArrayIndexOutOfRange { index: u64, size: u64 },
+    #[error("a value of type `{0}` cannot be indexed into")]
+    TypeNotIndexable(String),
+}
