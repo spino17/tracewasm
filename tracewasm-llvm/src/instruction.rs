@@ -951,6 +951,300 @@ mod tests {
         );
     }
 
+    /// The types of the nested fixture below, so an assertion can name a level by
+    /// what it means rather than by an id.
+    struct DeepTys {
+        outer: TyId,
+        inner_array: TyId,
+        inner: TyId,
+        i64_array: TyId,
+        i64: TyId,
+        f64: TyId,
+        ptr: TyId,
+        i32: TyId,
+    }
+
+    /// A slot holding
+    ///
+    /// ```text
+    /// %Inner = { i8, [3 x i64] }
+    /// %Outer = { i32, [2 x %Inner], ptr, double }
+    /// ```
+    ///
+    /// which is deep enough that an off-by-one in the walk lands on a real type
+    /// rather than falling off the end — the failure mode a two-level fixture cannot
+    /// catch. The index sequences the tests below use were checked against `llvm-as`:
+    /// `0,1,1,1,2` assembles and one index further is refused, which is what pins the
+    /// last level to a scalar.
+    fn block_with_deep_slot(ctx: &mut Context, builder: &mut Builder) -> (Cursor, Value, DeepTys) {
+        let f = builder.add_function("f".to_string(), ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let i8_ty = ctx.i8_ty();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f64_ty = ctx.f64_ty();
+        let ptr_ty = ctx.ptr_ty();
+
+        let i64_array = intern(
+            Type::Array {
+                size: 3,
+                element_ty: i64_ty,
+            },
+            ctx,
+        );
+
+        let inner = intern(
+            Type::Struct {
+                fields: Box::new([i8_ty, i64_array]),
+                packed: false,
+            },
+            ctx,
+        );
+
+        let inner_array = intern(
+            Type::Array {
+                size: 2,
+                element_ty: inner,
+            },
+            ctx,
+        );
+
+        let outer = intern(
+            Type::Struct {
+                fields: Box::new([i32_ty, inner_array, ptr_ty, f64_ty]),
+                packed: false,
+            },
+            ctx,
+        );
+
+        let slot = cursor
+            .add_alloca(outer, None, None, Some("s"), ctx)
+            .expect("a struct is allocatable");
+
+        (
+            cursor,
+            slot,
+            DeepTys {
+                outer,
+                inner_array,
+                inner,
+                i64_array,
+                i64: i64_ty,
+                f64: f64_ty,
+                ptr: ptr_ty,
+                i32: i32_ty,
+            },
+        )
+    }
+
+    /// A constant `i32` index, which is what a struct index has to be.
+    fn idx(n: i32, ctx: &mut Context) -> Value {
+        Value::from_const(n, None, ctx).expect("an i32 constant")
+    }
+
+    /// Every level of the nested type, asserted by both id and spelling.
+    ///
+    /// One index per level after the first, so an off-by-one anywhere in the walk
+    /// moves *every* row below it — which is why each row names the exact type rather
+    /// than just checking the walk succeeded.
+    #[test]
+    fn a_gep_walks_every_level_of_a_deeply_nested_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, tys) = block_with_deep_slot(&mut ctx, &mut builder);
+
+        // The slot itself, before any walking, is the whole `%Outer`.
+        assert_eq!(
+            slot.try_inferring_pointee_ty(cursor.block, &mut ctx)
+                .expect("an alloca says what it points to")
+                .ty,
+            tys.outer
+        );
+
+        // (indices after the leading 0, expected id, expected spelling)
+        let cases: Vec<(Vec<i32>, TyId, &str)> = vec![
+            (vec![0], tys.i32, "i32"),
+            (vec![1], tys.inner_array, "[2 x { i8, [3 x i64] }]"),
+            (vec![1, 1], tys.inner, "{ i8, [3 x i64] }"),
+            (vec![1, 1, 1], tys.i64_array, "[3 x i64]"),
+            (vec![1, 1, 1, 2], tys.i64, "i64"),
+            (vec![2], tys.ptr, "ptr"),
+            (vec![3], tys.f64, "double"),
+        ];
+
+        for (tail, expected_id, expected) in cases {
+            let mut indices = vec![idx(0, &mut ctx)];
+
+            for n in &tail {
+                indices.push(idx(*n, &mut ctx));
+            }
+
+            let elem = cursor
+                .add_get_element_ptr(None, slot.clone(), indices, None, None, &mut ctx)
+                .unwrap_or_else(|e| panic!("gep 0,{tail:?} should walk: {e}"));
+
+            let pointee = elem
+                .try_inferring_pointee_ty(cursor.block, &mut ctx)
+                .unwrap_or_else(|| panic!("gep 0,{tail:?} should report a pointee"));
+
+            assert_eq!(
+                ctx.display(pointee.ty).to_string(),
+                expected,
+                "gep 0,{tail:?} lands on the wrong type"
+            );
+
+            assert_eq!(
+                pointee.ty, expected_id,
+                "gep 0,{tail:?} renders as `{expected}` but is not that pool entry"
+            );
+
+            assert_eq!(
+                ctx.display(elem.ty()).to_string(),
+                "ptr",
+                "a gep always yields a pointer"
+            );
+        }
+    }
+
+    /// One index past the last level names nothing. `llvm-as` agrees: appending an
+    /// index to either sequence below is refused with "invalid getelementptr indices".
+    #[test]
+    fn a_gep_cannot_index_past_the_last_level() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, _) = block_with_deep_slot(&mut ctx, &mut builder);
+
+        // `0,1,1,1,2` ends on the `i64`; a sixth index has nothing to descend into.
+        let too_deep = vec![
+            idx(0, &mut ctx),
+            idx(1, &mut ctx),
+            idx(1, &mut ctx),
+            idx(1, &mut ctx),
+            idx(2, &mut ctx),
+            idx(0, &mut ctx),
+        ];
+
+        let err = cursor
+            .add_get_element_ptr(None, slot.clone(), too_deep, None, None, &mut ctx)
+            .expect_err("an i64 has no elements");
+
+        assert!(
+            matches!(&err, InstructionError::Gep(GepError::TypeNotIndexable(t)) if t == "i64"),
+            "the error must name the scalar it stopped at, got: {err}"
+        );
+
+        // And the same one level up, on the `double` field.
+        let past_double = vec![idx(0, &mut ctx), idx(3, &mut ctx), idx(0, &mut ctx)];
+
+        assert!(
+            matches!(
+                cursor.add_get_element_ptr(None, slot, past_double, None, None, &mut ctx),
+                Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
+            ),
+            "a double has no elements either"
+        );
+    }
+
+    /// A `load` in the middle of a chain: the scalar a deep `getelementptr` reaches is
+    /// loadable at exactly the type the walk landed on.
+    #[test]
+    fn a_load_through_a_deep_gep_yields_the_walked_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, tys) = block_with_deep_slot(&mut ctx, &mut builder);
+
+        let deep = vec![
+            idx(0, &mut ctx),
+            idx(1, &mut ctx),
+            idx(1, &mut ctx),
+            idx(1, &mut ctx),
+            idx(2, &mut ctx),
+        ];
+
+        let elem = cursor
+            .add_get_element_ptr(None, slot, deep, None, Some("e"), &mut ctx)
+            .expect("the walk reaches the i64");
+
+        let loaded = cursor
+            .add_load(tys.i64, elem.clone(), None, Some("v"), &mut ctx)
+            .expect("an i64 is loadable");
+
+        assert_eq!(ctx.display(loaded.ty()).to_string(), "i64");
+        assert_eq!(loaded.ty(), tys.i64);
+
+        // Storing the loaded value straight back is the round trip, and the pointee
+        // check has to accept it.
+        assert!(
+            cursor.add_store(loaded, elem, None, None, &mut ctx).is_ok(),
+            "what was loaded from a slot must store back into it"
+        );
+    }
+
+    /// A `load` of a *pointer* breaks the chain, which is the honest answer: the
+    /// pointee of a pointer read out of memory is not knowable from the instruction
+    /// that produced it, so the caller has to say what it is.
+    #[test]
+    fn a_gep_through_a_loaded_pointer_needs_an_explicit_source_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, slot, tys) = block_with_deep_slot(&mut ctx, &mut builder);
+
+        // `%p = gep %Outer, ptr %s, i32 0, i32 2` — the `ptr` field.
+        let ptr_field = vec![idx(0, &mut ctx), idx(2, &mut ctx)];
+
+        let ptr_field = cursor
+            .add_get_element_ptr(None, slot, ptr_field, None, Some("p"), &mut ctx)
+            .expect("field 2 is the pointer");
+
+        // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
+        let loaded_ptr = cursor
+            .add_load(tys.ptr, ptr_field, None, Some("q"), &mut ctx)
+            .expect("a ptr is loadable");
+
+        assert!(
+            loaded_ptr
+                .try_inferring_pointee_ty(cursor.block, &mut ctx)
+                .is_none(),
+            "a `load` says nothing about what its result points to"
+        );
+
+        let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
+
+        let err = cursor
+            .add_get_element_ptr(None, loaded_ptr.clone(), indices, None, None, &mut ctx)
+            .expect_err("nothing can be inferred through a load");
+
+        assert!(
+            matches!(&err, InstructionError::Gep(GepError::SourceTypeUnknown)),
+            "expected an unknown-source-type error, got: {err}"
+        );
+
+        // Given the type explicitly, the same walk goes through and lands where the
+        // nested fixture says it should.
+        let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
+
+        let elem = cursor
+            .add_get_element_ptr(
+                Some(tys.inner),
+                loaded_ptr,
+                indices,
+                None,
+                Some("r"),
+                &mut ctx,
+            )
+            .expect("with the source type given there is nothing to infer");
+
+        let pointee = elem
+            .try_inferring_pointee_ty(cursor.block, &mut ctx)
+            .expect("the gep itself records its source type");
+
+        assert_eq!(
+            ctx.display(pointee.ty).to_string(),
+            "[3 x i64]",
+            "field 1 of `{{ i8, [3 x i64] }}` is the array"
+        );
+
+        assert_eq!(pointee.ty, tys.i64_array);
+    }
+
     /// Memory is reached through a pointer, so `getelementptr` refuses anything else
     /// for the same reason `load` does.
     #[test]
