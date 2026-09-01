@@ -1,6 +1,6 @@
 use crate::{
     cfg::{context::Context, function::FuncId},
-    error::PhiError,
+    error::{InstructionError, PhiError},
     instruction::{Instruction, PhiInstrHandler, PhiInstruction},
     interner::StrId,
 };
@@ -12,6 +12,7 @@ pub struct BasicBlock {
     pub(crate) func_id: FuncId,
     pub(crate) phis: Vec<PhiInstruction>,
     pub(crate) instructions: Vec<Instruction>,
+    pub(crate) is_locked: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -36,13 +37,23 @@ impl Clone for BasicBlockId {
 impl Copy for BasicBlockId {}
 
 impl BasicBlockId {
-    pub(crate) fn add_instruction(&self, instr: Instruction, ctx: &mut Context) -> usize {
+    pub(crate) fn add_instruction(
+        &self,
+        instr: Instruction,
+        ctx: &mut Context,
+    ) -> Result<usize, InstructionError> {
+        if ctx.get_block(*self).is_locked {
+            return Err(InstructionError::BasicBlockAlreadyTerminated(
+                self.name(ctx),
+            ));
+        }
+
         let block = ctx.get_block_mut(*self);
         let index = block.instructions.len();
 
         block.instructions.push(instr);
 
-        index
+        Ok(index)
     }
 
     pub(crate) fn add_phi(
@@ -50,6 +61,10 @@ impl BasicBlockId {
         instr: PhiInstruction,
         ctx: &mut Context,
     ) -> Result<PhiInstrHandler, PhiError> {
+        if ctx.get_block(*self).is_locked {
+            return Err(PhiError::BasicBlockAlreadyTerminated(self.name(ctx)));
+        }
+
         let block = ctx.get_block_mut(*self);
 
         if block.is_first {
@@ -68,5 +83,17 @@ impl BasicBlockId {
             index: id,
             block: *self,
         })
+    }
+
+    pub(crate) fn name(&self, ctx: &Context) -> String {
+        let block = ctx.get_block(*self);
+
+        ctx.str_interner.value(block.name.0).to_string()
+    }
+
+    pub(crate) fn set_locked(&self, ctx: &mut Context) {
+        let block = ctx.get_block_mut(*self);
+
+        block.is_locked = true;
     }
 }

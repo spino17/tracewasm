@@ -50,23 +50,31 @@ impl Cursor {
         Ok((phi_id, val))
     }
 
-    pub fn add_unconditional_br(&self, label: BasicBlockId, ctx: &mut Context) {
+    pub fn add_unconditional_br(
+        self,
+        label: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), InstructionError> {
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::UnconditionalBr(UnconditionalBrOperands { label }),
                 value: None,
             },
             ctx,
-        );
+        )?;
+
+        self.block.set_locked(ctx);
+
+        Ok(())
     }
 
     pub fn add_conditional_br(
-        &self,
+        self,
         cond: I1Value,
         true_label: BasicBlockId,
         false_label: BasicBlockId,
         ctx: &mut Context,
-    ) {
+    ) -> Result<(), InstructionError> {
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::ConditionalBr(ConditionalBrOperands {
@@ -77,7 +85,11 @@ impl Cursor {
                 value: None,
             },
             ctx,
-        );
+        )?;
+
+        self.block.set_locked(ctx);
+
+        Ok(())
     }
 
     pub fn add_load(
@@ -171,7 +183,7 @@ impl Cursor {
                 value: None,
             },
             ctx,
-        );
+        )?;
 
         Ok(())
     }
@@ -345,7 +357,7 @@ fn add_instruction_to_block_and_get_value(
             value: Some(val.clone()),
         },
         ctx,
-    );
+    )?;
 
     let register_def_index = ctx.register_def_instr_index.entry(func_id).or_default();
 
@@ -382,25 +394,35 @@ mod tests {
         let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let i32_ty = ctx.i32_ty();
         let cursor = builder.cursor_at_block(entry);
 
-        cursor.add_unconditional_br(body, &mut ctx);
-        cursor.add_unconditional_br(entry, &mut ctx);
+        // A non-terminator first, so the block is still open for the branch that
+        // follows it — a branch consumes the cursor and closes the block.
+        cursor
+            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .unwrap();
+        cursor.add_unconditional_br(body, &mut ctx).unwrap();
 
         let instrs = &ctx.blocks.get(entry.raw()).unwrap().instructions;
 
         assert_eq!(instrs.len(), 2);
 
         assert!(
-            matches!(
-                instrs[0].kind,
-                InstructionKind::UnconditionalBr(UnconditionalBrOperands{ label }) if label == body
-            ),
+            matches!(instrs[0].kind, InstructionKind::Alloca(_)),
             "the first instruction is the one added first"
         );
 
         assert!(
-            instrs.iter().all(|i| i.value.is_none()),
+            matches!(
+                instrs[1].kind,
+                InstructionKind::UnconditionalBr(UnconditionalBrOperands{ label }) if label == body
+            ),
+            "and the branch is second"
+        );
+
+        assert!(
+            instrs[1].value.is_none(),
             "a branch produces no value, so it defines no register"
         );
 
@@ -594,9 +616,14 @@ mod tests {
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
+        let i32_ty = ctx.i32_ty();
         let cursor = builder.cursor_at_block(body);
 
-        cursor.add_unconditional_br(body, &mut ctx);
+        // A plain instruction, not a terminator: this is about phis coming *first*,
+        // not about the block being closed, which is a separate rule.
+        cursor
+            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .unwrap();
 
         let err = cursor
             .add_phi(&[(entry, v)], Some("result"), &mut ctx)
@@ -608,6 +635,295 @@ mod tests {
             ctx.blocks.get(body.raw()).unwrap().phis.is_empty(),
             "the refused phi must not have been added"
         );
+    }
+
+    /// A block stays open until a terminator: plain instructions keep appending, and
+    /// nothing locks it.
+    #[test]
+    fn a_block_stays_open_until_a_terminator() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let i32_ty = ctx.i32_ty();
+
+        let cursor = builder.cursor_at_block(entry);
+
+        for _ in 0..3 {
+            cursor
+                .add_alloca(i32_ty, None, None, None, &mut ctx)
+                .expect("a block that has not branched still accepts instructions");
+        }
+
+        assert!(
+            !ctx.blocks.get(entry.raw()).unwrap().is_locked,
+            "only a terminator locks a block"
+        );
+
+        assert_eq!(ctx.blocks.get(entry.raw()).unwrap().instructions.len(), 3);
+    }
+
+    /// Both terminators lock, and locking is per *block*: closing one leaves its
+    /// siblings open.
+    #[test]
+    fn a_terminator_locks_its_own_block_only() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let exit = f.add_basic_block("exit".to_string(), &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
+        assert!(
+            !ctx.blocks.get(body.raw()).unwrap().is_locked,
+            "a branch closes the block it was written into, not the one it names"
+        );
+
+        let cond = Value::from_const(true, None, &mut ctx)
+            .unwrap()
+            .into_i1(&ctx)
+            .unwrap();
+
+        builder
+            .cursor_at_block(body)
+            .add_conditional_br(cond, exit, exit, &mut ctx)
+            .unwrap();
+
+        assert!(
+            ctx.blocks.get(body.raw()).unwrap().is_locked,
+            "a conditional branch locks too"
+        );
+
+        assert!(!ctx.blocks.get(exit.raw()).unwrap().is_locked);
+    }
+
+    /// Consuming the cursor stops *that* cursor being reused, but a fresh one can
+    /// still be opened at the same block — which is what `is_locked` is for, and the
+    /// only thing that catches this: the consumed-`self` rule cannot see a second
+    /// cursor.
+    #[test]
+    fn a_fresh_cursor_on_a_locked_block_is_refused() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        // A second cursor at the same block: the consumed-`self` rule cannot see this.
+        let reopened = builder.cursor_at_block(entry);
+
+        let err = reopened
+            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .expect_err("`entry` already ends in a branch");
+
+        assert!(
+            matches!(&err, InstructionError::BasicBlockAlreadyTerminated(name) if name == "entry"),
+            "the error must name the block it refused, got: {err}"
+        );
+
+        assert_eq!(
+            ctx.blocks.get(entry.raw()).unwrap().instructions.len(),
+            1,
+            "the refused instruction must not have been added"
+        );
+    }
+
+    /// The same on the phi path. The lock check runs *before* the
+    /// `instructions.is_empty()` one, so a terminated block reports being terminated
+    /// rather than the vaguer `PhiInstructionAddError` — which is the more useful of
+    /// the two, since both are true of a block that has branched.
+    #[test]
+    fn a_phi_on_a_locked_block_reports_the_block_is_terminated() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let v = value(1, &mut ctx);
+
+        builder
+            .cursor_at_block(body)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        let reopened = builder.cursor_at_block(body);
+
+        let err = reopened
+            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .expect_err("`body` already ends in a branch");
+
+        assert!(
+            matches!(&err, PhiError::BasicBlockAlreadyTerminated(name) if name == "body"),
+            "the error must name the block it refused, got: {err}"
+        );
+
+        assert!(
+            ctx.blocks.get(body.raw()).unwrap().phis.is_empty(),
+            "the refused phi must not have been added"
+        );
+    }
+
+    /// Every builder that writes an instruction goes through the same lock, not just
+    /// the one that happened to be tested first.
+    #[test]
+    fn a_locked_block_refuses_every_kind_of_instruction() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+
+        let i32_ty = ctx.i32_ty();
+        let ptr = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        let terminated = |r: Result<(), InstructionError>, what: &str| {
+            assert!(
+                matches!(
+                    &r,
+                    Err(InstructionError::BasicBlockAlreadyTerminated(name)) if name == "entry"
+                ),
+                "`{what}` must be refused by the lock, got: {r:?}"
+            );
+        };
+
+        terminated(
+            builder
+                .cursor_at_block(entry)
+                .add_alloca(i32_ty, None, None, None, &mut ctx)
+                .map(|_| ()),
+            "alloca",
+        );
+
+        terminated(
+            builder
+                .cursor_at_block(entry)
+                .add_load(i32_ty, ptr.clone(), None, None, &mut ctx)
+                .map(|_| ()),
+            "load",
+        );
+
+        terminated(
+            builder
+                .cursor_at_block(entry)
+                .add_store(seven, ptr.clone(), None, None, &mut ctx),
+            "store",
+        );
+
+        terminated(
+            builder
+                .cursor_at_block(entry)
+                .add_get_element_ptr(Some(i32_ty), ptr, vec![zero], None, None, &mut ctx)
+                .map(|_| ()),
+            "getelementptr",
+        );
+
+        assert_eq!(
+            ctx.blocks.get(entry.raw()).unwrap().instructions.len(),
+            1,
+            "nothing was appended past the terminator"
+        );
+    }
+
+    /// A second terminator is refused too, so a block ends in exactly one branch —
+    /// which is what LLVM requires of a well-formed block.
+    #[test]
+    fn a_locked_block_refuses_a_second_terminator() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        let err = builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .expect_err("a block ends once");
+
+        assert!(
+            matches!(&err, InstructionError::BasicBlockAlreadyTerminated(name) if name == "entry"),
+            "got: {err}"
+        );
+
+        assert_eq!(ctx.blocks.get(entry.raw()).unwrap().instructions.len(), 1);
+    }
+
+    /// The lock survives reopening: asking for a fresh cursor does not clear it, so a
+    /// block cannot be reopened by going back to the builder.
+    #[test]
+    fn reopening_a_block_does_not_clear_its_lock() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .cursor_at_block(entry)
+            .add_unconditional_br(body, &mut ctx)
+            .unwrap();
+
+        for attempt in 0..3 {
+            let reopened = builder.cursor_at_block(entry);
+
+            assert!(
+                reopened
+                    .add_alloca(i32_ty, None, None, None, &mut ctx)
+                    .is_err(),
+                "attempt {attempt} must still be refused"
+            );
+
+            assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
+        }
+    }
+
+    /// A phi still goes in before the block is closed — locking is about the
+    /// terminator, and an open block accepts phis and instructions as before.
+    #[test]
+    fn locking_does_not_disturb_a_well_formed_block() {
+        let (mut ctx, mut builder) = fixture();
+        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
+        let v = value(1, &mut ctx);
+        let i32_ty = ctx.i32_ty();
+
+        let cursor = builder.cursor_at_block(body);
+
+        cursor
+            .add_phi(&[(entry, v)], Some("m"), &mut ctx)
+            .expect("a phi opens the block");
+
+        cursor
+            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .expect("instructions follow the phi");
+
+        cursor
+            .add_unconditional_br(body, &mut ctx)
+            .expect("and the terminator closes it");
+
+        let block = ctx.blocks.get(body.raw()).unwrap();
+
+        assert_eq!(block.phis.len(), 1);
+        assert_eq!(block.instructions.len(), 2);
+        assert!(block.is_locked, "closed only at the end");
     }
 
     /// A phi names one value per *predecessor*, so the same predecessor twice is a

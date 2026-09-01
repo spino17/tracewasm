@@ -68,6 +68,8 @@ pub enum InstructionError {
     /// alignment off is how the ABI default is asked for.
     #[error("alignment must be a power of two, but got `{0}`")]
     AlignmentNotPowerOfTwo(u32),
+    #[error("basic block `{0}` already ends in a branch, so nothing more can be added to it")]
+    BasicBlockAlreadyTerminated(String),
     #[error("{0}")]
     Alloca(#[from] AllocaError),
     #[error("{0}")]
@@ -102,6 +104,8 @@ pub enum StoreError {
 pub enum PhiError {
     #[error("phi instructions should be added at the start of the basic block")]
     PhiInstructionAddError,
+    #[error("basic block `{0}` already ends in a branch, so nothing more can be added to it")]
+    BasicBlockAlreadyTerminated(String),
     #[error("phi instructions cannot be added to the first basic block of the function")]
     PhiInstructionCannotBeAddedToEntryBasicBlock,
     #[error("basic block branch already in phi instruction")]

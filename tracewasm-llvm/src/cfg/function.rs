@@ -60,6 +60,7 @@ impl FuncId {
             func_id: *self,
             phis: vec![],
             instructions: vec![],
+            is_locked: false,
         }));
 
         let func = ctx.get_func_mut(*self);

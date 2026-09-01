@@ -463,7 +463,7 @@ mod tests {
         in_entry
             .add_store(null, ptr_slot, None, None, &mut ctx)
             .unwrap();
-        in_entry.add_unconditional_br(body, &mut ctx);
+        in_entry.add_unconditional_br(body, &mut ctx).unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
@@ -480,11 +480,13 @@ mod tests {
             .into_i1(&ctx)
             .unwrap();
 
-        in_body.add_conditional_br(cond, body, exit, &mut ctx);
+        in_body
+            .add_conditional_br(cond, body, exit, &mut ctx)
+            .unwrap();
 
         // No `ret` exists in the builder yet, so `exit` terminates with a self-loop.
         let in_exit = builder.cursor_at_block(exit);
-        in_exit.add_unconditional_br(exit, &mut ctx);
+        in_exit.add_unconditional_br(exit, &mut ctx).unwrap();
 
         let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
 
