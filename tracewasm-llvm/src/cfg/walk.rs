@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub trait CfgVisitor {
-    type OkType;
+    type OkType: Default;
     type ErrType;
 
     fn visit_phi(
@@ -160,20 +160,26 @@ pub trait CfgVisitor {
 
     fn post_block_visit(
         &mut self,
-        func: FuncId,
-        block: BasicBlockId,
-        phi_results: Vec<Self::OkType>,
-        instr_results: Vec<Self::OkType>,
-    ) -> Result<Self::OkType, Self::ErrType>;
+        _func: FuncId,
+        _block: BasicBlockId,
+        _phi_results: Vec<Self::OkType>,
+        _instr_results: Vec<Self::OkType>,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        Ok(Self::OkType::default())
+    }
 
     fn post_func_visit(
         &mut self,
-        func: FuncId,
-        block_results: Vec<Self::OkType>,
-    ) -> Result<Self::OkType, Self::ErrType>;
+        _func: FuncId,
+        _block_results: Vec<Self::OkType>,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        Ok(Self::OkType::default())
+    }
 
     fn post_module_visit(
         &mut self,
-        func_results: Vec<Self::OkType>,
-    ) -> Result<Self::OkType, Self::ErrType>;
+        _func_results: Vec<Self::OkType>,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        Ok(Self::OkType::default())
+    }
 }

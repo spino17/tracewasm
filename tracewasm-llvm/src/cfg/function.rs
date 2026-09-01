@@ -4,13 +4,16 @@ use crate::{
         context::Context,
     },
     error::ContextError,
-    interner::StrId,
+    interner::{StrId, TyId},
+    value::Value,
 };
 use id_arena::Id;
 use rustc_hash::FxHashSet;
 
 pub struct Function {
     pub(crate) name: StrId,
+    pub(crate) params: Box<[Value]>,
+    pub(crate) result: TyId,
     pub(crate) blocks: Vec<BasicBlockId>,
     pub(crate) block_names: FxHashSet<StrId>,
 }
