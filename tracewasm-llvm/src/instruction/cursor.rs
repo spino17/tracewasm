@@ -1253,7 +1253,10 @@ mod tests {
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
-        let base = ctx.get_func(f).params[0].clone();
+        let base = f
+            .nth_param(0, &ctx)
+            .expect("the function has one parameter")
+            .clone();
 
         assert!(
             base.try_inferring_pointee_ty(entry, &mut ctx).is_none(),
@@ -1288,7 +1291,10 @@ mod tests {
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
-        let base = ctx.get_func(f).params[0].clone();
+        let base = f
+            .nth_param(0, &ctx)
+            .expect("the function has one parameter")
+            .clone();
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
