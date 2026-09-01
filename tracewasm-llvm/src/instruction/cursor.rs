@@ -95,12 +95,12 @@ impl Cursor {
 
     pub fn add_ret(
         self,
-        ty: Option<TyId>,
         val: Option<Value>,
+        ty: Option<TyId>,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
-        let (val, ty) = match (ty, val) {
-            (Some(ty), Some(val)) => {
+        let (val, ty) = match (val, ty) {
+            (Some(val), Some(ty)) => {
                 if ty.is_void(ctx) {
                     return Err(
                         RetError::ValueGivenForVoid(ctx.display(val.ty()).to_string()).into(),
@@ -119,7 +119,12 @@ impl Cursor {
 
                 (Some(casted_val), ty)
             }
-            (Some(ty), None) => {
+            (Some(val), None) => {
+                let ty = val.ty();
+
+                (Some(val), ty)
+            }
+            (None, Some(ty)) => {
                 if !ty.is_void(ctx) {
                     return Err(
                         RetError::NonVoidTypeWithoutValue(ty.display(ctx).to_string()).into(),
@@ -127,11 +132,6 @@ impl Cursor {
                 }
 
                 (None, ty)
-            }
-            (None, Some(val)) => {
-                let ty = val.ty();
-
-                (Some(val), ty)
             }
             (None, None) => return Err(RetError::TypeAndValueBothAbsent.into()),
         };
@@ -298,10 +298,10 @@ impl Cursor {
 
     pub fn add_store(
         &self,
-        value: Value,
         ptr: Value,
-        align: Option<u32>,
+        value: Value,
         ty: Option<TyId>,
+        align: Option<u32>,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
         if !ptr.is_ptr(ctx) {
@@ -359,8 +359,8 @@ impl Cursor {
 
     pub fn add_get_element_ptr(
         &self,
-        source_ty: Option<TyId>,
         ptr: Value,
+        source_ty: Option<TyId>,
         indices: Vec<Value>,
         inbounds: Option<bool>,
         reg: Option<&str>,
