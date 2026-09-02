@@ -40,7 +40,7 @@ pub(crate) fn ctx() -> Context {
 /// the graph rather than the signature.
 pub(crate) fn add_fn(
     name: &str,
-    builder: &mut Builder,
+    builder: &Builder,
     ctx: &mut Context,
 ) -> Result<GlobalId<DefinedFunc>, ContextError> {
     let void_ty = ctx.void_ty();

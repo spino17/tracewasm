@@ -291,10 +291,10 @@ mod tests {
     /// A context, a builder, and two functions to scope names against.
     fn two_functions() -> (Context, GlobalId<DefinedFunc>, GlobalId<DefinedFunc>) {
         let mut ctx = crate::test_support::ctx();
-        let mut builder = Builder;
+        let builder = Builder;
 
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
-        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
+        let g = add_fn("g", &builder, &mut ctx).unwrap();
 
         (ctx, f, g)
     }
@@ -450,12 +450,12 @@ mod tests {
     fn an_id_from_another_context_panics_rather_than_writing_elsewhere() {
         // A builder per context: a builder's duplicate-name set holds `StrId`s,
         // which only mean anything against the context they were interned in.
-        let (mut ctx_a, mut builder_a) = fixture();
-        let (mut ctx_b, mut builder_b) = fixture();
+        let (mut ctx_a, builder_a) = fixture();
+        let (mut ctx_b, builder_b) = fixture();
 
-        let f = add_fn("f", &mut builder_a, &mut ctx_a).unwrap();
+        let f = add_fn("f", &builder_a, &mut ctx_a).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx_a).unwrap();
-        let g = add_fn("g", &mut builder_b, &mut ctx_b).unwrap();
+        let g = add_fn("g", &builder_b, &mut ctx_b).unwrap();
 
         g.add_basic_block("entry".to_string(), &mut ctx_b).unwrap();
 
@@ -470,9 +470,9 @@ mod tests {
     /// a function and a block costs one entry.
     #[test]
     fn names_are_interned_once_across_the_context() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
-        let f = add_fn("shared", &mut builder, &mut ctx).unwrap();
+        let f = add_fn("shared", &builder, &mut ctx).unwrap();
 
         f.add_basic_block("shared".to_string(), &mut ctx).unwrap();
 

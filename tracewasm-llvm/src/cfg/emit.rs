@@ -576,7 +576,7 @@ mod tests {
     /// up here as a diff.
     #[test]
     fn a_module_emits_ir_that_llvm_assembles() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -804,7 +804,7 @@ mod tests {
     /// `build_call` to resolve, but not for the module to be valid.
     #[test]
     fn a_declared_function_is_emitted_and_callable() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let f64_ty = ctx.f64_ty();
@@ -870,6 +870,176 @@ mod tests {
         );
     }
 
+    /// A declared global emits `@g = external global <ty>` — no initializer, since
+    /// `external` names something defined elsewhere. `llvm-as` refuses one:
+    /// `@g = external global i32 0` does not parse.
+    #[test]
+    fn a_global_variable_without_an_initializer_is_a_declaration() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .declare_global_variable("counter".to_string(), i32_ty, None, &mut ctx)
+            .expect("an i32 is a legal global type");
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                "@counter = external global i32\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
+    }
+
+    /// With an initializer the `external` keyword is *omitted*, because that keyword
+    /// is what makes a global a declaration — and a declaration may not be
+    /// initialised. Writing both is refused by `llvm-as`.
+    #[test]
+    fn an_initialised_global_variable_omits_the_external_keyword() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let ptr_ty = ctx.ptr_ty();
+
+        // A constant gep is the one initializer `ConstExpr` can express today.
+        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+
+        let init = ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
+            source_ty: i32_ty,
+            ptr: null,
+            indices: Box::new([zero]),
+            inbounds: false,
+        }));
+
+        builder
+            .declare_global_variable("p".to_string(), ptr_ty, Some(init), &mut ctx)
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                "@p = global ptr getelementptr (i32, ptr null, i32 0)\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
+    }
+
+    /// A global is an address, so its value is a `ptr` and it is written by name.
+    /// That is what lets one be stored, loaded through, or passed as an argument.
+    #[test]
+    fn a_global_is_an_operand_referred_to_by_name() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let ptr_ty = ctx.ptr_ty();
+        let void_ty = ctx.void_ty();
+
+        let counter = builder
+            .declare_global_variable("counter".to_string(), i32_ty, None, &mut ctx)
+            .unwrap();
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let address = Value::from_global(counter, &mut ctx);
+
+        assert_eq!(address.ty(), ptr_ty, "a global's value is its address");
+
+        // Its pointee is recoverable, so the load needs no explicit type.
+        let loaded = cursor
+            .build_load(address.clone(), None, None, Some("v"), &mut ctx)
+            .expect("the global says what it points at");
+
+        assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
+
+        cursor
+            .build_store(address, loaded, None, None, &mut ctx)
+            .unwrap();
+
+        cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert!(
+            ir.contains("    %v = load i32, ptr @counter\n"),
+            "the global is named in the load, got:\n{ir}"
+        );
+
+        assert!(
+            ir.contains("    store i32 %v, ptr @counter\n"),
+            "and in the store, got:\n{ir}"
+        );
+    }
+
+    /// Globals and functions share one namespace, so a name is used once.
+    #[test]
+    fn a_global_variable_cannot_reuse_a_name() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        builder
+            .declare_global_variable("g".to_string(), i32_ty, None, &mut ctx)
+            .unwrap();
+
+        assert!(
+            builder
+                .declare_global_variable("g".to_string(), i32_ty, None, &mut ctx)
+                .is_err(),
+            "a second global of that name collides"
+        );
+
+        assert!(
+            builder
+                .define_function("g".to_string(), &[], void_ty, &mut ctx)
+                .is_err(),
+            "and so does a function, since the namespace is shared"
+        );
+    }
+
+    /// Every linkage and visibility spells itself the way `llvm-as` accepts.
+    #[test]
+    fn linkage_and_visibility_render_as_llvm_spells_them() {
+        for (linkage, expected) in [
+            (Linkage::External, "external"),
+            (Linkage::Internal, "internal"),
+            (Linkage::Private, "private"),
+            (Linkage::Weak, "weak"),
+            (Linkage::Linkonce, "linkonce"),
+            (Linkage::LinkonceOdr, "linkonce_odr"),
+            (Linkage::WeakOdr, "weak_odr"),
+            (Linkage::Common, "common"),
+            (Linkage::Appending, "appending"),
+            (Linkage::AvailableExternally, "available_externally"),
+            (Linkage::ExternWeak, "extern_weak"),
+        ] {
+            assert_eq!(linkage.to_string(), expected);
+        }
+
+        for (visiblity, expected) in [
+            (Visiblity::Default, "default"),
+            (Visiblity::Hidden, "hidden"),
+            (Visiblity::Protected, "protected"),
+        ] {
+            assert_eq!(visiblity.to_string(), expected);
+        }
+    }
+
     /// A constant `getelementptr` is written inline, in the parenthesised form, and
     /// used wherever a constant may be — here as the address a `store` writes to.
     ///
@@ -878,7 +1048,7 @@ mod tests {
     /// assignment.
     #[test]
     fn a_constant_getelementptr_is_emitted_inline() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();

@@ -141,7 +141,7 @@ mod tests {
     /// Parameters come back by position, typed and named as declared.
     #[test]
     fn nth_param_returns_each_parameter_in_order() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let f64_ty = ctx.f64_ty();
@@ -182,7 +182,7 @@ mod tests {
     /// knowing the arity — and a function with no parameters has nothing at 0.
     #[test]
     fn nth_param_is_none_past_the_end() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -209,7 +209,7 @@ mod tests {
     /// another's.
     #[test]
     fn nth_param_is_scoped_to_its_function() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let f64_ty = ctx.f64_ty();
@@ -231,7 +231,7 @@ mod tests {
     /// result, not the absence of one.
     #[test]
     fn return_ty_reports_the_declared_result() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -258,8 +258,8 @@ mod tests {
     /// the first block added to a function is it.
     #[test]
     fn only_the_first_block_of_a_function_is_the_entry() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
 
@@ -268,7 +268,7 @@ mod tests {
 
         // A second function's first block is an entry too — `is_first` is per
         // function, not per module.
-        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
+        let g = add_fn("g", &builder, &mut ctx).unwrap();
         let g_entry = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         assert!(ctx.blocks.get(g_entry.raw()).unwrap().is_first);
@@ -278,8 +278,8 @@ mod tests {
     /// block — the two have to agree or a later walk of the graph goes wrong.
     #[test]
     fn a_block_and_its_function_agree() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
         assert_eq!(ctx.blocks.get(entry.raw()).unwrap().func_id.raw(), f.raw());
@@ -289,8 +289,8 @@ mod tests {
     /// Two blocks sharing a label would make a branch to it ambiguous.
     #[test]
     fn a_duplicate_block_name_in_one_function_is_refused() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
 
         f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 
@@ -314,9 +314,9 @@ mod tests {
     /// case, so scoping it to the module would reject almost every real program.
     #[test]
     fn the_same_block_name_in_another_function_is_fine() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
-        let g = add_fn("g", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
+        let g = add_fn("g", &builder, &mut ctx).unwrap();
         let in_f = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let in_g = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 

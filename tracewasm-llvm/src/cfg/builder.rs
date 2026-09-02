@@ -32,7 +32,7 @@ impl Builder {
     /// consume the cursor, plus the block's own
     /// [`is_locked`](crate::cfg::basic_block::BasicBlock) flag for cursors opened
     /// afterwards.
-    pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor {
+    pub fn cursor_at_block(&self, id: BasicBlockId) -> Cursor {
         Cursor { block: id }
     }
 
@@ -314,7 +314,7 @@ mod tests {
     /// block, `%2` is the first legal instruction number.
     #[test]
     fn unnamed_params_take_the_first_numbers_and_the_body_continues() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -347,7 +347,7 @@ mod tests {
     /// instruction `%0` is refused with "expected to be numbered '%1' or greater".
     #[test]
     fn a_named_param_does_not_consume_a_number() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -382,7 +382,7 @@ mod tests {
     /// assembles.
     #[test]
     fn all_named_params_leave_the_body_starting_at_zero() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -411,7 +411,7 @@ mod tests {
     /// is what `llvm-as` accepts for `%1` in `entry` and `%2` in `next`.
     #[test]
     fn the_counter_continues_across_blocks() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -448,7 +448,7 @@ mod tests {
     /// different value from `%0` in the other.
     #[test]
     fn each_function_restarts_the_counter_including_its_params() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -487,7 +487,7 @@ mod tests {
     /// a definition does — but adds no function to the arena, since there is no body.
     #[test]
     fn a_declaration_records_a_signature_without_a_definition() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
 
@@ -514,7 +514,7 @@ mod tests {
     /// other. Either order collides.
     #[test]
     fn a_declaration_and_a_definition_cannot_share_a_name() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -550,7 +550,7 @@ mod tests {
     /// size, and a result may be `void` but not a function type.
     #[test]
     fn a_declaration_signature_is_checked() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -593,7 +593,7 @@ mod tests {
     /// result is recorded as given.
     #[test]
     fn a_signature_becomes_typed_registers_and_a_result() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let f64_ty = ctx.f64_ty();
@@ -653,7 +653,7 @@ mod tests {
     /// `define void @f({i32, double} %x)` assembles.
     #[test]
     fn an_aggregate_parameter_is_allowed() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let f64_ty = ctx.f64_ty();
@@ -680,7 +680,7 @@ mod tests {
     /// function-typed one with "invalid type for function argument".
     #[test]
     fn an_unsized_parameter_is_refused() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let void_ty = ctx.void_ty();
 
@@ -704,7 +704,7 @@ mod tests {
     /// function type is not: `llvm-as` refuses it with "invalid function return type".
     #[test]
     fn a_result_may_be_void_but_not_a_function_type() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();

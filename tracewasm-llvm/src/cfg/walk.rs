@@ -132,11 +132,13 @@ pub trait CfgVisitor {
 
     /// Visits a global variable.
     ///
-    /// Takes the whole [`GlobalData`] rather than just the
-    /// [`GlobalVariable`](crate::cfg::global::GlobalVariable) inside it, because the
-    /// linkage and visibility are part of how a global is written — emitting without
-    /// them would turn an `internal` global into an externally visible one. Its
-    /// `kind` is always [`GlobalKind::Variable`](crate::cfg::global::GlobalKind).
+    /// `linkage` and `visiblity` come alongside the [`GlobalVariable`] rather than
+    /// being read from it, because they live on the enclosing `GlobalData` — and they
+    /// are part of how a global is written, not decoration: emitting without them
+    /// would turn an `internal` global into an externally visible one.
+    ///
+    /// Globals are visited before declarations and definitions, matching the order a
+    /// module reads.
     fn visit_global_variable(
         &mut self,
         name: &str,
@@ -262,7 +264,7 @@ pub trait CfgVisitor {
 
             global_variable_results.push(self.visit_global_variable(
                 name,
-                &var,
+                var,
                 linkage,
                 visiblity,
                 &cfg.context,

@@ -828,8 +828,8 @@ mod tests {
     /// Instructions land in the block the cursor names, in order.
     #[test]
     fn instructions_append_in_order_to_the_open_block() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let i32_ty = ctx.i32_ty();
@@ -877,8 +877,8 @@ mod tests {
     /// one runnable until that lands.
     #[test]
     fn a_phi_needs_at_least_one_branch() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let _entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(body);
@@ -899,8 +899,8 @@ mod tests {
     /// between.
     #[test]
     fn a_phi_cannot_go_in_the_entry_block() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
         let cursor = builder.cursor_at_block(entry);
@@ -920,8 +920,8 @@ mod tests {
     /// blocks.
     #[test]
     fn phis_in_a_later_block_are_indexed_within_that_block() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let tail = f.add_basic_block("tail".to_string(), &mut ctx).unwrap();
@@ -953,8 +953,8 @@ mod tests {
     /// carries that type — that is what makes the result usable downstream.
     #[test]
     fn a_phi_yields_a_value_of_its_branches_type() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -974,8 +974,8 @@ mod tests {
     /// A phi produces one value, so every incoming value has to have its type.
     #[test]
     fn phi_branches_must_all_share_the_phis_type() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -1011,8 +1011,8 @@ mod tests {
     /// rejected, with an error naming the same type twice.
     #[test]
     fn a_phi_accepts_branches_whose_equal_types_were_built_separately() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -1055,8 +1055,8 @@ mod tests {
     /// has been emitted the window has closed.
     #[test]
     fn a_phi_cannot_follow_an_instruction() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -1085,8 +1085,8 @@ mod tests {
     /// nothing locks it.
     #[test]
     fn a_block_stays_open_until_a_terminator() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let i32_ty = ctx.i32_ty();
 
@@ -1110,8 +1110,8 @@ mod tests {
     /// siblings open.
     #[test]
     fn a_terminator_locks_its_own_block_only() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let exit = f.add_basic_block("exit".to_string(), &mut ctx).unwrap();
@@ -1151,8 +1151,8 @@ mod tests {
     /// cursor.
     #[test]
     fn a_fresh_cursor_on_a_locked_block_is_refused() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let i32_ty = ctx.i32_ty();
@@ -1187,8 +1187,8 @@ mod tests {
     /// the two, since both are true of a block that has branched.
     #[test]
     fn a_phi_on_a_locked_block_reports_the_block_is_terminated() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -1219,8 +1219,8 @@ mod tests {
     /// the one that happened to be tested first.
     #[test]
     fn a_locked_block_refuses_every_kind_of_instruction() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
 
@@ -1286,8 +1286,8 @@ mod tests {
     /// which is what LLVM requires of a well-formed block.
     #[test]
     fn a_locked_block_refuses_a_second_terminator() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
 
@@ -1313,8 +1313,8 @@ mod tests {
     /// block cannot be reopened by going back to the builder.
     #[test]
     fn reopening_a_block_does_not_clear_its_lock() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let i32_ty = ctx.i32_ty();
@@ -1342,8 +1342,8 @@ mod tests {
     /// terminator, and an open block accepts phis and instructions as before.
     #[test]
     fn locking_does_not_disturb_a_well_formed_block() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let v = value(1, &mut ctx);
@@ -1375,7 +1375,7 @@ mod tests {
     /// "value doesn't match function result type".
     #[test]
     fn a_ret_must_match_the_function_result() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -1428,7 +1428,7 @@ mod tests {
     /// type inferred from the value, and `void` with no value at all.
     #[test]
     fn a_ret_accepts_its_three_well_formed_shapes() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -1482,7 +1482,7 @@ mod tests {
     /// The malformed combinations, each with its own error rather than one catch-all.
     #[test]
     fn a_ret_refuses_its_malformed_shapes() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -1543,7 +1543,7 @@ mod tests {
     /// A `ret` locks its block like the branches do, so nothing follows it.
     #[test]
     fn a_ret_locks_its_block() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -1580,7 +1580,7 @@ mod tests {
     /// something had defined a register, so reaching here panicked.
     #[test]
     fn a_parameter_pointer_declines_inference_rather_than_panicking() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let ptr_ty = ctx.ptr_ty();
@@ -1616,7 +1616,7 @@ mod tests {
     /// different types — the check only fires when a pointee is actually known.
     #[test]
     fn a_parameter_pointer_accepts_several_types_through_one_base() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -1683,7 +1683,7 @@ mod tests {
     /// `Context::register_defs` asserts, and it has to hold from the start.
     #[test]
     fn a_function_has_a_definition_map_before_any_instruction() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let void_ty = ctx.void_ty();
 
@@ -1726,7 +1726,7 @@ mod tests {
     /// name", so asking for one is an error rather than something quietly dropped.
     #[test]
     fn a_call_defines_a_register_only_when_the_callee_returns_one() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let void_ty = ctx.void_ty();
@@ -1778,7 +1778,7 @@ mod tests {
     /// does not, even though LLVM makes every function in a module mutually visible.
     #[test]
     fn a_call_resolves_only_against_functions_already_added() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
 
@@ -1813,7 +1813,7 @@ mod tests {
     /// recorded signature.
     #[test]
     fn a_call_is_checked_against_the_callee_signature() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -1907,7 +1907,7 @@ mod tests {
     /// register has to match already.
     #[test]
     fn a_call_argument_may_be_cast_before_it_is_checked() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -1982,7 +1982,7 @@ mod tests {
     /// A `call` is not a terminator, so the block stays open after one.
     #[test]
     fn a_call_does_not_end_its_block() {
-        let (mut ctx, mut builder) = fixture();
+        let (mut ctx, builder) = fixture();
 
         let void_ty = ctx.void_ty();
         let i32_ty = ctx.i32_ty();
@@ -2016,8 +2016,8 @@ mod tests {
     /// bug in the caller — and it is a different bug from an entry-block phi.
     #[test]
     fn a_phi_takes_each_predecessor_once() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let other = f.add_basic_block("other".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
@@ -2978,8 +2978,8 @@ mod tests {
     /// block from a `store` in a later one.
     #[test]
     fn a_register_definition_records_the_block_it_was_defined_in() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
         let ptr = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -3094,8 +3094,8 @@ mod tests {
     /// `inttoptr` first, so a non-pointer operand is refused rather than folded.
     #[test]
     fn a_load_needs_a_pointer_operand() {
-        let (mut ctx, mut builder) = fixture();
-        let f = add_fn("f", &mut builder, &mut ctx).unwrap();
+        let (mut ctx, builder) = fixture();
+        let f = add_fn("f", &builder, &mut ctx).unwrap();
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
         let not_a_ptr = value(7, &mut ctx);
