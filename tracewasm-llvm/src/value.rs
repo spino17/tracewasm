@@ -450,7 +450,7 @@ impl Value {
 
     /// Narrows to an [`I1Value`], the operand a conditional branch takes.
     ///
-    /// Checking once here means [`Cursor::add_conditional_br`](crate::instruction::cursor::Cursor::add_conditional_br)
+    /// Checking once here means [`Cursor::build_conditional_br`](crate::instruction::cursor::Cursor::build_conditional_br)
     /// cannot be handed anything else.
     ///
     /// # Errors

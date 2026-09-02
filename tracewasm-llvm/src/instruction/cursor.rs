@@ -24,8 +24,8 @@ use rustc_hash::FxHashSet;
 ///
 /// # Ending a block
 ///
-/// The three terminator builders — [`add_unconditional_br`](Self::add_unconditional_br),
-/// [`add_conditional_br`](Self::add_conditional_br) and [`add_ret`](Self::add_ret) —
+/// The three terminator builders — [`build_unconditional_br`](Self::build_unconditional_br),
+/// [`build_conditional_br`](Self::build_conditional_br) and [`build_ret`](Self::build_ret) —
 /// take `self` **by value**. Once a block is ended, that cursor is gone, and the
 /// compiler enforces it:
 ///
@@ -37,8 +37,8 @@ use rustc_hash::FxHashSet;
 /// # let f = builder.add_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
 /// # let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 /// let cursor = builder.cursor_at_block(entry);
-/// cursor.add_unconditional_br(entry, &mut ctx)?;
-/// cursor.add_unconditional_br(entry, &mut ctx)?;  // cursor was moved
+/// cursor.build_unconditional_br(entry, &mut ctx)?;
+/// cursor.build_unconditional_br(entry, &mut ctx)?;  // cursor was moved
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -56,7 +56,7 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Adds a phi node, returning a handle for adding later branches and the register
+    /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///
     /// The phi's type comes from the **first** branch; every branch given here, and
@@ -72,7 +72,7 @@ impl Cursor {
     /// - [`PhiError::BasicBlockAlreadyTerminated`] — the block already ended.
     /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — a branch disagrees with the
     ///   phi's type.
-    pub fn add_phi(
+    pub fn build_phi(
         &self,
         branches: &[(BasicBlockId, Value)],
         reg: Option<&str>,
@@ -104,7 +104,7 @@ impl Cursor {
         Ok((phi_id, val))
     }
 
-    /// Adds `br label %target`, ending the block.
+    /// Builds `br label %target`, ending the block.
     ///
     /// Consumes the cursor.
     ///
@@ -112,7 +112,7 @@ impl Cursor {
     ///
     /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
     /// already ended this block.
-    pub fn add_unconditional_br(
+    pub fn build_unconditional_br(
         self,
         label: BasicBlockId,
         ctx: &mut Context,
@@ -130,7 +130,7 @@ impl Cursor {
         Ok(())
     }
 
-    /// Adds `br i1 %c, label %t, label %f`, ending the block.
+    /// Builds `br i1 %c, label %t, label %f`, ending the block.
     ///
     /// Consumes the cursor. The condition is an [`I1Value`], so the `i1` requirement
     /// was already checked by [`Value::into_i1`](crate::value::Value::into_i1).
@@ -139,7 +139,7 @@ impl Cursor {
     ///
     /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
     /// already ended this block.
-    pub fn add_conditional_br(
+    pub fn build_conditional_br(
         self,
         cond: I1Value,
         true_label: BasicBlockId,
@@ -163,7 +163,7 @@ impl Cursor {
         Ok(())
     }
 
-    /// Adds `ret <ty> %v` or `ret void`, ending the block.
+    /// Builds `ret <ty> %v` or `ret void`, ending the block.
     ///
     /// Consumes the cursor. The three well-formed shapes are:
     ///
@@ -185,7 +185,7 @@ impl Cursor {
     ///   a type from.
     /// - [`RetError::ReturnedValueTypeMismatch`] — the value does not fold into `ty`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn add_ret(
+    pub fn build_ret(
         self,
         val: Option<Value>,
         ty: Option<TyId>,
@@ -261,7 +261,7 @@ impl Cursor {
         Ok(())
     }
 
-    /// Adds `%x = alloca <ty>`, returning the pointer to the new slot.
+    /// Builds `%x = alloca <ty>`, returning the pointer to the new slot.
     ///
     /// The result is a `ptr`, not `ty` — and the `alloca` records what it allocated,
     /// so a later `load` or `store` through that pointer can have its type inferred
@@ -280,7 +280,7 @@ impl Cursor {
     /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`; leaving
     ///   `align` off is how the default is asked for.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn add_alloca(
+    pub fn build_alloca(
         &self,
         ty: TyId,
         count: Option<(Value, Option<TyId>)>,
@@ -349,7 +349,7 @@ impl Cursor {
         )
     }
 
-    /// Adds `%x = load <ty>, ptr %p`, returning the loaded value.
+    /// Builds `%x = load <ty>, ptr %p`, returning the loaded value.
     ///
     /// `ty` may be omitted when the pointer can be traced back to what it points at —
     /// an `alloca` or a `getelementptr`. A pointer that arrived as a function
@@ -366,7 +366,7 @@ impl Cursor {
     /// - [`InstructionError::LoadedTypeUnknown`] — no type given and none inferable.
     /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn add_load(
+    pub fn build_load(
         &self,
         ptr: Value,
         ty: Option<TyId>,
@@ -424,7 +424,7 @@ impl Cursor {
         )
     }
 
-    /// Adds `store <ty> %v, ptr %p`.
+    /// Builds `store <ty> %v, ptr %p`.
     ///
     /// Produces no value, so it defines no register. With `ty` given, the value is
     /// folded into it — a constant widens, a register must already match. Without,
@@ -439,7 +439,7 @@ impl Cursor {
     ///   what the pointer was traced to. Stricter than LLVM.
     /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn add_store(
+    pub fn build_store(
         &self,
         ptr: Value,
         value: Value,
@@ -500,7 +500,7 @@ impl Cursor {
         Ok(())
     }
 
-    /// Adds `%x = getelementptr <ty>, ptr %p, ...`, returning the computed pointer.
+    /// Builds `%x = getelementptr <ty>, ptr %p, ...`, returning the computed pointer.
     ///
     /// Address arithmetic only — nothing is read from memory. The result is always a
     /// `ptr`, and it records what it points at, so a chain of `getelementptr`s can
@@ -529,7 +529,7 @@ impl Cursor {
     /// - [`GepError::TypeNotIndexable`] — indices remain but the walk reached a
     ///   scalar.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn add_get_element_ptr(
+    pub fn build_get_element_ptr(
         &self,
         ptr: Value,
         source_ty: Option<TyId>,
@@ -678,9 +678,9 @@ mod tests {
         // A non-terminator first, so the block is still open for the branch that
         // follows it — a branch consumes the cursor and closes the block.
         cursor
-            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
             .unwrap();
-        cursor.add_unconditional_br(body, &mut ctx).unwrap();
+        cursor.build_unconditional_br(body, &mut ctx).unwrap();
 
         let instrs = &ctx.blocks.get(entry.raw()).unwrap().instructions;
 
@@ -724,7 +724,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .add_phi(&[], Some("result"), &mut ctx)
+            .build_phi(&[], Some("result"), &mut ctx)
             .expect_err("a phi with no branches has no value and no type");
 
         assert!(matches!(err, PhiError::PhiInstructionWithNoBranches));
@@ -746,7 +746,7 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("no predecessors to choose between");
 
         assert!(matches!(
@@ -768,8 +768,12 @@ mod tests {
         let (v1, v2, v3) = (value(1, &mut ctx), value(2, &mut ctx), value(3, &mut ctx));
         let cursor = builder.cursor_at_block(body);
 
-        let (first, _) = cursor.add_phi(&[(entry, v1)], Some("a"), &mut ctx).unwrap();
-        let (second, _) = cursor.add_phi(&[(entry, v2)], Some("b"), &mut ctx).unwrap();
+        let (first, _) = cursor
+            .build_phi(&[(entry, v1)], Some("a"), &mut ctx)
+            .unwrap();
+        let (second, _) = cursor
+            .build_phi(&[(entry, v2)], Some("b"), &mut ctx)
+            .unwrap();
 
         assert_eq!((first.index, first.block), (0, body));
         assert_eq!((second.index, second.block), (1, body));
@@ -777,7 +781,9 @@ mod tests {
         // A different block starts its own numbering, which is why the id has to
         // carry the block to be unambiguous.
         let cursor = builder.cursor_at_block(tail);
-        let (elsewhere, _) = cursor.add_phi(&[(entry, v3)], Some("c"), &mut ctx).unwrap();
+        let (elsewhere, _) = cursor
+            .build_phi(&[(entry, v3)], Some("c"), &mut ctx)
+            .unwrap();
 
         assert_eq!((elsewhere.index, elsewhere.block), (0, tail));
         assert_ne!(elsewhere.block, first.block);
@@ -795,7 +801,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (_, result) = cursor
-            .add_phi(&[(entry, v)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, v)], Some("merged"), &mut ctx)
             .unwrap();
 
         assert_eq!(
@@ -818,7 +824,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .add_phi(
+            .build_phi(
                 &[(entry, an_i32), (other, an_i64)],
                 Some("merged"),
                 &mut ctx,
@@ -875,7 +881,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (_, merged) = cursor
-            .add_phi(&[(entry, a), (other, b)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, a), (other, b)], Some("merged"), &mut ctx)
             .expect("both branches are `[4 x i32]`");
 
         assert_eq!(
@@ -900,11 +906,11 @@ mod tests {
         // A plain instruction, not a terminator: this is about phis coming *first*,
         // not about the block being closed, which is a separate rule.
         cursor
-            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
             .unwrap();
 
         let err = cursor
-            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("the block already has an instruction");
 
         assert!(matches!(err, PhiError::PhiInstructionAddError));
@@ -928,7 +934,7 @@ mod tests {
 
         for _ in 0..3 {
             cursor
-                .add_alloca(i32_ty, None, None, None, &mut ctx)
+                .build_alloca(i32_ty, None, None, None, &mut ctx)
                 .expect("a block that has not branched still accepts instructions");
         }
 
@@ -952,7 +958,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
@@ -968,7 +974,7 @@ mod tests {
 
         builder
             .cursor_at_block(body)
-            .add_conditional_br(cond, exit, exit, &mut ctx)
+            .build_conditional_br(cond, exit, exit, &mut ctx)
             .unwrap();
 
         assert!(
@@ -993,14 +999,14 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         // A second cursor at the same block: the consumed-`self` rule cannot see this.
         let reopened = builder.cursor_at_block(entry);
 
         let err = reopened
-            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
             .expect_err("`entry` already ends in a branch");
 
         assert!(
@@ -1029,13 +1035,13 @@ mod tests {
 
         builder
             .cursor_at_block(body)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         let reopened = builder.cursor_at_block(body);
 
         let err = reopened
-            .add_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
             .expect_err("`body` already ends in a branch");
 
         assert!(
@@ -1065,7 +1071,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         let terminated = |r: Result<(), InstructionError>, what: &str| {
@@ -1081,7 +1087,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_alloca(i32_ty, None, None, None, &mut ctx)
+                .build_alloca(i32_ty, None, None, None, &mut ctx)
                 .map(|_| ()),
             "alloca",
         );
@@ -1089,7 +1095,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_load(ptr.clone(), Some(i32_ty), None, None, &mut ctx)
+                .build_load(ptr.clone(), Some(i32_ty), None, None, &mut ctx)
                 .map(|_| ()),
             "load",
         );
@@ -1097,14 +1103,14 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_store(ptr.clone(), seven, None, None, &mut ctx),
+                .build_store(ptr.clone(), seven, None, None, &mut ctx),
             "store",
         );
 
         terminated(
             builder
                 .cursor_at_block(entry)
-                .add_get_element_ptr(ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
+                .build_get_element_ptr(ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
                 .map(|_| ()),
             "getelementptr",
         );
@@ -1127,12 +1133,12 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         let err = builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .expect_err("a block ends once");
 
         assert!(
@@ -1155,7 +1161,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .unwrap();
 
         for attempt in 0..3 {
@@ -1163,7 +1169,7 @@ mod tests {
 
             assert!(
                 reopened
-                    .add_alloca(i32_ty, None, None, None, &mut ctx)
+                    .build_alloca(i32_ty, None, None, None, &mut ctx)
                     .is_err(),
                 "attempt {attempt} must still be refused"
             );
@@ -1186,15 +1192,15 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         cursor
-            .add_phi(&[(entry, v)], Some("m"), &mut ctx)
+            .build_phi(&[(entry, v)], Some("m"), &mut ctx)
             .expect("a phi opens the block");
 
         cursor
-            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
             .expect("instructions follow the phi");
 
         cursor
-            .add_unconditional_br(body, &mut ctx)
+            .build_unconditional_br(body, &mut ctx)
             .expect("and the terminator closes it");
 
         let block = ctx.blocks.get(body.raw()).unwrap();
@@ -1224,7 +1230,7 @@ mod tests {
         // `define i32 @f() { ret void }`
         let err = builder
             .cursor_at_block(entry)
-            .add_ret(None, Some(void_ty), &mut ctx)
+            .build_ret(None, Some(void_ty), &mut ctx)
             .expect_err("an i32 function does not return void");
 
         assert!(
@@ -1244,7 +1250,7 @@ mod tests {
             matches!(
                 builder
                     .cursor_at_block(entry)
-                    .add_ret(Some(wide), Some(i64_ty), &mut ctx),
+                    .build_ret(Some(wide), Some(i64_ty), &mut ctx),
                 Err(InstructionError::Ret(RetError::DoesNotMatchFunctionResult(
                     ..
                 )))
@@ -1284,12 +1290,12 @@ mod tests {
 
         builder
             .cursor_at_block(with_ty)
-            .add_ret(Some(seven), Some(i32_ty), &mut ctx)
+            .build_ret(Some(seven), Some(i32_ty), &mut ctx)
             .expect("the type and the value agree");
 
         builder
             .cursor_at_block(inferred)
-            .add_ret(Some(eight), None, &mut ctx)
+            .build_ret(Some(eight), None, &mut ctx)
             .expect("with no type given it comes from the value");
 
         let returns_void = builder
@@ -1302,7 +1308,7 @@ mod tests {
 
         builder
             .cursor_at_block(empty)
-            .add_ret(None, Some(void_ty), &mut ctx)
+            .build_ret(None, Some(void_ty), &mut ctx)
             .expect("`ret void` takes no value");
 
         for block in [with_ty, inferred, empty] {
@@ -1334,7 +1340,7 @@ mod tests {
         // `ret void` with a value.
         let err = builder
             .cursor_at_block(a)
-            .add_ret(Some(seven), Some(void_ty), &mut ctx)
+            .build_ret(Some(seven), Some(void_ty), &mut ctx)
             .expect_err("`void` takes no value");
 
         assert!(
@@ -1348,7 +1354,7 @@ mod tests {
         // A non-`void` type with no value.
         let err = builder
             .cursor_at_block(b)
-            .add_ret(None, Some(i32_ty), &mut ctx)
+            .build_ret(None, Some(i32_ty), &mut ctx)
             .expect_err("`i32` needs a value");
 
         assert!(
@@ -1362,7 +1368,7 @@ mod tests {
         // Neither: there is nothing to infer a return from.
         let err = builder
             .cursor_at_block(c)
-            .add_ret(None, None, &mut ctx)
+            .build_ret(None, None, &mut ctx)
             .expect_err("neither a type nor a value");
 
         assert!(
@@ -1390,14 +1396,14 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_ret(None, Some(void_ty), &mut ctx)
+            .build_ret(None, Some(void_ty), &mut ctx)
             .unwrap();
 
         assert!(ctx.blocks.get(entry.raw()).unwrap().is_locked);
 
         let err = builder
             .cursor_at_block(entry)
-            .add_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
             .expect_err("`entry` already returned");
 
         assert!(
@@ -1442,7 +1448,7 @@ mod tests {
         );
 
         cursor
-            .add_load(base, Some(i32_ty), None, Some("v"), &mut ctx)
+            .build_load(base, Some(i32_ty), None, Some("v"), &mut ctx)
             .expect("the explicit type stands when inference declines");
     }
 
@@ -1476,7 +1482,7 @@ mod tests {
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
-                .add_load(base.clone(), Some(ty), None, Some(reg), &mut ctx)
+                .build_load(base.clone(), Some(ty), None, Some(reg), &mut ctx)
                 .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
 
             assert_eq!(loaded.ty(), ty, "the load has the type it was given");
@@ -1485,7 +1491,7 @@ mod tests {
         let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
         cursor
-            .add_store(base.clone(), seven, None, None, &mut ctx)
+            .build_store(base.clone(), seven, None, None, &mut ctx)
             .expect("storing through a parameter works for the same reason");
 
         // And a `getelementptr` needs its source type given, since there is none to
@@ -1494,7 +1500,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(
+                cursor.build_get_element_ptr(
                     base.clone(),
                     None,
                     vec![zero.clone()],
@@ -1508,7 +1514,7 @@ mod tests {
         );
 
         cursor
-            .add_get_element_ptr(base, Some(i32_ty), vec![zero], None, Some("g"), &mut ctx)
+            .build_get_element_ptr(base, Some(i32_ty), vec![zero], None, Some("g"), &mut ctx)
             .expect("and supplying it is enough");
     }
 
@@ -1541,7 +1547,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .add_alloca(i32_ty, None, None, Some("x"), &mut ctx)
+            .build_alloca(i32_ty, None, None, Some("x"), &mut ctx)
             .unwrap();
 
         assert_eq!(ctx.register_defs(f).len(), 1, "`f` recorded its alloca");
@@ -1561,7 +1567,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (phi, _) = cursor
-            .add_phi(&[(entry, v1), (other, v2)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, v1), (other, v2)], Some("merged"), &mut ctx)
             .unwrap();
 
         let err = phi
@@ -1609,7 +1615,7 @@ mod tests {
         );
 
         let slot = cursor
-            .add_alloca(struct_ty, None, None, Some("s"), ctx)
+            .build_alloca(struct_ty, None, None, Some("s"), ctx)
             .expect("a struct is allocatable");
 
         (cursor, slot, struct_ty)
@@ -1645,7 +1651,7 @@ mod tests {
         );
 
         let slot = cursor
-            .add_alloca(struct_ty, None, None, Some("s"), ctx)
+            .build_alloca(struct_ty, None, None, Some("s"), ctx)
             .expect("a struct is allocatable");
 
         (cursor, slot, array_ty, f64_ty)
@@ -1668,7 +1674,7 @@ mod tests {
 
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
-            .add_get_element_ptr(
+            .build_get_element_ptr(
                 slot,
                 None,
                 vec![zero.clone(), one],
@@ -1681,7 +1687,7 @@ mod tests {
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
         // so it has to come from the gep above.
         let elem = cursor
-            .add_get_element_ptr(field, None, vec![zero, two], None, Some("e"), &mut ctx)
+            .build_get_element_ptr(field, None, vec![zero, two], None, Some("e"), &mut ctx)
             .expect("the first gep says what it points to");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -1701,13 +1707,13 @@ mod tests {
 
         assert!(
             cursor
-                .add_store(elem.clone(), a_double, None, None, &mut ctx)
+                .build_store(elem.clone(), a_double, None, None, &mut ctx)
                 .is_ok(),
             "the element is a double"
         );
 
         let err = cursor
-            .add_store(elem, an_i32, None, None, &mut ctx)
+            .build_store(elem, an_i32, None, None, &mut ctx)
             .expect_err("an i32 is not what this points to");
 
         assert!(
@@ -1768,7 +1774,7 @@ mod tests {
 
         // `%n = gep { i32, [4 x double] }, ptr %s, i32 1` — the *next* struct along.
         let next = cursor
-            .add_get_element_ptr(slot, None, vec![one], None, Some("n"), &mut ctx)
+            .build_get_element_ptr(slot, None, vec![one], None, Some("n"), &mut ctx)
             .expect("a single index is pointer arithmetic over the source type");
 
         let pointee = next
@@ -1851,7 +1857,7 @@ mod tests {
         );
 
         let slot = cursor
-            .add_alloca(outer, None, None, Some("s"), ctx)
+            .build_alloca(outer, None, None, Some("s"), ctx)
             .expect("a struct is allocatable");
 
         (
@@ -1912,7 +1918,7 @@ mod tests {
             }
 
             let elem = cursor
-                .add_get_element_ptr(slot.clone(), None, indices, None, None, &mut ctx)
+                .build_get_element_ptr(slot.clone(), None, indices, None, None, &mut ctx)
                 .unwrap_or_else(|e| panic!("gep 0,{tail:?} should walk: {e}"));
 
             let pointee = elem
@@ -1956,7 +1962,7 @@ mod tests {
         ];
 
         let err = cursor
-            .add_get_element_ptr(slot.clone(), None, too_deep, None, None, &mut ctx)
+            .build_get_element_ptr(slot.clone(), None, too_deep, None, None, &mut ctx)
             .expect_err("an i64 has no elements");
 
         assert!(
@@ -1969,7 +1975,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(slot, None, past_double, None, None, &mut ctx),
+                cursor.build_get_element_ptr(slot, None, past_double, None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
             ),
             "a double has no elements either"
@@ -1992,11 +1998,11 @@ mod tests {
         ];
 
         let elem = cursor
-            .add_get_element_ptr(slot, None, deep, None, Some("e"), &mut ctx)
+            .build_get_element_ptr(slot, None, deep, None, Some("e"), &mut ctx)
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .add_load(elem.clone(), Some(tys.i64), None, Some("v"), &mut ctx)
+            .build_load(elem.clone(), Some(tys.i64), None, Some("v"), &mut ctx)
             .expect("an i64 is loadable");
 
         assert_eq!(ctx.display(loaded.ty()).to_string(), "i64");
@@ -2005,7 +2011,9 @@ mod tests {
         // Storing the loaded value straight back is the round trip, and the pointee
         // check has to accept it.
         assert!(
-            cursor.add_store(elem, loaded, None, None, &mut ctx).is_ok(),
+            cursor
+                .build_store(elem, loaded, None, None, &mut ctx)
+                .is_ok(),
             "what was loaded from a slot must store back into it"
         );
     }
@@ -2022,12 +2030,12 @@ mod tests {
         let ptr_field = vec![idx(0, &mut ctx), idx(2, &mut ctx)];
 
         let ptr_field = cursor
-            .add_get_element_ptr(slot, None, ptr_field, None, Some("p"), &mut ctx)
+            .build_get_element_ptr(slot, None, ptr_field, None, Some("p"), &mut ctx)
             .expect("field 2 is the pointer");
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
         let loaded_ptr = cursor
-            .add_load(ptr_field, Some(tys.ptr), None, Some("q"), &mut ctx)
+            .build_load(ptr_field, Some(tys.ptr), None, Some("q"), &mut ctx)
             .expect("a ptr is loadable");
 
         assert!(
@@ -2040,7 +2048,7 @@ mod tests {
         let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
 
         let err = cursor
-            .add_get_element_ptr(loaded_ptr.clone(), None, indices, None, None, &mut ctx)
+            .build_get_element_ptr(loaded_ptr.clone(), None, indices, None, None, &mut ctx)
             .expect_err("nothing can be inferred through a load");
 
         assert!(
@@ -2053,7 +2061,7 @@ mod tests {
         let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
 
         let elem = cursor
-            .add_get_element_ptr(
+            .build_get_element_ptr(
                 loaded_ptr,
                 Some(tys.inner),
                 indices,
@@ -2088,7 +2096,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(not_a_ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
+            .build_get_element_ptr(not_a_ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -2107,7 +2115,7 @@ mod tests {
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(ptr, Some(i32_ty), vec![a_float], None, None, &mut ctx)
+            .build_get_element_ptr(ptr, Some(i32_ty), vec![a_float], None, None, &mut ctx)
             .expect_err("a float is not an index");
 
         assert!(
@@ -2126,7 +2134,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(ptr, None, vec![zero], None, None, &mut ctx)
+            .build_get_element_ptr(ptr, None, vec![zero], None, None, &mut ctx)
             .expect_err("null says nothing about its pointee");
 
         assert!(
@@ -2146,7 +2154,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .add_get_element_ptr(slot, Some(i32_ty), vec![zero], None, None, &mut ctx)
+            .build_get_element_ptr(slot, Some(i32_ty), vec![zero], None, None, &mut ctx)
             .expect_err("the slot holds a struct, not an i32");
 
         assert!(
@@ -2170,7 +2178,7 @@ mod tests {
         let field = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let elem = cursor
-            .add_get_element_ptr(slot, None, vec![zero, field], None, Some("f"), &mut ctx)
+            .build_get_element_ptr(slot, None, vec![zero, field], None, Some("f"), &mut ctx)
             .expect("the pointee is inferable from the alloca");
 
         assert_eq!(
@@ -2211,7 +2219,7 @@ mod tests {
         let wide = Value::from_const(1i64, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(
+            .build_get_element_ptr(
                 slot.clone(),
                 None,
                 vec![zero.clone(), wide],
@@ -2234,7 +2242,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(slot, None, vec![zero, reg], None, None, &mut ctx),
+                cursor.build_get_element_ptr(slot, None, vec![zero, reg], None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::StructIndexNotAConstantI32(
                     _
                 )))
@@ -2255,7 +2263,7 @@ mod tests {
         let negative = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(
+            .build_get_element_ptr(
                 slot.clone(),
                 None,
                 vec![zero.clone(), past_end],
@@ -2276,7 +2284,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_get_element_ptr(slot, None, vec![zero, negative], None, None, &mut ctx),
+                cursor.build_get_element_ptr(
+                    slot,
+                    None,
+                    vec![zero, negative],
+                    None,
+                    None,
+                    &mut ctx
+                ),
                 Err(InstructionError::Gep(GepError::StructIndexOutOfRange {
                     index: -1,
                     ..
@@ -2296,14 +2311,14 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let slot = cursor
-            .add_alloca(i32_ty, None, None, Some("p"), &mut ctx)
+            .build_alloca(i32_ty, None, None, Some("p"), &mut ctx)
             .unwrap();
 
         let zero = value(0, &mut ctx);
         let one = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_get_element_ptr(slot, None, vec![zero, one], None, None, &mut ctx)
+            .build_get_element_ptr(slot, None, vec![zero, one], None, None, &mut ctx)
             .expect_err("an i32 has no elements");
 
         assert!(
@@ -2328,7 +2343,7 @@ mod tests {
         let reg = Value::from_register("v".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .add_store(ptr, reg, Some(i64_ty), None, &mut ctx)
+            .build_store(ptr, reg, Some(i64_ty), None, &mut ctx)
             .expect_err("an i32 register is not an i64");
 
         assert!(
@@ -2349,7 +2364,7 @@ mod tests {
         let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
         cursor
-            .add_store(ptr, seven, Some(i64_ty), None, &mut ctx)
+            .build_store(ptr, seven, Some(i64_ty), None, &mut ctx)
             .expect("an i32 constant stores as an i64");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -2383,7 +2398,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = cursor
-            .add_alloca(void_ty, None, None, None, &mut ctx)
+            .build_alloca(void_ty, None, None, None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -2410,7 +2425,7 @@ mod tests {
         );
 
         let slot = cursor
-            .add_alloca(array_ty, None, None, Some("buf"), &mut ctx)
+            .build_alloca(array_ty, None, None, Some("buf"), &mut ctx)
             .expect("`[4 x i32]` is sized");
 
         assert_eq!(
@@ -2432,7 +2447,7 @@ mod tests {
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .add_alloca(i32_ty, Some((a_float, None)), None, None, &mut ctx)
+            .build_alloca(i32_ty, Some((a_float, None)), None, None, &mut ctx)
             .expect_err("a float is not a count");
 
         assert!(
@@ -2446,7 +2461,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.add_alloca(i32_ty, Some((an_int, Some(f64_ty))), None, None, &mut ctx),
+                cursor.build_alloca(i32_ty, Some((an_int, Some(f64_ty))), None, None, &mut ctx),
                 Err(InstructionError::Alloca(
                     AllocaError::AllocaCountNotAnInteger(_)
                 ))
@@ -2467,7 +2482,7 @@ mod tests {
 
         assert!(
             cursor
-                .add_alloca(i32_ty, Some((one, None)), None, None, &mut ctx)
+                .build_alloca(i32_ty, Some((one, None)), None, None, &mut ctx)
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -2485,7 +2500,7 @@ mod tests {
         let n = Value::from_register("n".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .add_alloca(i32_ty, Some((n, Some(i64_ty))), None, None, &mut ctx)
+            .build_alloca(i32_ty, Some((n, Some(i64_ty))), None, None, &mut ctx)
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
@@ -2520,17 +2535,17 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         in_entry
-            .add_load(ptr.clone(), Some(i32_ty), None, Some("a"), &mut ctx)
+            .build_load(ptr.clone(), Some(i32_ty), None, Some("a"), &mut ctx)
             .unwrap();
 
         let second = in_entry
-            .add_load(ptr.clone(), Some(i64_ty), None, Some("b"), &mut ctx)
+            .build_load(ptr.clone(), Some(i64_ty), None, Some("b"), &mut ctx)
             .unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .add_load(ptr, Some(f64_ty), None, Some("c"), &mut ctx)
+            .build_load(ptr, Some(f64_ty), None, Some("c"), &mut ctx)
             .unwrap();
 
         let func_id = ctx.get_block(entry).func_id;
@@ -2588,7 +2603,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let loaded = cursor
-            .add_load(ptr, Some(i32_ty), None, Some("x"), &mut ctx)
+            .build_load(ptr, Some(i32_ty), None, Some("x"), &mut ctx)
             .expect("loading an i32 through a ptr is fine");
 
         assert_eq!(ctx.ty_interner.value(loaded.ty().raw()), &Type::I32);
@@ -2604,7 +2619,7 @@ mod tests {
         let i64_ty = ctx.i64_ty();
 
         cursor
-            .add_load(ptr, Some(i64_ty), None, Some("x"), &mut ctx)
+            .build_load(ptr, Some(i64_ty), None, Some("x"), &mut ctx)
             .unwrap();
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -2630,7 +2645,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let err = cursor
-            .add_load(not_a_ptr, Some(i32_ty), None, Some("x"), &mut ctx)
+            .build_load(not_a_ptr, Some(i32_ty), None, Some("x"), &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -2656,7 +2671,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = cursor
-            .add_load(ptr, Some(void_ty), None, None, &mut ctx)
+            .build_load(ptr, Some(void_ty), None, None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -2691,7 +2706,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .add_load(ptr.clone(), Some(id), None, None, &mut ctx)
+                    .build_load(ptr.clone(), Some(id), None, None, &mut ctx)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
@@ -2711,7 +2726,7 @@ mod tests {
         for align in [1, 2, 4, 8, 16, 4096] {
             assert!(
                 cursor
-                    .add_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
+                    .build_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
                     .is_ok(),
                 "align {align} is a power of two"
             );
@@ -2719,7 +2734,7 @@ mod tests {
 
         for align in [0, 3, 6, 10, 12] {
             let err = cursor
-                .add_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
+                .build_load(ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
                 .expect_err("not a power of two");
 
             assert!(
@@ -2740,7 +2755,7 @@ mod tests {
 
         assert!(
             cursor
-                .add_load(ptr, Some(i32_ty), None, None, &mut ctx)
+                .build_load(ptr, Some(i32_ty), None, None, &mut ctx)
                 .is_ok()
         );
     }

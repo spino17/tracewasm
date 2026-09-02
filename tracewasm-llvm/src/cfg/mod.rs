@@ -46,7 +46,7 @@ mod tests {
         let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
-        cursor.add_unconditional_br(entry, &mut ctx).unwrap();
+        cursor.build_unconditional_br(entry, &mut ctx).unwrap();
 
         assert_eq!(
             ctx.blocks.get(entry.raw()).unwrap().instructions.len(),

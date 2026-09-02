@@ -1,7 +1,7 @@
 //! What the builders return when they refuse to build something.
 //!
 //! The errors are layered so that each builder returns the narrowest type that can
-//! describe its failures — [`Cursor::add_alloca`](crate::instruction::cursor::Cursor)
+//! describe its failures — [`Cursor::build_alloca`](crate::instruction::cursor::Cursor)
 //! yields an [`InstructionError`], not a catch-all — and every layer converts upward
 //! through `#[from]`, so `?` composes without hand-written matches.
 //!

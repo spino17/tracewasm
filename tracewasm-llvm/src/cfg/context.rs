@@ -444,7 +444,7 @@ mod tests {
         // not land on whatever block sits at the same position there.
         let cursor = builder_a.cursor_at_block(entry);
 
-        cursor.add_unconditional_br(entry, &mut ctx_b).unwrap();
+        cursor.build_unconditional_br(entry, &mut ctx_b).unwrap();
     }
 
     /// The string pool is shared across the whole context, so a name used by both

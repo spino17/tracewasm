@@ -74,7 +74,6 @@ impl IREmitter {
     }
 
     /// A register's `%name`, or the literal a constant is spelled as.
-    /// A register's `%name`, or the literal a constant is spelled as.
     fn operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         match value.kind() {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
@@ -87,7 +86,6 @@ impl IREmitter {
         }
     }
 
-    /// `<type> <operand>`, the form an operand takes almost everywhere in LLVM.
     /// `<type> <operand>`, the form an operand takes almost everywhere in LLVM.
     fn typed_operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!(
@@ -125,7 +123,6 @@ impl IREmitter {
         }
     }
 
-    /// `label %name`, which is how a branch and a phi both name a block.
     /// `%name`, how a branch or a phi names a block.
     fn label(id: BasicBlockId, ctx: &Context) -> String {
         format!("%{}", Self::block_name(id, ctx))
@@ -138,7 +135,6 @@ impl IREmitter {
         ctx.str_interner.value(block.name.0).to_string()
     }
 
-    /// The `%x = ` an instruction that defines a register is prefixed with.
     /// The `%x = ` prefix for an instruction that defines a register.
     fn assignment(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!("{} = ", Self::operand(value, ctx)?))
@@ -459,13 +455,13 @@ mod tests {
         let in_entry = builder.cursor_at_block(entry);
 
         let slot = in_entry
-            .add_alloca(struct_ty, None, Some(8), Some("s"), &mut ctx)
+            .build_alloca(struct_ty, None, Some(8), Some("s"), &mut ctx)
             .unwrap();
 
         let count = Value::from_const(4i32, None, &mut ctx).unwrap();
 
         in_entry
-            .add_alloca(i64_ty, Some((count, None)), None, None, &mut ctx)
+            .build_alloca(i64_ty, Some((count, None)), None, None, &mut ctx)
             .unwrap();
 
         let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
@@ -473,7 +469,7 @@ mod tests {
         let two = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let elem = in_entry
-            .add_get_element_ptr(
+            .build_get_element_ptr(
                 slot,
                 None,
                 vec![zero, one, two],
@@ -484,11 +480,11 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .add_load(elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
+            .build_load(elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
             .unwrap();
 
         in_entry
-            .add_store(elem, loaded.clone(), None, Some(8), &mut ctx)
+            .build_store(elem, loaded.clone(), None, Some(8), &mut ctx)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
@@ -496,28 +492,28 @@ mod tests {
         let a_float = Value::from_const(0.1f32, None, &mut ctx).unwrap();
 
         let float_slot = in_entry
-            .add_alloca(f32_ty, None, None, Some("fs"), &mut ctx)
+            .build_alloca(f32_ty, None, None, Some("fs"), &mut ctx)
             .unwrap();
 
         in_entry
-            .add_store(float_slot, a_float, None, None, &mut ctx)
+            .build_store(float_slot, a_float, None, None, &mut ctx)
             .unwrap();
 
         let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
 
         let ptr_slot = in_entry
-            .add_alloca(ptr_ty, None, None, Some("np"), &mut ctx)
+            .build_alloca(ptr_ty, None, None, Some("np"), &mut ctx)
             .unwrap();
 
         in_entry
-            .add_store(ptr_slot, null, None, None, &mut ctx)
+            .build_store(ptr_slot, null, None, None, &mut ctx)
             .unwrap();
-        in_entry.add_unconditional_br(body, &mut ctx).unwrap();
+        in_entry.build_unconditional_br(body, &mut ctx).unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
         let (phi_handler, phi) = in_body
-            .add_phi(&[(entry, loaded)], Some("m"), &mut ctx)
+            .build_phi(&[(entry, loaded)], Some("m"), &mut ctx)
             .unwrap();
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
@@ -530,14 +526,14 @@ mod tests {
             .unwrap();
 
         in_body
-            .add_conditional_br(cond, body, exit, &mut ctx)
+            .build_conditional_br(cond, body, exit, &mut ctx)
             .unwrap();
 
         let answer = Value::from_const(0i32, None, &mut ctx).unwrap();
 
         builder
             .cursor_at_block(exit)
-            .add_ret(Some(answer), Some(i32_ty), &mut ctx)
+            .build_ret(Some(answer), Some(i32_ty), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
