@@ -91,7 +91,7 @@ mod tests {
         let err = add_fn("sum", &builder, &mut ctx).expect_err("the name is taken");
 
         assert!(
-            matches!(&err, ContextError::DuplicateFunctionName(name) if name == "sum"),
+            matches!(&err, ContextError::DuplicateGlobalName(name) if name == "sum"),
             "the error must name the collision, got: {err}"
         );
 

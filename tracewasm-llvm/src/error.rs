@@ -67,10 +67,12 @@ pub enum TypeError {
 /// a legal identifier, or a signature that LLVM would not accept.
 #[derive(Error, Debug)]
 pub enum ContextError {
-    /// Two functions cannot share a name: LLVM identifies a definition by it, so
-    /// emitting both would produce two `@name` definitions in one module.
-    #[error("a function named `{0}` already exists in this module")]
-    DuplicateFunctionName(String),
+    /// Two globals cannot share a name. LLVM gives module-level symbols **one**
+    /// namespace, so this covers variables, definitions and declarations alike: a
+    /// variable may not reuse a function's name, and a function may not be both
+    /// declared and defined. Emitting either would produce two `@name`s in one module.
+    #[error("a global named `{0}` already exists in this module")]
+    DuplicateGlobalName(String),
     /// Two blocks in one function cannot share a name, for the same reason: the
     /// label a branch names would be ambiguous.
     #[error("a basic block named `{0}` already exists in this function")]

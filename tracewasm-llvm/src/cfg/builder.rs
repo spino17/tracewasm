@@ -58,7 +58,7 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// [`ContextError::DuplicateFunctionName`] if the name is taken — globals and
+    /// [`ContextError::DuplicateGlobalName`] if the name is taken — globals and
     /// functions share one namespace, so a variable may not reuse a function's name.
     /// [`ContextError::GlobalVariableTypeNotSized`] if `ty` is `void` or a function
     /// type, neither of which a variable can hold. Plus the two above.
@@ -72,7 +72,7 @@ impl Builder {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if ctx.module.globals.contains_key(&name_id) {
-            return Err(ContextError::DuplicateFunctionName(
+            return Err(ContextError::DuplicateGlobalName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
@@ -147,7 +147,7 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// - [`ContextError::DuplicateFunctionName`] — the name is already declared or
+    /// - [`ContextError::DuplicateGlobalName`] — the name is already declared or
     ///   defined in this module.
     /// - [`ContextError::FunctionParamTypeNotSized`] — a parameter needs a size, so
     ///   `void` and function types are refused; aggregates are fine.
@@ -163,7 +163,7 @@ impl Builder {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if ctx.module.globals.contains_key(&name_id) {
-            return Err(ContextError::DuplicateFunctionName(
+            return Err(ContextError::DuplicateGlobalName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
@@ -213,7 +213,7 @@ impl Builder {
     ///
     /// # Errors
     ///
-    /// - [`ContextError::DuplicateFunctionName`] — LLVM identifies a definition by
+    /// - [`ContextError::DuplicateGlobalName`] — LLVM identifies a definition by
     ///   name, so two `@name`s in one module is a build error rather than something
     ///   `llvm-as` finds later.
     /// - [`ContextError::FunctionParamTypeNotSized`] — a parameter is passed by
@@ -233,7 +233,7 @@ impl Builder {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if ctx.module.globals.contains_key(&name_id) {
-            return Err(ContextError::DuplicateFunctionName(
+            return Err(ContextError::DuplicateGlobalName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
@@ -583,7 +583,7 @@ mod tests {
             .expect_err("`f` is already declared");
 
         assert!(
-            matches!(&err, ContextError::DuplicateFunctionName(n) if n == "f"),
+            matches!(&err, ContextError::DuplicateGlobalName(n) if n == "f"),
             "got: {err}"
         );
 
@@ -595,9 +595,49 @@ mod tests {
         assert!(
             matches!(
                 builder.declare_function("g".to_string(), &[], void_ty, &mut ctx),
-                Err(ContextError::DuplicateFunctionName(_))
+                Err(ContextError::DuplicateGlobalName(_))
             ),
             "`g` is already defined"
+        );
+    }
+
+    /// The namespace spans *kinds*, not just functions. LLVM writes every module-level
+    /// symbol as `@name`, so a variable and a function collide exactly as two functions
+    /// would — which is why the error is
+    /// [`DuplicateGlobalName`](ContextError::DuplicateGlobalName) rather than anything
+    /// function-specific.
+    #[test]
+    fn a_variable_and_a_function_cannot_share_a_name() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+
+        // A variable, then a function of the same name.
+        builder
+            .declare_global_variable("shared".to_string(), Some(i32_ty), None, &mut ctx)
+            .unwrap();
+
+        let err = builder
+            .define_function("shared".to_string(), &[], i32_ty, &mut ctx)
+            .expect_err("`shared` is already a global variable");
+
+        assert!(
+            matches!(&err, ContextError::DuplicateGlobalName(n) if n == "shared"),
+            "got: {err}"
+        );
+
+        // And the other way round: a function, then a variable.
+        builder
+            .define_function("taken".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let err = builder
+            .declare_global_variable("taken".to_string(), Some(i32_ty), None, &mut ctx)
+            .expect_err("`taken` is already a function");
+
+        assert!(
+            matches!(&err, ContextError::DuplicateGlobalName(n) if n == "taken"),
+            "got: {err}"
         );
     }
 
