@@ -94,6 +94,14 @@ pub enum ContextError {
     /// function type, which `llvm-as` refuses with "invalid function return type".
     #[error("a function cannot return type `{0}`")]
     FunctionResultTypeInvalid(String),
+    /// A global variable holds a value, so its type needs a size.
+    ///
+    /// The same pair as everywhere else is excluded: `llvm-as` refuses
+    /// `@g = external global void` with "void type only allowed for function results"
+    /// and a function-typed one with "invalid type for global variable". Aggregates
+    /// and pointers are fine.
+    #[error("a global variable cannot have type `{0}`: it has no size")]
+    GlobalVariableTypeNotSized(String),
 }
 
 /// An instruction could not be built.

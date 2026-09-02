@@ -560,10 +560,11 @@ mod tests {
             builder::Builder,
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
+        error::ContextError,
         instruction::GetElementPtrOperands,
         interner::TyId,
         test_support::fixture,
-        value::{ConstExpr, NullPtr, Type},
+        value::{ConstExpr, FuncSignature, NullPtr, Type},
     };
 
     /// Every instruction the builder can produce, in one module, compared against the
@@ -982,6 +983,61 @@ mod tests {
         assert!(
             ir.contains("    store i32 %v, ptr @counter\n"),
             "and in the store, got:\n{ir}"
+        );
+    }
+
+    /// A global holds a value, so its type needs a size. `llvm-as` refuses
+    /// `@g = external global void` with "void type only allowed for function results"
+    /// and a function-typed one with "invalid type for global variable" — the same
+    /// pair excluded everywhere else. Aggregates and pointers are fine.
+    #[test]
+    fn a_global_variable_needs_a_sized_type() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
+        let void_ty = ctx.void_ty();
+
+        let err = builder
+            .declare_global_variable("a".to_string(), void_ty, None, &mut ctx)
+            .expect_err("`void` has no size");
+
+        assert!(
+            matches!(&err, ContextError::GlobalVariableTypeNotSized(t) if t == "void"),
+            "the error must name the offending type, got: {err}"
+        );
+
+        let signature = FuncSignature::new(vec![i32_ty], i32_ty);
+        let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
+
+        assert!(
+            matches!(
+                builder.declare_global_variable("b".to_string(), func_ty, None, &mut ctx),
+                Err(ContextError::GlobalVariableTypeNotSized(_))
+            ),
+            "a function type is not a global's type either"
+        );
+
+        // An aggregate is sized, so it is accepted.
+        let struct_ty: TyId = ctx
+            .ty_interner
+            .intern(Type::Struct {
+                fields: Box::new([i32_ty, f64_ty]),
+                packed: false,
+            })
+            .into();
+
+        assert!(
+            builder
+                .declare_global_variable("c".to_string(), struct_ty, None, &mut ctx)
+                .is_ok(),
+            "an aggregate has a size"
+        );
+
+        assert_eq!(
+            ctx.module.global_variables.len(),
+            1,
+            "only the accepted global was recorded"
         );
     }
 

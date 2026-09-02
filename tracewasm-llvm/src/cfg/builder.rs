@@ -51,8 +51,12 @@ impl Builder {
             ));
         }
 
+        // A global holds a value, so its type needs a size — the same `void`-and-
+        // function-types exclusion as a parameter or an `alloca`.
         if !ty.is_first_class(ctx) {
-            todo!() // RAISE ERROR: global variable should be declared with first class types
+            return Err(ContextError::GlobalVariableTypeNotSized(
+                ty.display(ctx).to_string(),
+            ));
         }
 
         ctx.module.globals.insert(
