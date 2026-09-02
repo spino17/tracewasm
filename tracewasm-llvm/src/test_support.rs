@@ -8,7 +8,7 @@ use crate::{
     cfg::{
         builder::Builder,
         context::Context,
-        function::FuncId,
+        global::{DefinedFunc, GlobalId},
         module::{DataLayout, Triple},
     },
     error::ContextError,
@@ -42,7 +42,7 @@ pub(crate) fn add_fn(
     name: &str,
     builder: &mut Builder,
     ctx: &mut Context,
-) -> Result<FuncId, ContextError> {
+) -> Result<GlobalId<DefinedFunc>, ContextError> {
     let void_ty = ctx.void_ty();
 
     builder.define_function(name.to_string(), &[], void_ty, ctx)

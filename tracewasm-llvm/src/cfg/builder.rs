@@ -233,6 +233,7 @@ impl Builder {
 mod tests {
     use super::*;
     use crate::{
+        cfg::global::{DefinedFunc, GlobalId},
         test_support::fixture,
         value::{FuncSignature, Type, ValueKind},
     };
@@ -247,8 +248,8 @@ mod tests {
     }
 
     /// The names of a function's parameters, in declaration order.
-    fn param_names(f: FuncId, ctx: &Context) -> Vec<String> {
-        ctx.get_func(f)
+    fn param_names(f: GlobalId<DefinedFunc>, ctx: &Context) -> Vec<String> {
+        ctx.get_func(f.tag.raw())
             .params
             .iter()
             .map(|p| reg_name(p, ctx))
@@ -572,7 +573,7 @@ mod tests {
             )
             .expect("a valid signature");
 
-        let func = ctx.get_func(f);
+        let func = ctx.get_func(f.tag.raw());
 
         assert_eq!(func.result, i32_ty, "the result is the one given");
         assert_eq!(func.params.len(), 3);

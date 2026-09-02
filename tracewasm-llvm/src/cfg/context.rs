@@ -280,13 +280,16 @@ impl FuncRegNameIndex {
 mod tests {
     use super::*;
     use crate::{
-        cfg::builder::Builder,
+        cfg::{
+            builder::Builder,
+            global::{DefinedFunc, GlobalId},
+        },
         test_support::{add_fn, fixture},
         value::Type,
     };
 
     /// A context, a builder, and two functions to scope names against.
-    fn two_functions() -> (Context, FuncId, FuncId) {
+    fn two_functions() -> (Context, GlobalId<DefinedFunc>, GlobalId<DefinedFunc>) {
         let mut ctx = crate::test_support::ctx();
         let mut builder = Builder;
 
@@ -296,8 +299,8 @@ mod tests {
         (ctx, f, g)
     }
 
-    fn name(ctx: &mut Context, hint: Option<&str>, func: FuncId) -> String {
-        ctx.name_for_reg(hint, func)
+    fn name(ctx: &mut Context, hint: Option<&str>, func: GlobalId<DefinedFunc>) -> String {
+        ctx.name_for_reg(hint, func.tag.raw())
             .unwrap_or_else(|e| panic!("hint {hint:?} should be accepted: {e}"))
     }
 
@@ -397,7 +400,7 @@ mod tests {
         let (mut ctx, f, _) = two_functions();
 
         assert!(
-            ctx.name_for_reg(Some("0"), f).is_err(),
+            ctx.name_for_reg(Some("0"), f.tag.raw()).is_err(),
             "`%0` is the unnamed form, not a name a caller may ask for"
         );
 
@@ -416,7 +419,7 @@ mod tests {
 
         for hint in ["my reg", "a+b", "", "a\"b", "café", "x\ny"] {
             assert!(
-                ctx.name_for_reg(Some(hint), f).is_err(),
+                ctx.name_for_reg(Some(hint), f.tag.raw()).is_err(),
                 "`{hint}` is not a legal unquoted LLVM identifier"
             );
         }

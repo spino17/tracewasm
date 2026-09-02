@@ -1692,7 +1692,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            ctx.register_defs(f).is_empty(),
+            ctx.register_defs(f.tag.raw()).is_empty(),
             "the map exists and is empty before anything is built"
         );
 
@@ -1710,8 +1710,15 @@ mod tests {
             .build_alloca(i32_ty, None, None, Some("x"), &mut ctx)
             .unwrap();
 
-        assert_eq!(ctx.register_defs(f).len(), 1, "`f` recorded its alloca");
-        assert!(ctx.register_defs(g).is_empty(), "`g` is untouched");
+        assert_eq!(
+            ctx.register_defs(f.tag.raw()).len(),
+            1,
+            "`f` recorded its alloca"
+        );
+        assert!(
+            ctx.register_defs(g.tag.raw()).is_empty(),
+            "`g` is untouched"
+        );
     }
 
     /// A `void` callee defines no register, and a non-`void` one does. `llvm-as`
