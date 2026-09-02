@@ -42,7 +42,7 @@ impl Clone for FuncId {
 impl Copy for FuncId {}
 
 impl FuncId {
-    /// Wraps an arena id. Only [`Builder::add_function`](crate::cfg::builder::Builder::add_function)
+    /// Wraps an arena id. Only [`Builder::define_function`](crate::cfg::builder::Builder::define_function)
     /// calls this, so an id always names a function that exists.
     pub(crate) fn new(id: Id<Function>) -> Self {
         FuncId(id)
@@ -141,7 +141,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[
                     (i32_ty, Some("n".to_string())),
@@ -181,7 +181,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let one_param = builder
-            .add_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
             .unwrap();
 
         assert!(one_param.nth_param(0, &ctx).is_some());
@@ -189,7 +189,7 @@ mod tests {
         assert!(one_param.nth_param(99, &ctx).is_none());
 
         let no_params = builder
-            .add_function("g".to_string(), &[], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         assert!(
@@ -209,11 +209,11 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
             .unwrap();
 
         let g = builder
-            .add_function("g".to_string(), &[(f64_ty, None)], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[(f64_ty, None)], void_ty, &mut ctx)
             .unwrap();
 
         assert_eq!(f.nth_param(0, &ctx).unwrap().ty(), i32_ty);
@@ -230,11 +230,11 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let returns_i32 = builder
-            .add_function("a".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("a".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         let returns_void = builder
-            .add_function("b".to_string(), &[], void_ty, &mut ctx)
+            .define_function("b".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         assert_eq!(returns_i32.return_ty(&ctx), i32_ty);

@@ -286,6 +286,7 @@ pub struct Module {
     pub(crate) data_layout: String,
     pub(crate) globals: Vec<Global>,
     pub(crate) functions: Vec<FuncId>,
+    pub(crate) imported_functions: Vec<StrId>,
     pub(crate) func_names: FxHashMap<StrId, FuncSignature>,
 }
 
@@ -297,6 +298,7 @@ impl Module {
             data_layout: data_layout.to_string(),
             globals: vec![],
             functions: vec![],
+            imported_functions: vec![],
             func_names: FxHashMap::default(),
         }
     }

@@ -210,7 +210,7 @@ pub enum CallError {
     /// No function of that name has been added to the module.
     ///
     /// The table holds only what
-    /// [`Builder::add_function`](crate::cfg::builder::Builder::add_function) has
+    /// [`Builder::define_function`](crate::cfg::builder::Builder::define_function) has
     /// registered so far, so this also covers a **forward call** — one to a function
     /// that will be added later — and a host import, which nothing declares.
     #[error("no function named `{0}` has been added to this module")]

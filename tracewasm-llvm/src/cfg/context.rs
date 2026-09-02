@@ -124,7 +124,7 @@ impl Context {
 
     /// Every register `func` has defined, by name.
     ///
-    /// The map is created by [`Builder::add_function`](crate::cfg::builder::Builder::add_function),
+    /// The map is created by [`Builder::define_function`](crate::cfg::builder::Builder::define_function),
     /// so it exists — empty — from the moment the function does. That is what the
     /// `expect` here relies on; without it, a function whose first instruction reads
     /// a parameter pointer would panic before it could define anything.

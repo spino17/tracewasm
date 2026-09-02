@@ -32,6 +32,72 @@ impl Builder {
         Cursor { block: id }
     }
 
+    /// Declares a function that this module does not define.
+    ///
+    /// Emits `declare <result> @name(<param types>)`, which is how a module names
+    /// something it links against — a host import, a runtime helper. LLVM requires
+    /// it: a call to a name that is neither defined nor declared is refused with
+    /// "use of undefined value".
+    ///
+    /// Parameters are **types only**, with no name hints, because a declaration has
+    /// no body for a name to refer to. Nothing is returned either: there is no
+    /// [`FuncId`], since there is no function here to add blocks to. The signature is
+    /// recorded under the name, so
+    /// [`Cursor::build_call`](crate::instruction::cursor::Cursor::build_call)
+    /// resolves against it exactly as it would a defined function, and checks
+    /// arity, argument types and the return type the same way.
+    ///
+    /// A declaration shares one namespace with definitions, so a name may be
+    /// declared or defined, not both.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContextError::DuplicateFunctionName`] — the name is already declared or
+    ///   defined in this module.
+    /// - [`ContextError::FunctionParamTypeNotSized`] — a parameter needs a size, so
+    ///   `void` and function types are refused; aggregates are fine.
+    /// - [`ContextError::FunctionResultTypeInvalid`] — a result may be `void` but not
+    ///   a function type.
+    pub fn declare_function(
+        &mut self,
+        name: String,
+        params: &[TyId],
+        result: TyId,
+        ctx: &mut Context,
+    ) -> Result<(), ContextError> {
+        let name_id: StrId = ctx.str_interner.intern(name).into();
+
+        if ctx.module.func_names.contains_key(&name_id) {
+            return Err(ContextError::DuplicateFunctionName(
+                ctx.str_interner.value(name_id.0).to_string(),
+            ));
+        }
+
+        let void_ty = ctx.void_ty();
+
+        for param_ty in params {
+            if !param_ty.is_first_class(ctx) {
+                return Err(ContextError::FunctionParamTypeNotSized(
+                    param_ty.display(ctx).to_string(),
+                ));
+            }
+        }
+
+        if result != void_ty && !result.is_first_class(ctx) {
+            return Err(ContextError::FunctionResultTypeInvalid(
+                result.display(ctx).to_string(),
+            ));
+        }
+
+        ctx.module
+            .func_names
+            .insert(name_id, FuncSignature::new(params.to_vec(), result));
+
+        ctx.module.imported_functions.push(name_id);
+
+        Ok(())
+    }
+
     /// Declares a function and its signature.
     ///
     /// Each parameter is a type and an optional name hint. A named parameter keeps
@@ -54,7 +120,7 @@ impl Builder {
     ///   a function type.
     /// - [`ContextError::InvalidRegisterName`] — a parameter's name hint is not a
     ///   legal LLVM local.
-    pub fn add_function(
+    pub fn define_function(
         &mut self,
         name: String,
         params: &[(TyId, Option<String>)],
@@ -196,7 +262,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[(i32_ty, None), (i32_ty, None)],
                 void_ty,
@@ -229,7 +295,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[(i32_ty, Some("n".to_string())), (i32_ty, None)],
                 void_ty,
@@ -264,7 +330,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[
                     (i32_ty, Some("a".to_string())),
@@ -293,7 +359,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
             .unwrap();
 
         assert_eq!(param_names(f, &ctx), ["0"]);
@@ -330,7 +396,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[(i32_ty, None), (i32_ty, None)],
                 void_ty,
@@ -339,7 +405,7 @@ mod tests {
             .unwrap();
 
         let g = builder
-            .add_function("g".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
             .unwrap();
 
         assert_eq!(param_names(f, &ctx), ["0", "1"]);
@@ -370,7 +436,7 @@ mod tests {
         let ptr_ty = ctx.ptr_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "sum".to_string(),
                 &[
                     (i32_ty, Some("n".to_string())),
@@ -439,7 +505,7 @@ mod tests {
 
         assert!(
             builder
-                .add_function("f".to_string(), &[(struct_ty, None)], void_ty, &mut ctx)
+                .define_function("f".to_string(), &[(struct_ty, None)], void_ty, &mut ctx)
                 .is_ok(),
             "an aggregate is sized, so it can be passed"
         );
@@ -455,7 +521,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = builder
-            .add_function("f".to_string(), &[(void_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(void_ty, None)], void_ty, &mut ctx)
             .expect_err("`void` is not a parameter type");
 
         assert!(
@@ -481,7 +547,7 @@ mod tests {
 
         assert!(
             builder
-                .add_function("returns_void".to_string(), &[], void_ty, &mut ctx)
+                .define_function("returns_void".to_string(), &[], void_ty, &mut ctx)
                 .is_ok(),
             "`void` is a result like any other"
         );
@@ -490,7 +556,7 @@ mod tests {
         let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
 
         let err = builder
-            .add_function("returns_fn".to_string(), &[], func_ty, &mut ctx)
+            .define_function("returns_fn".to_string(), &[], func_ty, &mut ctx)
             .expect_err("a function cannot return a function type");
 
         assert!(

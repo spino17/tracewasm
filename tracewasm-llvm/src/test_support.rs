@@ -45,7 +45,7 @@ pub(crate) fn add_fn(
 ) -> Result<FuncId, ContextError> {
     let void_ty = ctx.void_ty();
 
-    builder.add_function(name.to_string(), &[], void_ty, ctx)
+    builder.define_function(name.to_string(), &[], void_ty, ctx)
 }
 
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather

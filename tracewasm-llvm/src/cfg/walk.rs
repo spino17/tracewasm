@@ -12,7 +12,8 @@ use crate::{
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
-    value::Value,
+    interner::StrId,
+    value::{FuncSignature, Value},
 };
 
 /// Walks a [`ControlFlowGraph`], visiting each construct in emission order.
@@ -30,7 +31,8 @@ use crate::{
 ///
 /// ```text
 /// visit_cfg
-///   visit_func              for each function
+///   visit_imported_func     for each declaration
+///   visit_func              for each defined function
 ///     visit_basic_block     for each block
 ///       visit_phi           for each phi, then
 ///       visit_<instr>       for each instruction
@@ -128,6 +130,18 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a declared-but-not-defined function.
+    ///
+    /// Declarations come before definitions in the walk, matching how a module reads:
+    /// what it links against, then what it provides. There is no [`FuncId`] and no
+    /// body — only a name and a signature.
+    fn visit_imported_func(
+        &mut self,
+        func_name: &str,
+        func_sig: &FuncSignature,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a function, before its blocks.
     fn visit_func(&mut self, func: &Function, ctx: &Context)
     -> Result<Self::OkType, Self::ErrType>;
@@ -208,8 +222,20 @@ pub trait CfgVisitor {
     fn walk_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
         let funcs = &cfg.context.module.functions;
         let mut func_results = vec![];
+        let mut imported_func_results = vec![];
 
         let _res = self.visit_cfg(cfg)?;
+
+        for &imported_func in &cfg.context.module.imported_functions {
+            let func_name = cfg.context.str_interner.value(imported_func.0);
+            let func_sig = cfg.context.module.func_names.get(&imported_func).unwrap();
+
+            imported_func_results.push(self.visit_imported_func(
+                func_name,
+                func_sig,
+                &cfg.context,
+            )?);
+        }
 
         for func_id in funcs {
             let func = cfg.context.get_func(*func_id);
@@ -217,7 +243,7 @@ pub trait CfgVisitor {
             func_results.push(self.walk_func(*func_id, func, &cfg.context)?);
         }
 
-        self.post_module_visit(func_results)
+        self.post_module_visit(imported_func_results, func_results)
     }
 
     /// Runs after a block's phis and instructions, with what each visit returned.
@@ -240,10 +266,11 @@ pub trait CfgVisitor {
         Ok(Self::OkType::default())
     }
 
-    /// Runs after every function. Its return value is what [`walk_cfg`](Self::walk_cfg)
-    /// yields.
+    /// Runs after every declaration and every function, with what each returned.
+    /// Its return value is what [`walk_cfg`](Self::walk_cfg) yields.
     fn post_module_visit(
         &mut self,
+        _imported_func_results: Vec<Self::OkType>,
         _func_results: Vec<Self::OkType>,
     ) -> Result<Self::OkType, Self::ErrType> {
         Ok(Self::OkType::default())

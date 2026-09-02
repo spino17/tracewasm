@@ -34,7 +34,7 @@ use rustc_hash::FxHashSet;
 /// # let mut ctx = crate::test_support::ctx();
 /// # let mut builder = Builder;
 /// # let void_ty = ctx.void_ty();
-/// # let f = builder.add_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
+/// # let f = builder.define_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
 /// # let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
 /// let cursor = builder.cursor_at_block(entry);
 /// cursor.build_unconditional_br(entry, &mut ctx)?;
@@ -627,7 +627,7 @@ impl Cursor {
     /// # The callee must already exist
     ///
     /// Only functions added through
-    /// [`Builder::add_function`](crate::cfg::builder::Builder::add_function) are in
+    /// [`Builder::define_function`](crate::cfg::builder::Builder::define_function) are in
     /// the table, and they are added as the module is built. So:
     ///
     /// - **Self-recursion works** — a function's name is registered before its body
@@ -1377,7 +1377,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1429,7 +1429,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let returns_i32 = builder
-            .add_function("a".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("a".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         let with_ty = returns_i32
@@ -1454,7 +1454,7 @@ mod tests {
             .expect("with no type given it comes from the value");
 
         let returns_void = builder
-            .add_function("b".to_string(), &[], void_ty, &mut ctx)
+            .define_function("b".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let empty = returns_void
@@ -1483,7 +1483,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let a = f.add_basic_block("a".to_string(), &mut ctx).unwrap();
@@ -1544,7 +1544,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1582,7 +1582,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[(ptr_ty, Some("base".to_string()))],
                 void_ty,
@@ -1620,7 +1620,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "f".to_string(),
                 &[(ptr_ty, Some("base".to_string()))],
                 void_ty,
@@ -1683,7 +1683,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         assert!(
@@ -1694,7 +1694,7 @@ mod tests {
         // A second function gets its own, so the entry is per function rather than
         // created once by whoever built first.
         let g = builder
-            .add_function("g".to_string(), &[], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1720,11 +1720,11 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let returns_i32 = builder
-            .add_function("a".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("a".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         builder
-            .add_function("b".to_string(), &[], void_ty, &mut ctx)
+            .define_function("b".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let entry = returns_i32
@@ -1771,7 +1771,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let f = builder
-            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1808,11 +1808,11 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         builder
-            .add_function("takes_i32".to_string(), &[(i32_ty, None)], i32_ty, &mut ctx)
+            .define_function("takes_i32".to_string(), &[(i32_ty, None)], i32_ty, &mut ctx)
             .unwrap();
 
         let f = builder
-            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1902,11 +1902,11 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         builder
-            .add_function("takes_i64".to_string(), &[(i64_ty, None)], i64_ty, &mut ctx)
+            .define_function("takes_i64".to_string(), &[(i64_ty, None)], i64_ty, &mut ctx)
             .unwrap();
 
         let f = builder
-            .add_function("f".to_string(), &[], i64_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i64_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -1976,11 +1976,11 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         builder
-            .add_function("g".to_string(), &[], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let f = builder
-            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();

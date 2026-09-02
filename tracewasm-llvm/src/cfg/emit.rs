@@ -9,7 +9,7 @@ use crate::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands,
         PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
-    value::{ConstExpr, ConstValue, Value, ValueKind},
+    value::{ConstExpr, ConstValue, FuncSignature, Value, ValueKind},
 };
 use anyhow::bail;
 
@@ -212,6 +212,31 @@ impl CfgVisitor for IREmitter {
         if !cfg.context.module.data_layout.is_empty() || !cfg.context.module.triple.is_empty() {
             self.push_line("");
         }
+
+        Ok(())
+    }
+
+    fn visit_imported_func(
+        &mut self,
+        func_name: &str,
+        func_sig: &FuncSignature,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // A `declare` names types only — there is no body for a parameter name to
+        // refer to. Names are legal but carry nothing, so they are left out.
+        let params: Vec<String> = func_sig
+            .params
+            .iter()
+            .map(|ty| ctx.display(*ty).to_string())
+            .collect();
+
+        self.unset_indentation();
+        self.push_line(&format!(
+            "declare {} @{}({})",
+            ctx.display(func_sig.result),
+            func_name,
+            params.join(", ")
+        ));
 
         Ok(())
     }
@@ -517,7 +542,7 @@ mod tests {
         // The callees come first: a call resolves against the functions added so far,
         // so a forward reference would not resolve.
         let helper = builder
-            .add_function(
+            .define_function(
                 "helper".to_string(),
                 &[(i32_ty, Some("v".to_string()))],
                 i32_ty,
@@ -540,7 +565,7 @@ mod tests {
             .unwrap();
 
         let noop = builder
-            .add_function("noop".to_string(), &[], void_ty, &mut ctx)
+            .define_function("noop".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let noop_entry = noop.add_basic_block("entry".to_string(), &mut ctx).unwrap();
@@ -551,7 +576,7 @@ mod tests {
             .unwrap();
 
         let f = builder
-            .add_function(
+            .define_function(
                 "main".to_string(),
                 &[(i32_ty, Some("n".to_string())), (ptr_ty, None)],
                 i32_ty,
@@ -732,7 +757,7 @@ mod tests {
             .into();
 
         let f = builder
-            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty, &mut ctx)
             .unwrap();
 
         let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();

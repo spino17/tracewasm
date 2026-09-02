@@ -31,7 +31,7 @@
 //! let mut builder = Builder;
 //!
 //! let i32_ty = ctx.i32_ty();
-//! let f = builder.add_function("main".to_string(), &[], i32_ty, &mut ctx)?;
+//! let f = builder.define_function("main".to_string(), &[], i32_ty, &mut ctx)?;
 //! let entry = f.add_basic_block("entry".to_string(), &mut ctx)?;
 //!
 //! let zero = tracewasm_llvm::value::Value::from_const(0i32, None, &mut ctx)?;
