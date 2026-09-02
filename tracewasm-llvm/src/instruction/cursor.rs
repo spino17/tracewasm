@@ -2173,8 +2173,8 @@ mod tests {
     }
 
     /// The same inference from a `getelementptr` *constant expression* rather than an
-    /// instruction. Nothing builds one yet, so this pins the arm before a builder
-    /// exists to reach it.
+    /// instruction — a constant expression records its operands just as the
+    /// instruction does, so the pointee is equally recoverable.
     #[test]
     fn a_gep_constant_expression_reports_its_pointee() {
         let (mut ctx, mut builder) = fixture();

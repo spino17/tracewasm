@@ -9,7 +9,7 @@ use crate::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands,
         PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
-    value::{ConstValue, Value, ValueKind},
+    value::{ConstExpr, ConstValue, Value, ValueKind},
 };
 use anyhow::bail;
 
@@ -31,9 +31,11 @@ impl IREmitter {
     ///
     /// # Errors
     ///
-    /// If the graph contains something the emitter cannot spell — currently only a
-    /// constant-expression operand, which is refused rather than written as a
-    /// placeholder `llvm-as` could not parse.
+    /// If the graph contains something the emitter cannot spell. Currently that is
+    /// only a constant expression other than
+    /// [`GetElementPtr`](crate::value::ConstExpr::GetElementPtr), since the others
+    /// carry no operands — refused rather than written as a placeholder `llvm-as`
+    /// could not parse.
     pub fn emit(cfg: ControlFlowGraph) -> Result<String, anyhow::Error> {
         let mut emitter = IREmitter {
             ir: String::default(),
@@ -73,16 +75,50 @@ impl IREmitter {
         self.push_str(&format!("{s}\n"));
     }
 
-    /// A register's `%name`, or the literal a constant is spelled as.
+    /// A register's `%name`, the literal a constant is spelled as, or a constant
+    /// expression written inline.
     fn operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
         match value.kind() {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
             ValueKind::Const(id) => Ok(Self::constant(ctx.const_interner.value(id.raw()))),
-            // Nothing builds one yet, so refusing is honest: emitting a placeholder
-            // would put text into the module that `llvm-as` cannot parse.
-            ValueKind::ConstExpr(_) => {
-                bail!("a constant expression operand is not emitted yet")
+            ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
+        }
+    }
+
+    /// A constant expression, in the parenthesised form LLVM writes it.
+    ///
+    /// Unlike the instruction, a constant expression takes no `%x = ` and wraps its
+    /// operands in parentheses: `getelementptr inbounds ([4 x i32], ptr @g, i32 0,
+    /// i32 2)`. It appears wherever a constant may, so it is produced by
+    /// [`operand`](Self::operand) rather than by a visit.
+    fn const_expr(expr: &ConstExpr, ctx: &Context) -> Result<String, anyhow::Error> {
+        match expr {
+            ConstExpr::GetElementPtr(operands) => {
+                let mut indices = vec![];
+
+                for index in operands.indices.iter() {
+                    indices.push(Self::typed_operand(index, ctx)?);
+                }
+
+                let indices = if indices.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", indices.join(", "))
+                };
+
+                Ok(format!(
+                    "getelementptr {}({}, {}{})",
+                    if operands.inbounds { "inbounds " } else { "" },
+                    ctx.display(operands.source_ty),
+                    Self::typed_operand(&operands.ptr, ctx)?,
+                    indices
+                ))
             }
+            // These four carry no operands to render — `PtrToInt` and `IntToPtr` have
+            // no fields at all, and `BitCast`/`Trunc` name only a target type with no
+            // value to convert. Refusing is honest: a placeholder would put text into
+            // the module that `llvm-as` cannot parse.
+            other => bail!("`{other:?}` has no operands, so it cannot be emitted yet"),
         }
     }
 
@@ -437,9 +473,10 @@ mod tests {
             builder::Builder,
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
+        instruction::GetElementPtrOperands,
         interner::TyId,
         test_support::fixture,
-        value::{NullPtr, Type},
+        value::{ConstExpr, NullPtr, Type},
     };
 
     /// Every instruction the builder can produce, in one module, compared against the
@@ -670,6 +707,122 @@ mod tests {
         );
 
         assert_eq!(ir, expected, "\n--- emitted ---\n{ir}");
+    }
+
+    /// A constant `getelementptr` is written inline, in the parenthesised form, and
+    /// used wherever a constant may be — here as the address a `store` writes to.
+    ///
+    /// The instruction form and the constant form differ: the instruction takes a
+    /// `%x = ` and no parentheses, the constant expression takes parentheses and no
+    /// assignment.
+    #[test]
+    fn a_constant_getelementptr_is_emitted_inline() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+        let ptr_ty = ctx.ptr_ty();
+
+        let array_ty: TyId = ctx
+            .ty_interner
+            .intern(Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            })
+            .into();
+
+        let f = builder
+            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        // `getelementptr inbounds ([4 x i32], ptr null, i32 0, i32 2)`
+        let const_gep = Value::from_const_expr(
+            ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
+                source_ty: array_ty,
+                ptr: null,
+                indices: Box::new([zero, two]),
+                inbounds: true,
+            })),
+            &mut ctx,
+        );
+
+        assert_eq!(
+            const_gep.ty(),
+            ptr_ty,
+            "a constant gep is a pointer, like the instruction"
+        );
+
+        let slot = cursor
+            .build_alloca(ptr_ty, None, None, Some("s"), &mut ctx)
+            .unwrap();
+
+        cursor
+            .build_store(slot, const_gep, None, None, &mut ctx)
+            .expect("a constant expression is a valid store value");
+
+        cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert!(
+            ir.contains(
+                "store ptr getelementptr inbounds ([4 x i32], ptr null, i32 0, i32 2), ptr %s"
+            ),
+            "the constant gep is written inline, got:\n{ir}"
+        );
+    }
+
+    /// Without `inbounds` the keyword is simply absent.
+    #[test]
+    fn a_constant_getelementptr_omits_inbounds_when_unset() {
+        let mut ctx = crate::test_support::ctx();
+
+        let i32_ty = ctx.i32_ty();
+
+        let array_ty: TyId = ctx
+            .ty_interner
+            .intern(Type::Array {
+                size: 4,
+                element_ty: i32_ty,
+            })
+            .into();
+
+        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+
+        let expr = ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
+            source_ty: array_ty,
+            ptr: null,
+            indices: Box::new([zero]),
+            inbounds: false,
+        }));
+
+        assert_eq!(
+            IREmitter::const_expr(&expr, &ctx).unwrap(),
+            "getelementptr ([4 x i32], ptr null, i32 0)"
+        );
+    }
+
+    /// The four operand-less variants cannot be rendered, so the emitter refuses
+    /// rather than writing something `llvm-as` could not parse.
+    #[test]
+    fn an_operandless_constant_expression_is_refused() {
+        let ctx = crate::test_support::ctx();
+
+        let err = IREmitter::const_expr(&ConstExpr::PtrToInt {}, &ctx)
+            .expect_err("`ptrtoint` carries no operand");
+
+        assert!(
+            err.to_string().contains("no operands"),
+            "the error must say why, got: {err}"
+        );
     }
 
     /// A `float` and a `double` holding the same number encode differently: the hex

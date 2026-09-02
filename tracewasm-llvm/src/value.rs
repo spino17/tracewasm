@@ -595,23 +595,29 @@ pub(crate) struct PointeeTy {
 /// computed at link time rather than by an instruction. They are useful for global
 /// initialisers and for addresses known statically.
 ///
-/// Only [`GetElementPtr`](Self::GetElementPtr) is modelled so far; the rest are
-/// placeholders, and the emitter refuses any of them as an operand rather than
-/// writing IR it cannot spell.
+/// Build one with [`Value::from_const_expr`] and it can be used wherever a constant
+/// can: as a `store` value, a `load` address, a call argument.
+///
+/// [`GetElementPtr`](Self::GetElementPtr) is complete — it carries its operands, it
+/// renders, and its pointee is recoverable, so a `load` or `store` through one is
+/// type-checked like any other. The remaining four carry **no operands**: two have no
+/// fields at all, and the other two name only a target type with no value to convert.
+/// They can be constructed, but there is nothing to emit, so the emitter refuses them
+/// rather than writing IR it cannot spell.
 pub enum ConstExpr {
     /// A `getelementptr` over constant operands. Its pointee is recoverable, so it
     /// participates in pointee inference like the instruction does.
     GetElementPtr(Box<GetElementPtrOperands>),
-    /// Not yet modelled.
+    /// `ptrtoint`. Incomplete: no operand field, so nothing to convert.
     PtrToInt {},
-    /// Not yet modelled.
+    /// `inttoptr`. Incomplete: no operand field, so nothing to convert.
     IntToPtr {},
-    /// Not yet modelled.
+    /// `bitcast`. Incomplete: names the target type but not the value being cast.
     BitCast {
         /// The type being cast to.
         ty: TyId,
     },
-    /// Not yet modelled.
+    /// `trunc`. Incomplete: names the target type but not the value being truncated.
     Trunc {
         /// The narrower type being truncated to.
         target_ty: TyId,
