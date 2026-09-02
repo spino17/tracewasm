@@ -287,8 +287,8 @@ mod tests {
 
     /// A context, a builder, and two functions to scope names against.
     fn two_functions() -> (Context, FuncId, FuncId) {
-        let mut ctx = Context::default();
-        let mut builder = Builder::new(String::new(), String::new());
+        let mut ctx = crate::test_support::ctx();
+        let mut builder = Builder;
 
         let f = add_fn("f", &mut builder, &mut ctx).unwrap();
         let g = add_fn("g", &mut builder, &mut ctx).unwrap();

@@ -19,10 +19,16 @@
 //! - A [`Cursor`](instruction::cursor::Cursor) points at one basic block and writes
 //!   instructions into it.
 //!
-//! ```no_run
-//! # use tracewasm_llvm::cfg::{builder::Builder, context::Context, emit::IREmitter};
-//! let mut ctx = Context::default();
-//! let mut builder = Builder::new("arm64-apple-macosx".to_string(), String::new());
+//! ```
+//! # use tracewasm_llvm::cfg::{
+//! #     builder::Builder, context::Context, emit::IREmitter,
+//! #     module::{DataLayout, Triple},
+//! # };
+//! let mut ctx = Context::new(
+//!     Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
+//!     DataLayout::default(),
+//! );
+//! let mut builder = Builder;
 //!
 //! let i32_ty = ctx.i32_ty();
 //! let f = builder.add_function("main".to_string(), &[], i32_ty, &mut ctx)?;
@@ -31,7 +37,10 @@
 //! let zero = tracewasm_llvm::value::Value::from_const(0i32, None, &mut ctx)?;
 //! builder.cursor_at_block(entry).build_ret(Some(zero), Some(i32_ty), &mut ctx)?;
 //!
-//! let ir = IREmitter::emit(builder.build(), &ctx)?;
+//! let ir = IREmitter::emit(builder.build(ctx))?;
+//!
+//! assert!(ir.contains("define i32 @main() {"));
+//! assert!(ir.contains("ret i32 0"));
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!

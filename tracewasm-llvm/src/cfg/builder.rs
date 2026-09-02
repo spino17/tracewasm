@@ -14,11 +14,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Builds a module: adds functions and opens cursors onto their blocks.
 ///
-/// The builder owns the module's own contents — its target settings and the list of
-/// functions — while the [`Context`] owns the storage everything is allocated in. The
-/// two are threaded together through every call, and
-/// [`build`](Self::build) consumes the builder to produce the finished
-/// [`ControlFlowGraph`].
+/// Stateless — the [`Context`] owns everything, the module included, so the builder
+/// is just the set of operations that extend it. Construct it as `Builder` and pass
+/// `&mut Context` to each call; [`build`](Self::build) takes the context by value and
+/// hands back the finished [`ControlFlowGraph`].
 pub struct Builder;
 
 impl Builder {
@@ -465,7 +464,7 @@ mod tests {
         );
 
         assert_eq!(
-            builder.module.functions.len(),
+            ctx.module.functions.len(),
             0,
             "the refused function must not have been added to the module"
         );

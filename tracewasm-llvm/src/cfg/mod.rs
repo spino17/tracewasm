@@ -24,10 +24,10 @@ pub mod walk;
 
 /// A finished module, ready to be walked or emitted.
 ///
-/// Produced by [`Builder::build`](builder::Builder::build), which consumes the
-/// builder — the graph is done being constructed, so nothing can be added to it. The
-/// [`Context`](context::Context) it was built against is still needed to read it,
-/// since everything inside is an id.
+/// Produced by [`Builder::build`](builder::Builder::build), which takes the
+/// [`Context`] by value — so the graph owns everything its ids point into, and
+/// walking or emitting it needs nothing else. Construction is over: the context has
+/// been handed over, so no builder call can reach it any more.
 pub struct ControlFlowGraph {
     pub(crate) context: Context,
 }
@@ -54,9 +54,9 @@ mod tests {
             "the cursor writes into the block it was opened at"
         );
 
-        let cfg = builder.build();
+        let cfg = builder.build(ctx);
 
-        assert_eq!(cfg.module.functions.len(), 1);
+        assert_eq!(cfg.context.module.functions.len(), 1);
     }
 
     /// Every function is its own entry, and the module records them in the order
@@ -68,7 +68,7 @@ mod tests {
         let b = add_fn("b", &mut builder, &mut ctx).unwrap();
 
         assert_ne!(a.raw(), b.raw());
-        assert_eq!(builder.module.functions.len(), 2);
+        assert_eq!(ctx.module.functions.len(), 2);
         assert_eq!(ctx.funcs.len(), 2);
     }
 
@@ -88,7 +88,7 @@ mod tests {
         );
 
         assert_eq!(
-            builder.module.functions.len(),
+            ctx.module.functions.len(),
             1,
             "the refused function must not have been added"
         );

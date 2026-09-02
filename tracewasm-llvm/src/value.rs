@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn value_from_constants() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i32_ty = ctx.i32_ty();
         let i1_ty = ctx.i1_ty();
 
@@ -1094,7 +1094,7 @@ mod tests {
     /// answer.
     #[test]
     fn a_cast_sets_the_values_type_and_its_stored_variant() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i64_ty = ctx.i64_ty();
 
         let widened = Value::from_const(7i8, Some(i64_ty), &mut ctx).unwrap();
@@ -1113,7 +1113,7 @@ mod tests {
     /// says it is.
     #[test]
     fn without_a_cast_the_source_type_is_kept() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         // Built first, then checked: resolving an id back needs a shared borrow of
         // the context the values were built through.
@@ -1136,7 +1136,7 @@ mod tests {
     /// value the way LLVM's `trunc` would.
     #[test]
     fn integer_casts_widen_and_narrow() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i8_ty = ctx.i8_ty();
         let i16_ty = ctx.i16_ty();
         let i32_ty = ctx.i32_ty();
@@ -1163,7 +1163,7 @@ mod tests {
     /// built from it to be usable where a pointer is expected.
     #[test]
     fn a_null_pointer_is_typed_ptr() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         assert_eq!(rendered(NullPtr::ty(&mut ctx), &ctx), "ptr");
         assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
@@ -1178,7 +1178,7 @@ mod tests {
     /// would need a real instruction — `ptrtoint` to reach an integer.
     #[test]
     fn a_null_pointer_casts_only_to_ptr() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i8_ty = ctx.i8_ty();
         let ptr_ty = ctx.ptr_ty();
 
@@ -1215,7 +1215,7 @@ mod tests {
     /// so accepting one here would fold away a conversion that has to be emitted.
     #[test]
     fn nothing_else_casts_to_a_pointer() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let ptr_ty = ctx.ptr_ty();
 
         assert_eq!(0i8.try_cast(ptr_ty, &mut ctx), None);
@@ -1248,7 +1248,7 @@ mod tests {
     /// asked for — the unit variant has no payload to tell two apart by.
     #[test]
     fn every_null_pointer_is_the_same_constant() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let ptr_ty = ctx.ptr_ty();
 
@@ -1281,7 +1281,7 @@ mod tests {
     /// whose source type has no payload to print.
     #[test]
     fn a_refused_null_cast_names_both_types() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i64_ty = ctx.i64_ty();
 
@@ -1299,7 +1299,7 @@ mod tests {
     /// conversion needs an `sitofp`/`fptosi` instruction, not a constant cast.
     #[test]
     fn casts_between_integers_and_floats_are_refused() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let f32_ty = ctx.f32_ty();
         let f64_ty = ctx.f64_ty();
         let i32_ty = ctx.i32_ty();
@@ -1315,7 +1315,7 @@ mod tests {
     /// Floats cast between the two widths and nowhere else.
     #[test]
     fn float_casts_cover_both_widths_only() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let f32_ty = ctx.f32_ty();
         let f64_ty = ctx.f64_ty();
         let f16_ty = ctx.f16_ty();
@@ -1339,7 +1339,7 @@ mod tests {
     /// wrong from the message alone.
     #[test]
     fn a_failed_cast_reports_both_types() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i32_ty = ctx.i32_ty();
 
@@ -1359,7 +1359,7 @@ mod tests {
     /// type, so it is the failing path that has to reach the pool.
     #[test]
     fn a_refused_cast_spells_an_aggregate_target_in_full() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i32_ty = intern(Type::I32, &mut ctx);
 
         let array = intern(
@@ -1383,7 +1383,7 @@ mod tests {
     /// non-`i1` by *returning*, not by panicking while building the message.
     #[test]
     fn into_i1_accepts_only_i1() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let ok = Value::from_const(true, None, &mut ctx).unwrap();
         let not_i1 = Value::from_const(1i32, None, &mut ctx).unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
     /// `i1`, since the id is carried across rather than re-derived.
     #[test]
     fn an_i1_value_converts_back_to_a_value() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let value = Value::from_const(true, None, &mut ctx).unwrap();
         let ty = value.ty();
@@ -1498,7 +1498,7 @@ mod tests {
     /// parses as a different type rather than failing.
     #[test]
     fn a_function_type_renders_its_result_before_its_params() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let signature = func(vec![Type::I8, Type::Ptr], Type::I32, &mut ctx);
 
         assert_eq!(
@@ -1512,7 +1512,7 @@ mod tests {
     /// any other.
     #[test]
     fn a_function_type_with_no_params_keeps_its_parens() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let void = Type::Func(func(vec![], Type::Void, &mut ctx));
         let i1 = Type::Func(func(vec![], Type::I1, &mut ctx));
@@ -1525,7 +1525,7 @@ mod tests {
     /// struct arms rather than assume a scalar.
     #[test]
     fn a_function_type_composes_with_aggregate_params() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i32_ty = intern(Type::I32, &mut ctx);
         let i8_ty = intern(Type::I8, &mut ctx);
@@ -1556,7 +1556,7 @@ mod tests {
     /// lists positionally would stop at the shorter one and call these the same.
     #[test]
     fn function_types_differ_on_arity() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let one = Type::Func(func(vec![Type::I32], Type::Void, &mut ctx));
         let two = Type::Func(func(vec![Type::I32, Type::I64], Type::Void, &mut ctx));
@@ -1573,7 +1573,7 @@ mod tests {
     /// two spellings of one signature must still compare equal.
     #[test]
     fn function_types_differ_on_params_order_and_result() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let base = |ctx: &mut Context| func(vec![Type::I32, Type::I64], Type::Void, ctx);
 
@@ -1606,7 +1606,7 @@ mod tests {
     /// very same id.
     #[test]
     fn an_equal_type_interns_to_the_same_id() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i32_ty = intern(Type::I32, &mut ctx);
 
@@ -1656,7 +1656,7 @@ mod tests {
     /// `alloca`'s `num_elements` operand, which is a `Value`.
     #[test]
     fn an_array_length_is_a_number_so_one_length_is_one_type() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
         let i32_ty = intern(Type::I32, &mut ctx);
 
         // The same length by four routes — a literal, a widened narrower integer, a
@@ -1690,7 +1690,7 @@ mod tests {
     /// types out, everything else in.
     #[test]
     fn only_void_and_function_types_are_unsized() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i32_ty = intern(Type::I32, &mut ctx);
         let ptr_ty = intern(Type::Ptr, &mut ctx);
@@ -1733,7 +1733,7 @@ mod tests {
     /// so every shape has to spell itself the way LLVM does.
     #[test]
     fn types_render_as_llvm_spells_them() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         for (ty, expected) in [
             (Type::I1, "i1"),
@@ -1803,7 +1803,7 @@ mod tests {
     /// pass every assertion above and fail here.
     #[test]
     fn a_nested_aggregate_renders_through_every_level() {
-        let mut ctx = Context::default();
+        let mut ctx = crate::test_support::ctx();
 
         let i16_ty = intern(Type::I16, &mut ctx);
         let ptr_ty = intern(Type::Ptr, &mut ctx);

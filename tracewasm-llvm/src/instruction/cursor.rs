@@ -31,8 +31,8 @@ use rustc_hash::FxHashSet;
 ///
 /// ```compile_fail
 /// # use tracewasm_llvm::cfg::{builder::Builder, context::Context};
-/// # let mut ctx = Context::default();
-/// # let mut builder = Builder::new(String::new(), String::new());
+/// # let mut ctx = crate::test_support::ctx();
+/// # let mut builder = Builder;
 /// # let void_ty = ctx.void_ty();
 /// # let f = builder.add_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
 /// # let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();

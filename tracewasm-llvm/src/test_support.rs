@@ -5,16 +5,34 @@
 //! how a context or a value is built is one edit, not four.
 
 use crate::{
-    cfg::{builder::Builder, context::Context, function::FuncId},
+    cfg::{
+        builder::Builder,
+        context::Context,
+        function::FuncId,
+        module::{DataLayout, Triple},
+    },
     error::ContextError,
     value::Value,
 };
 
-/// An empty context and a builder for it.
+/// A context targeting `arm64-apple-macosx`, with no data layout, and a builder.
+///
+/// The triple is fixed so the emitter tests can assert on the `target triple` line;
+/// the layout is left unset, so no `target datalayout` line is emitted.
 pub(crate) fn fixture() -> (Context, Builder) {
-    (
-        Context::default(),
-        Builder::new("arm64-apple-macosx".to_string(), String::new()),
+    (ctx(), Builder)
+}
+
+/// Just the context, for the tests that never touch a builder.
+pub(crate) fn ctx() -> Context {
+    Context::new(
+        Triple::new(
+            "arm64".to_string(),
+            "apple".to_string(),
+            "macosx".to_string(),
+            None,
+        ),
+        DataLayout::default(),
     )
 }
 

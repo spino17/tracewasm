@@ -156,8 +156,9 @@ impl CfgVisitor for IREmitter {
     fn visit_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
         self.unset_indentation();
 
-        // Both are optional in a module, and `Builder::new` accepts empty strings for
-        // them — an empty `target triple = ""` line is not what that means.
+        // An unset data layout is the empty string, and an empty
+        // `target datalayout = ""` line is not what "unset" means. A structured
+        // `Triple` is always present, so that guard is belt-and-braces.
         if !cfg.context.module.data_layout.is_empty() {
             self.push_line(&format!(
                 "target datalayout = \"{}\"",
@@ -399,6 +400,10 @@ impl CfgVisitor for IREmitter {
 mod tests {
     use super::*;
     use crate::{
+        cfg::{
+            builder::Builder,
+            module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
+        },
         interner::TyId,
         test_support::fixture,
         value::{NullPtr, Type},
@@ -535,7 +540,7 @@ mod tests {
             .build_ret(Some(answer), Some(i32_ty), &mut ctx)
             .unwrap();
 
-        let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
 
         let expected = concat!(
             "target triple = \"arm64-apple-macosx\"\n",
@@ -602,15 +607,54 @@ mod tests {
         assert_eq!(IREmitter::constant(&ConstValue::NullPtr), "null");
     }
 
-    /// An empty triple and data layout are omitted rather than emitted as empty
-    /// strings — `target triple = ""` is not what "unset" means.
+    /// An unset data layout is omitted rather than written as an empty string —
+    /// `target datalayout = ""` is not what "unset" means.
+    ///
+    /// Note that a [`Triple`](crate::cfg::module::Triple) is always present now that
+    /// it is structured, so a module with no functions still emits its `target
+    /// triple` line and the blank separator after it.
     #[test]
-    fn an_unset_target_emits_no_target_lines() {
-        let ctx = Context::default();
-        let builder = crate::cfg::builder::Builder::new(String::new(), String::new());
+    fn an_unset_data_layout_emits_no_datalayout_line() {
+        let ctx = crate::test_support::ctx();
+        let ir = IREmitter::emit(Builder.build(ctx)).unwrap();
 
-        let ir = IREmitter::emit(builder.build(), &ctx).unwrap();
+        assert_eq!(
+            ir, "target triple = \"arm64-apple-macosx\"\n\n",
+            "the triple is written, the absent layout is not"
+        );
 
-        assert_eq!(ir, "", "an empty module emits nothing at all");
+        assert!(
+            !ir.contains("datalayout"),
+            "an unset layout emits no line at all, not an empty one"
+        );
+    }
+
+    /// And a layout that *is* set gets its own line, ahead of the triple.
+    #[test]
+    fn a_set_data_layout_is_emitted_before_the_triple() {
+        let ctx = Context::new(
+            Triple::new(
+                "arm64".to_string(),
+                "apple".to_string(),
+                "macosx".to_string(),
+                None,
+            ),
+            DataLayout::new(vec![
+                DataLayoutSpec::Endianness(Endianness::Little),
+                DataLayoutSpec::Mangling(Mangling::MachO),
+                DataLayoutSpec::StackAlignment(128),
+            ]),
+        );
+
+        let ir = IREmitter::emit(Builder.build(ctx)).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target datalayout = \"e-m:o-S128\"\n",
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+            )
+        );
     }
 }

@@ -9,7 +9,7 @@ use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::PhiError,
     interner::{StrId, TyId},
-    value::{I1Value, Type, Value},
+    value::{I1Value, Value},
 };
 use rustc_hash::FxHashSet;
 
