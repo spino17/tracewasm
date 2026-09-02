@@ -6,7 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::Function,
-        global::GlobalVariable,
+        global::{GlobalVariable, Linkage, Visiblity},
         walk::CfgVisitor,
     },
     instruction::{
@@ -82,11 +82,25 @@ impl IREmitter {
     /// A register's `%name`, the literal a constant is spelled as, or a constant
     /// expression written inline.
     fn operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
-        match value.kind() {
+        Self::operand_kind(value.kind(), ctx)
+    }
+
+    /// [`operand`](Self::operand) for a bare [`ValueKind`].
+    ///
+    /// Split out for [`I1Value`](crate::value::I1Value), which carries a kind without
+    /// a whole [`Value`] to hand over — so a branch condition renders through exactly
+    /// the same arms as every other operand rather than a parallel copy of them.
+    fn operand_kind(kind: &ValueKind, ctx: &Context) -> Result<String, anyhow::Error> {
+        match kind {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
             ValueKind::Const(id) => Ok(Self::constant(ctx.const_interner.value(id.raw()))),
             ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
-            ValueKind::Global(global) => todo!(),
+            // A global is referred to by name, whatever it names — a variable, a
+            // defined function, a declaration. Its *value* is the address, which is
+            // why `Value::from_global` types it `ptr`.
+            ValueKind::Global(global) => {
+                Ok(format!("@{}", ctx.str_interner.value(global.name().0)))
+            }
         }
     }
 
@@ -225,9 +239,47 @@ impl CfgVisitor for IREmitter {
         &mut self,
         name: &str,
         data: &GlobalVariable,
+        linkage: Linkage,
+        visiblity: Visiblity,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // A *definition* with external linkage omits the keyword — that is the
+        // default. Writing `external` is what makes it a declaration, and `llvm-as`
+        // then refuses an initializer outright: `@g = external global i32 0` does not
+        // parse.
+        let linkage = if linkage == Linkage::External && data.initializer.is_some() {
+            String::new()
+        } else {
+            format!("{linkage} ")
+        };
+
+        // `default` is the default, and a *local* symbol may have nothing else —
+        // `@g = internal hidden global i32 0` is refused with "symbol with local
+        // linkage must have default visibility".
+        let visiblity = if visiblity == Visiblity::Default {
+            String::new()
+        } else {
+            format!("{visiblity} ")
+        };
+
+        // A declaration names a type and stops; every other linkage needs a value.
+        let initializer = match &data.initializer {
+            Some(expr) => format!(" {}", Self::const_expr(expr, ctx)?),
+            None => String::new(),
+        };
+
+        self.unset_indentation();
+
+        self.push_line(&format!(
+            "@{} = {}{}global {}{}",
+            name,
+            linkage,
+            visiblity,
+            ctx.display(data.ty),
+            initializer
+        ));
+
+        Ok(())
     }
 
     fn visit_imported_func(
@@ -245,6 +297,7 @@ impl CfgVisitor for IREmitter {
             .collect();
 
         self.unset_indentation();
+
         self.push_line(&format!(
             "declare {} @{}({})",
             ctx.display(func_sig.result),
@@ -353,15 +406,9 @@ impl CfgVisitor for IREmitter {
         operands: &ConditionalBrOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        // The condition is an `I1Value`, so the `i1` is known without asking the pool.
-        let cond = match operands.cond.kind {
-            ValueKind::Reg(reg) => format!("%{}", ctx.str_interner.value(reg.name.0)),
-            ValueKind::Const(id) => Self::constant(ctx.const_interner.value(id.raw())),
-            ValueKind::ConstExpr(_) => {
-                bail!("a constant expression condition is not emitted yet")
-            }
-            ValueKind::Global(_) => todo!(),
-        };
+        // The condition is an `I1Value`, so the `i1` is known without asking the pool
+        // and only the operand itself has to be rendered.
+        let cond = Self::operand_kind(&operands.cond.kind, ctx)?;
 
         self.push_line(&format!(
             "br i1 {}, label {}, label {}",

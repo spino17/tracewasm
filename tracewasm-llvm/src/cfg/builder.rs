@@ -4,12 +4,15 @@ use crate::{
         basic_block::BasicBlockId,
         context::Context,
         function::{FuncId, Function},
-        global::{DeclaredFunc, DefinedFunc, GlobalData, GlobalId, GlobalKind, Linkage, Visiblity},
+        global::{
+            DeclaredFunc, DefinedFunc, GlobalData, GlobalId, GlobalKind, GlobalVar, GlobalVariable,
+            Linkage, Visiblity,
+        },
     },
     error::ContextError,
     instruction::cursor::Cursor,
     interner::{StrId, TyId},
-    value::{FuncSignature, Value},
+    value::{ConstExpr, FuncSignature, Value},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -31,6 +34,42 @@ impl Builder {
     /// afterwards.
     pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor {
         Cursor { block: id }
+    }
+
+    pub fn declare_global_variable(
+        &self,
+        name: String,
+        ty: TyId,
+        initializer: Option<ConstExpr>,
+        ctx: &mut Context,
+    ) -> Result<GlobalId<GlobalVar>, ContextError> {
+        let name_id: StrId = ctx.str_interner.intern(name).into();
+
+        if ctx.module.globals.contains_key(&name_id) {
+            return Err(ContextError::DuplicateFunctionName(
+                ctx.str_interner.value(name_id.0).to_string(),
+            ));
+        }
+
+        if !ty.is_first_class(ctx) {
+            todo!() // RAISE ERROR: global variable should be declared with first class types
+        }
+
+        ctx.module.globals.insert(
+            name_id,
+            GlobalData {
+                linkage: Linkage::External,
+                visiblity: Visiblity::Default,
+                kind: GlobalKind::Variable(GlobalVariable { ty, initializer }),
+            },
+        );
+
+        ctx.module.global_variables.push(name_id);
+
+        Ok(GlobalId {
+            name: name_id,
+            tag: GlobalVar,
+        })
     }
 
     /// Declares a function that this module does not define.
@@ -60,7 +99,7 @@ impl Builder {
     /// - [`ContextError::FunctionResultTypeInvalid`] — a result may be `void` but not
     ///   a function type.
     pub fn declare_function(
-        &mut self,
+        &self,
         name: String,
         params: &[TyId],
         result: TyId,
@@ -130,7 +169,7 @@ impl Builder {
     /// - [`ContextError::InvalidRegisterName`] — a parameter's name hint is not a
     ///   legal LLVM local.
     pub fn define_function(
-        &mut self,
+        &self,
         name: String,
         params: &[(TyId, Option<String>)],
         result: TyId,

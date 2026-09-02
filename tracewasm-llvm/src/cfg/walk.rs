@@ -6,7 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::{FuncId, Function},
-        global::{GlobalKind, GlobalVariable},
+        global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands,
@@ -130,10 +130,19 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a global variable.
+    ///
+    /// Takes the whole [`GlobalData`] rather than just the
+    /// [`GlobalVariable`](crate::cfg::global::GlobalVariable) inside it, because the
+    /// linkage and visibility are part of how a global is written — emitting without
+    /// them would turn an `internal` global into an externally visible one. Its
+    /// `kind` is always [`GlobalKind::Variable`](crate::cfg::global::GlobalKind).
     fn visit_global_variable(
         &mut self,
         name: &str,
         data: &GlobalVariable,
+        linkage: Linkage,
+        visiblity: Visiblity,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -237,13 +246,27 @@ pub trait CfgVisitor {
         for variable in &cfg.context.module.global_variables {
             let name = cfg.context.str_interner.value(variable.0);
 
-            let GlobalKind::Variable(data) =
-                &cfg.context.module.globals.get(variable).unwrap().kind
-            else {
+            let data = cfg
+                .context
+                .module
+                .globals
+                .get(variable)
+                .expect("hitting this means globals tracking logic by their name is incorrect");
+
+            let linkage = data.linkage;
+            let visiblity = data.visiblity;
+
+            let GlobalKind::Variable(var) = &data.kind else {
                 unreachable!("hitting this means globals tracking logic by their name is incorrect")
             };
 
-            global_variable_results.push(self.visit_global_variable(name, data, &cfg.context)?);
+            global_variable_results.push(self.visit_global_variable(
+                name,
+                &var,
+                linkage,
+                visiblity,
+                &cfg.context,
+            )?);
         }
 
         for &imported_func in &cfg.context.module.imported_functions {
