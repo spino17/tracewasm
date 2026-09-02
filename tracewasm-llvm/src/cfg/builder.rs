@@ -39,7 +39,7 @@ impl Builder {
     pub fn declare_global_variable(
         &self,
         name: String,
-        ty: TyId,
+        ty: Option<TyId>,
         initializer: Option<ConstExpr>,
         ctx: &mut Context,
     ) -> Result<GlobalId<GlobalVar>, ContextError> {
@@ -51,20 +51,45 @@ impl Builder {
             ));
         }
 
-        // A global holds a value, so its type needs a size — the same `void`-and-
-        // function-types exclusion as a parameter or an `alloca`.
-        if !ty.is_first_class(ctx) {
-            return Err(ContextError::GlobalVariableTypeNotSized(
-                ty.display(ctx).to_string(),
-            ));
-        }
+        let final_ty = if let Some(ty) = ty {
+            // A global holds a value, so its type needs a size — the same `void`-and-
+            // function-types exclusion as a parameter or an `alloca`.
+            if !ty.is_first_class(ctx) {
+                return Err(ContextError::GlobalVariableTypeNotSized(
+                    ty.display(ctx).to_string(),
+                ));
+            }
+
+            // The initializer's type has to match *exactly*, not merely be
+            // compatible: `llvm-as` refuses `@g = global i32 true` with "constant
+            // expression type mismatch", even though an `i1` is an integer.
+            if let Some(initializer) = &initializer {
+                let init_ty = initializer.ty(ctx);
+
+                if init_ty != ty {
+                    return Err(ContextError::GlobalInitializerTypeMismatch(
+                        ty.display(ctx).to_string(),
+                        init_ty.display(ctx).to_string(),
+                    ));
+                }
+            }
+
+            ty
+        } else if let Some(initializer) = &initializer {
+            initializer.ty(ctx)
+        } else {
+            return Err(ContextError::GlobalTypeAndInitializerBothAbsent);
+        };
 
         ctx.module.globals.insert(
             name_id,
             GlobalData {
                 linkage: Linkage::External,
                 visiblity: Visiblity::Default,
-                kind: GlobalKind::Variable(GlobalVariable { ty, initializer }),
+                kind: GlobalKind::Variable(GlobalVariable {
+                    ty: final_ty,
+                    initializer,
+                }),
             },
         );
 

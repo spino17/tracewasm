@@ -883,7 +883,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         builder
-            .declare_global_variable("counter".to_string(), i32_ty, None, &mut ctx)
+            .declare_global_variable("counter".to_string(), Some(i32_ty), None, &mut ctx)
             .expect("an i32 is a legal global type");
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -921,7 +921,7 @@ mod tests {
         }));
 
         builder
-            .declare_global_variable("p".to_string(), ptr_ty, Some(init), &mut ctx)
+            .declare_global_variable("p".to_string(), Some(ptr_ty), Some(init), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -948,7 +948,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let counter = builder
-            .declare_global_variable("counter".to_string(), i32_ty, None, &mut ctx)
+            .declare_global_variable("counter".to_string(), Some(i32_ty), None, &mut ctx)
             .unwrap();
 
         let f = builder
@@ -1001,7 +1001,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = builder
-            .declare_global_variable("a".to_string(), void_ty, None, &mut ctx)
+            .declare_global_variable("a".to_string(), Some(void_ty), None, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -1014,7 +1014,7 @@ mod tests {
 
         assert!(
             matches!(
-                builder.declare_global_variable("b".to_string(), func_ty, None, &mut ctx),
+                builder.declare_global_variable("b".to_string(), Some(func_ty), None, &mut ctx),
                 Err(ContextError::GlobalVariableTypeNotSized(_))
             ),
             "a function type is not a global's type either"
@@ -1031,7 +1031,7 @@ mod tests {
 
         assert!(
             builder
-                .declare_global_variable("c".to_string(), struct_ty, None, &mut ctx)
+                .declare_global_variable("c".to_string(), Some(struct_ty), None, &mut ctx)
                 .is_ok(),
             "an aggregate has a size"
         );
@@ -1052,12 +1052,12 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         builder
-            .declare_global_variable("g".to_string(), i32_ty, None, &mut ctx)
+            .declare_global_variable("g".to_string(), Some(i32_ty), None, &mut ctx)
             .unwrap();
 
         assert!(
             builder
-                .declare_global_variable("g".to_string(), i32_ty, None, &mut ctx)
+                .declare_global_variable("g".to_string(), Some(i32_ty), None, &mut ctx)
                 .is_err(),
             "a second global of that name collides"
         );

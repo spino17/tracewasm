@@ -102,6 +102,24 @@ pub enum ContextError {
     /// and pointers are fine.
     #[error("a global variable cannot have type `{0}`: it has no size")]
     GlobalVariableTypeNotSized(String),
+    /// A global's initializer is not of the type the global was declared with.
+    ///
+    /// The match has to be **exact**, not merely compatible: `llvm-as` refuses
+    /// `@g = global i32 true` with "constant expression type mismatch" even though an
+    /// `i1` is an integer, and `@g = global double 0` with "integer constant must
+    /// have integer type".
+    ///
+    /// One mismatch LLVM cannot catch is a width one — an initializer renders bare,
+    /// so `@g = global i64 <i32 0>` writes `@g = global i64 0` and the declared type
+    /// silently wins. Checking here is what makes that visible.
+    ///
+    /// Fields: the type the global was declared with, and the initializer's type.
+    #[error("a global of type `{0}` cannot be initialised with a value of type `{1}`")]
+    GlobalInitializerTypeMismatch(String, String),
+    /// A global was declared with neither a type nor an initializer, so there is
+    /// nothing to give it and nothing to infer one from.
+    #[error("a global variable needs either a type or an initializer, and neither was given")]
+    GlobalTypeAndInitializerBothAbsent,
 }
 
 /// An instruction could not be built.
