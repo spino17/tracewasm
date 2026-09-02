@@ -2836,7 +2836,7 @@ mod tests {
         // would be a different instruction than the caller asked for.
         assert_eq!(ctx.display(value.ty()).to_string(), "i64");
 
-        let ValueKind::Const(id) = value.kind() else {
+        let ValueKind::ConstExpr(ConstExpr::Const(id)) = value.kind() else {
             panic!("expected a constant")
         };
 

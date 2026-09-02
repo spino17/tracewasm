@@ -93,7 +93,6 @@ impl IREmitter {
     fn operand_kind(kind: &ValueKind, ctx: &Context) -> Result<String, anyhow::Error> {
         match kind {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
-            ValueKind::Const(id) => Ok(Self::constant(ctx.const_interner.value(id.raw()))),
             ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
             // A global is referred to by name, whatever it names — a variable, a
             // defined function, a declaration. Its *value* is the address, which is
@@ -132,6 +131,9 @@ impl IREmitter {
                     Self::typed_operand(&operands.ptr, ctx)?,
                     indices
                 ))
+            }
+            ConstExpr::Const(const_id) => {
+                Ok(Self::constant(ctx.const_interner.value(const_id.raw())))
             }
             // These four carry no operands to render — `PtrToInt` and `IntToPtr` have
             // no fields at all, and `BitCast`/`Trunc` name only a target type with no

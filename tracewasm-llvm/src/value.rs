@@ -333,8 +333,6 @@ impl Display for TypeDisplay<'_> {
 pub enum ValueKind {
     /// A named register, `%x`, defined by some instruction or a parameter.
     Reg(Register),
-    /// A literal, interned in the constant pool: `i32 7`, `null`, `true`.
-    Const(ConstId),
     /// A constant folded from other constants, written inline in the IR rather than
     /// computed by an instruction. See [`ConstExpr`].
     ConstExpr(ConstExpr),
@@ -395,7 +393,7 @@ impl Value {
 
         Ok(Value {
             ty,
-            kind: ValueKind::Const(const_id.into()),
+            kind: ValueKind::ConstExpr(ConstExpr::Const(const_id.into())),
         })
     }
 
@@ -453,7 +451,7 @@ impl Value {
     /// Used where a value has to be known *now* rather than at run time — a
     /// `getelementptr` struct index, for instance.
     pub fn try_const<'a>(&self, ctx: &'a Context) -> Option<&'a ConstValue> {
-        if let ValueKind::Const(const_val) = self.kind() {
+        if let ValueKind::ConstExpr(ConstExpr::Const(const_val)) = self.kind() {
             let const_val = ctx.const_interner.value(const_val.raw());
 
             Some(const_val)
@@ -510,14 +508,14 @@ impl Value {
         let val_ty = self.ty();
 
         let final_value = match self.kind() {
-            ValueKind::Const(const_id) => {
+            ValueKind::ConstExpr(ConstExpr::Const(const_id)) => {
                 let const_val = *ctx.const_interner.value(const_id.raw());
                 let casted_const_val = const_val.try_cast(ty, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
 
-                Value::new(ty, ValueKind::Const(casted_const_id))
+                Value::new(ty, ValueKind::ConstExpr(ConstExpr::Const(casted_const_id)))
             }
-            ValueKind::Reg(_) | ValueKind::ConstExpr(_) | ValueKind::Global(_) => {
+            ValueKind::ConstExpr(_) | ValueKind::Reg(_) | ValueKind::Global(_) => {
                 if val_ty != ty {
                     return None;
                 }
@@ -600,7 +598,6 @@ impl Value {
 
                 PointeeTy { ty, count: None }
             }
-            ValueKind::Const(_) => return None,
         };
 
         Some(pointee_ty)
@@ -650,6 +647,7 @@ pub enum ConstExpr {
         /// The narrower type being truncated to.
         target_ty: TyId,
     },
+    Const(ConstId),
 }
 
 impl ConstExpr {
@@ -661,6 +659,11 @@ impl ConstExpr {
             ConstExpr::IntToPtr { .. } => ctx.ptr_ty(),
             ConstExpr::BitCast { ty } => *ty,
             ConstExpr::Trunc { target_ty } => *target_ty,
+            ConstExpr::Const(const_val) => {
+                let const_val = ctx.const_interner.value(const_val.raw()).clone();
+
+                const_val.ty(ctx)
+            }
         }
     }
 }
@@ -706,6 +709,21 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    pub fn ty(&self, ctx: &mut Context) -> TyId {
+        ctx.ty_interner
+            .intern(match self {
+                ConstValue::I1(_) => Type::I1,
+                ConstValue::I8(_) => Type::I8,
+                ConstValue::I16(_) => Type::I16,
+                ConstValue::I32(_) => Type::I32,
+                ConstValue::I64(_) => Type::I64,
+                ConstValue::Float(_) => Type::Float,
+                ConstValue::Double(_) => Type::Double,
+                ConstValue::NullPtr => Type::Ptr,
+            })
+            .into()
+    }
+
     pub fn try_integer(&self) -> Option<i32> {
         let val = match self {
             ConstValue::I1(val) => *val as i32,
@@ -1134,8 +1152,9 @@ mod tests {
         let widened = Value::from_const(7i8, Some(i64_ty), &mut ctx).unwrap();
 
         assert_eq!(ty_of(&widened, &ctx), Type::I64);
+
         assert!(
-            matches!(widened.kind, ValueKind::Const(_)),
+            matches!(widened.kind, ValueKind::ConstExpr(ConstExpr::Const(_))),
             "a constant value holds a pool id"
         );
 
