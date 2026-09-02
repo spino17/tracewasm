@@ -11,7 +11,7 @@ use crate::{
         LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
-    interner::TyId,
+    interner::{StrId, TyId},
     value::{I1Value, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
@@ -603,6 +603,17 @@ impl Cursor {
             reg,
             ctx,
         )
+    }
+
+    pub fn build_call(
+        &self,
+        func_name: String,
+        params: &[(Value, Option<TyId>)],
+        return_ty: Option<TyId>,
+        ctx: &mut Context,
+    ) -> Result<Option<Value>, InstructionError> {
+        let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
+        todo!()
     }
 }
 

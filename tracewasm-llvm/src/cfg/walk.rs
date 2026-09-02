@@ -120,11 +120,7 @@ pub trait CfgVisitor {
     -> Result<Self::OkType, Self::ErrType>;
 
     /// Visits the module, before its functions.
-    fn visit_cfg(
-        &mut self,
-        module: &ControlFlowGraph,
-        ctx: &Context,
-    ) -> Result<Self::OkType, Self::ErrType>;
+    fn visit_cfg(&mut self, module: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType>;
 
     /// Walks one block: the block itself, then its phis, then its instructions.
     ///
@@ -195,20 +191,16 @@ pub trait CfgVisitor {
     }
 
     /// Walks the whole module. This is the entry point.
-    fn walk_cfg(
-        &mut self,
-        cfg: &ControlFlowGraph,
-        ctx: &Context,
-    ) -> Result<Self::OkType, Self::ErrType> {
-        let funcs = &cfg.module.functions;
+    fn walk_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
+        let funcs = &cfg.context.module.functions;
         let mut func_results = vec![];
 
-        let _res = self.visit_cfg(cfg, ctx)?;
+        let _res = self.visit_cfg(cfg)?;
 
         for func_id in funcs {
-            let func = ctx.get_func(*func_id);
+            let func = cfg.context.get_func(*func_id);
 
-            func_results.push(self.walk_func(*func_id, func, ctx)?);
+            func_results.push(self.walk_func(*func_id, func, &cfg.context)?);
         }
 
         self.post_module_visit(func_results)

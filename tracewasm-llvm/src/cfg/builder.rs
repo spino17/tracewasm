@@ -4,7 +4,6 @@ use crate::{
         basic_block::BasicBlockId,
         context::Context,
         function::{FuncId, Function},
-        module::Module,
     },
     error::ContextError,
     instruction::cursor::Cursor,
@@ -20,27 +19,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// two are threaded together through every call, and
 /// [`build`](Self::build) consumes the builder to produce the finished
 /// [`ControlFlowGraph`].
-pub struct Builder {
-    pub(crate) module: Module,
-}
+pub struct Builder;
 
 impl Builder {
-    /// An empty module for the given target.
-    ///
-    /// Either string may be empty, meaning "unset": the emitter then omits the
-    /// corresponding `target` line rather than writing an empty one.
-    pub fn new(triple: String, data_layout: String) -> Self {
-        Builder {
-            module: Module {
-                triple,
-                data_layout,
-                globals: vec![],
-                functions: vec![],
-                func_names: FxHashMap::default(),
-            },
-        }
-    }
-
     /// Opens a cursor that writes into `id`.
     ///
     /// A cursor is a position, not a lock: several may be opened at one block over
@@ -83,7 +64,7 @@ impl Builder {
     ) -> Result<FuncId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
-        if self.module.func_names.contains_key(&name_id) {
+        if ctx.module.func_names.contains_key(&name_id) {
             return Err(ContextError::DuplicateFunctionName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
@@ -141,10 +122,10 @@ impl Builder {
         func.params = final_params;
         func.result = result;
 
-        self.module
+        ctx.module
             .func_names
             .insert(name_id, FuncSignature::new(param_tys, result));
-        self.module.functions.push(id);
+        ctx.module.functions.push(id);
 
         ctx.register_def_instr_index
             .insert(id, FxHashMap::default());
@@ -160,10 +141,8 @@ impl Builder {
     /// Nothing is verified here: whether each block ends in a terminator, and whether
     /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
     /// reports both.
-    pub fn build(self) -> ControlFlowGraph {
-        ControlFlowGraph {
-            module: self.module,
-        }
+    pub fn build(self, ctx: Context) -> ControlFlowGraph {
+        ControlFlowGraph { context: ctx }
     }
 }
 

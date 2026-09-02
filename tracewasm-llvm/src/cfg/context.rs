@@ -4,6 +4,7 @@ use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
         function::{FuncId, Function},
+        module::{DataLayout, Module, Triple},
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::ContextError,
@@ -27,8 +28,8 @@ use std::collections::hash_map::Entry;
 /// In practice: one context per module, threaded through every builder call. That is
 /// why so much of this crate takes `&mut Context` rather than the individual pool it
 /// happens to need.
-#[derive(Default)]
 pub struct Context {
+    pub(crate) module: Module,
     pub(crate) blocks: Arena<BasicBlock>,
     pub(crate) funcs: Arena<Function>,
     pub(crate) str_interner: StrInterner,
@@ -36,6 +37,21 @@ pub struct Context {
     pub(crate) ty_interner: TyInterner,
     pub(crate) reg_name_assigner: FxHashMap<FuncId, FuncRegNameIndex>,
     pub(crate) register_def_instr_index: FxHashMap<FuncId, FxHashMap<StrId, RegisterDef>>,
+}
+
+impl Context {
+    pub fn new(triple: Triple, data_layout: DataLayout) -> Self {
+        Context {
+            module: Module::new(triple, data_layout),
+            blocks: Arena::default(),
+            funcs: Arena::default(),
+            str_interner: StrInterner::default(),
+            const_interner: ConstInterner::default(),
+            ty_interner: TyInterner::default(),
+            reg_name_assigner: FxHashMap::default(),
+            register_def_instr_index: FxHashMap::default(),
+        }
+    }
 }
 
 /// Where a register was defined.

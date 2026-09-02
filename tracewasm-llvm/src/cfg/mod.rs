@@ -11,7 +11,7 @@
 //! - [`walk::CfgVisitor`] traverses a finished graph, and [`emit::IREmitter`] is the
 //!   implementation that renders it as text.
 
-use crate::cfg::module::Module;
+use crate::cfg::context::Context;
 
 pub mod basic_block;
 pub mod builder;
@@ -29,7 +29,7 @@ pub mod walk;
 /// [`Context`](context::Context) it was built against is still needed to read it,
 /// since everything inside is an id.
 pub struct ControlFlowGraph {
-    pub(crate) module: Module,
+    pub(crate) context: Context,
 }
 
 #[cfg(test)]

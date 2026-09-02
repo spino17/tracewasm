@@ -34,13 +34,13 @@ impl IREmitter {
     /// If the graph contains something the emitter cannot spell — currently only a
     /// constant-expression operand, which is refused rather than written as a
     /// placeholder `llvm-as` could not parse.
-    pub fn emit(cfg: ControlFlowGraph, ctx: &Context) -> Result<String, anyhow::Error> {
+    pub fn emit(cfg: ControlFlowGraph) -> Result<String, anyhow::Error> {
         let mut emitter = IREmitter {
             ir: String::default(),
             indentation: false,
         };
 
-        emitter.walk_cfg(&cfg, ctx)?;
+        emitter.walk_cfg(&cfg)?;
 
         Ok(emitter.ir)
     }
@@ -153,27 +153,26 @@ impl CfgVisitor for IREmitter {
     type OkType = ();
     type ErrType = anyhow::Error;
 
-    fn visit_cfg(
-        &mut self,
-        module: &ControlFlowGraph,
-        _ctx: &Context,
-    ) -> Result<Self::OkType, Self::ErrType> {
+    fn visit_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
         self.unset_indentation();
 
         // Both are optional in a module, and `Builder::new` accepts empty strings for
         // them — an empty `target triple = ""` line is not what that means.
-        if !module.module.data_layout.is_empty() {
+        if !cfg.context.module.data_layout.is_empty() {
             self.push_line(&format!(
                 "target datalayout = \"{}\"",
-                module.module.data_layout
+                cfg.context.module.data_layout
             ));
         }
 
-        if !module.module.triple.is_empty() {
-            self.push_line(&format!("target triple = \"{}\"", module.module.triple));
+        if !cfg.context.module.triple.is_empty() {
+            self.push_line(&format!(
+                "target triple = \"{}\"",
+                cfg.context.module.triple
+            ));
         }
 
-        if !module.module.data_layout.is_empty() || !module.module.triple.is_empty() {
+        if !cfg.context.module.data_layout.is_empty() || !cfg.context.module.triple.is_empty() {
             self.push_line("");
         }
 

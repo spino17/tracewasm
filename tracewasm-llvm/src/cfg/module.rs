@@ -52,7 +52,7 @@ pub struct Module {
 
 impl Module {
     /// An empty module for the given target.
-    pub fn new(triple: Triple, data_layout: DataLayout) -> Self {
+    pub(crate) fn new(triple: Triple, data_layout: DataLayout) -> Self {
         Module {
             triple: triple.to_string(),
             data_layout: data_layout.to_string(),

@@ -8,8 +8,8 @@
 use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::PhiError,
-    interner::TyId,
-    value::{I1Value, Value},
+    interner::{StrId, TyId},
+    value::{I1Value, Type, Value},
 };
 use rustc_hash::FxHashSet;
 
@@ -214,4 +214,10 @@ impl GetElementPtrOperands {
             .walk_pointee_ty_in_gep(&self.indices[1..], ctx)
             .ok()
     }
+}
+
+pub struct CallOperands {
+    pub func_name: StrId,
+    pub return_ty: TyId,
+    pub params: Vec<(Value, Option<TyId>)>,
 }
