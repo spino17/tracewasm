@@ -1043,6 +1043,122 @@ mod tests {
         );
     }
 
+    /// A plain constant initializer, now that `ConstExpr` can carry one — and with
+    /// the type omitted, since the initializer already determines it.
+    #[test]
+    fn a_global_variable_infers_its_type_from_a_constant_initializer() {
+        let (mut ctx, builder) = fixture();
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        let ValueKind::ConstExpr(init) = seven.kind() else {
+            panic!("a constant is a constant expression")
+        };
+
+        builder
+            .declare_global_variable("count".to_string(), None, Some(init.clone()), &mut ctx)
+            .expect("the initializer says what the type is");
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                "@count = global i32 7\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
+    }
+
+    /// Given both, they have to agree — and **exactly**. `llvm-as` refuses
+    /// `@g = global i32 true` with "constant expression type mismatch" even though an
+    /// `i1` is an integer, and `@g = global double 0` with "integer constant must
+    /// have integer type".
+    #[test]
+    fn a_global_initializer_must_match_the_declared_type_exactly() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
+
+        let const_of = |v: &Value| {
+            let ValueKind::ConstExpr(expr) = v.kind() else {
+                panic!("a constant is a constant expression")
+            };
+
+            expr.clone()
+        };
+
+        let a_bool = const_of(&Value::from_const(true, None, &mut ctx).unwrap());
+
+        let err = builder
+            .declare_global_variable("a".to_string(), Some(i32_ty), Some(a_bool), &mut ctx)
+            .expect_err("an i1 does not initialise an i32");
+
+        assert!(
+            matches!(
+                &err,
+                ContextError::GlobalInitializerTypeMismatch(declared, given)
+                    if declared == "i32" && given == "i1"
+            ),
+            "the error must name both types, got: {err}"
+        );
+
+        // An integer does not initialise a float either, in either direction.
+        let an_int = const_of(&Value::from_const(0i32, None, &mut ctx).unwrap());
+
+        assert!(
+            matches!(
+                builder.declare_global_variable(
+                    "b".to_string(),
+                    Some(f64_ty),
+                    Some(an_int),
+                    &mut ctx
+                ),
+                Err(ContextError::GlobalInitializerTypeMismatch(..))
+            ),
+            "an i32 does not initialise a double"
+        );
+
+        // The matching case still goes through.
+        let an_i32 = const_of(&Value::from_const(1i32, None, &mut ctx).unwrap());
+
+        assert!(
+            builder
+                .declare_global_variable("c".to_string(), Some(i32_ty), Some(an_i32), &mut ctx)
+                .is_ok()
+        );
+
+        assert_eq!(
+            ctx.module.global_variables.len(),
+            1,
+            "only the accepted global was recorded"
+        );
+    }
+
+    /// Neither a type nor an initializer leaves nothing to declare and nothing to
+    /// infer from — the same shape as a `ret` with neither.
+    #[test]
+    fn a_global_variable_needs_a_type_or_an_initializer() {
+        let (mut ctx, builder) = fixture();
+
+        let err = builder
+            .declare_global_variable("g".to_string(), None, None, &mut ctx)
+            .expect_err("nothing to go on");
+
+        assert!(
+            matches!(&err, ContextError::GlobalTypeAndInitializerBothAbsent),
+            "got: {err}"
+        );
+
+        assert!(
+            ctx.module.global_variables.is_empty(),
+            "the refused global was not recorded"
+        );
+    }
+
     /// Globals and functions share one namespace, so a name is used once.
     #[test]
     fn a_global_variable_cannot_reuse_a_name() {
