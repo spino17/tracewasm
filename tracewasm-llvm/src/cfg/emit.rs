@@ -6,8 +6,8 @@ use crate::{
         function::Function, walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands, PhiInstruction,
-        RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands,
+        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{ConstValue, Value, ValueKind},
 };
@@ -385,11 +385,35 @@ impl CfgVisitor for IREmitter {
 
     fn visit_call(
         &mut self,
-        operands: &crate::instruction::CallOperands,
+        operands: &CallOperands,
         value: Option<&Value>,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        let mut args = vec![];
+
+        for param in &operands.params {
+            args.push(Self::typed_operand(param, ctx)?);
+        }
+
+        // Only the return type is written, not the whole function type — the long
+        // form is legal but only needed for a variadic callee.
+        //
+        // A `void` call defines no register and takes no `%x = ` prefix: `llvm-as`
+        // refuses one with "instructions returning void cannot have a name".
+        let assignment = match value {
+            Some(value) => Self::assignment(value, ctx)?,
+            None => String::new(),
+        };
+
+        self.push_line(&format!(
+            "{}call {} @{}({})",
+            assignment,
+            ctx.display(operands.return_ty),
+            ctx.str_interner.value(operands.func_name.0),
+            args.join(", ")
+        ));
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -435,6 +459,7 @@ mod tests {
         let f32_ty = ctx.f32_ty();
         let f64_ty = ctx.f64_ty();
         let ptr_ty = ctx.ptr_ty();
+        let void_ty = ctx.void_ty();
 
         let array_ty: TyId = ctx
             .ty_interner
@@ -451,6 +476,42 @@ mod tests {
                 packed: false,
             })
             .into();
+
+        // The callees come first: a call resolves against the functions added so far,
+        // so a forward reference would not resolve.
+        let helper = builder
+            .add_function(
+                "helper".to_string(),
+                &[(i32_ty, Some("v".to_string()))],
+                i32_ty,
+                &mut ctx,
+            )
+            .unwrap();
+
+        let helper_entry = helper
+            .add_basic_block("entry".to_string(), &mut ctx)
+            .unwrap();
+
+        let passed = helper
+            .nth_param(0, &ctx)
+            .expect("helper takes one parameter")
+            .clone();
+
+        builder
+            .cursor_at_block(helper_entry)
+            .build_ret(Some(passed), Some(i32_ty), &mut ctx)
+            .unwrap();
+
+        let noop = builder
+            .add_function("noop".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let noop_entry = noop.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+
+        builder
+            .cursor_at_block(noop_entry)
+            .build_ret(None, Some(void_ty), &mut ctx)
+            .unwrap();
 
         let f = builder
             .add_function(
@@ -542,10 +603,31 @@ mod tests {
             .build_conditional_br(cond, body, exit, &mut ctx)
             .unwrap();
 
-        let answer = Value::from_const(0i32, None, &mut ctx).unwrap();
+        // Both call shapes: one returning a value, one `void`. `helper` was added
+        // before `main`, since the callee has to already exist.
+        let in_exit = builder.cursor_at_block(exit);
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
-        builder
-            .cursor_at_block(exit)
+        let answer = in_exit
+            .build_call(
+                "helper".to_string(),
+                &[(seven, None)],
+                Some(i32_ty),
+                Some("c"),
+                &mut ctx,
+            )
+            .expect("helper takes an i32 and returns one")
+            .expect("a non-void call defines a register");
+
+        assert!(
+            in_exit
+                .build_call("noop".to_string(), &[], None, None, &mut ctx)
+                .unwrap()
+                .is_none(),
+            "a void call defines nothing"
+        );
+
+        in_exit
             .build_ret(Some(answer), Some(i32_ty), &mut ctx)
             .unwrap();
 
@@ -553,6 +635,16 @@ mod tests {
 
         let expected = concat!(
             "target triple = \"arm64-apple-macosx\"\n",
+            "\n",
+            "define i32 @helper(i32 %v) {\n",
+            "entry:\n",
+            "    ret i32 %v\n",
+            "}\n",
+            "\n",
+            "define void @noop() {\n",
+            "entry:\n",
+            "    ret void\n",
+            "}\n",
             "\n",
             "define i32 @main(i32 %n, ptr %0) {\n",
             "entry:\n",
@@ -570,7 +662,9 @@ mod tests {
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
             "    br i1 true, label %body, label %exit\n",
             "exit:\n",
-            "    ret i32 0\n",
+            "    %c = call i32 @helper(i32 7)\n",
+            "    call void @noop()\n",
+            "    ret i32 %c\n",
             "}\n",
             "\n",
         );

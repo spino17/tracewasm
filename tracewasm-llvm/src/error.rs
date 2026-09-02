@@ -146,6 +146,9 @@ pub enum InstructionError {
     /// See [`RetError`].
     #[error("{0}")]
     Ret(#[from] RetError),
+    /// See [`CallError`].
+    #[error("{0}")]
+    Call(#[from] CallError),
     /// See [`PhiError`].
     #[error("{0}")]
     Phi(#[from] PhiError),
@@ -199,6 +202,45 @@ pub enum RetError {
     /// Fields: the function's name, the result it declares, and what was returned.
     #[error("`{0}` returns `{1}`, so it cannot return `{2}`")]
     DoesNotMatchFunctionResult(String, String, String),
+}
+
+/// A `call` could not be built.
+#[derive(Error, Debug)]
+pub enum CallError {
+    /// No function of that name has been added to the module.
+    ///
+    /// The table holds only what
+    /// [`Builder::add_function`](crate::cfg::builder::Builder::add_function) has
+    /// registered so far, so this also covers a **forward call** — one to a function
+    /// that will be added later — and a host import, which nothing declares.
+    #[error("no function named `{0}` has been added to this module")]
+    FunctionNotFound(String),
+    /// The callee takes a different number of arguments.
+    #[error("`{name}` takes `{expected}` argument(s), but `{given}` were given")]
+    ParamCountMismatch {
+        /// The callee's name.
+        name: String,
+        /// How many it declares.
+        expected: usize,
+        /// How many were passed.
+        given: usize,
+    },
+    /// An argument's type differs from the callee's parameter type.
+    ///
+    /// Fields: the callee, the argument's position, the type declared for it, and
+    /// the type actually given.
+    #[error("`{0}` expects `{2}` for argument `{1}`, but got `{3}`")]
+    ParamTypeMismatch(String, usize, String, String),
+    /// An argument could not be folded into the type given for it.
+    #[error("argument `{1}` of type `{2}` cannot be passed as `{3}` in a call to `{0}`")]
+    ParamCastFailed(String, usize, String, String),
+    /// The declared return type differs from the callee's.
+    #[error("`{0}` returns `{1}`, so a call to it cannot return `{2}`")]
+    ReturnTypeMismatch(String, String, String),
+    /// A register name was given for a call that produces nothing. `llvm-as` refuses
+    /// `%r = call void @g()` with "instructions returning void cannot have a name".
+    #[error("a call to `{0}` returns `void`, so it cannot be assigned to a register")]
+    RegisterNameForVoidCall(String),
 }
 
 /// A `store` could not be built.

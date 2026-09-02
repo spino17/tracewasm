@@ -5,7 +5,7 @@ use crate::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
     },
-    error::{AllocaError, GepError, InstructionError, PhiError, RetError, StoreError},
+    error::{AllocaError, CallError, GepError, InstructionError, PhiError, RetError, StoreError},
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction,
         InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
@@ -647,31 +647,39 @@ impl Cursor {
     ) -> Result<Option<Value>, InstructionError> {
         let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
 
-        let params: Vec<Value> = params
-            .iter()
-            .map(|(param_val, param_ty)| {
-                if let Some(param_ty) = param_ty {
-                    let Some(casted_val) = param_val.try_cast(*param_ty, ctx) else {
-                        todo!() // RAISE ERROR: cannot cast the param into provided type!
-                    };
-
-                    casted_val
-                } else {
-                    param_val.clone()
-                }
-            })
-            .collect();
-
+        // The signature is read out by value before anything below borrows `ctx`
+        // mutably: casting an argument interns into the type pool, which a live
+        // borrow of the function table would forbid.
         let Some(func_sig) = ctx.module.func_names.get(&func_name_id) else {
-            todo!() // RAISE ERROR: function declaration not found in the module
+            return Err(CallError::FunctionNotFound(
+                ctx.str_interner.value(func_name_id.0).to_string(),
+            )
+            .into());
         };
 
+        let name = ctx.str_interner.value(func_name_id.0).to_string();
         let expected_return_ty = func_sig.result;
-        let expected_param_tys = &func_sig.params;
+        let expected_param_tys = func_sig.params.clone();
+
+        // Arity first, so a mismatched count is reported as such rather than as a
+        // type error on whichever argument happens to line up wrongly.
+        if params.len() != expected_param_tys.len() {
+            return Err(CallError::ParamCountMismatch {
+                name,
+                expected: expected_param_tys.len(),
+                given: params.len(),
+            }
+            .into());
+        }
 
         let return_ty = if let Some(return_ty) = return_ty {
             if return_ty != expected_return_ty {
-                todo!() // RAISE ERROR: provided return ty does not match with function signature
+                return Err(CallError::ReturnTypeMismatch(
+                    name,
+                    ctx.display(expected_return_ty).to_string(),
+                    ctx.display(return_ty).to_string(),
+                )
+                .into());
             }
 
             return_ty
@@ -679,19 +687,47 @@ impl Cursor {
             expected_return_ty
         };
 
-        if params.len() != expected_param_tys.len() {
-            todo!() // RAISE ERROR: number of params mismtach
+        let mut final_params: Vec<Value> = Vec::with_capacity(params.len());
+
+        for (index, ((param_val, param_ty), expected_param_ty)) in
+            params.iter().zip(&expected_param_tys).enumerate()
+        {
+            let final_val = if let Some(param_ty) = param_ty {
+                let given = ctx.display(param_val.ty()).to_string();
+
+                let Some(casted_val) = param_val.try_cast(*param_ty, ctx) else {
+                    return Err(CallError::ParamCastFailed(
+                        name,
+                        index,
+                        given,
+                        ctx.display(*param_ty).to_string(),
+                    )
+                    .into());
+                };
+
+                casted_val
+            } else {
+                param_val.clone()
+            };
+
+            if final_val.ty() != *expected_param_ty {
+                return Err(CallError::ParamTypeMismatch(
+                    name,
+                    index,
+                    ctx.display(*expected_param_ty).to_string(),
+                    ctx.display(final_val.ty()).to_string(),
+                )
+                .into());
+            }
+
+            final_params.push(final_val);
         }
 
-        for (param_val, &expected_param_ty) in params.iter().zip(expected_param_tys) {
-            if param_val.ty() != expected_param_ty {
-                todo!() // RAISE ERROR: param ty does not match with function signature
-            }
-        }
+        let params = final_params;
 
         let val = if return_ty.is_void(ctx) {
             if reg.is_some() {
-                todo!() // RAISE ERROR: reg name passed for void returning function
+                return Err(CallError::RegisterNameForVoidCall(name).into());
             }
 
             self.block.add_instruction(
@@ -1671,6 +1707,297 @@ mod tests {
 
         assert_eq!(ctx.register_defs(f).len(), 1, "`f` recorded its alloca");
         assert!(ctx.register_defs(g).is_empty(), "`g` is untouched");
+    }
+
+    /// A `void` callee defines no register, and a non-`void` one does. `llvm-as`
+    /// refuses `%r = call void @g()` with "instructions returning void cannot have a
+    /// name", so asking for one is an error rather than something quietly dropped.
+    #[test]
+    fn a_call_defines_a_register_only_when_the_callee_returns_one() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let returns_i32 = builder
+            .add_function("a".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        builder
+            .add_function("b".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = returns_i32
+            .add_basic_block("entry".to_string(), &mut ctx)
+            .unwrap();
+
+        let cursor = builder.cursor_at_block(entry);
+
+        let value = cursor
+            .build_call("a".to_string(), &[], None, Some("r"), &mut ctx)
+            .unwrap()
+            .expect("a non-void call defines a register");
+
+        assert_eq!(value.ty(), i32_ty, "typed by the callee's result");
+
+        assert!(
+            cursor
+                .build_call("b".to_string(), &[], None, None, &mut ctx)
+                .unwrap()
+                .is_none(),
+            "a void call defines nothing"
+        );
+
+        let err = cursor
+            .build_call("b".to_string(), &[], None, Some("x"), &mut ctx)
+            .expect_err("a void call cannot be named");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::RegisterNameForVoidCall(n)) if n == "b"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// The callee has to already be in the module. Self-recursion works, because a
+    /// function's name is registered before its body is built; a **forward** call
+    /// does not, even though LLVM makes every function in a module mutually visible.
+    #[test]
+    fn a_call_resolves_only_against_functions_already_added() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+
+        let f = builder
+            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        assert!(
+            cursor
+                .build_call("f".to_string(), &[], None, Some("rec"), &mut ctx)
+                .is_ok(),
+            "a function may call itself"
+        );
+
+        let err = cursor
+            .build_call("later".to_string(), &[], None, Some("fwd"), &mut ctx)
+            .expect_err("`later` has not been added");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::FunctionNotFound(n)) if n == "later"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Arity, argument types and the return type are all checked against the callee's
+    /// recorded signature.
+    #[test]
+    fn a_call_is_checked_against_the_callee_signature() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f64_ty = ctx.f64_ty();
+
+        builder
+            .add_function("takes_i32".to_string(), &[(i32_ty, None)], i32_ty, &mut ctx)
+            .unwrap();
+
+        let f = builder
+            .add_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        // Arity, checked before the argument types so a miscount reads as one.
+        let err = cursor
+            .build_call("takes_i32".to_string(), &[], None, Some("a"), &mut ctx)
+            .expect_err("it takes one argument");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::ParamCountMismatch { name, expected, given })
+                    if name == "takes_i32" && *expected == 1 && *given == 0
+            ),
+            "got: {err}"
+        );
+
+        // A register of the wrong width is refused rather than widened.
+        let wide = Value::from_register("w".to_string(), i64_ty, &mut ctx);
+
+        let err = cursor
+            .build_call(
+                "takes_i32".to_string(),
+                &[(wide, None)],
+                None,
+                Some("b"),
+                &mut ctx,
+            )
+            .expect_err("an i64 is not an i32");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::ParamTypeMismatch(name, index, want, got))
+                    if name == "takes_i32" && *index == 0 && want == "i32" && got == "i64"
+            ),
+            "got: {err}"
+        );
+
+        // A declared return type that disagrees with the callee's.
+        let err = cursor
+            .build_call(
+                "takes_i32".to_string(),
+                &[(seven.clone(), None)],
+                Some(f64_ty),
+                Some("c"),
+                &mut ctx,
+            )
+            .expect_err("it returns i32");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::ReturnTypeMismatch(name, want, got))
+                    if name == "takes_i32" && want == "i32" && got == "double"
+            ),
+            "got: {err}"
+        );
+
+        // And the well-formed call still goes through.
+        assert!(
+            cursor
+                .build_call(
+                    "takes_i32".to_string(),
+                    &[(seven, None)],
+                    Some(i32_ty),
+                    Some("d"),
+                    &mut ctx
+                )
+                .is_ok(),
+            "a matching call is accepted"
+        );
+    }
+
+    /// An argument may carry a type to be folded into first — a constant converts, a
+    /// register has to match already.
+    #[test]
+    fn a_call_argument_may_be_cast_before_it_is_checked() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f64_ty = ctx.f64_ty();
+
+        builder
+            .add_function("takes_i64".to_string(), &[(i64_ty, None)], i64_ty, &mut ctx)
+            .unwrap();
+
+        let f = builder
+            .add_function("f".to_string(), &[], i64_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        // An `i32` constant widens into the `i64` the callee wants.
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+
+        assert!(
+            cursor
+                .build_call(
+                    "takes_i64".to_string(),
+                    &[(seven.clone(), Some(i64_ty))],
+                    None,
+                    Some("a"),
+                    &mut ctx
+                )
+                .is_ok(),
+            "a constant folds into the declared type"
+        );
+
+        // But a cast that cannot happen at all is reported as the cast failing,
+        // rather than as a type mismatch after the fact.
+        let err = cursor
+            .build_call(
+                "takes_i64".to_string(),
+                &[(seven, Some(f64_ty))],
+                None,
+                Some("b"),
+                &mut ctx,
+            )
+            .expect_err("an integer does not become a double without an instruction");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::ParamCastFailed(name, index, from, to))
+                    if name == "takes_i64" && *index == 0 && from == "i32" && to == "double"
+            ),
+            "got: {err}"
+        );
+
+        // A register is only checked, never converted.
+        let narrow = Value::from_register("n".to_string(), i32_ty, &mut ctx);
+
+        assert!(
+            matches!(
+                cursor.build_call(
+                    "takes_i64".to_string(),
+                    &[(narrow, Some(i64_ty))],
+                    None,
+                    Some("c"),
+                    &mut ctx
+                ),
+                Err(InstructionError::Call(CallError::ParamCastFailed(..)))
+            ),
+            "widening a register needs a real instruction"
+        );
+    }
+
+    /// A `call` is not a terminator, so the block stays open after one.
+    #[test]
+    fn a_call_does_not_end_its_block() {
+        let (mut ctx, mut builder) = fixture();
+
+        let void_ty = ctx.void_ty();
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .add_function("g".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let f = builder
+            .add_function("f".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        cursor
+            .build_call("g".to_string(), &[], None, None, &mut ctx)
+            .unwrap();
+
+        assert!(
+            !ctx.blocks.get(entry.raw()).unwrap().is_locked,
+            "a call is not a terminator"
+        );
+
+        cursor
+            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .expect("the block is still open");
     }
 
     /// A phi names one value per *predecessor*, so the same predecessor twice is a
