@@ -383,6 +383,15 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
+    fn visit_call(
+        &mut self,
+        operands: &crate::instruction::CallOperands,
+        value: Option<&Value>,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
+    }
+
     fn post_func_visit(
         &mut self,
         _func: crate::cfg::function::FuncId,

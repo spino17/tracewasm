@@ -8,8 +8,9 @@ use crate::{
         function::{FuncId, Function},
     },
     instruction::{
-        AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, InstructionKind,
-        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands,
+        InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
+        UnconditionalBrOperands,
     },
     value::Value,
 };
@@ -108,6 +109,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_call(
+        &mut self,
+        operands: &CallOperands,
+        value: Option<&Value>,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -162,6 +170,7 @@ pub trait CfgVisitor {
                 InstructionKind::GetElementPtr(operands) => {
                     self.visit_get_element_ptr(operands, val.unwrap(), ctx)?
                 }
+                InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
             });
         }
 

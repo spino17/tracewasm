@@ -112,6 +112,7 @@ pub enum InstructionKind {
     GetElementPtr(GetElementPtrOperands),
     /// `ret <ty> %v` or `ret void`.
     Ret(RetOperands),
+    Call(CallOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -219,5 +220,5 @@ impl GetElementPtrOperands {
 pub struct CallOperands {
     pub func_name: StrId,
     pub return_ty: TyId,
-    pub params: Vec<(Value, Option<TyId>)>,
+    pub params: Vec<Value>,
 }

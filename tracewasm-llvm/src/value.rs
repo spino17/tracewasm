@@ -29,8 +29,8 @@ use std::{
 /// that parses as a *different* type rather than failing.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
-    params: Vec<TyId>,
-    result: TyId,
+    pub params: Vec<TyId>,
+    pub result: TyId,
 }
 
 impl FuncSignature {

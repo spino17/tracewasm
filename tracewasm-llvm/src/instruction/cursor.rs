@@ -7,8 +7,8 @@ use crate::{
     },
     error::{AllocaError, GepError, InstructionError, PhiError, RetError, StoreError},
     instruction::{
-        AllocaOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction, InstructionKind,
-        LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction,
+        InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
@@ -610,10 +610,86 @@ impl Cursor {
         func_name: String,
         params: &[(Value, Option<TyId>)],
         return_ty: Option<TyId>,
+        reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Option<Value>, InstructionError> {
         let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
-        todo!()
+
+        let params: Vec<Value> = params
+            .iter()
+            .map(|(param_val, param_ty)| {
+                if let Some(param_ty) = param_ty {
+                    let Some(casted_val) = param_val.try_cast(*param_ty, ctx) else {
+                        todo!() // RAISE ERROR: cannot cast the param into provided type!
+                    };
+
+                    casted_val
+                } else {
+                    param_val.clone()
+                }
+            })
+            .collect();
+
+        let Some(func_sig) = ctx.module.func_names.get(&func_name_id) else {
+            todo!() // RAISE ERROR: function declaration not found in the module
+        };
+
+        let expected_return_ty = func_sig.result;
+        let expected_param_tys = &func_sig.params;
+
+        let return_ty = if let Some(return_ty) = return_ty {
+            if return_ty != expected_return_ty {
+                todo!() // RAISE ERROR: provided return ty does not match with function signature
+            }
+
+            return_ty
+        } else {
+            expected_return_ty
+        };
+
+        if params.len() != expected_param_tys.len() {
+            todo!() // RAISE ERROR: number of params mismtach
+        }
+
+        for (param_val, &expected_param_ty) in params.iter().zip(expected_param_tys) {
+            if param_val.ty() != expected_param_ty {
+                todo!() // RAISE ERROR: param ty does not match with function signature
+            }
+        }
+
+        let val = if return_ty.is_void(ctx) {
+            if reg.is_some() {
+                todo!() // RAISE ERROR: reg name passed for void returning function
+            }
+
+            self.block.add_instruction(
+                Instruction {
+                    kind: InstructionKind::Call(CallOperands {
+                        func_name: func_name_id,
+                        return_ty,
+                        params,
+                    }),
+                    value: None,
+                },
+                ctx,
+            );
+
+            None
+        } else {
+            Some(add_instruction_to_block_and_get_value(
+                InstructionKind::Call(CallOperands {
+                    func_name: func_name_id,
+                    return_ty,
+                    params,
+                }),
+                return_ty,
+                self.block,
+                reg,
+                ctx,
+            )?)
+        };
+
+        Ok(val)
     }
 }
 
