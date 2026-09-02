@@ -660,7 +660,9 @@ impl ConstExpr {
             ConstExpr::BitCast { ty } => *ty,
             ConstExpr::Trunc { target_ty } => *target_ty,
             ConstExpr::Const(const_val) => {
-                let const_val = ctx.const_interner.value(const_val.raw()).clone();
+                // Copied out rather than borrowed: `ConstValue::ty` interns, which
+                // needs `&mut ctx` and so cannot run while the pool is borrowed.
+                let const_val = *ctx.const_interner.value(const_val.raw());
 
                 const_val.ty(ctx)
             }
