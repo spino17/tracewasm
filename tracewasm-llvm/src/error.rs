@@ -13,6 +13,7 @@
 //!     ├── AllocaError
 //!     ├── StoreError
 //!     ├── RetError
+//!     ├── CallError
 //!     ├── GepError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
@@ -282,6 +283,7 @@ pub enum StoreError {
     StoredValueDoesNotMatchPointee(String, String),
 }
 
+/// A phi node could not be built.
 #[derive(Error, Debug)]
 pub enum PhiError {
     /// Phis come first in a block, before any other instruction.
@@ -351,7 +353,12 @@ pub enum GepError {
     StructIndexNotAConstantI32(String),
     /// The field index is past the end, or negative.
     #[error("index `{index}` is out of range for a struct with `{fields}` field(s)")]
-    StructIndexOutOfRange { index: i32, fields: usize },
+    StructIndexOutOfRange {
+        /// The index that was given.
+        index: i32,
+        /// How many fields the struct has.
+        fields: usize,
+    },
     /// A constant array index is past the end, or negative.
     ///
     /// **Stricter than LLVM.** `getelementptr [4 x i32], ptr %p, i64 0, i64 10`
@@ -359,7 +366,12 @@ pub enum GepError {
     /// error. Refused here so the mistake surfaces at construction. A non-constant
     /// index is not checked, since its value is not known yet.
     #[error("index `{index}` is out of range for an array of `{size}` element(s)")]
-    ArrayIndexOutOfRange { index: u64, size: u64 },
+    ArrayIndexOutOfRange {
+        /// The index that was given.
+        index: u64,
+        /// How many elements the array has.
+        size: u64,
+    },
     /// The walk reached a scalar with indices still to consume: only aggregates have
     /// anything to descend into.
     #[error("a value of type `{0}` cannot be indexed into")]

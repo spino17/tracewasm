@@ -40,6 +40,10 @@ pub struct Context {
 }
 
 impl Context {
+    /// An empty context for the given target.
+    ///
+    /// One per module. Everything built against it is addressed by id, and an id only
+    /// means anything here — see the type-level note above.
     pub fn new(triple: Triple, data_layout: DataLayout) -> Self {
         Context {
             module: Module::new(triple, data_layout),

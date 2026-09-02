@@ -33,7 +33,9 @@ use std::{
 /// that parses as a *different* type rather than failing.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
+    /// Parameter types, in declaration order.
     pub params: Vec<TyId>,
+    /// The result type, `void` included.
     pub result: TyId,
 }
 
@@ -336,6 +338,8 @@ pub enum ValueKind {
     /// A constant folded from other constants, written inline in the IR rather than
     /// computed by an instruction. See [`ConstExpr`].
     ConstExpr(ConstExpr),
+    /// A module-level symbol, `@g` — a variable or a function. Its type is always
+    /// `ptr`, since what a global *is* as an operand is its address.
     Global(Global),
 }
 
@@ -421,6 +425,15 @@ impl Value {
         }
     }
 
+    /// Takes a global's address as an operand.
+    ///
+    /// The result is a `ptr` whatever the global names — a variable, a defined
+    /// function, a declaration — which is exactly how LLVM types `@g`. What it points
+    /// at is recoverable separately, so a `load` or `store` through one needs no
+    /// explicit type.
+    ///
+    /// The tag is erased here: by the time a global is an operand, all three kinds
+    /// behave alike.
     pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> Self {
         let global = GlobalEntity::to_global(global);
 
@@ -623,11 +636,15 @@ pub(crate) struct PointeeTy {
 /// Build one with [`Value::from_const_expr`] and it can be used wherever a constant
 /// can: as a `store` value, a `load` address, a call argument.
 ///
-/// [`GetElementPtr`](Self::GetElementPtr) is complete — it carries its operands, it
-/// renders, and its pointee is recoverable, so a `load` or `store` through one is
-/// type-checked like any other. The remaining four carry **no operands**: two have no
-/// fields at all, and the other two name only a target type with no value to convert.
-/// They can be constructed, but there is nothing to emit, so the emitter refuses them
+/// Two variants are complete. [`Const`](Self::Const) is a plain literal, and
+/// [`GetElementPtr`](Self::GetElementPtr) carries its operands, renders, and has a
+/// recoverable pointee — so a `load` or `store` through one is type-checked like any
+/// other.
+///
+/// The other four carry **no operands**: [`PtrToInt`](Self::PtrToInt) and
+/// [`IntToPtr`](Self::IntToPtr) have no fields at all, and [`BitCast`](Self::BitCast)
+/// and [`Trunc`](Self::Trunc) name only a target type with no value to convert. They
+/// can be constructed, but there is nothing to emit, so the emitter refuses them
 /// rather than writing IR it cannot spell.
 pub enum ConstExpr {
     /// A `getelementptr` over constant operands. Its pointee is recoverable, so it
@@ -647,6 +664,11 @@ pub enum ConstExpr {
         /// The narrower type being truncated to.
         target_ty: TyId,
     },
+    /// A plain literal — `7`, `null`, `true`.
+    ///
+    /// Not an operation at all, but it belongs here because LLVM makes no distinction
+    /// where a constant is expected: a global initializer or a `store` value takes
+    /// either. Folding it in means one kind of operand instead of two.
     Const(ConstId),
 }
 
@@ -711,6 +733,7 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    /// The LLVM type this constant has.
     pub fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.ty_interner
             .intern(match self {
@@ -726,6 +749,11 @@ impl ConstValue {
             .into()
     }
 
+    /// The value as an `i32`, or `None` if this is not an integer.
+    ///
+    /// Narrower widths widen and `i64` truncates, so a caller that needs the exact
+    /// value must check the type too — a `getelementptr` struct index does, since
+    /// LLVM requires that one to be an `i32` specifically.
     pub fn try_integer(&self) -> Option<i32> {
         let val = match self {
             ConstValue::I1(val) => *val as i32,
@@ -739,6 +767,10 @@ impl ConstValue {
         Some(val)
     }
 
+    /// Whether the value is positive. A null pointer is not.
+    ///
+    /// For floats this is the *sign bit*, so `-0.0` is negative — the distinction
+    /// this type is careful to preserve elsewhere.
     pub fn is_sign_positive(&self) -> bool {
         match self {
             ConstValue::I1(val) => val.is_positive(),
@@ -752,6 +784,11 @@ impl ConstValue {
         }
     }
 
+    /// Folds this constant into `ty`, or `None` if it does not belong there.
+    ///
+    /// Dispatches to the [`Const`] impl for whichever literal it holds, so the rules
+    /// are the same ones described there: widths convert among integers and among
+    /// floats, and nothing crosses between them or reaches a pointer.
     pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
         match self {
             ConstValue::I1(val) => val.try_cast(ty, ctx),

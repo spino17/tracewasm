@@ -36,6 +36,32 @@ impl Builder {
         Cursor { block: id }
     }
 
+    /// Adds a global variable to the module.
+    ///
+    /// Emits `@name = global <ty> <initializer>`. The value is a
+    /// [`Value::from_global`](crate::value::Value::from_global) away from being usable
+    /// as an operand, where its type is `ptr` and `ty` is what that pointer points at.
+    ///
+    /// The two `Option`s are not independent — one of them has to say what the variable
+    /// holds:
+    ///
+    /// | `ty` | `initializer` | result |
+    /// |---|---|---|
+    /// | `Some` | `Some` | checked: the initializer's type must equal `ty` |
+    /// | `Some` | `None` | a declaration — the type is stated, the value is elsewhere |
+    /// | `None` | `Some` | the type is taken from the initializer |
+    /// | `None` | `None` | [`ContextError::GlobalTypeAndInitializerBothAbsent`] |
+    ///
+    /// The match in the first row is *exact*, not merely compatible: `llvm-as` refuses
+    /// `@g = global i32 true` with "constant expression type mismatch", even though an
+    /// `i1` is an integer.
+    ///
+    /// # Errors
+    ///
+    /// [`ContextError::DuplicateFunctionName`] if the name is taken — globals and
+    /// functions share one namespace, so a variable may not reuse a function's name.
+    /// [`ContextError::GlobalVariableTypeNotSized`] if `ty` is `void` or a function
+    /// type, neither of which a variable can hold. Plus the two above.
     pub fn declare_global_variable(
         &self,
         name: String,

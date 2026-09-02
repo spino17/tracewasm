@@ -13,13 +13,21 @@
 
 use crate::cfg::context::Context;
 
+/// Basic blocks and the handle that addresses them.
 pub mod basic_block;
+/// The builder that extends a module.
 pub mod builder;
+/// Storage for everything a module's ids point into.
 pub mod context;
+/// Rendering a finished graph as textual LLVM IR.
 pub mod emit;
+/// Function definitions and their parameters.
 pub mod function;
+/// Module-level symbols: variables, definitions and declarations.
 pub mod global;
+/// The module and its target settings.
 pub mod module;
+/// Traversing a finished graph.
 pub mod walk;
 
 /// A finished module, ready to be walked or emitted.

@@ -95,10 +95,23 @@ impl Display for Visiblity {
     }
 }
 
+/// What kind of thing a [`GlobalId`] names.
+///
+/// Implemented by the three tag types — [`GlobalVar`], [`DefinedFunc`] and
+/// [`DeclaredFunc`] — which exist only to distinguish `GlobalId<T>`s at compile time.
+/// That is what keeps
+/// [`add_basic_block`](crate::cfg::global::GlobalId::add_basic_block) on
+/// `GlobalId<DefinedFunc>` alone: adding a block to a declaration or a variable is a
+/// type error rather than a runtime check.
 pub trait GlobalEntity: Clone + Copy + PartialEq + Eq + Hash {
+    /// Erases the tag, giving the untyped [`Global`] the module stores.
     fn to_global(id: GlobalId<Self>) -> Global;
 }
 
+/// Tag for a function this module defines, carrying the body's arena id.
+///
+/// The only tag with a payload: a definition has blocks, and they live in the
+/// context's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefinedFunc(FuncId);
 
@@ -109,15 +122,23 @@ impl GlobalEntity for DefinedFunc {
 }
 
 impl DefinedFunc {
+    /// Tags a function body. Only
+    /// [`Builder::define_function`](crate::cfg::builder::Builder::define_function)
+    /// calls this.
     pub(crate) fn new(id: FuncId) -> Self {
         DefinedFunc(id)
     }
 
+    /// The body's arena id, for reaching the [`Function`](crate::cfg::function::Function)
+    /// itself.
     pub(crate) fn raw(&self) -> FuncId {
         self.0
     }
 }
 
+/// Tag for a function this module only declares.
+///
+/// Carries nothing: a declaration has no body, so there is no arena id to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeclaredFunc;
 
@@ -127,6 +148,7 @@ impl GlobalEntity for DeclaredFunc {
     }
 }
 
+/// Tag for a global variable. Carries nothing; the data lives in [`GlobalData`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalVar;
 
@@ -136,14 +158,23 @@ impl GlobalEntity for GlobalVar {
     }
 }
 
+/// Anything a module names with an `@`, with its tag erased.
+///
+/// This is what a [`Value`](crate::value::Value) holds once a global is used as an
+/// operand — by then the distinction no longer matters, since all three are addresses
+/// and all three render as `@name`.
 #[derive(Debug, Clone, Copy)]
 pub enum Global {
+    /// A global variable.
     Variable(GlobalId<GlobalVar>),
+    /// A function defined in this module.
     DefinedFunc(GlobalId<DefinedFunc>),
+    /// A function declared but not defined here.
     DeclaredFunc(GlobalId<DeclaredFunc>),
 }
 
 impl Global {
+    /// The name it is written under, whichever kind it is.
     pub(crate) fn name(&self) -> StrId {
         match self {
             Global::Variable(var) => var.name,
@@ -153,22 +184,42 @@ impl Global {
     }
 }
 
+/// A handle to something the module names with an `@`, tagged with what it is.
+///
+/// The tag is a compile-time distinction only — every global is identified by its
+/// name, since LLVM gives module-level symbols one namespace. What the tag buys is
+/// that operations belonging to one kind cannot be reached on another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalId<T: GlobalEntity> {
     pub(crate) name: StrId,
     pub(crate) tag: T,
 }
 
+/// A global variable's own data: what it holds, and what it starts as.
+///
+/// The two are coupled. An initializer makes this a *definition*, and its type must
+/// match `ty` exactly. Without one it is a declaration, which is why
+/// [`Linkage::External`] and [`Linkage::ExternWeak`] are the only linkages that
+/// accept a missing initializer.
 pub struct GlobalVariable {
     pub(crate) ty: TyId,
     pub(crate) initializer: Option<ConstExpr>,
 }
 
+/// Which of the two shapes a global takes.
 pub enum GlobalKind {
+    /// A function, defined or declared — either way only its signature is stored
+    /// here; a definition's body lives in the arena.
     Func(FuncSignature),
+    /// A variable.
     Variable(GlobalVariable),
 }
 
+/// Everything the module records about one global, under its name.
+///
+/// One shape for all three kinds, which is what lets a
+/// [`Value`](crate::value::Value) built from any global resolve its pointee the same
+/// way — see [`pointee_ty`](Self::pointee_ty).
 pub struct GlobalData {
     pub(crate) linkage: Linkage,
     pub(crate) visiblity: Visiblity,
@@ -176,6 +227,13 @@ pub struct GlobalData {
 }
 
 impl GlobalData {
+    /// What a pointer to this global points at.
+    ///
+    /// A global's *own* type is always `ptr` — `@g` is an address whatever it names.
+    /// This is the other half: the type behind that address, which is what lets a
+    /// `load` or `store` through a global omit its type.
+    ///
+    /// For a function that is the function type, so `@f` points at `i32 (i32)`.
     pub fn pointee_ty(&self, ctx: &Context) -> Type {
         match &self.kind {
             GlobalKind::Func(func_sig) => Type::Func(func_sig.clone()),
