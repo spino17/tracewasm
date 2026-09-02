@@ -6,6 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::{FuncId, Function},
+        global::{GlobalKind, GlobalVariable},
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands,
@@ -129,6 +130,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_global_variable(
+        &mut self,
+        name: &str,
+        data: &GlobalVariable,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a declared-but-not-defined function.
     ///
     /// Declarations come before definitions in the walk, matching how a module reads:
@@ -222,12 +230,30 @@ pub trait CfgVisitor {
         let funcs = &cfg.context.module.functions;
         let mut func_results = vec![];
         let mut imported_func_results = vec![];
+        let mut global_variable_results = vec![];
 
-        let _res = self.visit_cfg(cfg)?;
+        let cfg_result = self.visit_cfg(cfg)?;
+
+        for variable in &cfg.context.module.global_variables {
+            let name = cfg.context.str_interner.value(variable.0);
+
+            let GlobalKind::Variable(data) =
+                &cfg.context.module.globals.get(variable).unwrap().kind
+            else {
+                unreachable!("hitting this means globals tracking logic by their name is incorrect")
+            };
+
+            global_variable_results.push(self.visit_global_variable(name, data, &cfg.context)?);
+        }
 
         for &imported_func in &cfg.context.module.imported_functions {
             let func_name = cfg.context.str_interner.value(imported_func.0);
-            let func_sig = cfg.context.module.func_names.get(&imported_func).unwrap();
+
+            let GlobalKind::Func(func_sig) =
+                &cfg.context.module.globals.get(&imported_func).unwrap().kind
+            else {
+                unreachable!("hitting this means globals tracking logic by their name is incorrect")
+            };
 
             imported_func_results.push(self.visit_imported_func(
                 func_name,
@@ -242,7 +268,12 @@ pub trait CfgVisitor {
             func_results.push(self.walk_func(*func_id, func, &cfg.context)?);
         }
 
-        self.post_module_visit(imported_func_results, func_results)
+        self.post_module_visit(
+            cfg_result,
+            global_variable_results,
+            imported_func_results,
+            func_results,
+        )
     }
 
     /// Runs after a block's phis and instructions, with what each visit returned.
@@ -269,6 +300,8 @@ pub trait CfgVisitor {
     /// Its return value is what [`walk_cfg`](Self::walk_cfg) yields.
     fn post_module_visit(
         &mut self,
+        _cfg_visit_result: Self::OkType,
+        _global_variable_results: Vec<Self::OkType>,
         _imported_func_results: Vec<Self::OkType>,
         _func_results: Vec<Self::OkType>,
     ) -> Result<Self::OkType, Self::ErrType> {

@@ -4,6 +4,7 @@ use crate::{
         basic_block::BasicBlockId,
         context::Context,
         function::{FuncId, Function},
+        global::{Global, GlobalKind, Linkage, Visiblity},
     },
     error::ContextError,
     instruction::cursor::Cursor,
@@ -67,7 +68,7 @@ impl Builder {
     ) -> Result<(), ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
-        if ctx.module.func_names.contains_key(&name_id) {
+        if ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateFunctionName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
@@ -89,9 +90,14 @@ impl Builder {
             ));
         }
 
-        ctx.module
-            .func_names
-            .insert(name_id, FuncSignature::new(params.to_vec(), result));
+        ctx.module.globals.insert(
+            name_id,
+            Global {
+                linkage: Linkage::External,
+                visiblity: Visiblity::Default,
+                kind: GlobalKind::Func(FuncSignature::new(params.to_vec(), result)),
+            },
+        );
 
         ctx.module.imported_functions.push(name_id);
 
@@ -129,7 +135,7 @@ impl Builder {
     ) -> Result<FuncId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
-        if ctx.module.func_names.contains_key(&name_id) {
+        if ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateFunctionName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
@@ -187,9 +193,15 @@ impl Builder {
         func.params = final_params;
         func.result = result;
 
-        ctx.module
-            .func_names
-            .insert(name_id, FuncSignature::new(param_tys, result));
+        ctx.module.globals.insert(
+            name_id,
+            Global {
+                linkage: Linkage::External,
+                visiblity: Visiblity::Default,
+                kind: GlobalKind::Func(FuncSignature::new(param_tys, result)),
+            },
+        );
+
         ctx.module.functions.push(id);
 
         ctx.register_def_instr_index

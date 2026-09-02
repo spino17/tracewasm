@@ -3,7 +3,6 @@
 use crate::{
     cfg::{function::FuncId, global::Global},
     interner::StrId,
-    value::FuncSignature,
 };
 use rustc_hash::FxHashMap;
 use std::fmt::Display;
@@ -284,10 +283,10 @@ impl Display for DataLayout {
 pub struct Module {
     pub(crate) triple: String,
     pub(crate) data_layout: String,
-    pub(crate) globals: Vec<Global>,
     pub(crate) functions: Vec<FuncId>,
     pub(crate) imported_functions: Vec<StrId>,
-    pub(crate) func_names: FxHashMap<StrId, FuncSignature>,
+    pub(crate) global_variables: Vec<StrId>,
+    pub(crate) globals: FxHashMap<StrId, Global>,
 }
 
 impl Module {
@@ -296,10 +295,10 @@ impl Module {
         Module {
             triple: triple.to_string(),
             data_layout: data_layout.to_string(),
-            globals: vec![],
             functions: vec![],
             imported_functions: vec![],
-            func_names: FxHashMap::default(),
+            global_variables: vec![],
+            globals: FxHashMap::default(),
         }
     }
 }

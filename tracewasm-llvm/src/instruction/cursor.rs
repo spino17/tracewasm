@@ -4,6 +4,7 @@ use crate::{
     cfg::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
+        global::GlobalKind,
     },
     error::{AllocaError, CallError, GepError, InstructionError, PhiError, RetError, StoreError},
     instruction::{
@@ -650,11 +651,15 @@ impl Cursor {
         // The signature is read out by value before anything below borrows `ctx`
         // mutably: casting an argument interns into the type pool, which a live
         // borrow of the function table would forbid.
-        let Some(func_sig) = ctx.module.func_names.get(&func_name_id) else {
+        let Some(global) = ctx.module.globals.get(&func_name_id) else {
             return Err(CallError::FunctionNotFound(
                 ctx.str_interner.value(func_name_id.0).to_string(),
             )
             .into());
+        };
+
+        let GlobalKind::Func(func_sig) = &global.kind else {
+            unreachable!("hitting this means globals tracking logic by their name is incorrect")
         };
 
         let name = ctx.str_interner.value(func_name_id.0).to_string();

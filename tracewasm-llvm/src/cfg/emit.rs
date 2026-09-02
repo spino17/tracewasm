@@ -2,8 +2,12 @@
 
 use crate::{
     cfg::{
-        ControlFlowGraph, basic_block::BasicBlock, basic_block::BasicBlockId, context::Context,
-        function::Function, walk::CfgVisitor,
+        ControlFlowGraph,
+        basic_block::{BasicBlock, BasicBlockId},
+        context::Context,
+        function::Function,
+        global::GlobalVariable,
+        walk::CfgVisitor,
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, LoadOperands,
@@ -214,6 +218,15 @@ impl CfgVisitor for IREmitter {
         }
 
         Ok(())
+    }
+
+    fn visit_global_variable(
+        &mut self,
+        name: &str,
+        data: &GlobalVariable,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
     }
 
     fn visit_imported_func(
