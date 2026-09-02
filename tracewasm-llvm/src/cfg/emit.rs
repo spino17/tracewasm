@@ -86,6 +86,7 @@ impl IREmitter {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
             ValueKind::Const(id) => Ok(Self::constant(ctx.const_interner.value(id.raw()))),
             ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
+            ValueKind::Global(global) => todo!(),
         }
     }
 
@@ -359,6 +360,7 @@ impl CfgVisitor for IREmitter {
             ValueKind::ConstExpr(_) => {
                 bail!("a constant expression condition is not emitted yet")
             }
+            ValueKind::Global(_) => todo!(),
         };
 
         self.push_line(&format!(

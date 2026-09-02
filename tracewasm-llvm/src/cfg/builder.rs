@@ -4,7 +4,7 @@ use crate::{
         basic_block::BasicBlockId,
         context::Context,
         function::{FuncId, Function},
-        global::{Global, GlobalKind, Linkage, Visiblity},
+        global::{DeclaredFunc, DefinedFunc, GlobalData, GlobalId, GlobalKind, Linkage, Visiblity},
     },
     error::ContextError,
     instruction::cursor::Cursor,
@@ -65,7 +65,7 @@ impl Builder {
         params: &[TyId],
         result: TyId,
         ctx: &mut Context,
-    ) -> Result<(), ContextError> {
+    ) -> Result<GlobalId<DeclaredFunc>, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if ctx.module.globals.contains_key(&name_id) {
@@ -92,7 +92,7 @@ impl Builder {
 
         ctx.module.globals.insert(
             name_id,
-            Global {
+            GlobalData {
                 linkage: Linkage::External,
                 visiblity: Visiblity::Default,
                 kind: GlobalKind::Func(FuncSignature::new(params.to_vec(), result)),
@@ -101,7 +101,10 @@ impl Builder {
 
         ctx.module.imported_functions.push(name_id);
 
-        Ok(())
+        Ok(GlobalId {
+            name: name_id,
+            tag: DeclaredFunc,
+        })
     }
 
     /// Declares a function and its signature.
@@ -132,7 +135,7 @@ impl Builder {
         params: &[(TyId, Option<String>)],
         result: TyId,
         ctx: &mut Context,
-    ) -> Result<FuncId, ContextError> {
+    ) -> Result<GlobalId<DefinedFunc>, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
         if ctx.module.globals.contains_key(&name_id) {
@@ -195,7 +198,7 @@ impl Builder {
 
         ctx.module.globals.insert(
             name_id,
-            Global {
+            GlobalData {
                 linkage: Linkage::External,
                 visiblity: Visiblity::Default,
                 kind: GlobalKind::Func(FuncSignature::new(param_tys, result)),
@@ -207,7 +210,10 @@ impl Builder {
         ctx.register_def_instr_index
             .insert(id, FxHashMap::default());
 
-        Ok(id)
+        Ok(GlobalId {
+            name: name_id,
+            tag: DefinedFunc::new(id),
+        })
     }
 
     /// Finishes the module.

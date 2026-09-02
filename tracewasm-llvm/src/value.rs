@@ -10,7 +10,11 @@
 //! pointer?" or "how does this spell itself?" needs the pool.
 
 use crate::{
-    cfg::{basic_block::BasicBlockId, context::Context},
+    cfg::{
+        basic_block::BasicBlockId,
+        context::Context,
+        global::{Global, GlobalEntity, GlobalId},
+    },
     error::{GepError, TypeError},
     instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind},
     interner::{ConstId, StrId, TyId},
@@ -334,6 +338,7 @@ pub enum ValueKind {
     /// A constant folded from other constants, written inline in the IR rather than
     /// computed by an instruction. See [`ConstExpr`].
     ConstExpr(ConstExpr),
+    Global(Global),
 }
 
 /// An operand: a type, and where the value comes from.
@@ -415,6 +420,15 @@ impl Value {
         Value {
             ty: expr.ty(ctx),
             kind: ValueKind::ConstExpr(expr),
+        }
+    }
+
+    pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> Self {
+        let global = GlobalEntity::to_global(global);
+
+        Value {
+            ty: ctx.ptr_ty(),
+            kind: ValueKind::Global(global),
         }
     }
 
@@ -503,7 +517,7 @@ impl Value {
 
                 Value::new(ty, ValueKind::Const(casted_const_id))
             }
-            ValueKind::Reg(_) | ValueKind::ConstExpr(_) => {
+            ValueKind::Reg(_) | ValueKind::ConstExpr(_) | ValueKind::Global(_) => {
                 if val_ty != ty {
                     return None;
                 }
@@ -572,6 +586,20 @@ impl Value {
                 ConstExpr::IntToPtr { .. } => return None,
                 _ => return None,
             },
+            ValueKind::Global(global) => {
+                let name = global.name();
+
+                let global = &ctx
+                    .module
+                    .globals
+                    .get(&name)
+                    .expect("hitting this means logic for tracking global names is incorrect");
+
+                let ty_obj = global.pointee_ty(ctx);
+                let ty = ctx.ty_interner.intern(ty_obj).into();
+
+                PointeeTy { ty, count: None }
+            }
             ValueKind::Const(_) => return None,
         };
 

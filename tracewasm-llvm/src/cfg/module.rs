@@ -1,7 +1,7 @@
 //! The module: its target settings and the functions it defines.
 
 use crate::{
-    cfg::{function::FuncId, global::Global},
+    cfg::{function::FuncId, global::GlobalData},
     interner::StrId,
 };
 use rustc_hash::FxHashMap;
@@ -286,7 +286,7 @@ pub struct Module {
     pub(crate) functions: Vec<FuncId>,
     pub(crate) imported_functions: Vec<StrId>,
     pub(crate) global_variables: Vec<StrId>,
-    pub(crate) globals: FxHashMap<StrId, Global>,
+    pub(crate) globals: FxHashMap<StrId, GlobalData>,
 }
 
 impl Module {

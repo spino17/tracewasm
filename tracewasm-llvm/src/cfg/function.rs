@@ -4,6 +4,7 @@ use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
+        global::{DefinedFunc, GlobalId},
     },
     error::ContextError,
     interner::{StrId, TyId},
@@ -48,9 +49,15 @@ impl FuncId {
         FuncId(id)
     }
 
-    /// The underlying arena id.
     pub(crate) fn raw(&self) -> Id<Function> {
         self.0
+    }
+}
+
+impl GlobalId<DefinedFunc> {
+    /// The underlying arena id.
+    pub(crate) fn raw(&self) -> Id<Function> {
+        self.tag.raw().0
     }
 
     /// Appends a basic block to this function.
@@ -69,7 +76,7 @@ impl FuncId {
         ctx: &mut Context,
     ) -> Result<BasicBlockId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
-        let func = ctx.get_func_mut(*self);
+        let func = ctx.get_func_mut(self.tag.raw());
 
         if func.block_names.contains(&name_id) {
             return Err(ContextError::DuplicateBasicBlockName(
@@ -82,13 +89,13 @@ impl FuncId {
         let id = BasicBlockId::new(ctx.blocks.alloc(BasicBlock {
             name: name_id,
             is_first,
-            func_id: *self,
+            func_id: self.tag.raw(),
             phis: vec![],
             instructions: vec![],
             is_locked: false,
         }));
 
-        let func = ctx.get_func_mut(*self);
+        let func = ctx.get_func_mut(self.tag.raw());
 
         func.blocks.push(id);
         func.block_names.insert(name_id);
@@ -103,7 +110,7 @@ impl FuncId {
     /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
     /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
     pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<&'a Value> {
-        let func = ctx.get_func(*self);
+        let func = ctx.get_func(self.tag.raw());
         let params = &func.params;
 
         if n >= params.len() {
@@ -117,7 +124,7 @@ impl FuncId {
     ///
     /// Every `ret` in this function is checked against it.
     pub fn return_ty(&self, ctx: &Context) -> TyId {
-        let func = ctx.get_func(*self);
+        let func = ctx.get_func(self.tag.raw());
 
         func.result
     }
