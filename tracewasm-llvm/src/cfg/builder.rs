@@ -9,7 +9,7 @@ use crate::{
     error::ContextError,
     instruction::cursor::Cursor,
     interner::{StrId, TyId},
-    value::Value,
+    value::{FuncSignature, Value},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -36,7 +36,7 @@ impl Builder {
                 data_layout,
                 globals: vec![],
                 functions: vec![],
-                func_names: FxHashSet::default(),
+                func_names: FxHashMap::default(),
             },
         }
     }
@@ -83,7 +83,7 @@ impl Builder {
     ) -> Result<FuncId, ContextError> {
         let name_id: StrId = ctx.str_interner.intern(name).into();
 
-        if self.module.func_names.contains(&name_id) {
+        if self.module.func_names.contains_key(&name_id) {
             return Err(ContextError::DuplicateFunctionName(
                 ctx.str_interner.value(name_id.0).to_string(),
             ));
@@ -120,6 +120,7 @@ impl Builder {
         }));
 
         let mut final_params: Vec<Value> = vec![];
+        let mut param_tys = vec![];
 
         for (param_ty, param_name) in params {
             let name = ctx.name_for_reg(
@@ -131,6 +132,7 @@ impl Builder {
                 id,
             )?;
 
+            param_tys.push(*param_ty);
             final_params.push(Value::from_register(name, *param_ty, ctx));
         }
 
@@ -139,7 +141,9 @@ impl Builder {
         func.params = final_params;
         func.result = result;
 
-        self.module.func_names.insert(name_id);
+        self.module
+            .func_names
+            .insert(name_id, FuncSignature::new(param_tys, result));
         self.module.functions.push(id);
 
         ctx.register_def_instr_index

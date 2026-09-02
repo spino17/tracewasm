@@ -3,8 +3,9 @@
 use crate::{
     cfg::{function::FuncId, global::Global},
     interner::StrId,
+    value::FuncSignature,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use std::fmt::Display;
 
 /// A target triple, such as `arm64-apple-macosx`.
@@ -46,7 +47,7 @@ pub struct Module {
     pub(crate) data_layout: String,
     pub(crate) globals: Vec<Global>,
     pub(crate) functions: Vec<FuncId>,
-    pub(crate) func_names: FxHashSet<StrId>,
+    pub(crate) func_names: FxHashMap<StrId, FuncSignature>,
 }
 
 impl Module {
@@ -57,7 +58,7 @@ impl Module {
             data_layout: data_layout.to_string(),
             globals: vec![],
             functions: vec![],
-            func_names: FxHashSet::default(),
+            func_names: FxHashMap::default(),
         }
     }
 }
