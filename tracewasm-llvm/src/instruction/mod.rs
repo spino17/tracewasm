@@ -112,6 +112,10 @@ pub enum InstructionKind {
     GetElementPtr(GetElementPtrOperands),
     /// `ret <ty> %v` or `ret void`.
     Ret(RetOperands),
+    /// `%x = call <ty> @f(...)`, or `call void @f(...)` when nothing is returned.
+    ///
+    /// Not a terminator: control returns to the next instruction, so the block stays
+    /// open.
     Call(CallOperands),
 }
 
@@ -217,8 +221,17 @@ impl GetElementPtrOperands {
     }
 }
 
+/// Operands of a `call`.
 pub struct CallOperands {
+    /// The callee, by name. Resolved against the module's function table when the
+    /// call is built, so the signature is known to match by the time it is stored.
     pub func_name: StrId,
+    /// What the callee returns, `void` included.
+    ///
+    /// LLVM writes only the return type at a call site — `call i32 @g(i32 7)` — not
+    /// the whole function type. The full form is also legal but unnecessary for a
+    /// non-variadic callee.
     pub return_ty: TyId,
+    /// The arguments, already checked against the callee's parameter types.
     pub params: Vec<Value>,
 }

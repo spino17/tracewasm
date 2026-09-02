@@ -605,6 +605,38 @@ impl Cursor {
         )
     }
 
+    /// Builds `%x = call <ty> @f(...)`, returning the register it defines.
+    ///
+    /// `None` comes back for a `void` callee, which defines nothing — LLVM refuses
+    /// `%r = call void @g()` with "instructions returning void cannot have a name",
+    /// so passing `reg` for one is an error rather than something quietly dropped.
+    ///
+    /// A `call` is not a terminator: the block stays open afterwards.
+    ///
+    /// # Checking against the callee
+    ///
+    /// The callee is looked up by name in the module's function table and everything
+    /// is checked against its recorded signature — arity, each parameter type, and
+    /// the return type. Each argument may carry an optional type to be folded into
+    /// first, with the same rule as elsewhere: a constant converts, a register must
+    /// already match.
+    ///
+    /// `return_ty` is optional; omitted, it is taken from the signature. Given, it
+    /// has to agree with it.
+    ///
+    /// # The callee must already exist
+    ///
+    /// Only functions added through
+    /// [`Builder::add_function`](crate::cfg::builder::Builder::add_function) are in
+    /// the table, and they are added as the module is built. So:
+    ///
+    /// - **Self-recursion works** — a function's name is registered before its body
+    ///   is built.
+    /// - **A forward call does not.** Calling a function that will be added later
+    ///   fails, even though LLVM makes every function in a module mutually visible.
+    ///   Add all the functions first, then fill in their bodies.
+    /// - **Host imports are not reachable**, since nothing declares a function
+    ///   without also defining it.
     pub fn build_call(
         &self,
         func_name: String,
@@ -672,7 +704,7 @@ impl Cursor {
                     value: None,
                 },
                 ctx,
-            );
+            )?;
 
             None
         } else {

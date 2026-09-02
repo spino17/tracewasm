@@ -109,6 +109,11 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `call`.
+    ///
+    /// `value` is the register it defines, and is `None` for a `void` callee — the
+    /// only visit here that takes an `Option`, since every other value-producing
+    /// instruction always defines one.
     fn visit_call(
         &mut self,
         operands: &CallOperands,
