@@ -734,6 +734,80 @@ mod tests {
         assert_eq!(ir, expected, "\n--- emitted ---\n{ir}");
     }
 
+    /// A declared function is emitted as a `declare` line, and calling it produces
+    /// IR that assembles.
+    ///
+    /// Both halves matter. Without the `declare`, `llvm-as` refuses the call with
+    /// "use of undefined value" — the signature being recorded is enough for
+    /// `build_call` to resolve, but not for the module to be valid.
+    #[test]
+    fn a_declared_function_is_emitted_and_callable() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let f64_ty = ctx.f64_ty();
+        let void_ty = ctx.void_ty();
+
+        builder
+            .declare_function("host_add".to_string(), &[i32_ty, f64_ty], i32_ty, &mut ctx)
+            .unwrap();
+
+        builder
+            .declare_function("host_noop".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let f = builder
+            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
+
+        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+        let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_call(
+                "host_add".to_string(),
+                &[(seven, None), (half, None)],
+                None,
+                Some("r"),
+                &mut ctx,
+            )
+            .expect("a declared function is callable")
+            .expect("it returns an i32");
+
+        cursor
+            .build_call("host_noop".to_string(), &[], None, None, &mut ctx)
+            .unwrap();
+
+        cursor
+            .build_ret(Some(result), Some(i32_ty), &mut ctx)
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                // Declarations come first, and carry types only — no parameter names,
+                // since there is no body for one to refer to.
+                "declare i32 @host_add(i32, double)\n",
+                "declare void @host_noop()\n",
+                "define i32 @f() {\n",
+                "entry:\n",
+                "    %r = call i32 @host_add(i32 7, double 0x3FE0000000000000)\n",
+                "    call void @host_noop()\n",
+                "    ret i32 %r\n",
+                "}\n",
+                "\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
+    }
+
     /// A constant `getelementptr` is written inline, in the parenthesised form, and
     /// used wherever a constant may be — here as the address a `store` writes to.
     ///

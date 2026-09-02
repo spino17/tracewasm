@@ -425,6 +425,112 @@ mod tests {
         );
     }
 
+    /// A declaration records its signature so a call resolves against it, exactly as
+    /// a definition does — but adds no function to the arena, since there is no body.
+    #[test]
+    fn a_declaration_records_a_signature_without_a_definition() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+
+        builder
+            .declare_function("host".to_string(), &[i32_ty], i32_ty, &mut ctx)
+            .expect("a valid signature");
+
+        assert_eq!(
+            ctx.module.imported_functions.len(),
+            1,
+            "the declaration is recorded"
+        );
+
+        assert_eq!(
+            ctx.module.functions.len(),
+            0,
+            "but it defines no function, so the module has no body for it"
+        );
+
+        assert_eq!(ctx.funcs.len(), 0, "and nothing is allocated in the arena");
+    }
+
+    /// Declarations and definitions share one namespace, so a name is one or the
+    /// other. Either order collides.
+    #[test]
+    fn a_declaration_and_a_definition_cannot_share_a_name() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        builder
+            .declare_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        let err = builder
+            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .expect_err("`f` is already declared");
+
+        assert!(
+            matches!(&err, ContextError::DuplicateFunctionName(n) if n == "f"),
+            "got: {err}"
+        );
+
+        // And the other way round.
+        builder
+            .define_function("g".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        assert!(
+            matches!(
+                builder.declare_function("g".to_string(), &[], void_ty, &mut ctx),
+                Err(ContextError::DuplicateFunctionName(_))
+            ),
+            "`g` is already defined"
+        );
+    }
+
+    /// A declaration's signature is checked like a definition's: a parameter needs a
+    /// size, and a result may be `void` but not a function type.
+    #[test]
+    fn a_declaration_signature_is_checked() {
+        let (mut ctx, mut builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let err = builder
+            .declare_function("a".to_string(), &[void_ty], i32_ty, &mut ctx)
+            .expect_err("`void` is not a parameter type");
+
+        assert!(
+            matches!(&err, ContextError::FunctionParamTypeNotSized(t) if t == "void"),
+            "got: {err}"
+        );
+
+        let signature = FuncSignature::new(vec![i32_ty], i32_ty);
+        let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
+
+        assert!(
+            matches!(
+                builder.declare_function("b".to_string(), &[], func_ty, &mut ctx),
+                Err(ContextError::FunctionResultTypeInvalid(_))
+            ),
+            "a function type is not a result"
+        );
+
+        // `void` *is* a legal result, and no parameters is a legal signature.
+        assert!(
+            builder
+                .declare_function("c".to_string(), &[], void_ty, &mut ctx)
+                .is_ok()
+        );
+
+        assert_eq!(
+            ctx.module.imported_functions.len(),
+            1,
+            "only the accepted declaration was recorded"
+        );
+    }
+
     /// A parameter becomes a register of the declared type, named in order, and the
     /// result is recorded as given.
     #[test]

@@ -12,7 +12,6 @@ use crate::{
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
-    interner::StrId,
     value::{FuncSignature, Value},
 };
 
