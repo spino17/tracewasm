@@ -1321,7 +1321,7 @@ impl Const for f64 {
 
         let v = match ty_obj {
             Type::Float => {
-                if *self > f32::MAX as f64 || *self < f32::MIN as f64 {
+                if self.is_finite() && (*self > f32::MAX as f64 || *self < f32::MIN as f64) {
                     return None;
                 }
 
@@ -1827,6 +1827,102 @@ mod tests {
             "-0.0 must not come back as +0.0",
         );
         assert!(!negative_zero.is_sign_positive());
+    }
+
+    /// The non-finite values survive narrowing, because every one of them is exactly
+    /// representable at the smaller width.
+    ///
+    /// This is what [`f64::is_finite`] guards in the range check: `inf` is greater
+    /// than `f32::MAX`, so a bare bounds test would refuse a value that converts
+    /// perfectly. `llvm-as` accepts all of them as `float` — the hex form the emitter
+    /// writes is the f32 widened back to f64, which lands on the canonical bit
+    /// patterns `0x7FF0000000000000`, `0xFFF0000000000000` and `0x7FF8000000000000`.
+    #[test]
+    fn infinities_and_nan_narrow_rather_than_being_refused() {
+        let mut ctx = crate::test_support::ctx();
+        let f32_ty = ctx.f32_ty();
+
+        assert_eq!(
+            f64::INFINITY.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::INFINITY))),
+            "infinity is representable as an f32, so it must not be refused",
+        );
+        assert_eq!(
+            f64::NEG_INFINITY.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::NEG_INFINITY))),
+        );
+
+        // A finite value *past* the range is still refused — the exemption is for the
+        // non-finite values specifically, not for everything above `f32::MAX`.
+        assert_eq!(
+            1e300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "a finite overflow is still an overflow",
+        );
+
+        let nan = f64::NAN
+            .try_cast(f32_ty, Signedness::Signed, &mut ctx)
+            .expect("NaN is representable as an f32");
+
+        let ConstValue::Float(nan) = nan else {
+            panic!("a NaN f64 must narrow to a `Float`");
+        };
+
+        assert!(nan.into_inner().is_nan(), "and it must still be a NaN");
+    }
+
+    /// A NaN constant has to equal *itself*, or the pool could neither find nor dedup
+    /// it — the [`PartialEq`] impl compares bits precisely so that this holds.
+    ///
+    /// Numeric equality would break it: `NaN != NaN` under IEEE, so a bit-wise
+    /// comparison is what makes interning a NaN work at all.
+    #[test]
+    fn a_nan_constant_is_its_own_equal_and_interns_once() {
+        let mut ctx = crate::test_support::ctx();
+        let f64_ty = ctx.f64_ty();
+
+        let first = Value::from_const(f64::NAN, None, &mut ctx).unwrap();
+        let before = ctx.const_interner.len();
+        let second = Value::from_const(f64::NAN, None, &mut ctx).unwrap();
+
+        assert_eq!(
+            ctx.const_interner.len(),
+            before,
+            "the same NaN must reuse its pool entry rather than add another",
+        );
+        assert_eq!(first.ty(), f64_ty);
+        assert_eq!(second.ty(), f64_ty);
+
+        assert_eq!(
+            ConstValue::Double(OrderedFloat(f64::NAN)),
+            ConstValue::Double(OrderedFloat(f64::NAN)),
+            "a NaN constant equals itself, whatever IEEE says about the number",
+        );
+    }
+
+    /// Infinity and NaN are *different* constants, and neither is any finite value —
+    /// so none of them may share a pool entry.
+    #[test]
+    fn the_non_finite_constants_stay_distinct() {
+        let mut interner = ConstInterner::default();
+
+        let pos_inf = interner.intern(ConstValue::Double(OrderedFloat(f64::INFINITY)));
+        let neg_inf = interner.intern(ConstValue::Double(OrderedFloat(f64::NEG_INFINITY)));
+        let nan = interner.intern(ConstValue::Double(OrderedFloat(f64::NAN)));
+        let zero = interner.intern(ConstValue::Double(OrderedFloat(0.0f64)));
+
+        assert_ne!(pos_inf, neg_inf, "the sign of an infinity is meaningful");
+        assert_ne!(pos_inf, nan);
+        assert_ne!(neg_inf, nan);
+        assert_ne!(nan, zero);
+        assert_eq!(interner.len(), 4, "four distinct constants");
+
+        // And a `float` infinity is not a `double` infinity: LLVM types a constant,
+        // so merging the two would emit one where the other was meant.
+        let float_inf = interner.intern(ConstValue::Float(OrderedFloat(f32::INFINITY)));
+
+        assert_ne!(float_inf, pos_inf);
+        assert_eq!(interner.len(), 5);
     }
 
     /// Nothing crosses between the integer and float families, whichever reading is
