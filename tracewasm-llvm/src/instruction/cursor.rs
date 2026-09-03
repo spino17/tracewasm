@@ -8,9 +8,9 @@ use crate::{
     },
     error::{AllocaError, CallError, GepError, InstructionError, PhiError, RetError, StoreError},
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, Instruction,
-        InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
-        UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperadns,
+        ICond, Instruction, InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction,
+        RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
     value::{I1Value, Value, ValueKind},
@@ -763,6 +763,38 @@ impl Cursor {
         };
 
         Ok(val)
+    }
+
+    pub fn build_icmp(
+        &self,
+        cond: ICond,
+        ty: Option<TyId>,
+        a: Value,
+        b: Value,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<I1Value, InstructionError> {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, ctx) else {
+            todo!() // RAISE ERRRO: two values cannot be casted!
+        };
+
+        let ty = a.ty();
+
+        if !ty.is_integer(ctx) && !ty.is_ptr(ctx) {
+            todo!() // RAISE ERROR: the type is neither an integer nor a pointer
+        }
+
+        let val = add_instruction_to_block_and_get_value(
+            InstructionKind::ICmp(ICmpOperadns { cond, ty, a, b }),
+            ctx.i1_ty(),
+            self.block,
+            reg,
+            ctx,
+        )?;
+
+        let i1val = val.into_i1(ctx).unwrap(); // just above we passed i1 type!
+
+        Ok(i1val)
     }
 }
 

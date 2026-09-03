@@ -117,6 +117,7 @@ pub enum InstructionKind {
     /// Not a terminator: control returns to the next instruction, so the block stays
     /// open.
     Call(CallOperands),
+    ICmp(ICmpOperadns),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -235,3 +236,26 @@ pub struct CallOperands {
     /// The arguments, already checked against the callee's parameter types.
     pub params: Vec<Value>,
 }
+
+pub struct ICmpOperadns {
+    pub cond: ICond,
+    pub ty: TyId,
+    pub a: Value,
+    pub b: Value,
+}
+
+#[derive(Clone, Copy)]
+pub enum ICond {
+    Eq,
+    Ne,
+    Ugt,
+    Uge,
+    Ult,
+    Ule,
+    Sgt,
+    Sge,
+    Slt,
+    Sle,
+}
+
+pub struct FCmpOperands {}

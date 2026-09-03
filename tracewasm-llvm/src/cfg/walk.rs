@@ -9,11 +9,11 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperadns,
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
-    value::{FuncSignature, Value},
+    value::{FuncSignature, I1Value, Value},
 };
 
 /// Walks a [`ControlFlowGraph`], visiting each construct in emission order.
@@ -123,6 +123,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_icmp(
+        &mut self,
+        operands: &ICmpOperadns,
+        value: &I1Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -208,6 +215,9 @@ pub trait CfgVisitor {
                     self.visit_get_element_ptr(operands, val.unwrap(), ctx)?
                 }
                 InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
+                InstructionKind::ICmp(operands) => {
+                    self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                }
             });
         }
 

@@ -178,6 +178,27 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    pub fn width(&self, ctx: &Context) -> Option<u8> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let width = match ty_obj {
+            Type::I1 => 1,
+            Type::I8 => 8,
+            Type::I16 => 16,
+            Type::I32 => 32,
+            Type::I64 => 64,
+            Type::Half => 16,
+            Type::Bfloat => 16,
+            Type::Float => 32,
+            Type::Double => 64,
+            Type::Ptr | Type::Array { .. } | Type::Struct { .. } | Type::Func(_) | Type::Void => {
+                return None;
+            }
+        };
+
+        Some(width)
+    }
+
     /// Descends this type by `indices`, returning what the walk lands on.
     ///
     /// Used by `getelementptr` to type-check its indices and to work out what the
@@ -538,6 +559,55 @@ impl Value {
         };
 
         Some(final_value)
+    }
+
+    pub fn try_cast_two(
+        a: Value,
+        b: Value,
+        ty: Option<TyId>,
+        ctx: &mut Context,
+    ) -> Option<(Value, Value)> {
+        if let Some(ty) = ty {
+            let Some(casted_a) = a.try_cast(ty, ctx) else {
+                return None;
+            };
+
+            let Some(casted_b) = b.try_cast(ty, ctx) else {
+                return None;
+            };
+
+            return Some((casted_a, casted_b));
+        }
+
+        if a.ty() == b.ty() {
+            return Some((a, b));
+        }
+
+        let Some(a_width) = a.ty().width(ctx) else {
+            return None;
+        };
+
+        let Some(b_width) = b.ty().width(ctx) else {
+            return None;
+        };
+
+        if a_width >= b_width {
+            let ref_ty = a.ty();
+
+            let Some(casted_b) = b.try_cast(ref_ty, ctx) else {
+                return None;
+            };
+
+            Some((a, casted_b))
+        } else {
+            let ref_ty = b.ty();
+
+            let Some(casted_a) = a.try_cast(ref_ty, ctx) else {
+                return None;
+            };
+
+            Some((casted_a, b))
+        }
     }
 
     /// Works out what this pointer points at, by walking back to the instruction
