@@ -887,10 +887,24 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
-        let signedness = op.signedness();
+        let (a, b) = if let Some(signedness) = op.signedness() {
+            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
+                todo!() // RAISE ERROR
+            };
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
-            todo!() // RAISE ERROR: cannot cast
+            (a, b)
+        } else {
+            if a.ty() != b.ty() {
+                todo!() // RAISE ERROR
+            }
+
+            if let Some(ty) = ty
+                && ty != a.ty()
+            {
+                todo!() // RAISE ERROR
+            }
+
+            (a, b)
         };
 
         let ty = a.ty();

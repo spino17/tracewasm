@@ -374,22 +374,24 @@ pub enum IArithmeticOp {
 }
 
 impl IArithmeticOp {
-    pub fn signedness(&self) -> Signedness {
-        match self {
-            IArithmeticOp::Add => Signedness::Signed,
-            IArithmeticOp::Sub => Signedness::Signed,
-            IArithmeticOp::Mul => Signedness::Signed,
+    pub fn signedness(&self) -> Option<Signedness> {
+        let v = match self {
+            IArithmeticOp::Add => return None,
+            IArithmeticOp::Sub => return None,
+            IArithmeticOp::Mul => return None,
+            IArithmeticOp::And => return None,
+            IArithmeticOp::Or => return None,
+            IArithmeticOp::Xor => return None,
+            IArithmeticOp::Shl => return None,
             IArithmeticOp::Udiv => Signedness::Unsigned,
             IArithmeticOp::Sdiv => Signedness::Signed,
             IArithmeticOp::Urem => Signedness::Unsigned,
             IArithmeticOp::Srem => Signedness::Signed,
-            IArithmeticOp::Shl => Signedness::Signed,
             IArithmeticOp::Lshr => Signedness::Unsigned,
             IArithmeticOp::Ashr => Signedness::Signed,
-            IArithmeticOp::And => Signedness::Signed,
-            IArithmeticOp::Or => Signedness::Signed,
-            IArithmeticOp::Xor => Signedness::Signed,
-        }
+        };
+
+        Some(v)
     }
 }
 
@@ -407,7 +409,6 @@ pub enum FArithmeticOp {
     FMul,
     FDiv,
     FRem,
-    FNeg,
 }
 
 /// The operands of an `fcmp`.
