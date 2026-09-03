@@ -2038,7 +2038,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(&base, None, &[zero.clone()], None, None, &mut ctx),
+                cursor.build_get_element_ptr(
+                    &base,
+                    None,
+                    std::slice::from_ref(&zero),
+                    None,
+                    None,
+                    &mut ctx
+                ),
                 Err(InstructionError::Gep(GepError::SourceTypeUnknown))
             ),
             "with nothing to infer from, a source type is required"
