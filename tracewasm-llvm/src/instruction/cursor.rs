@@ -890,7 +890,7 @@ impl Cursor {
     ///
     /// No signedness is involved — a float carries its sign in its format, so `fpext`
     /// is exact and there is nothing for a caller to choose. That is why the cast runs
-    /// under [`Signedness::None`](crate::value::Signedness::None), which also refuses
+    /// under [`Signedness::None`], which also refuses
     /// every integer cast and so keeps an integer from reaching a float comparison by
     /// way of a silent widening.
     ///
@@ -3742,7 +3742,7 @@ mod tests {
     }
 
     /// An integer paired with a float has no common type under
-    /// [`Signedness::None`](crate::value::Signedness::None), so the mismatch is caught
+    /// [`Signedness::None`], so the mismatch is caught
     /// as a cast failure before the float check is ever reached.
     #[test]
     fn fcmp_refuses_an_integer_paired_with_a_float() {
@@ -3769,7 +3769,7 @@ mod tests {
     /// Two integers of *different* widths are refused as an uncastable pair, not as
     /// a non-float type.
     ///
-    /// This is what [`Signedness::None`](crate::value::Signedness::None) buys. Under a
+    /// This is what [`Signedness::None`] buys. Under a
     /// real signedness the narrower constant would widen happily, and the mismatch
     /// would only surface a step later at the float check — reporting the *widened*
     /// type, which the caller never wrote. Refusing the cast keeps the error pointing
