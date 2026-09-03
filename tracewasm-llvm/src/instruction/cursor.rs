@@ -21,8 +21,31 @@ use crate::{
 };
 use rustc_hash::FxHashSet;
 
+/// What to call the register an instruction defines.
+///
+/// LLVM has two forms and **they draw from the same per-function counter**: a named
+/// local like `%sum`, and an unnamed one like `%3`. That shared counter is why this is
+/// an enum rather than an `Option`: [`Unnamed`](Self::Unnamed) is not the absence of a
+/// name, it is a request for the next number.
+///
+/// [`From`] is implemented for the string types, so a call site can write
+/// `"sum".into()` rather than naming the variant.
 pub enum RegName {
+    /// Use this name, suffixed if it is already taken — a second `%sum` becomes
+    /// `%sum1`.
+    ///
+    /// It has to be a legal LLVM local, `[-a-zA-Z$._][-a-zA-Z$._0-9]*`, or
+    /// [`ContextError::InvalidRegisterName`](crate::error::ContextError::InvalidRegisterName)
+    /// comes back. A leading digit is refused for a second reason: `%0` is the
+    /// *unnamed* form, so a numeric name would collide with the numbering rather than
+    /// merely need quoting.
     Named(String),
+    /// Take the next unnamed index, which is how LLVM's `%0`, `%1`, … numbering is
+    /// produced.
+    ///
+    /// The counter is per function, and **parameters draw from it first** — so a
+    /// body's first unnamed temporary continues where the parameter list stopped. A
+    /// *named* parameter consumes nothing.
     Unnamed,
 }
 
@@ -44,8 +67,40 @@ impl From<&String> for RegName {
     }
 }
 
+/// Where an instruction's type comes from: stated by the caller, or worked out.
+///
+/// Most builders can derive the type they need, and [`Inferred`](Self::Inferred) asks
+/// them to. What they derive it *from* differs — a `load` follows the pointer back to
+/// its defining instruction, a `store` takes the value's own type, a comparison takes
+/// the operands' common type, a `ret` takes the returned value's — so the variant says
+/// "work it out", not "there is no type".
+///
+/// [`From<TyId>`](From) is implemented, so a call site can write `i32_ty.into()`.
+///
+/// # What `Asserted` does is per builder
+///
+/// The name fits some callers better than others, and it is worth knowing which before
+/// reaching for it:
+///
+/// - **Checked.** [`build_get_element_ptr`](Cursor::build_get_element_ptr) uses it as
+///   the walk's source type; [`build_call`](Cursor::build_call) checks it against the
+///   callee's signature; [`build_load`](Cursor::build_load) checks it against the
+///   pointee it traced the pointer back to; [`build_icmp`](Cursor::build_icmp) and
+///   [`build_iarithmetic`](Cursor::build_iarithmetic) require it to *equal* the
+///   operands' type for the predicates and operations that carry no signedness.
+/// - **Converting.** [`build_store`](Cursor::build_store),
+///   [`build_ret`](Cursor::build_ret) and the signedness-carrying comparisons fold the
+///   operand into it. A constant converts and a register must already match, so
+///   `Asserted` here can *change the value* — narrowing is range-checked, but
+///   widening picks zero- or sign-extension from the operation.
+///
+/// So this asserts a type in the first group and requests a conversion in the second.
+/// Each builder's own documentation says which it does.
 pub enum OperandTy {
+    /// Use this type rather than deriving one.
     Asserted(TyId),
+    /// Derive the type from the instruction's operands. See the note above for what
+    /// each builder derives it from.
     Inferred,
 }
 
