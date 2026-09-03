@@ -77,27 +77,27 @@ impl From<&String> for RegName {
 ///
 /// [`From<TyId>`](From) is implemented, so a call site can write `i32_ty.into()`.
 ///
-/// # What `Asserted` does is per builder
+/// # `Asserted` is an assertion
 ///
-/// The name fits some callers better than others, and it is worth knowing which before
-/// reaching for it:
+/// Whatever the builder goes on to do with it, the operand either **has** that type or
+/// the call is an error. For a register, a global, or a constant expression that is
+/// what happens literally: the types are compared and a mismatch is refused, because
+/// giving one of those a different type would need a real `zext`/`sext`/`bitcast` that
+/// no builder inserts on the caller's behalf.
 ///
-/// - **Checked.** [`build_get_element_ptr`](Cursor::build_get_element_ptr) uses it as
-///   the walk's source type; [`build_call`](Cursor::build_call) checks it against the
-///   callee's signature; [`build_load`](Cursor::build_load) checks it against the
-///   pointee it traced the pointer back to; [`build_icmp`](Cursor::build_icmp) and
-///   [`build_iarithmetic`](Cursor::build_iarithmetic) require it to *equal* the
-///   operands' type for the predicates and operations that carry no signedness.
-/// - **Converting.** [`build_store`](Cursor::build_store),
-///   [`build_ret`](Cursor::build_ret) and the signedness-carrying comparisons fold the
-///   operand into it. A constant converts and a register must already match, so
-///   `Asserted` here can *change the value* — narrowing is range-checked, but
-///   widening picks zero- or sign-extension from the operation.
+/// A **literal** is the one thing that gets folded, and that is still an assertion
+/// rather than a conversion: `43` is a number, not an `i32` that happens to be small,
+/// so `43` *is* an `i64` and asserting so is simply true. The fold either succeeds
+/// with the same number or the call errors — narrowing is range-checked
+/// (`300` is refused as an `i8`), and widening picks zero- or sign-extension from the
+/// operation rather than guessing.
 ///
-/// So this asserts a type in the first group and requests a conversion in the second.
-/// Each builder's own documentation says which it does.
+/// The one place a fold is lossy is float narrowing, where `fptrunc` rounds:
+/// `0.1f64` asserted as a `float` is the nearest `float`. That is inherent to the
+/// instruction, not to this type.
 pub enum OperandTy {
-    /// Use this type rather than deriving one.
+    /// The operand has this type. If it does not, the call is an error rather than a
+    /// silent conversion — see the note above.
     Asserted(TyId),
     /// Derive the type from the instruction's operands. See the note above for what
     /// each builder derives it from.
