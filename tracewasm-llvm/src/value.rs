@@ -397,7 +397,7 @@ pub enum Signedness {
     /// `fcmp` compares floats, whose sign is part of the format. Refusing rather than
     /// defaulting is what stops an integer reaching a float comparison by way of a
     /// silent widening. Float casts are unaffected, since they never consult this.
-    None,
+    NotApplicable,
 }
 
 /// How a [`Value`] is obtained — the three forms an LLVM operand can take.
@@ -1098,7 +1098,7 @@ impl Const for i8 {
                 Type::I64 => ConstValue::I64(*self as u8 as u64 as i64),
                 _ => return None,
             },
-            Signedness::None => return None,
+            Signedness::NotApplicable => return None,
         };
 
         Some(v)
@@ -1146,7 +1146,7 @@ impl Const for i16 {
                 Type::I64 => ConstValue::I64(*self as u16 as u64 as i64),
                 _ => return None,
             },
-            Signedness::None => return None,
+            Signedness::NotApplicable => return None,
         };
 
         Some(v)
@@ -1212,7 +1212,7 @@ impl Const for i32 {
                     _ => return None,
                 }
             }
-            Signedness::None => return None,
+            Signedness::NotApplicable => return None,
         };
 
         Some(v)
@@ -1290,7 +1290,7 @@ impl Const for i64 {
                     _ => return None,
                 }
             }
-            Signedness::None => return None,
+            Signedness::NotApplicable => return None,
         };
 
         Some(v)
@@ -1673,23 +1673,35 @@ mod tests {
         let i64_ty = ctx.i64_ty();
 
         // Widening, narrowing and identity alike.
-        assert_eq!(1i32.try_cast(i64_ty, Signedness::None, &mut ctx), None);
-        assert_eq!(1i32.try_cast(i8_ty, Signedness::None, &mut ctx), None);
+        assert_eq!(
+            1i32.try_cast(i64_ty, Signedness::NotApplicable, &mut ctx),
+            None
+        );
+        assert_eq!(
+            1i32.try_cast(i8_ty, Signedness::NotApplicable, &mut ctx),
+            None
+        );
 
         assert_eq!(
-            1i32.try_cast(i32_ty, Signedness::None, &mut ctx),
+            1i32.try_cast(i32_ty, Signedness::NotApplicable, &mut ctx),
             None,
             "even the identity cast, since no reading was given",
         );
 
-        assert_eq!(1i8.try_cast(i8_ty, Signedness::None, &mut ctx), None);
-        assert_eq!(1i64.try_cast(i64_ty, Signedness::None, &mut ctx), None);
+        assert_eq!(
+            1i8.try_cast(i8_ty, Signedness::NotApplicable, &mut ctx),
+            None
+        );
+        assert_eq!(
+            1i64.try_cast(i64_ty, Signedness::NotApplicable, &mut ctx),
+            None
+        );
 
         // Floats are unaffected: they have no signedness to withhold.
         let f64_ty = ctx.f64_ty();
 
         assert_eq!(
-            0.5f32.try_cast(f64_ty, Signedness::None, &mut ctx),
+            0.5f32.try_cast(f64_ty, Signedness::NotApplicable, &mut ctx),
             Some(ConstValue::Double(OrderedFloat(0.5f64))),
         );
     }
@@ -1704,7 +1716,7 @@ mod tests {
         let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
         let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
 
-        let (a, b) = Value::try_cast_two(a, b, None, Signedness::None, &mut ctx)
+        let (a, b) = Value::try_cast_two(a, b, None, Signedness::NotApplicable, &mut ctx)
             .expect("two doubles already agree");
 
         assert_eq!(a.ty(), f64_ty);
@@ -1715,7 +1727,7 @@ mod tests {
         let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
         let wide = Value::from_const(1.0f64, None, &mut ctx).unwrap();
 
-        let (x, y) = Value::try_cast_two(wide, narrow, None, Signedness::None, &mut ctx)
+        let (x, y) = Value::try_cast_two(wide, narrow, None, Signedness::NotApplicable, &mut ctx)
             .expect("f32 widens into f64 exactly");
 
         assert_eq!(x.ty(), f64_ty);
@@ -1726,7 +1738,7 @@ mod tests {
         let float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         assert!(
-            Value::try_cast_two(int, float, None, Signedness::None, &mut ctx).is_none(),
+            Value::try_cast_two(int, float, None, Signedness::NotApplicable, &mut ctx).is_none(),
             "nothing bridges the integer and float families",
         );
     }
@@ -1765,7 +1777,11 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let f64_ty = ctx.f64_ty();
 
-        for signedness in [Signedness::Signed, Signedness::Unsigned, Signedness::None] {
+        for signedness in [
+            Signedness::Signed,
+            Signedness::Unsigned,
+            Signedness::NotApplicable,
+        ] {
             assert_eq!(
                 0.5f32.try_cast(f64_ty, signedness, &mut ctx),
                 Some(ConstValue::Double(OrderedFloat(0.5f64))),

@@ -879,7 +879,7 @@ impl Cursor {
     }
 
     pub fn build_iarithmetic(
-        &mut self,
+        &self,
         op: IArithmeticOp,
         ty: Option<TyId>,
         a: Value,
@@ -915,34 +915,6 @@ impl Cursor {
 
         add_instruction_to_block_and_get_value(
             InstructionKind::IArithmetic(IArithmeticOperands { op, ty, a, b }),
-            ty,
-            self.block,
-            reg,
-            ctx,
-        )
-    }
-
-    pub fn build_farithmetic(
-        &mut self,
-        op: FArithmeticOp,
-        ty: Option<TyId>,
-        a: Value,
-        b: Value,
-        reg: Option<&str>,
-        ctx: &mut Context,
-    ) -> Result<Value, InstructionError> {
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::None, ctx) else {
-            todo!() // RAISE ERROR: cannot cast
-        };
-
-        let ty = a.ty();
-
-        if !ty.is_float(ctx) {
-            todo!() // RAISE ERROR
-        }
-
-        add_instruction_to_block_and_get_value(
-            InstructionKind::FArithmetic(FArithmeticOperands { op, ty, a, b }),
             ty,
             self.block,
             reg,
@@ -986,7 +958,7 @@ impl Cursor {
         // rendered only on the failing path.
         let (given_a, given_b) = (a.ty(), b.ty());
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::None, ctx) else {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, ctx) else {
             return Err(FCmpError::OperandsNotCastable(
                 cond.to_string(),
                 ctx.display(given_a).to_string(),
@@ -1015,6 +987,34 @@ impl Cursor {
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
+    }
+
+    pub fn build_farithmetic(
+        &self,
+        op: FArithmeticOp,
+        ty: Option<TyId>,
+        a: Value,
+        b: Value,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, InstructionError> {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, ctx) else {
+            todo!() // RAISE ERROR: cannot cast
+        };
+
+        let ty = a.ty();
+
+        if !ty.is_float(ctx) {
+            todo!() // RAISE ERROR
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::FArithmetic(FArithmeticOperands { op, ty, a, b }),
+            ty,
+            self.block,
+            reg,
+            ctx,
+        )
     }
 }
 
