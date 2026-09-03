@@ -123,6 +123,7 @@ pub enum InstructionKind {
     /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
     /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
+    FCmp(FCmpOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -343,4 +344,48 @@ impl ICond {
 }
 
 /// The operands of an `fcmp`. Not yet built or emitted.
-pub struct FCmpOperands {}
+pub struct FCmpOperands {
+    pub cond: FCond,
+    pub ty: TyId,
+    pub a: Value,
+    pub b: Value,
+}
+
+#[derive(Clone, Copy)]
+pub enum FCond {
+    Oeq,
+    Ogt,
+    Oge,
+    Olt,
+    Ole,
+    One,
+    Ord,
+    Ueq,
+    Ugt,
+    Uge,
+    Ult,
+    Ule,
+    Une,
+    Uno,
+    True,
+    False,
+}
+
+impl FCond {
+    pub fn is_ordered(&self) -> bool {
+        matches!(
+            self,
+            FCond::Oeq
+                | FCond::Ogt
+                | FCond::Oge
+                | FCond::Olt
+                | FCond::Ole
+                | FCond::One
+                | FCond::Ord
+        )
+    }
+
+    pub fn is_unordered(&self) -> bool {
+        !self.is_ordered()
+    }
+}

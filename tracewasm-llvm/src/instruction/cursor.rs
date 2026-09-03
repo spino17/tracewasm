@@ -11,12 +11,12 @@ use crate::{
         StoreError,
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperands,
-        ICond, Instruction, InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction,
-        RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, FCmpOperands, FCond,
+        GetElementPtrOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
+        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
-    value::{I1Value, Signedness, Value, ValueKind},
+    value::{I1Value, Signedness, Type, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -864,6 +864,40 @@ impl Cursor {
 
         let val = add_instruction_to_block_and_get_value(
             InstructionKind::ICmp(ICmpOperands { cond, ty, a, b }),
+            ctx.i1_ty(),
+            self.block,
+            reg,
+            ctx,
+        )?;
+
+        let i1val = val
+            .into_i1(ctx)
+            .expect("the result type passed just above is ");
+
+        Ok(i1val)
+    }
+
+    fn build_fcmp(
+        &self,
+        cond: FCond,
+        ty: Option<TyId>,
+        a: Value,
+        b: Value,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<I1Value, InstructionError> {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::Signed, ctx) else {
+            todo!() // RAISE ERROR
+        };
+
+        let ty = a.ty();
+
+        if !ty.is_float(ctx) {
+            todo!() // RAISE ERROR: not a float!
+        }
+
+        let val = add_instruction_to_block_and_get_value(
+            InstructionKind::FCmp(FCmpOperands { cond, ty, a, b }),
             ctx.i1_ty(),
             self.block,
             reg,

@@ -160,6 +160,15 @@ impl TyId {
         )
     }
 
+    pub fn is_float(&self, ctx: &Context) -> bool {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        matches!(
+            ty_obj,
+            Type::Half | Type::Bfloat | Type::Float | Type::Double
+        )
+    }
+
     /// Whether this is `i32` specifically.
     ///
     /// Narrower than [`is_integer`](Self::is_integer) because a `getelementptr` index
@@ -1306,7 +1315,13 @@ impl Const for f64 {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
-            Type::Float => ConstValue::Float(OrderedFloat(*self as f32)),
+            Type::Float => {
+                if *self > f32::MAX as f64 || *self < f32::MIN as f64 {
+                    return None;
+                }
+
+                ConstValue::Float(OrderedFloat(*self as f32))
+            }
             Type::Double => ConstValue::Double(OrderedFloat(*self)),
             _ => return None,
         };
