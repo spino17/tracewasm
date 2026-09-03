@@ -1309,7 +1309,7 @@ impl Const for NullPtr {
         ConstValue::NullPtr
     }
 
-    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         if NullPtr::ty(ctx) != ty {
             return None;
         }
@@ -1432,30 +1432,344 @@ mod tests {
         }
     }
 
-    /// Integer casts go both ways between widths, and a narrowing cast folds the
-    /// value the way LLVM's `trunc` would.
+    /// Widening is where [`Signedness`] earns its place: the same source bits mean
+    /// two different numbers depending on how the high bits are filled, and only the
+    /// caller knows which was meant.
+    ///
+    /// Every row here is a case where dropping the flag would silently produce the
+    /// other answer.
     #[test]
-    fn integer_casts_widen_and_narrow() {
+    fn widening_fills_the_high_bits_the_way_the_flag_says() {
         let mut ctx = crate::test_support::ctx();
-        let i8_ty = ctx.i8_ty();
         let i16_ty = ctx.i16_ty();
         let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
 
+        // -1 is all-ones at every width, so it is the sharpest probe: sign-extending
+        // keeps it -1, zero-extending turns it into that width's unsigned maximum.
         assert_eq!(
-            300i32.try_cast(i8_ty, &mut ctx),
-            Some(ConstValue::I8(300i32 as i8)),
-            "narrowing truncates rather than refusing"
+            (-1i8).try_cast(i64_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I64(-1)),
         );
 
-        assert_eq!(1i8.try_cast(i32_ty, &mut ctx), Some(ConstValue::I32(1)));
         assert_eq!(
-            (-1i64).try_cast(i16_ty, &mut ctx),
-            Some(ConstValue::I16(-1))
+            (-1i8).try_cast(i64_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I64(255)),
+            "zext of an all-ones i8 is u8::MAX, not -1",
         );
 
-        assert!(
-            Value::from_const(300i32, Some(i8_ty), &mut ctx).is_ok(),
-            "so the builder accepts it too"
+        assert_eq!(
+            (-1i16).try_cast(i32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I32(-1)),
+        );
+
+        assert_eq!(
+            (-1i16).try_cast(i32_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I32(65535)),
+        );
+
+        // The case that produced a wrong `icmp ult` before the flag existed: as an
+        // unsigned 32-bit quantity `-1i32` is 4294967295, and comparing against it
+        // sign-extended gives the opposite answer for any operand above 2^32.
+        assert_eq!(
+            (-1i32).try_cast(i64_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I64(-1)),
+        );
+
+        assert_eq!(
+            (-1i32).try_cast(i64_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I64(4294967295)),
+        );
+
+        // The extremes, where the two readings are furthest apart.
+        assert_eq!(
+            i32::MIN.try_cast(i64_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I64(-2147483648)),
+        );
+
+        assert_eq!(
+            i32::MIN.try_cast(i64_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I64(2147483648)),
+        );
+
+        // A non-negative source has the same value under both readings, which is why
+        // the bug only ever showed up for high-bit-set constants.
+        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+            assert_eq!(
+                5i8.try_cast(i16_ty, signedness, &mut ctx),
+                Some(ConstValue::I16(5)),
+            );
+
+            assert_eq!(
+                5i32.try_cast(i64_ty, signedness, &mut ctx),
+                Some(ConstValue::I64(5)),
+            );
+        }
+    }
+
+    /// Narrowing needs no signedness to *compute* — LLVM has one `trunc`, not a
+    /// signed and an unsigned one — but it needs one to decide whether the value
+    /// **fits**. `255` fits a byte read as unsigned and does not read as signed, and
+    /// both readings produce the identical bits `0xFF`.
+    #[test]
+    fn narrowing_is_range_checked_against_the_reading_asked_for() {
+        let mut ctx = crate::test_support::ctx();
+        let i8_ty = ctx.i8_ty();
+        let i32_ty = ctx.i32_ty();
+
+        // Signed: the target's own range, both ends inclusive.
+        assert_eq!(
+            127i32.try_cast(i8_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I8(127)),
+            "i8::MAX itself must be accepted",
+        );
+
+        assert_eq!(
+            (-128i32).try_cast(i8_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I8(-128)),
+            "i8::MIN itself must be accepted",
+        );
+
+        assert_eq!(128i32.try_cast(i8_ty, Signedness::Signed, &mut ctx), None);
+
+        assert_eq!(
+            (-129i32).try_cast(i8_ty, Signedness::Signed, &mut ctx),
+            None,
+            "the lower bound is checked too, not just the upper",
+        );
+
+        assert_eq!(
+            300i32.try_cast(i8_ty, Signedness::Signed, &mut ctx),
+            None,
+            "refused rather than folded to 44",
+        );
+
+        // Unsigned: the bit pattern read as unsigned, so 0..=255 for a byte. The
+        // result is still stored signed, since `ConstValue::I8` holds an `i8`.
+        assert_eq!(
+            255i32.try_cast(i8_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I8(-1)),
+            "0xFF is a valid unsigned byte, stored as the i8 -1",
+        );
+
+        assert_eq!(
+            200i32.try_cast(i8_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I8(-56)),
+            "0xC8",
+        );
+
+        assert_eq!(256i32.try_cast(i8_ty, Signedness::Unsigned, &mut ctx), None);
+
+        assert_eq!(
+            (-1i32).try_cast(i8_ty, Signedness::Unsigned, &mut ctx),
+            None,
+            "read unsigned, -1i32 is 4294967295 and does not fit a byte",
+        );
+
+        // The two readings genuinely disagree at the same input, in both directions.
+        assert_eq!(255i32.try_cast(i8_ty, Signedness::Signed, &mut ctx), None);
+
+        assert_eq!(
+            (-1i32).try_cast(i8_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I8(-1)),
+        );
+
+        // i64 narrows the same way, across the 32-bit boundary.
+        assert_eq!(
+            4294967295i64.try_cast(i32_ty, Signedness::Unsigned, &mut ctx),
+            Some(ConstValue::I32(-1)),
+            "u32::MAX fits an unsigned 32-bit slot",
+        );
+
+        assert_eq!(
+            4294967295i64.try_cast(i32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "but it is past i32::MAX read signed",
+        );
+
+        assert_eq!(
+            4294967296i64.try_cast(i32_ty, Signedness::Unsigned, &mut ctx),
+            None,
+            "one past u32::MAX",
+        );
+
+        assert_eq!(
+            (i32::MIN as i64).try_cast(i32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::I32(i32::MIN)),
+        );
+
+        assert_eq!(
+            (i32::MIN as i64 - 1).try_cast(i32_ty, Signedness::Signed, &mut ctx),
+            None,
+        );
+    }
+
+    /// A cast to the width a value already has is the identity, whichever reading is
+    /// asked for — there are no bits to add or drop, so the flag cannot apply.
+    #[test]
+    fn a_same_width_cast_changes_nothing() {
+        let mut ctx = crate::test_support::ctx();
+        let i8_ty = ctx.i8_ty();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+
+        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+            assert_eq!(
+                (-1i8).try_cast(i8_ty, signedness, &mut ctx),
+                Some(ConstValue::I8(-1)),
+            );
+
+            assert_eq!(
+                i32::MIN.try_cast(i32_ty, signedness, &mut ctx),
+                Some(ConstValue::I32(i32::MIN)),
+            );
+
+            assert_eq!(
+                i64::MIN.try_cast(i64_ty, signedness, &mut ctx),
+                Some(ConstValue::I64(i64::MIN)),
+            );
+        }
+    }
+
+    /// `f32` -> `f64` is `fpext`, and it is exact: every `f32` is representable as an
+    /// `f64`, so nothing is rounded and the flag is irrelevant.
+    #[test]
+    fn widening_a_float_is_exact_and_ignores_signedness() {
+        let mut ctx = crate::test_support::ctx();
+        let f64_ty = ctx.f64_ty();
+
+        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+            assert_eq!(
+                0.5f32.try_cast(f64_ty, signedness, &mut ctx),
+                Some(ConstValue::Double(OrderedFloat(0.5f64))),
+                "a value with an exact binary form survives untouched",
+            );
+
+            // 0.1 is not exact in either format, but widening still adds no error:
+            // the result is exactly the f32 it came from, not the f64 nearest 0.1.
+            assert_eq!(
+                0.1f32.try_cast(f64_ty, signedness, &mut ctx),
+                Some(ConstValue::Double(OrderedFloat(0.1f32 as f64))),
+            );
+
+            assert_ne!(
+                0.1f32.try_cast(f64_ty, signedness, &mut ctx),
+                Some(ConstValue::Double(OrderedFloat(0.1f64))),
+                "widening must not silently re-round to the nearest f64",
+            );
+        }
+    }
+
+    /// `f64` -> `f32` is `fptrunc`. Unlike integer narrowing this is **not** range
+    /// checked: out-of-range values become infinity and tiny ones become zero, rather
+    /// than being refused.
+    ///
+    /// Asserted as it behaves today so that changing it is a deliberate act — the
+    /// integer path refuses `300i32 -> i8`, and this path does not refuse the
+    /// equivalent.
+    #[test]
+    fn narrowing_a_float_is_lossy_and_unchecked() {
+        let mut ctx = crate::test_support::ctx();
+        let f32_ty = ctx.f32_ty();
+
+        assert_eq!(
+            0.1f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(0.1f64 as f32))),
+            "ordinary precision loss",
+        );
+
+        assert_eq!(
+            1e300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::INFINITY))),
+            "overflow becomes infinity rather than being refused",
+        );
+
+        assert_eq!(
+            1e-300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(0.0f32))),
+            "underflow becomes zero rather than being refused",
+        );
+
+        // The sign of a zero survives, which the constant pool depends on: `+0.0` and
+        // `-0.0` are different constants and must not merge.
+        let negative_zero = (-0.0f64)
+            .try_cast(f32_ty, Signedness::Signed, &mut ctx)
+            .expect("-0.0 is representable as an f32");
+
+        assert_eq!(
+            negative_zero,
+            ConstValue::Float(OrderedFloat(-0.0f32)),
+            "-0.0 must not come back as +0.0",
+        );
+
+        assert!(!negative_zero.is_sign_positive());
+    }
+
+    /// Nothing crosses between the integer and float families, whichever reading is
+    /// asked for. Those conversions are `sitofp`/`fptosi` and have to be emitted as
+    /// instructions, so folding one here would erase a step the caller owes.
+    #[test]
+    fn integers_and_floats_do_not_cast_into_each_other() {
+        let mut ctx = crate::test_support::ctx();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let f32_ty = ctx.f32_ty();
+        let f64_ty = ctx.f64_ty();
+
+        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+            assert_eq!(1i32.try_cast(f32_ty, signedness, &mut ctx), None);
+            assert_eq!(1i32.try_cast(f64_ty, signedness, &mut ctx), None);
+            assert_eq!(1i64.try_cast(f64_ty, signedness, &mut ctx), None);
+            assert_eq!(1.0f32.try_cast(i32_ty, signedness, &mut ctx), None);
+            assert_eq!(1.0f64.try_cast(i64_ty, signedness, &mut ctx), None);
+            assert_eq!(true.try_cast(i32_ty, signedness, &mut ctx), None);
+        }
+    }
+
+    /// `half` and `bfloat` are types this crate can *name* but has no constant for,
+    /// so no cast reaches them. Worth pinning: it is a gap in the value
+    /// representation rather than a rule, and a test says so out loud.
+    #[test]
+    fn there_is_no_constant_of_half_or_bfloat_type() {
+        let mut ctx = crate::test_support::ctx();
+
+        for ty in [Type::Half, Type::Bfloat] {
+            let id = intern(ty, &mut ctx);
+            let spelled = rendered(id, &ctx);
+
+            for signedness in [Signedness::Signed, Signedness::Unsigned] {
+                assert_eq!(
+                    1.0f32.try_cast(id, signedness, &mut ctx),
+                    None,
+                    "no f32 constant reaches `{spelled}`",
+                );
+
+                assert_eq!(
+                    1.0f64.try_cast(id, signedness, &mut ctx),
+                    None,
+                    "and no f64 constant does either",
+                );
+            }
+        }
+    }
+
+    /// A cast that refuses must leave the pool untouched. The interner is keyed on
+    /// the constant, so a value folded and then rejected would still occupy an entry
+    /// and could be handed to a later lookup.
+    #[test]
+    fn a_refused_cast_interns_nothing() {
+        let mut ctx = crate::test_support::ctx();
+        let i8_ty = ctx.i8_ty();
+
+        let before = ctx.const_interner.len();
+
+        assert!(Value::from_const(300i32, Some(i8_ty), &mut ctx).is_err());
+        assert!(Value::from_const(-1i32, Some(i8_ty), &mut ctx).is_ok());
+
+        assert_eq!(
+            ctx.const_interner.len(),
+            before + 1,
+            "only the accepted cast may reach the pool",
         );
     }
 
@@ -1483,7 +1797,7 @@ mod tests {
         let ptr_ty = ctx.ptr_ty();
 
         assert_eq!(
-            NullPtr.try_cast(ptr_ty, &mut ctx),
+            NullPtr.try_cast(ptr_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::NullPtr)
         );
 
@@ -1504,7 +1818,7 @@ mod tests {
             let spelled = rendered(id, &ctx);
 
             assert_eq!(
-                NullPtr.try_cast(id, &mut ctx),
+                NullPtr.try_cast(id, Signedness::Signed, &mut ctx),
                 None,
                 "null must not cast to `{spelled}` without an instruction"
             );
@@ -1518,12 +1832,12 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let ptr_ty = ctx.ptr_ty();
 
-        assert_eq!(0i8.try_cast(ptr_ty, &mut ctx), None);
-        assert_eq!(0i32.try_cast(ptr_ty, &mut ctx), None);
-        assert_eq!(0i64.try_cast(ptr_ty, &mut ctx), None);
-        assert_eq!(0.0f32.try_cast(ptr_ty, &mut ctx), None);
-        assert_eq!(0.0f64.try_cast(ptr_ty, &mut ctx), None);
-        assert_eq!(false.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(0i8.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(0i32.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(0i64.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(0.0f32.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(0.0f64.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(false.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
     }
 
     /// A null and an integer zero are different constants — `ptr null` is not
@@ -1605,11 +1919,11 @@ mod tests {
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
 
-        assert_eq!(1i32.try_cast(f32_ty, &mut ctx), None);
-        assert_eq!(1i64.try_cast(f64_ty, &mut ctx), None);
-        assert_eq!(1.0f32.try_cast(i32_ty, &mut ctx), None);
-        assert_eq!(1.0f64.try_cast(i64_ty, &mut ctx), None);
-        assert_eq!(true.try_cast(i32_ty, &mut ctx), None);
+        assert_eq!(1i32.try_cast(f32_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(1i64.try_cast(f64_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(1.0f32.try_cast(i32_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(1.0f64.try_cast(i64_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(true.try_cast(i32_ty, Signedness::Signed, &mut ctx), None);
     }
 
     /// Floats cast between the two widths and nowhere else.
@@ -1622,17 +1936,17 @@ mod tests {
         let ptr_ty = ctx.ptr_ty();
 
         assert_eq!(
-            1.5f32.try_cast(f64_ty, &mut ctx),
+            1.5f32.try_cast(f64_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::Double(OrderedFloat(1.5)))
         );
 
         assert_eq!(
-            1.5f64.try_cast(f32_ty, &mut ctx),
+            1.5f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::Float(OrderedFloat(1.5)))
         );
 
-        assert_eq!(1.5f32.try_cast(f16_ty, &mut ctx), None);
-        assert_eq!(1.5f64.try_cast(ptr_ty, &mut ctx), None);
+        assert_eq!(1.5f32.try_cast(f16_ty, Signedness::Signed, &mut ctx), None);
+        assert_eq!(1.5f64.try_cast(ptr_ty, Signedness::Signed, &mut ctx), None);
     }
 
     /// A failed cast names both ends, which is the only way to tell which side was

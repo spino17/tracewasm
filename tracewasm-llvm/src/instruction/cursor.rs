@@ -6,9 +6,12 @@ use crate::{
         context::{Context, RegisterDef},
         global::GlobalKind,
     },
-    error::{AllocaError, CallError, GepError, InstructionError, PhiError, RetError, StoreError},
+    error::{
+        AllocaError, CallError, GepError, ICmpError, InstructionError, PhiError, RetError,
+        StoreError,
+    },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperadns,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperands,
         ICond, Instruction, InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction,
         RetOperands, StoreOperands, UnconditionalBrOperands,
     },
@@ -778,40 +781,63 @@ impl Cursor {
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
         let (a, b) = if let Some(signedness) = cond.signedness() {
+            // Ids are `Copy`, so the operand types survive the move into the cast and
+            // are rendered only on the failing path.
+            let (given_a, given_b) = (a.ty(), b.ty());
+
             let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
-                todo!() // RAISE ERRRO: two values cannot be casted!
+                return Err(ICmpError::OperandsNotCastable(
+                    cond.to_string(),
+                    ctx.display(given_a).to_string(),
+                    ctx.display(given_b).to_string(),
+                )
+                .into());
             };
 
             (a, b)
         } else {
             if a.ty() != b.ty() {
-                todo!() // RAISE ERROR: types of operands not matching!
+                return Err(ICmpError::OperandTypesDiffer(
+                    cond.to_string(),
+                    ctx.display(a.ty()).to_string(),
+                    ctx.display(b.ty()).to_string(),
+                )
+                .into());
             }
 
             if let Some(ty) = ty
                 && ty != a.ty()
             {
-                todo!() // RAISE ERROR: provided type not matching with operands type
+                return Err(ICmpError::ProvidedTypeDoesNotMatchOperands(
+                    cond.to_string(),
+                    ctx.display(ty).to_string(),
+                    ctx.display(a.ty()).to_string(),
+                )
+                .into());
             }
 
             (a, b)
         };
 
+        // Both operands share a type by here: the strict arm asserted it, and the cast
+        // returns a pair that agrees. So checking one covers both.
         let ty = a.ty();
 
         if !ty.is_integer(ctx) && !ty.is_ptr(ctx) {
-            todo!() // RAISE ERROR: the type is neither an integer nor a pointer
+            return Err(ICmpError::OperandTypeNotComparable(ctx.display(ty).to_string()).into());
         }
 
         let val = add_instruction_to_block_and_get_value(
-            InstructionKind::ICmp(ICmpOperadns { cond, ty, a, b }),
+            InstructionKind::ICmp(ICmpOperands { cond, ty, a, b }),
             ctx.i1_ty(),
             self.block,
             reg,
             ctx,
         )?;
 
-        let i1val = val.into_i1(ctx).unwrap(); // just above we passed i1 type!
+        let i1val = val
+            .into_i1(ctx)
+            .expect("the result type passed just above is ");
 
         Ok(i1val)
     }
@@ -1766,6 +1792,7 @@ mod tests {
             1,
             "`f` recorded its alloca"
         );
+
         assert!(
             ctx.register_defs(g.tag.raw()).is_empty(),
             "`g` is untouched"
@@ -3267,5 +3294,312 @@ mod tests {
                 .build_load(ptr, Some(i32_ty), None, None, &mut ctx)
                 .is_ok()
         );
+    }
+
+    /// A block plus the cursor writing into it, for the `icmp` tests below — which
+    /// need to read the instruction back out to see what the operands were folded to.
+    fn block_for_icmp(ctx: &mut Context, builder: &mut Builder) -> (Cursor, BasicBlockId) {
+        let f = add_fn("f", builder, ctx).unwrap();
+        let entry = f.add_basic_block("entry".to_string(), ctx).unwrap();
+
+        (builder.cursor_at_block(entry), entry)
+    }
+
+    /// The constant an `icmp`'s operands were folded to, read back out of the block.
+    fn icmp_operand_consts(block: BasicBlockId, ctx: &Context) -> (ConstValue, ConstValue) {
+        let instr = ctx
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .expect("an instruction was added");
+
+        let InstructionKind::ICmp(operands) = &instr.kind else {
+            panic!("the last instruction is not an icmp");
+        };
+
+        let read = |v: &Value| match v.kind() {
+            ValueKind::ConstExpr(ConstExpr::Const(id)) => *ctx.const_interner.value(id.raw()),
+            other => panic!("operand is not a constant: {other:?}"),
+        };
+
+        (read(&operands.a), read(&operands.b))
+    }
+
+    /// The type an `icmp` settled on for its operands.
+    fn icmp_ty(block: BasicBlockId, ctx: &Context) -> TyId {
+        let instr = ctx
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .expect("an instruction was added");
+
+        let InstructionKind::ICmp(operands) = &instr.kind else {
+            panic!("the last instruction is not an icmp");
+        };
+
+        operands.ty
+    }
+
+    /// An unsigned predicate widens a narrower constant by **zero**-extension, so a
+    /// high-bit-set operand keeps its unsigned meaning.
+    ///
+    /// This is the case that assembled to a wrong answer before `ICond::signedness`
+    /// existed: as an unsigned quantity `-1i32` is 4294967295, and `icmp ult` against
+    /// it sign-extended flips the result for every operand above 2^32.
+    #[test]
+    fn an_unsigned_predicate_zero_extends_a_narrower_constant() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, block) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i64_ty = ctx.i64_ty();
+        let wide = Value::from_const(5_000_000_000i64, None, &mut ctx).unwrap();
+        let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_icmp(ICond::Ult, None, wide, narrow, Some("c"), &mut ctx)
+            .expect("an i32 constant widens into an i64 comparison");
+
+        assert_eq!(
+            icmp_operand_consts(block, &ctx),
+            (
+                ConstValue::I64(5_000_000_000),
+                ConstValue::I64(4_294_967_295)
+            ),
+            "the narrower operand must be zero-extended, not sign-extended",
+        );
+
+        assert!(result.ty.is_i1(&ctx), "an icmp produces an i1");
+        assert_eq!(
+            icmp_ty(block, &ctx),
+            i64_ty,
+            "the comparison itself is at the common type",
+        );
+    }
+
+    /// A signed predicate widens the same constant by **sign**-extension, giving the
+    /// other answer — which is why the predicate has to be consulted.
+    #[test]
+    fn a_signed_predicate_sign_extends_a_narrower_constant() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, block) = block_for_icmp(&mut ctx, &mut builder);
+
+        let wide = Value::from_const(5_000_000_000i64, None, &mut ctx).unwrap();
+        let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+        cursor
+            .build_icmp(ICond::Slt, None, wide, narrow, Some("c"), &mut ctx)
+            .expect("an i32 constant widens into an i64 comparison");
+
+        assert_eq!(
+            icmp_operand_consts(block, &ctx),
+            (ConstValue::I64(5_000_000_000), ConstValue::I64(-1)),
+            "the same constant, sign-extended, is a different number",
+        );
+    }
+
+    /// `eq` and `ne` carry no signedness, so they refuse to widen rather than guess.
+    ///
+    /// LLVM has one `eq`, because at equal widths the reading cannot change the
+    /// answer. It only matters when widening, and there the two choices disagree.
+    #[test]
+    fn eq_and_ne_refuse_operands_of_different_types() {
+        for cond in [ICond::Eq, ICond::Ne] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let wide = Value::from_const(1i64, None, &mut ctx).unwrap();
+            let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+            let err = cursor
+                .build_icmp(cond, None, wide, narrow, None, &mut ctx)
+                .expect_err("eq/ne must not widen");
+
+            assert!(
+                matches!(
+                    &err,
+                    InstructionError::ICmp(ICmpError::OperandTypesDiffer(p, a, b))
+                        if p == &cond.to_string() && a == "i64" && b == "i32"
+                ),
+                "the error must name the predicate and both types, got: {err}",
+            );
+        }
+    }
+
+    /// The same operands under an *ordered* predicate are accepted, which is what
+    /// makes the refusal above about signedness rather than about width.
+    #[test]
+    fn an_ordered_predicate_accepts_what_eq_refuses() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let wide = Value::from_const(1i64, None, &mut ctx).unwrap();
+        let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+        assert!(
+            cursor
+                .build_icmp(ICond::Ult, None, wide, narrow, None, &mut ctx)
+                .is_ok(),
+        );
+    }
+
+    /// For `eq`/`ne` the type argument is a *check*, not a coercion — there is no
+    /// signedness to coerce with, so a type the operands do not have is an error
+    /// rather than a request to widen them.
+    #[test]
+    fn eq_treats_an_explicit_type_as_an_assertion() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i64_ty = ctx.i64_ty();
+        let a = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_icmp(ICond::Eq, Some(i64_ty), a, b, None, &mut ctx)
+            .expect_err("i32 operands are not i64, and eq will not widen them");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::ICmp(ICmpError::ProvidedTypeDoesNotMatchOperands(p, given, have))
+                    if p == "eq" && given == "i64" && have == "i32"
+            ),
+            "got: {err}",
+        );
+    }
+
+    /// Matching the operands' own type is accepted, so the check is on the *type*,
+    /// not on the argument being absent.
+    #[test]
+    fn eq_accepts_an_explicit_type_the_operands_already_have() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let a = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        assert!(
+            cursor
+                .build_icmp(ICond::Eq, Some(i32_ty), a, b, None, &mut ctx)
+                .is_ok(),
+        );
+    }
+
+    /// Widening a *register* would need a real `zext`/`sext`, which this builder does
+    /// not insert — so a mismatch between registers is refused even under an ordered
+    /// predicate, where a constant would have been folded.
+    #[test]
+    fn a_register_of_the_wrong_width_is_not_widened() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let a = Value::from_register("a".to_string(), i64_ty, &mut ctx);
+        let b = Value::from_register("b".to_string(), i32_ty, &mut ctx);
+
+        let err = cursor
+            .build_icmp(ICond::Ult, None, a, b, None, &mut ctx)
+            .expect_err("a register cannot be widened by folding");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::ICmp(ICmpError::OperandsNotCastable(p, a, b))
+                    if p == "ult" && a == "i64" && b == "i32"
+            ),
+            "got: {err}",
+        );
+    }
+
+    /// A constant that does not fit the common type under the predicate's reading is
+    /// refused rather than truncated.
+    #[test]
+    fn a_constant_that_does_not_fit_the_given_type_is_refused() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i8_ty = ctx.i8_ty();
+        let a = Value::from_const(300i32, None, &mut ctx).unwrap();
+        let b = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_icmp(ICond::Slt, Some(i8_ty), a, b, None, &mut ctx)
+            .expect_err("300 does not fit an i8");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::ICmp(ICmpError::OperandsNotCastable(..))
+            ),
+            "got: {err}",
+        );
+    }
+
+    /// `icmp` compares integers or pointers. `llvm-as` refuses `icmp eq float` with
+    /// "icmp requires integer operands" — comparing floats needs `fcmp`.
+    #[test]
+    fn icmp_refuses_floats() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_icmp(ICond::Eq, None, a, b, None, &mut ctx)
+            .expect_err("floats are not comparable with icmp");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::ICmp(ICmpError::OperandTypeNotComparable(ty)) if ty == "double"
+            ),
+            "the error must name the offending type, got: {err}",
+        );
+    }
+
+    /// Pointers are comparable, with *every* predicate. `llvm-as` accepts both
+    /// `icmp ult ptr` and `icmp slt ptr`, so the signed ones must not be refused.
+    #[test]
+    fn icmp_accepts_pointers_under_any_predicate() {
+        for cond in [ICond::Eq, ICond::Ult, ICond::Slt] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let a = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+            let b = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+
+            assert!(
+                cursor.build_icmp(cond, None, a, b, None, &mut ctx).is_ok(),
+                "`icmp {cond} ptr` is valid LLVM",
+            );
+        }
+    }
+
+    /// An `icmp` defines an `i1` whatever it compared, and the register it defines is
+    /// named from the enclosing function's counter like any other.
+    #[test]
+    fn an_icmp_defines_an_i1_register() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let a = Value::from_const(1i64, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i64, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_icmp(ICond::Sgt, None, a, b, Some("cmp"), &mut ctx)
+            .unwrap();
+
+        assert!(result.ty.is_i1(&ctx));
+
+        let as_value: Value = result.into();
+
+        assert!(matches!(as_value.kind(), ValueKind::Reg(_)));
     }
 }

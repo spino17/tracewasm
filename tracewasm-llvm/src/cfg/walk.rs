@@ -9,7 +9,7 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperadns,
+        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperands,
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
@@ -125,7 +125,7 @@ pub trait CfgVisitor {
 
     fn visit_icmp(
         &mut self,
-        operands: &ICmpOperadns,
+        operands: &ICmpOperands,
         value: &I1Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;

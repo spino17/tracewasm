@@ -15,6 +15,7 @@
 //!     ├── RetError
 //!     ├── CallError
 //!     ├── GepError
+//!     ├── ICmpError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -184,6 +185,9 @@ pub enum InstructionError {
     /// See [`GepError`].
     #[error("{0}")]
     Gep(#[from] GepError),
+    /// See [`ICmpError`].
+    #[error("{0}")]
+    ICmp(#[from] ICmpError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -270,6 +274,53 @@ pub enum CallError {
     /// `%r = call void @g()` with "instructions returning void cannot have a name".
     #[error("a call to `{0}` returns `void`, so it cannot be assigned to a register")]
     RegisterNameForVoidCall(String),
+}
+
+/// An `icmp` could not be built.
+///
+/// LLVM requires both operands to have the *same* type — `llvm-as` refuses
+/// `icmp slt i64 %a, %b` where `%b` is an `i32` with "'%b' defined with type 'i32' but
+/// expected 'i64'". Where the predicate says how to read the operands, a differing-width
+/// **constant** is widened to match; everything else is refused here.
+#[derive(Error, Debug)]
+pub enum ICmpError {
+    /// The operands have different types and could not be brought to a common one.
+    ///
+    /// Either the narrower operand is a register — widening one needs a real
+    /// `zext`/`sext`, which this builder will not insert — or it is a constant that
+    /// does not fit the common type under the predicate's signedness.
+    ///
+    /// Fields: the predicate, and the two operand types.
+    #[error("`icmp {0}` cannot bring operands of type `{1}` and `{2}` to a common type")]
+    OperandsNotCastable(String, String, String),
+    /// `eq` and `ne` require operands that *already* share a type.
+    ///
+    /// Unlike the ordered predicates, these carry no signedness — LLVM has one `eq`,
+    /// not a signed and an unsigned one — so there is nothing to say whether a
+    /// narrower operand should be zero- or sign-extended. Widening is therefore
+    /// refused rather than guessed: `icmp eq i64 %x, -1` and
+    /// `icmp eq i64 %x, 4294967295` disagree, and only the caller knows which was
+    /// meant.
+    ///
+    /// Fields: the predicate, and the two operand types.
+    #[error("`icmp {0}` needs both operands to have the same type, but got `{1}` and `{2}`")]
+    OperandTypesDiffer(String, String, String),
+    /// An explicit type was given for an `eq`/`ne` that its operands do not have.
+    ///
+    /// For these predicates the type argument is a *check*, not a coercion, for the
+    /// same reason as [`OperandTypesDiffer`](Self::OperandTypesDiffer).
+    ///
+    /// Fields: the predicate, the type given, and the type the operands have.
+    #[error("`icmp {0}` was given type `{1}`, but its operands have type `{2}`")]
+    ProvidedTypeDoesNotMatchOperands(String, String, String),
+    /// `icmp` compares integers or pointers, and this is neither.
+    ///
+    /// Pointers are allowed with every predicate, signed ones included — `llvm-as`
+    /// accepts both `icmp ult ptr` and `icmp slt ptr`. Floats are not: it refuses
+    /// `icmp eq float` with "icmp requires integer operands". Comparing floats needs
+    /// `fcmp`.
+    #[error("`icmp` compares integers or pointers, but its operands have type `{0}`")]
+    OperandTypeNotComparable(String),
 }
 
 /// A `store` could not be built.

@@ -12,6 +12,7 @@ use crate::{
     value::{I1Value, Signedness, Value},
 };
 use rustc_hash::FxHashSet;
+use std::fmt::Display;
 
 pub mod cursor;
 
@@ -117,7 +118,7 @@ pub enum InstructionKind {
     /// Not a terminator: control returns to the next instruction, so the block stays
     /// open.
     Call(CallOperands),
-    ICmp(ICmpOperadns),
+    ICmp(ICmpOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -237,7 +238,7 @@ pub struct CallOperands {
     pub params: Vec<Value>,
 }
 
-pub struct ICmpOperadns {
+pub struct ICmpOperands {
     pub cond: ICond,
     pub ty: TyId,
     pub a: Value,
@@ -258,7 +259,36 @@ pub enum ICond {
     Sle,
 }
 
+impl Display for ICond {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ICond::Eq => "eq",
+            ICond::Ne => "ne",
+            ICond::Ugt => "ugt",
+            ICond::Uge => "uge",
+            ICond::Ult => "ult",
+            ICond::Ule => "ule",
+            ICond::Sgt => "sgt",
+            ICond::Sge => "sge",
+            ICond::Slt => "slt",
+            ICond::Sle => "sle",
+        })
+    }
+}
+
 impl ICond {
+    /// How to read the operands, or `None` if the predicate does not say.
+    ///
+    /// The ordered predicates carry it in their name — `ult` compares unsigned, `slt`
+    /// signed — which is what decides whether a narrower constant operand is zero- or
+    /// sign-extended to the common type.
+    ///
+    /// `eq` and `ne` return `None`, and that absence is load-bearing rather than a
+    /// gap. LLVM has a single `eq`, because at equal widths signedness cannot change
+    /// the answer. It only matters when widening, and there the two choices genuinely
+    /// disagree: against `i64 4294967295`, a `-1i32` operand is equal after `zext` and
+    /// unequal after `sext`. So [`build_icmp`](crate::instruction::cursor::Cursor::build_icmp)
+    /// refuses to widen for these rather than pick one.
     pub fn signedness(&self) -> Option<Signedness> {
         let signedness = match self {
             ICond::Eq => return None,
