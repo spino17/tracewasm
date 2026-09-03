@@ -11,8 +11,8 @@ use crate::{
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
-        GetElementPtrOperands, IArithmeticOperands, ICmpOperands, LoadOperands, PhiInstruction,
-        RetOperands, StoreOperands, UnconditionalBrOperands,
+        FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands, LoadOperands,
+        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
 };
@@ -573,7 +573,19 @@ impl CfgVisitor for IREmitter {
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // `<reg> = <op> <ty> <a>, <b>` — the type once, then two untyped operands, the
+        // same shape as a comparison. What differs is the result type: an arithmetic
+        // instruction defines a value of the *operand* type, not an `i1`.
+        self.push_line(&format!(
+            "{}{} {} {}, {}",
+            Self::assignment(value, ctx)?,
+            operands.op,
+            ctx.display(operands.ty),
+            Self::operand(&operands.a, ctx)?,
+            Self::operand(&operands.b, ctx)?
+        ));
+
+        Ok(())
     }
 
     fn visit_fcmp(
@@ -601,7 +613,33 @@ impl CfgVisitor for IREmitter {
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        self.push_line(&format!(
+            "{}{} {} {}, {}",
+            Self::assignment(value, ctx)?,
+            operands.op,
+            ctx.display(operands.ty),
+            Self::operand(&operands.a, ctx)?,
+            Self::operand(&operands.b, ctx)?
+        ));
+
+        Ok(())
+    }
+
+    fn visit_fneg(
+        &mut self,
+        operands: &FNegOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // One operand and no comma: `llvm-as` reads anything after one as metadata.
+        self.push_line(&format!(
+            "{}fneg {} {}",
+            Self::assignment(value, ctx)?,
+            ctx.display(operands.ty),
+            Self::operand(&operands.value, ctx)?
+        ));
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -795,7 +833,7 @@ mod tests {
             .clone();
 
         let cond = in_body
-            .build_icmp(ICond::Ult, None, counter, limit, Some("cmp"), &mut ctx)
+            .build_icmp(ICond::Ult, None, counter.clone(), limit, Some("cmp"), &mut ctx)
             .unwrap();
 
         // An `fcmp` alongside it, so the float comparison is emitted and assembled
@@ -804,8 +842,36 @@ mod tests {
         let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
 
         in_body
-            .build_fcmp(FCond::Ord, None, phi, half, Some("fcmp"), &mut ctx)
+            .build_fcmp(FCond::Ord, None, phi.clone(), half.clone(), Some("fcmp"), &mut ctx)
             .unwrap();
+
+        // One of each arithmetic shape, so all three emitters are assembled: an
+        // integer op, a float op, and the unary `fneg`.
+        let step = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        in_body
+            .build_iarithmetic(
+                IArithmeticOp::Add,
+                None,
+                counter,
+                step,
+                Some("next"),
+                &mut ctx,
+            )
+            .unwrap();
+
+        in_body
+            .build_farithmetic(
+                FArithmeticOp::FMul,
+                None,
+                phi.clone(),
+                half,
+                Some("scaled"),
+                &mut ctx,
+            )
+            .unwrap();
+
+        in_body.build_fneg(phi, Some("neg"), &mut ctx).unwrap();
 
         in_body
             .build_conditional_br(cond, body, exit, &mut ctx)
@@ -870,6 +936,9 @@ mod tests {
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
             "    %cmp = icmp ult i32 %n, 10\n",
             "    %fcmp = fcmp ord double %m, 0x3FE0000000000000\n",
+            "    %next = add i32 %n, 1\n",
+            "    %scaled = fmul double %m, 0x3FE0000000000000\n",
+            "    %neg = fneg double %m\n",
             "    br i1 %cmp, label %body, label %exit\n",
             "exit:\n",
             "    %c = call i32 @helper(i32 7)\n",

@@ -227,7 +227,7 @@ impl TyId {
     /// `getelementptr` with one index or none points at its source type unchanged.
     pub(crate) fn walk_pointee_ty_in_gep(
         &self,
-        indices: &[Value],
+        indices: &[&Value],
         ctx: &Context,
     ) -> Result<TyId, GepError> {
         if indices.is_empty() {
@@ -627,8 +627,8 @@ impl Value {
     /// `None` if no common type works. On success the two returned values are
     /// guaranteed to have equal types, so callers may check just one.
     pub fn try_cast_two(
-        a: Value,
-        b: Value,
+        a: &Value,
+        b: &Value,
         ty: Option<TyId>,
         signedness: Signedness,
         ctx: &mut Context,
@@ -641,7 +641,7 @@ impl Value {
         }
 
         if a.ty() == b.ty() {
-            return Some((a, b));
+            return Some((a.clone(), b.clone()));
         }
 
         // An unsized type has no width, so there is nothing to widen towards. Two
@@ -653,11 +653,11 @@ impl Value {
         if a_width >= b_width {
             let ref_ty = a.ty();
 
-            Some((a, b.try_cast(ref_ty, signedness, ctx)?))
+            Some((a.clone(), b.try_cast(ref_ty, signedness, ctx)?))
         } else {
             let ref_ty = b.ty();
 
-            Some((a.try_cast(ref_ty, signedness, ctx)?, b))
+            Some((a.try_cast(ref_ty, signedness, ctx)?, b.clone()))
         }
     }
 
@@ -1658,7 +1658,7 @@ mod tests {
         );
     }
 
-    /// [`Signedness::None`] refuses every integer cast, including one to the type the
+    /// [`Signedness::NotApplicable`] refuses every integer cast, including one to the type the
     /// value already has.
     ///
     /// It means "no reading was supplied", which is the honest answer for `fcmp`,
@@ -1707,7 +1707,7 @@ mod tests {
     }
 
     /// Two operands that already share a float type need no cast, so
-    /// [`Signedness::None`] never gets in the way — which is what lets `fcmp` pass it.
+    /// [`Signedness::NotApplicable`] never gets in the way — which is what lets `fcmp` pass it.
     #[test]
     fn no_signedness_still_pairs_matching_floats() {
         let mut ctx = crate::test_support::ctx();

@@ -123,13 +123,23 @@ pub enum InstructionKind {
     /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
     /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
+    /// Integer arithmetic, bitwise logic or a shift, producing a value of the
+    /// operand type.
     IArithmetic(IArithmeticOperands),
     /// Compares two floating-point values, producing an `i1`.
     ///
     /// Separate from [`ICmp`](Self::ICmp) because LLVM keeps them separate: `icmp`
     /// refuses floats and `fcmp` refuses integers.
     FCmp(FCmpOperands),
+    /// Floating-point arithmetic, producing a value of the operand type.
     FArithmetic(FArithmeticOperands),
+    /// Negates a floating-point value.
+    ///
+    /// Its own kind rather than an [`FArithmetic`](Self::FArithmetic) op, because
+    /// `fneg` is the one arithmetic instruction that takes a **single** operand —
+    /// `llvm-as` refuses `fneg double %a, %b`. Integers have no counterpart; negating
+    /// one is `sub 0, %x`.
+    FNeg(FNegOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -349,31 +359,93 @@ impl ICond {
     }
 }
 
+/// The operands of an integer arithmetic, bitwise or shift instruction.
+///
+/// Emitted as `<op> <ty> <a>, <b>` — the type written once, since LLVM requires both
+/// operands to have it. The result has that same type, unlike a comparison's `i1`.
 pub struct IArithmeticOperands {
+    /// Which operation.
     pub op: IArithmeticOp,
+    /// The type both operands have, and the type of the result.
     pub ty: TyId,
+    /// The left operand.
     pub a: Value,
+    /// The right operand. For a shift, the shift *amount*.
     pub b: Value,
 }
 
+/// Which integer operation an [`IArithmeticOperands`] performs.
+///
+/// Only six of these carry a signedness, and LLVM is the authority on which: it spells
+/// `sdiv`/`udiv`, `srem`/`urem` and `ashr`/`lshr` as distinct opcodes, and has exactly
+/// **one** `add`, `and`, `shl` and so on. There is no `sadd` — two's-complement
+/// addition produces the same bits under either reading, which is why one opcode
+/// suffices. See [`signedness`](Self::signedness).
+///
+/// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
 pub enum IArithmeticOp {
+    /// Addition. No signedness — see the type-level note.
     Add,
+    /// Subtraction. No signedness.
     Sub,
+    /// Multiplication. No signedness.
     Mul,
+    /// Unsigned division.
     Udiv,
+    /// Signed division.
     Sdiv,
+    /// Unsigned remainder.
     Urem,
+    /// Signed remainder.
     Srem,
+    /// Shift left. No signedness: vacated bits are always zero.
     Shl,
+    /// Logical shift right — vacated bits are zero, so the value is read unsigned.
     Lshr,
+    /// Arithmetic shift right — vacated bits copy the sign, so the value is read
+    /// signed.
     Ashr,
+    /// Bitwise and. No signedness.
     And,
+    /// Bitwise or. No signedness.
     Or,
+    /// Bitwise exclusive or. No signedness.
     Xor,
 }
 
+impl Display for IArithmeticOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            IArithmeticOp::Add => "add",
+            IArithmeticOp::Sub => "sub",
+            IArithmeticOp::Mul => "mul",
+            IArithmeticOp::Udiv => "udiv",
+            IArithmeticOp::Sdiv => "sdiv",
+            IArithmeticOp::Urem => "urem",
+            IArithmeticOp::Srem => "srem",
+            IArithmeticOp::Shl => "shl",
+            IArithmeticOp::Lshr => "lshr",
+            IArithmeticOp::Ashr => "ashr",
+            IArithmeticOp::And => "and",
+            IArithmeticOp::Or => "or",
+            IArithmeticOp::Xor => "xor",
+        })
+    }
+}
+
 impl IArithmeticOp {
+    /// How to read the operands, or `None` if the operation does not say.
+    ///
+    /// `None` for `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — LLVM has a
+    /// single opcode for each, because the *result* bits are the same either way.
+    /// That absence is load-bearing: it is what makes
+    /// [`build_iarithmetic`](crate::instruction::cursor::Cursor::build_iarithmetic)
+    /// refuse to widen a narrower constant rather than guess. The result may not
+    /// depend on the reading, but the widening does — `add i64 100, -1` is 99, while
+    /// the same `i32` constant zero-extended gives 4294967395.
+    ///
+    /// The six that do carry one are the pairs LLVM spells separately.
     pub fn signedness(&self) -> Option<Signedness> {
         let v = match self {
             IArithmeticOp::Add => return None,
@@ -395,20 +467,64 @@ impl IArithmeticOp {
     }
 }
 
+/// The operands of a floating-point arithmetic instruction.
+///
+/// Emitted as `<op> <ty> <a>, <b>`. Every variant here is binary; `fneg` is unary and
+/// lives in [`FNegOperands`] instead.
 pub struct FArithmeticOperands {
+    /// Which operation.
     pub op: FArithmeticOp,
+    /// The type both operands have, and the type of the result.
     pub ty: TyId,
+    /// The left operand.
     pub a: Value,
+    /// The right operand.
     pub b: Value,
 }
 
+/// Which floating-point operation an [`FArithmeticOperands`] performs.
+///
+/// None of these carry a signedness — a float's sign is part of its format, so there
+/// is no signed/unsigned split to make.
+///
+/// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
 pub enum FArithmeticOp {
+    /// Addition.
     FAdd,
+    /// Subtraction.
     FSub,
+    /// Multiplication.
     FMul,
+    /// Division.
     FDiv,
+    /// Remainder.
     FRem,
+}
+
+impl Display for FArithmeticOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FArithmeticOp::FAdd => "fadd",
+            FArithmeticOp::FSub => "fsub",
+            FArithmeticOp::FMul => "fmul",
+            FArithmeticOp::FDiv => "fdiv",
+            FArithmeticOp::FRem => "frem",
+        })
+    }
+}
+
+/// The operand of an `fneg`.
+///
+/// Emitted as `fneg <ty> <value>`. One operand, not two: `llvm-as` refuses
+/// `fneg double %a, %b` with "expected metadata after comma". That is why `fneg` is
+/// not an [`FArithmeticOp`] — giving it a second operand would make an
+/// unrepresentable instruction constructible.
+pub struct FNegOperands {
+    /// The type of the operand, and of the result.
+    pub ty: TyId,
+    /// The value to negate.
+    pub value: Value,
 }
 
 /// The operands of an `fcmp`.

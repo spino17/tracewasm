@@ -7,14 +7,14 @@ use crate::{
         global::GlobalKind,
     },
     error::{
-        AllocaError, CallError, FCmpError, GepError, ICmpError, InstructionError, PhiError,
-        RetError, StoreError,
+        AllocaError, CallError, FArithmeticError, FCmpError, GepError, IArithmeticError, ICmpError,
+        InstructionError, PhiError, RetError, StoreError,
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOp, FArithmeticOperands,
-        FCmpOperands, FCond, GetElementPtrOperands, IArithmeticOp, IArithmeticOperands,
-        ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands, PhiInstrHandler,
-        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IArithmeticOp,
+        IArithmeticOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
+        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
     value::{I1Value, Signedness, Value, ValueKind},
@@ -192,7 +192,7 @@ impl Cursor {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_ret(
         self,
-        val: Option<Value>,
+        val: Option<&Value>,
         ty: Option<TyId>,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
@@ -219,7 +219,7 @@ impl Cursor {
             (Some(val), None) => {
                 let ty = val.ty();
 
-                (Some(val), ty)
+                (Some(val.clone()), ty)
             }
             (None, Some(ty)) => {
                 if !ty.is_void(ctx) {
@@ -288,7 +288,7 @@ impl Cursor {
     pub fn build_alloca(
         &self,
         ty: TyId,
-        count: Option<(Value, Option<TyId>)>,
+        count: Option<(&Value, Option<TyId>)>,
         align: Option<u32>,
         reg: Option<&str>,
         ctx: &mut Context,
@@ -335,7 +335,7 @@ impl Cursor {
 
                 casted_val
             } else {
-                count_val
+                count_val.clone()
             };
 
             final_count = Some(final_count_val);
@@ -375,7 +375,7 @@ impl Cursor {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_load(
         &self,
-        ptr: Value,
+        ptr: &Value,
         ty: Option<TyId>,
         align: Option<u32>,
         reg: Option<&str>,
@@ -421,7 +421,7 @@ impl Cursor {
         add_instruction_to_block_and_get_value(
             InstructionKind::Load(LoadOperands {
                 ty: final_ty,
-                ptr,
+                ptr: ptr.clone(),
                 align,
             }),
             final_ty,
@@ -448,8 +448,8 @@ impl Cursor {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_store(
         &self,
-        ptr: Value,
-        value: Value,
+        ptr: &Value,
+        value: &Value,
         ty: Option<TyId>,
         align: Option<u32>,
         ctx: &mut Context,
@@ -479,7 +479,7 @@ impl Cursor {
 
             casted_value
         } else {
-            value
+            value.clone()
         };
 
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
@@ -496,7 +496,7 @@ impl Cursor {
             Instruction {
                 kind: InstructionKind::Store(StoreOperands {
                     value: final_val,
-                    ptr,
+                    ptr: ptr.clone(),
                     align,
                 }),
                 value: None,
@@ -538,9 +538,9 @@ impl Cursor {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_get_element_ptr(
         &self,
-        ptr: Value,
+        ptr: &Value,
         source_ty: Option<TyId>,
-        indices: Vec<Value>,
+        indices: &[&Value],
         inbounds: Option<bool>,
         reg: Option<&str>,
         ctx: &mut Context,
@@ -553,7 +553,7 @@ impl Cursor {
             ));
         }
 
-        for index in &indices {
+        for index in indices {
             if !index.is_integer(ctx) {
                 return Err(
                     GepError::IndexNotAnInteger(ctx.display(index.ty()).to_string()).into(),
@@ -601,8 +601,8 @@ impl Cursor {
                 // from the pointer, that is the type the instruction has to be emitted
                 // with, and it is the one the walk above validated.
                 source_ty: final_source_ty,
-                ptr,
-                indices: indices.into_boxed_slice(),
+                ptr: ptr.clone(),
+                indices: indices.iter().copied().map(|x| x.clone()).collect(),
                 inbounds,
             }),
             result_ty,
@@ -647,11 +647,17 @@ impl Cursor {
     pub fn build_call(
         &self,
         func_name: String,
-        params: &[(Value, Option<TyId>)],
+        params: &[(&Value, Option<TyId>)],
         return_ty: Option<TyId>,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Option<Value>, InstructionError> {
+        let params: Vec<(Value, Option<TyId>)> = params
+            .iter()
+            .copied()
+            .map(|(x, y)| (x.clone(), y))
+            .collect();
+
         let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
 
         // The signature is read out by value before anything below borrows `ctx`
@@ -811,8 +817,8 @@ impl Cursor {
         &self,
         cond: ICond,
         ty: Option<TyId>,
-        a: Value,
-        b: Value,
+        a: &Value,
+        b: &Value,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
@@ -852,7 +858,7 @@ impl Cursor {
                 .into());
             }
 
-            (a, b)
+            (a.clone(), b.clone())
         };
 
         // Both operands share a type by here: the strict arm asserted it, and the cast
@@ -878,39 +884,95 @@ impl Cursor {
         Ok(i1val)
     }
 
+    /// Integer arithmetic, bitwise logic or a shift, defining a value of the operand
+    /// type.
+    ///
+    /// Emits `<op> <ty> <a>, <b>`. Unlike a comparison, the result has the operands'
+    /// type rather than `i1`.
+    ///
+    /// # Operand types must agree
+    ///
+    /// The six operations LLVM spells with a signedness — `sdiv`/`udiv`, `srem`/`urem`
+    /// and `ashr`/`lshr` — widen a narrower **constant** to match, zero- or
+    /// sign-extending as that operation says.
+    ///
+    /// The other seven refuse to widen at all. `add`, `sub`, `mul`, `shl`, `and`, `or`
+    /// and `xor` have a single opcode each because the result bits are the same under
+    /// either reading — which means nothing says how to *widen* an operand, and the
+    /// two choices give different answers. So they require operands that already share
+    /// a type, exactly as `icmp eq` does.
+    ///
+    /// A differing-width *register* is always refused: widening one needs an
+    /// instruction this builder will not insert on the caller's behalf.
+    ///
+    /// # Errors
+    ///
+    /// - [`IArithmeticError::OperandsNotCastable`] — a signed operation whose operands
+    ///   have no common type.
+    /// - [`IArithmeticError::OperandTypesDiffer`] — a signedness-free operation given
+    ///   two types.
+    /// - [`IArithmeticError::ProvidedTypeDoesNotMatchOperands`] — a signedness-free
+    ///   operation given a `ty` its operands do not have.
+    /// - [`IArithmeticError::OperandTypeNotInteger`] — floats need the `f`-prefixed
+    ///   instructions.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_iarithmetic(
         &self,
         op: IArithmeticOp,
         ty: Option<TyId>,
-        a: Value,
-        b: Value,
+        a: &Value,
+        b: &Value,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let (a, b) = if let Some(signedness) = op.signedness() {
+            // Ids are `Copy`, so the operand types survive the move into the cast and
+            // are rendered only on the failing path.
+            let (given_a, given_b) = (a.ty(), b.ty());
+
             let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
-                todo!() // RAISE ERROR
+                return Err(IArithmeticError::OperandsNotCastable(
+                    op.to_string(),
+                    ctx.display(given_a).to_string(),
+                    ctx.display(given_b).to_string(),
+                )
+                .into());
             };
 
             (a, b)
         } else {
             if a.ty() != b.ty() {
-                todo!() // RAISE ERROR
+                return Err(IArithmeticError::OperandTypesDiffer(
+                    op.to_string(),
+                    ctx.display(a.ty()).to_string(),
+                    ctx.display(b.ty()).to_string(),
+                )
+                .into());
             }
 
             if let Some(ty) = ty
                 && ty != a.ty()
             {
-                todo!() // RAISE ERROR
+                return Err(IArithmeticError::ProvidedTypeDoesNotMatchOperands(
+                    op.to_string(),
+                    ctx.display(ty).to_string(),
+                    ctx.display(a.ty()).to_string(),
+                )
+                .into());
             }
 
-            (a, b)
+            (a.clone(), b.clone())
         };
 
+        // Both operands share a type by here, so checking one covers both.
         let ty = a.ty();
 
         if !ty.is_integer(ctx) {
-            todo!() // RAISE ERROR
+            return Err(IArithmeticError::OperandTypeNotInteger(
+                op.to_string(),
+                ctx.display(ty).to_string(),
+            )
+            .into());
         }
 
         add_instruction_to_block_and_get_value(
@@ -935,7 +997,7 @@ impl Cursor {
     ///
     /// No signedness is involved — a float carries its sign in its format, so `fpext`
     /// is exact and there is nothing for a caller to choose. That is why the cast runs
-    /// under [`Signedness::None`], which also refuses
+    /// under [`Signedness::NotApplicable`], which also refuses
     /// every integer cast and so keeps an integer from reaching a float comparison by
     /// way of a silent widening.
     ///
@@ -949,8 +1011,8 @@ impl Cursor {
         &self,
         cond: FCond,
         ty: Option<TyId>,
-        a: Value,
-        b: Value,
+        a: &Value,
+        b: &Value,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
@@ -989,27 +1051,91 @@ impl Cursor {
         Ok(i1val)
     }
 
+    /// Floating-point arithmetic, defining a value of the operand type.
+    ///
+    /// Emits `<op> <ty> <a>, <b>`. A narrower float **constant** widens to match, and
+    /// needs no signedness to do it: `fpext` is exact, so there is nothing for a
+    /// caller to choose. The cast therefore runs under
+    /// [`Signedness::NotApplicable`], which also refuses every
+    /// integer cast and so keeps an integer from reaching a float instruction by way
+    /// of a silent widening.
+    ///
+    /// For negation see [`build_fneg`](Self::build_fneg) — `fneg` is unary.
+    ///
+    /// # Errors
+    ///
+    /// - [`FArithmeticError::OperandsNotCastable`] — no common type. Integer operands
+    ///   land here.
+    /// - [`FArithmeticError::OperandTypeNotFloat`] — the common type is not a float.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_farithmetic(
         &self,
         op: FArithmeticOp,
         ty: Option<TyId>,
-        a: Value,
-        b: Value,
+        a: &Value,
+        b: &Value,
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
+        let (given_a, given_b) = (a.ty(), b.ty());
+
         let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, ctx) else {
-            todo!() // RAISE ERROR: cannot cast
+            return Err(FArithmeticError::OperandsNotCastable(
+                op.to_string(),
+                ctx.display(given_a).to_string(),
+                ctx.display(given_b).to_string(),
+            )
+            .into());
         };
 
         let ty = a.ty();
 
         if !ty.is_float(ctx) {
-            todo!() // RAISE ERROR
+            return Err(FArithmeticError::OperandTypeNotFloat(
+                op.to_string(),
+                ctx.display(ty).to_string(),
+            )
+            .into());
         }
 
         add_instruction_to_block_and_get_value(
             InstructionKind::FArithmetic(FArithmeticOperands { op, ty, a, b }),
+            ty,
+            self.block,
+            reg,
+            ctx,
+        )
+    }
+
+    /// Negates a floating-point value, defining one of the same type.
+    ///
+    /// Emits `fneg <ty> <value>`. Separate from
+    /// [`build_farithmetic`](Self::build_farithmetic) because `fneg` takes a **single**
+    /// operand — `llvm-as` refuses `fneg double %a, %b`. There is no integer
+    /// counterpart; negating one is `sub 0, %x`.
+    ///
+    /// # Errors
+    ///
+    /// - [`FArithmeticError::OperandTypeNotFloat`] if the operand is not a float.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
+    pub fn build_fneg(
+        &self,
+        value: Value,
+        reg: Option<&str>,
+        ctx: &mut Context,
+    ) -> Result<Value, InstructionError> {
+        let ty = value.ty();
+
+        if !ty.is_float(ctx) {
+            return Err(FArithmeticError::OperandTypeNotFloat(
+                "fneg".to_string(),
+                ctx.display(ty).to_string(),
+            )
+            .into());
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::FNeg(FNegOperands { ty, value }),
             ty,
             self.block,
             reg,
@@ -1507,7 +1633,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_load(ptr.clone(), Some(i32_ty), None, None, &mut ctx)
+                .build_load(&ptr, Some(i32_ty), None, None, &mut ctx)
                 .map(|_| ()),
             "load",
         );
@@ -1515,14 +1641,14 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_store(ptr.clone(), seven, None, None, &mut ctx),
+                .build_store(&ptr, &seven, None, None, &mut ctx),
             "store",
         );
 
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_get_element_ptr(ptr, Some(i32_ty), vec![zero], None, None, &mut ctx)
+                .build_get_element_ptr(&ptr, Some(i32_ty), &[&zero], None, None, &mut ctx)
                 .map(|_| ()),
             "getelementptr",
         );
@@ -1702,12 +1828,12 @@ mod tests {
 
         builder
             .cursor_at_block(with_ty)
-            .build_ret(Some(seven), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&seven), Some(i32_ty), &mut ctx)
             .expect("the type and the value agree");
 
         builder
             .cursor_at_block(inferred)
-            .build_ret(Some(eight), None, &mut ctx)
+            .build_ret(Some(&eight), None, &mut ctx)
             .expect("with no type given it comes from the value");
 
         let returns_void = builder
@@ -1752,7 +1878,7 @@ mod tests {
         // `ret void` with a value.
         let err = builder
             .cursor_at_block(a)
-            .build_ret(Some(seven), Some(void_ty), &mut ctx)
+            .build_ret(Some(&seven), Some(void_ty), &mut ctx)
             .expect_err("`void` takes no value");
 
         assert!(
@@ -1860,7 +1986,7 @@ mod tests {
         );
 
         cursor
-            .build_load(base, Some(i32_ty), None, Some("v"), &mut ctx)
+            .build_load(&base, Some(i32_ty), None, Some("v"), &mut ctx)
             .expect("the explicit type stands when inference declines");
     }
 
@@ -1894,7 +2020,7 @@ mod tests {
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
-                .build_load(base.clone(), Some(ty), None, Some(reg), &mut ctx)
+                .build_load(&base, Some(ty), None, Some(reg), &mut ctx)
                 .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
 
             assert_eq!(loaded.ty(), ty, "the load has the type it was given");
@@ -1903,7 +2029,7 @@ mod tests {
         let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
 
         cursor
-            .build_store(base.clone(), seven, None, None, &mut ctx)
+            .build_store(&base, &seven, None, None, &mut ctx)
             .expect("storing through a parameter works for the same reason");
 
         // And a `getelementptr` needs its source type given, since there is none to
@@ -1912,21 +2038,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(
-                    base.clone(),
-                    None,
-                    vec![zero.clone()],
-                    None,
-                    None,
-                    &mut ctx
-                ),
+                cursor.build_get_element_ptr(&base, None, &[&zero], None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::SourceTypeUnknown))
             ),
             "with nothing to infer from, a source type is required"
         );
 
         cursor
-            .build_get_element_ptr(base, Some(i32_ty), vec![zero], None, Some("g"), &mut ctx)
+            .build_get_element_ptr(&base, Some(i32_ty), &[&zero], None, Some("g"), &mut ctx)
             .expect("and supplying it is enough");
     }
 
@@ -2105,7 +2224,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i32".to_string(),
-                &[(wide, None)],
+                &[(&wide, None)],
                 None,
                 Some("b"),
                 &mut ctx,
@@ -2125,7 +2244,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i32".to_string(),
-                &[(seven.clone(), None)],
+                &[(&seven, None)],
                 Some(f64_ty),
                 Some("c"),
                 &mut ctx,
@@ -2146,7 +2265,7 @@ mod tests {
             cursor
                 .build_call(
                     "takes_i32".to_string(),
-                    &[(seven, None)],
+                    &[(&seven, None)],
                     Some(i32_ty),
                     Some("d"),
                     &mut ctx
@@ -2184,7 +2303,7 @@ mod tests {
             cursor
                 .build_call(
                     "takes_i64".to_string(),
-                    &[(seven.clone(), Some(i64_ty))],
+                    &[(&seven, Some(i64_ty))],
                     None,
                     Some("a"),
                     &mut ctx
@@ -2198,7 +2317,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i64".to_string(),
-                &[(seven, Some(f64_ty))],
+                &[(&seven, Some(f64_ty))],
                 None,
                 Some("b"),
                 &mut ctx,
@@ -2221,7 +2340,7 @@ mod tests {
             matches!(
                 cursor.build_call(
                     "takes_i64".to_string(),
-                    &[(narrow, Some(i64_ty))],
+                    &[(&narrow, Some(i64_ty))],
                     None,
                     Some("c"),
                     &mut ctx
@@ -2385,20 +2504,13 @@ mod tests {
 
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
-            .build_get_element_ptr(
-                slot,
-                None,
-                vec![zero.clone(), one],
-                None,
-                Some("f"),
-                &mut ctx,
-            )
+            .build_get_element_ptr(&slot, None, &[&zero, &one], None, Some("f"), &mut ctx)
             .expect("the alloca says what it points to");
 
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
         // so it has to come from the gep above.
         let elem = cursor
-            .build_get_element_ptr(field, None, vec![zero, two], None, Some("e"), &mut ctx)
+            .build_get_element_ptr(&field, None, &[&zero, &two], None, Some("e"), &mut ctx)
             .expect("the first gep says what it points to");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -2418,13 +2530,13 @@ mod tests {
 
         assert!(
             cursor
-                .build_store(elem.clone(), a_double, None, None, &mut ctx)
+                .build_store(&elem, &a_double, None, None, &mut ctx)
                 .is_ok(),
             "the element is a double"
         );
 
         let err = cursor
-            .build_store(elem, an_i32, None, None, &mut ctx)
+            .build_store(&elem, &an_i32, None, None, &mut ctx)
             .expect_err("an i32 is not what this points to");
 
         assert!(
@@ -2673,7 +2785,7 @@ mod tests {
         ];
 
         let err = cursor
-            .build_get_element_ptr(slot.clone(), None, too_deep, None, None, &mut ctx)
+            .build_get_element_ptr(&slot, None, &too_deep, None, None, &mut ctx)
             .expect_err("an i64 has no elements");
 
         assert!(
@@ -2686,7 +2798,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(slot, None, past_double, None, None, &mut ctx),
+                cursor.build_get_element_ptr(&slot, None, &past_double, None, None, &mut ctx),
                 Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
             ),
             "a double has no elements either"
@@ -2700,20 +2812,20 @@ mod tests {
         let (mut ctx, mut builder) = fixture();
         let (cursor, slot, tys) = block_with_deep_slot(&mut ctx, &mut builder);
 
-        let deep = vec![
-            idx(0, &mut ctx),
-            idx(1, &mut ctx),
-            idx(1, &mut ctx),
-            idx(1, &mut ctx),
-            idx(2, &mut ctx),
+        let deep = &[
+            &idx(0, &mut ctx),
+            &idx(1, &mut ctx),
+            &idx(1, &mut ctx),
+            &idx(1, &mut ctx),
+            &idx(2, &mut ctx),
         ];
 
         let elem = cursor
-            .build_get_element_ptr(slot, None, deep, None, Some("e"), &mut ctx)
+            .build_get_element_ptr(&slot, None, deep, None, Some("e"), &mut ctx)
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .build_load(elem.clone(), Some(tys.i64), None, Some("v"), &mut ctx)
+            .build_load(&elem, Some(tys.i64), None, Some("v"), &mut ctx)
             .expect("an i64 is loadable");
 
         assert_eq!(ctx.display(loaded.ty()).to_string(), "i64");
@@ -2723,7 +2835,7 @@ mod tests {
         // check has to accept it.
         assert!(
             cursor
-                .build_store(elem, loaded, None, None, &mut ctx)
+                .build_store(&elem, &loaded, None, None, &mut ctx)
                 .is_ok(),
             "what was loaded from a slot must store back into it"
         );
@@ -3815,7 +3927,7 @@ mod tests {
     }
 
     /// An integer paired with a float has no common type under
-    /// [`Signedness::None`], so the mismatch is caught
+    /// [`Signedness::NotApplicable`], so the mismatch is caught
     /// as a cast failure before the float check is ever reached.
     #[test]
     fn fcmp_refuses_an_integer_paired_with_a_float() {
@@ -3842,7 +3954,7 @@ mod tests {
     /// Two integers of *different* widths are refused as an uncastable pair, not as
     /// a non-float type.
     ///
-    /// This is what [`Signedness::None`] buys. Under a
+    /// This is what [`Signedness::NotApplicable`] buys. Under a
     /// real signedness the narrower constant would widen happily, and the mismatch
     /// would only surface a step later at the float check — reporting the *widened*
     /// type, which the caller never wrote. Refusing the cast keeps the error pointing
@@ -3918,6 +4030,248 @@ mod tests {
             assert!(
                 cursor.build_fcmp(cond, None, a, b, None, &mut ctx).is_ok(),
                 "`fcmp {cond}` is valid LLVM",
+            );
+        }
+    }
+
+    /// An operation LLVM spells with a signedness widens a narrower constant the way
+    /// that spelling says.
+    #[test]
+    fn a_signed_operation_widens_a_constant_by_its_own_reading() {
+        for (op, expected) in [
+            (IArithmeticOp::Lshr, ConstValue::I64(4_294_967_295)),
+            (IArithmeticOp::Ashr, ConstValue::I64(-1)),
+            (IArithmeticOp::Udiv, ConstValue::I64(4_294_967_295)),
+            (IArithmeticOp::Sdiv, ConstValue::I64(-1)),
+        ] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, block) = block_for_icmp(&mut ctx, &mut builder);
+
+            let wide = Value::from_const(8i64, None, &mut ctx).unwrap();
+            let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+            cursor
+                .build_iarithmetic(op, None, wide, narrow, Some("r"), &mut ctx)
+                .expect("a signed operation may widen a constant");
+
+            let instr = ctx
+                .blocks
+                .get(block.raw())
+                .unwrap()
+                .instructions
+                .last()
+                .unwrap();
+
+            let InstructionKind::IArithmetic(operands) = &instr.kind else {
+                panic!("not an iarithmetic");
+            };
+
+            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind() else {
+                panic!("the right operand is not a constant");
+            };
+
+            assert_eq!(
+                *ctx.const_interner.value(id.raw()),
+                expected,
+                "`{op}` must widen by its own reading",
+            );
+        }
+    }
+
+    /// The seven operations with no signedness refuse to widen, because nothing says
+    /// which way to fill the new bits and the two answers differ.
+    ///
+    /// `add i64 100, -1` is 99; the same `i32` constant zero-extended gives
+    /// 4294967395. LLVM has one `add` precisely because the *result* bits do not
+    /// depend on the reading — but the *widening* does.
+    #[test]
+    fn a_signedness_free_operation_refuses_to_widen() {
+        for op in [
+            IArithmeticOp::Add,
+            IArithmeticOp::Sub,
+            IArithmeticOp::Mul,
+            IArithmeticOp::Shl,
+            IArithmeticOp::And,
+            IArithmeticOp::Or,
+            IArithmeticOp::Xor,
+        ] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let wide = Value::from_const(100i64, None, &mut ctx).unwrap();
+            let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
+
+            let err = cursor
+                .build_iarithmetic(op, None, wide, narrow, None, &mut ctx)
+                .expect_err("no reading is available, so widening must be refused");
+
+            assert!(
+                matches!(
+                    &err,
+                    InstructionError::IArithmetic(IArithmeticError::OperandTypesDiffer(o, a, b))
+                        if o == &op.to_string() && a == "i64" && b == "i32"
+                ),
+                "got: {err}",
+            );
+        }
+    }
+
+    /// Matching operands are fine for those same operations — the refusal is about
+    /// widening, not about the operation.
+    #[test]
+    fn a_signedness_free_operation_accepts_matching_operands() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let i64_ty = ctx.i64_ty();
+        let a = Value::from_const(100i64, None, &mut ctx).unwrap();
+        let b = Value::from_const(-1i64, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_iarithmetic(IArithmeticOp::Add, None, a, b, Some("r"), &mut ctx)
+            .expect("two i64s need no widening");
+
+        assert_eq!(
+            result.ty(),
+            i64_ty,
+            "arithmetic yields the operand type, not an i1",
+        );
+    }
+
+    /// Floats need the `f`-prefixed instructions, and integers the unprefixed ones.
+    #[test]
+    fn the_integer_and_float_instructions_refuse_each_other() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let f = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let g = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+
+        assert!(
+            matches!(
+                cursor.build_iarithmetic(IArithmeticOp::Add, None, f, g, None, &mut ctx),
+                Err(InstructionError::IArithmetic(
+                    IArithmeticError::OperandTypeNotInteger(..)
+                ))
+            ),
+            "`add` does not take doubles",
+        );
+
+        let i = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let j = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        assert!(
+            matches!(
+                cursor.build_farithmetic(FArithmeticOp::FAdd, None, i, j, None, &mut ctx),
+                Err(InstructionError::FArithmetic(
+                    FArithmeticError::OperandTypeNotFloat(..)
+                ))
+            ),
+            "`fadd` does not take i32s",
+        );
+    }
+
+    /// `fneg` takes one operand, so it cannot be handed a second — the type system
+    /// enforces that, and this pins the type and result.
+    #[test]
+    fn fneg_is_unary_and_yields_the_operand_type() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, block) = block_for_icmp(&mut ctx, &mut builder);
+
+        let f64_ty = ctx.f64_ty();
+        let v = Value::from_const(1.5f64, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_fneg(v, Some("n"), &mut ctx)
+            .expect("a double may be negated");
+
+        assert_eq!(result.ty(), f64_ty);
+
+        let instr = ctx
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .unwrap();
+
+        assert!(
+            matches!(&instr.kind, InstructionKind::FNeg(o) if o.ty == f64_ty),
+            "the instruction must be an FNeg at the operand type",
+        );
+    }
+
+    /// `fneg` refuses an integer: there is no integer negation instruction, and
+    /// negating one is `sub 0, %x`.
+    #[test]
+    fn fneg_refuses_an_integer() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let v = Value::from_const(1i32, None, &mut ctx).unwrap();
+
+        assert!(matches!(
+            cursor.build_fneg(v, None, &mut ctx),
+            Err(InstructionError::FArithmetic(
+                FArithmeticError::OperandTypeNotFloat(..)
+            ))
+        ),);
+    }
+
+    /// Every integer operation builds, so no spelling is unreachable.
+    #[test]
+    fn every_integer_operation_builds() {
+        for op in [
+            IArithmeticOp::Add,
+            IArithmeticOp::Sub,
+            IArithmeticOp::Mul,
+            IArithmeticOp::Udiv,
+            IArithmeticOp::Sdiv,
+            IArithmeticOp::Urem,
+            IArithmeticOp::Srem,
+            IArithmeticOp::Shl,
+            IArithmeticOp::Lshr,
+            IArithmeticOp::Ashr,
+            IArithmeticOp::And,
+            IArithmeticOp::Or,
+            IArithmeticOp::Xor,
+        ] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let a = Value::from_const(8i32, None, &mut ctx).unwrap();
+            let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+            assert!(
+                cursor
+                    .build_iarithmetic(op, None, a, b, None, &mut ctx)
+                    .is_ok(),
+                "`{op}` is valid LLVM",
+            );
+        }
+    }
+
+    /// And every float one.
+    #[test]
+    fn every_float_operation_builds() {
+        for op in [
+            FArithmeticOp::FAdd,
+            FArithmeticOp::FSub,
+            FArithmeticOp::FMul,
+            FArithmeticOp::FDiv,
+            FArithmeticOp::FRem,
+        ] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let a = Value::from_const(8.0f64, None, &mut ctx).unwrap();
+            let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+
+            assert!(
+                cursor
+                    .build_farithmetic(op, None, a, b, None, &mut ctx)
+                    .is_ok(),
+                "`{op}` is valid LLVM",
             );
         }
     }

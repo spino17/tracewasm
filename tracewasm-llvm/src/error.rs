@@ -17,6 +17,8 @@
 //!     ├── GepError
 //!     ├── ICmpError
 //!     ├── FCmpError
+//!     ├── IArithmeticError
+//!     ├── FArithmeticError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -192,6 +194,12 @@ pub enum InstructionError {
     /// See [`FCmpError`].
     #[error("{0}")]
     FCmp(#[from] FCmpError),
+    /// See [`IArithmeticError`].
+    #[error("{0}")]
+    IArithmetic(#[from] IArithmeticError),
+    /// See [`FArithmeticError`].
+    #[error("{0}")]
+    FArithmetic(#[from] FArithmeticError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -351,6 +359,59 @@ pub enum FCmpError {
     /// `fcmp oeq` on every one of them. Integers are not: comparing those is `icmp`.
     #[error("`fcmp` compares floating-point values, but its operands have type `{0}`")]
     OperandTypeNotFloat(String),
+}
+
+/// An integer arithmetic, bitwise or shift instruction could not be built.
+#[derive(Error, Debug)]
+pub enum IArithmeticError {
+    /// The operands have different types and could not be brought to a common one.
+    ///
+    /// Reached only by the six operations that carry a signedness. Either the narrower
+    /// operand is a register — widening one needs a real `zext`/`sext` — or it is a
+    /// constant that does not fit under that reading.
+    ///
+    /// Fields: the operation, and the two operand types.
+    #[error("`{0}` cannot bring operands of type `{1}` and `{2}` to a common type")]
+    OperandsNotCastable(String, String, String),
+    /// An operation with no signedness was given operands of two types.
+    ///
+    /// `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` have a single LLVM opcode
+    /// each, so nothing says whether a narrower operand should be zero- or
+    /// sign-extended — and the choice changes the result. `add i64 100, -1` is 99,
+    /// while the same `i32` constant zero-extended gives 4294967395. Widening is
+    /// refused rather than guessed.
+    ///
+    /// Fields: the operation, and the two operand types.
+    #[error("`{0}` needs both operands to have the same type, but got `{1}` and `{2}`")]
+    OperandTypesDiffer(String, String, String),
+    /// An explicit type was given that the operands do not have.
+    ///
+    /// For an operation with no signedness the type argument is a *check*, not a
+    /// coercion, for the same reason as
+    /// [`OperandTypesDiffer`](Self::OperandTypesDiffer).
+    ///
+    /// Fields: the operation, the type given, and the type the operands have.
+    #[error("`{0}` was given type `{1}`, but its operands have type `{2}`")]
+    ProvidedTypeDoesNotMatchOperands(String, String, String),
+    /// These operations take integers. Floats use the `f`-prefixed instructions.
+    #[error("`{0}` takes integer operands, but got ones of type `{1}`")]
+    OperandTypeNotInteger(String, String),
+}
+
+/// A floating-point arithmetic instruction could not be built.
+#[derive(Error, Debug)]
+pub enum FArithmeticError {
+    /// The operands have different types and could not be brought to a common one.
+    ///
+    /// Integer operands land here too: nothing bridges the two families without a
+    /// real `sitofp`.
+    ///
+    /// Fields: the operation, and the two operand types.
+    #[error("`{0}` cannot bring operands of type `{1}` and `{2}` to a common type")]
+    OperandsNotCastable(String, String, String),
+    /// These operations take floats. Integers use the unprefixed instructions.
+    #[error("`{0}` takes floating-point operands, but got ones of type `{1}`")]
+    OperandTypeNotFloat(String, String),
 }
 
 /// A `store` could not be built.

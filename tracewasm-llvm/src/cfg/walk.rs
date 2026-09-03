@@ -10,8 +10,8 @@ use crate::{
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
-        GetElementPtrOperands, IArithmeticOperands, ICmpOperands, InstructionKind, LoadOperands,
-        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands, InstructionKind,
+        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, Value},
 };
@@ -134,6 +134,9 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an integer arithmetic, bitwise or shift instruction.
+    ///
+    /// The result has the operands' type, not `i1`.
     fn visit_iarithmetic(
         &mut self,
         operands: &IArithmeticOperands,
@@ -152,9 +155,20 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a floating-point arithmetic instruction.
     fn visit_farithmetic(
         &mut self,
         operands: &FArithmeticOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
+    /// Visits an `fneg`.
+    ///
+    /// One operand, unlike every other arithmetic instruction.
+    fn visit_fneg(
+        &mut self,
+        operands: &FNegOperands,
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
@@ -256,6 +270,7 @@ pub trait CfgVisitor {
                 InstructionKind::FArithmetic(operands) => {
                     self.visit_farithmetic(operands, val.unwrap(), ctx)?
                 }
+                InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
             });
         }
 
