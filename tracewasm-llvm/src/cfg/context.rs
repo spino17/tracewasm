@@ -304,9 +304,14 @@ mod tests {
         (ctx, f, g)
     }
 
-    fn name(ctx: &mut Context, hint: Option<&str>, func: GlobalId<DefinedFunc>) -> String {
+    fn name(ctx: &mut Context, hint: RegName, func: GlobalId<DefinedFunc>) -> String {
+        let spelled = match &hint {
+            RegName::Named(n) => n.clone(),
+            RegName::Unnamed => "<unnamed>".to_string(),
+        };
+
         ctx.name_for_reg(hint, func.tag.raw())
-            .unwrap_or_else(|e| panic!("hint {hint:?} should be accepted: {e}"))
+            .unwrap_or_else(|e| panic!("hint `{spelled}` should be accepted: {e}"))
     }
 
     /// LLVM numbers unnamed temporaries from 0, in order, and the numbering is per
@@ -315,8 +320,12 @@ mod tests {
     fn unnamed_values_are_numbered_from_zero_per_function() {
         let (mut ctx, f, g) = two_functions();
 
-        let in_f: Vec<String> = (0..3).map(|_| name(&mut ctx, None, f)).collect();
-        let in_g: Vec<String> = (0..2).map(|_| name(&mut ctx, None, g)).collect();
+        let in_f: Vec<String> = (0..3)
+            .map(|_| name(&mut ctx, RegName::Unnamed, f))
+            .collect();
+        let in_g: Vec<String> = (0..2)
+            .map(|_| name(&mut ctx, RegName::Unnamed, g))
+            .collect();
 
         assert_eq!(in_f, ["0", "1", "2"]);
         assert_eq!(in_g, ["0", "1"], "a second function restarts at 0");
@@ -328,9 +337,9 @@ mod tests {
     fn a_hint_is_scoped_to_its_function() {
         let (mut ctx, f, g) = two_functions();
 
-        assert_eq!(name(&mut ctx, Some("sum"), f), "sum");
+        assert_eq!(name(&mut ctx, "sum".into(), f), "sum");
         assert_eq!(
-            name(&mut ctx, Some("sum"), g),
+            name(&mut ctx, "sum".into(), g),
             "sum",
             "another function's `sum` is a different value"
         );
@@ -342,7 +351,7 @@ mod tests {
     fn a_repeated_hint_is_made_unique() {
         let (mut ctx, f, _) = two_functions();
 
-        let names: Vec<String> = (0..3).map(|_| name(&mut ctx, Some("x"), f)).collect();
+        let names: Vec<String> = (0..3).map(|_| name(&mut ctx, "x".into(), f)).collect();
 
         assert_eq!(names, ["x", "x1", "x2"]);
     }
@@ -360,21 +369,26 @@ mod tests {
         // A hint, the same hint again, and a hint that looks like the suffixed form
         // of the first — plus unnamed values interleaved.
         let requests = [
-            Some("x"),
-            Some("x"),
-            Some("x1"),
-            None,
-            Some("x"),
-            None,
-            Some("x2"),
+            RegName::Named("x".to_string()),
+            RegName::Named("x".to_string()),
+            RegName::Named("x1".to_string()),
+            RegName::Unnamed,
+            RegName::Named("x".to_string()),
+            RegName::Unnamed,
+            RegName::Named("x2".to_string()),
         ];
 
         for hint in requests {
+            let spelled = match &hint {
+                RegName::Named(n) => n.clone(),
+                RegName::Unnamed => "<unnamed>".to_string(),
+            };
+
             let issued_name = name(&mut ctx, hint, f);
 
             assert!(
                 issued.insert(issued_name.clone()),
-                "`{issued_name}` was handed out twice (hint {hint:?}); LLVM rejects \
+                "`{issued_name}` was handed out twice (hint `{spelled}`); LLVM rejects \
                  two definitions of the same local"
             );
         }
@@ -386,9 +400,9 @@ mod tests {
     fn a_hint_matching_a_generated_suffix_does_not_collide() {
         let (mut ctx, f, _) = two_functions();
 
-        let first = name(&mut ctx, Some("x"), f);
-        let suffixed = name(&mut ctx, Some("x"), f);
-        let asked_for = name(&mut ctx, Some("x1"), f);
+        let first = name(&mut ctx, "x".into(), f);
+        let suffixed = name(&mut ctx, "x".into(), f);
+        let asked_for = name(&mut ctx, "x1".into(), f);
 
         assert_eq!((first.as_str(), suffixed.as_str()), ("x", "x1"));
         assert_ne!(
@@ -405,12 +419,12 @@ mod tests {
         let (mut ctx, f, _) = two_functions();
 
         assert!(
-            ctx.name_for_reg(Some("0"), f.tag.raw()).is_err(),
+            ctx.name_for_reg("0".into(), f.tag.raw()).is_err(),
             "`%0` is the unnamed form, not a name a caller may ask for"
         );
 
         assert_eq!(
-            name(&mut ctx, None, f),
+            name(&mut ctx, RegName::Unnamed, f),
             "0",
             "and the refusal leaves the unnamed counter untouched"
         );
@@ -424,7 +438,7 @@ mod tests {
 
         for hint in ["my reg", "a+b", "", "a\"b", "café", "x\ny"] {
             assert!(
-                ctx.name_for_reg(Some(hint), f.tag.raw()).is_err(),
+                ctx.name_for_reg(hint.into(), f.tag.raw()).is_err(),
                 "`{hint}` is not a legal unquoted LLVM identifier"
             );
         }
@@ -441,7 +455,7 @@ mod tests {
             "x", "_x", ".x", "$x", "-x", "x.y", "x_y", "x$y", "x-y", "x0", "A", "a1b2",
         ] {
             assert_eq!(
-                name(&mut ctx, Some(hint), f),
+                name(&mut ctx, hint.into(), f),
                 hint,
                 "`{hint}` is a legal identifier and is unused, so it comes back as-is"
             );

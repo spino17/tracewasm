@@ -664,7 +664,9 @@ mod tests {
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
         error::ContextError,
-        instruction::{FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond},
+        instruction::{
+            FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond, cursor::RegName,
+        },
         interner::TyId,
         test_support::fixture,
         value::{ConstExpr, FuncSignature, NullPtr, Type},
@@ -757,13 +759,19 @@ mod tests {
         let in_entry = builder.cursor_at_block(entry);
 
         let slot = in_entry
-            .build_alloca(struct_ty, None, Some(8), Some("s"), &mut ctx)
+            .build_alloca(struct_ty, None, Some(8), "s".into(), &mut ctx)
             .unwrap();
 
         let count = Value::from_const(4i32, None, &mut ctx).unwrap();
 
         in_entry
-            .build_alloca(i64_ty, Some((&count, None)), None, None, &mut ctx)
+            .build_alloca(
+                i64_ty,
+                Some((&count, None)),
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .unwrap();
 
         let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
@@ -776,13 +784,13 @@ mod tests {
                 None,
                 &[zero, one, two],
                 Some(true),
-                Some("e"),
+                "e".into(),
                 &mut ctx,
             )
             .unwrap();
 
         let loaded = in_entry
-            .build_load(&elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
+            .build_load(&elem.clone(), Some(f64_ty), Some(8), "d".into(), &mut ctx)
             .unwrap();
 
         in_entry
@@ -794,7 +802,7 @@ mod tests {
         let a_float = Value::from_const(0.1f32, None, &mut ctx).unwrap();
 
         let float_slot = in_entry
-            .build_alloca(f32_ty, None, None, Some("fs"), &mut ctx)
+            .build_alloca(f32_ty, None, None, "fs".into(), &mut ctx)
             .unwrap();
 
         in_entry
@@ -804,7 +812,7 @@ mod tests {
         let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
 
         let ptr_slot = in_entry
-            .build_alloca(ptr_ty, None, None, Some("np"), &mut ctx)
+            .build_alloca(ptr_ty, None, None, "np".into(), &mut ctx)
             .unwrap();
 
         in_entry
@@ -815,7 +823,7 @@ mod tests {
         let in_body = builder.cursor_at_block(body);
 
         let (phi_handler, phi) = in_body
-            .build_phi(&[(entry, loaded)], Some("m"), &mut ctx)
+            .build_phi(&[(entry, loaded)], "m".into(), &mut ctx)
             .unwrap();
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
@@ -838,7 +846,7 @@ mod tests {
                 None,
                 &counter.clone(),
                 &limit,
-                Some("cmp"),
+                "cmp".into(),
                 &mut ctx,
             )
             .unwrap();
@@ -854,7 +862,7 @@ mod tests {
                 None,
                 &phi.clone(),
                 &half.clone(),
-                Some("fcmp"),
+                "fcmp".into(),
                 &mut ctx,
             )
             .unwrap();
@@ -869,7 +877,7 @@ mod tests {
                 None,
                 &counter,
                 &step,
-                Some("next"),
+                "next".into(),
                 &mut ctx,
             )
             .unwrap();
@@ -880,12 +888,12 @@ mod tests {
                 None,
                 &phi.clone(),
                 &half,
-                Some("scaled"),
+                "scaled".into(),
                 &mut ctx,
             )
             .unwrap();
 
-        in_body.build_fneg(phi, Some("neg"), &mut ctx).unwrap();
+        in_body.build_fneg(phi, "neg".into(), &mut ctx).unwrap();
 
         in_body
             .build_conditional_br(cond, body, exit, &mut ctx)
@@ -901,7 +909,7 @@ mod tests {
                 "helper".to_string(),
                 &[(&seven, None)],
                 Some(i32_ty),
-                Some("c"),
+                "c".into(),
                 &mut ctx,
             )
             .expect("helper takes an i32 and returns one");
@@ -1000,7 +1008,7 @@ mod tests {
                 "host_add".to_string(),
                 &[(&seven, None), (&half, None)],
                 None,
-                Some("r"),
+                "r".into(),
                 &mut ctx,
             )
             .expect("a declared function is callable");
@@ -1127,7 +1135,7 @@ mod tests {
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(&address.clone(), None, None, Some("v"), &mut ctx)
+            .build_load(&address.clone(), None, None, "v".into(), &mut ctx)
             .expect("the global says what it points at");
 
         assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
@@ -1428,7 +1436,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(ptr_ty, None, None, Some("s"), &mut ctx)
+            .build_alloca(ptr_ty, None, None, "s".into(), &mut ctx)
             .unwrap();
 
         cursor

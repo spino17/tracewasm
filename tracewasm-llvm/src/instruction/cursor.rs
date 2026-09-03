@@ -44,6 +44,17 @@ impl From<&String> for RegName {
     }
 }
 
+pub enum OperandTy {
+    Asserted(TyId),
+    Inferred,
+}
+
+impl From<TyId> for OperandTy {
+    fn from(value: TyId) -> Self {
+        OperandTy::Asserted(value)
+    }
+}
+
 /// Writes instructions into one basic block.
 ///
 /// Obtained from [`Builder::cursor_at_block`](crate::cfg::builder::Builder::cursor_at_block).
@@ -1338,7 +1349,7 @@ mod tests {
         // A non-terminator first, so the block is still open for the branch that
         // follows it — a branch consumes the cursor and closes the block.
         cursor
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .unwrap();
         cursor.build_unconditional_br(body, &mut ctx).unwrap();
 
@@ -1384,7 +1395,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .build_phi(&[], Some("result"), &mut ctx)
+            .build_phi(&[], "result".into(), &mut ctx)
             .expect_err("a phi with no branches has no value and no type");
 
         assert!(matches!(err, PhiError::PhiInstructionWithNoBranches));
@@ -1406,7 +1417,7 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], "result".into(), &mut ctx)
             .expect_err("no predecessors to choose between");
 
         assert!(matches!(
@@ -1429,10 +1440,10 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (first, _) = cursor
-            .build_phi(&[(entry, v1)], Some("a"), &mut ctx)
+            .build_phi(&[(entry, v1)], "a".into(), &mut ctx)
             .unwrap();
         let (second, _) = cursor
-            .build_phi(&[(entry, v2)], Some("b"), &mut ctx)
+            .build_phi(&[(entry, v2)], "b".into(), &mut ctx)
             .unwrap();
 
         assert_eq!((first.index, first.block), (0, body));
@@ -1442,7 +1453,7 @@ mod tests {
         // carry the block to be unambiguous.
         let cursor = builder.cursor_at_block(tail);
         let (elsewhere, _) = cursor
-            .build_phi(&[(entry, v3)], Some("c"), &mut ctx)
+            .build_phi(&[(entry, v3)], "c".into(), &mut ctx)
             .unwrap();
 
         assert_eq!((elsewhere.index, elsewhere.block), (0, tail));
@@ -1461,7 +1472,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (_, result) = cursor
-            .build_phi(&[(entry, v)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, v)], "merged".into(), &mut ctx)
             .unwrap();
 
         assert_eq!(
@@ -1486,7 +1497,7 @@ mod tests {
         let err = cursor
             .build_phi(
                 &[(entry, an_i32), (other, an_i64)],
-                Some("merged"),
+                "merged".into(),
                 &mut ctx,
             )
             .expect_err("the second branch is an i64");
@@ -1541,7 +1552,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (_, merged) = cursor
-            .build_phi(&[(entry, a), (other, b)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, a), (other, b)], "merged".into(), &mut ctx)
             .expect("both branches are `[4 x i32]`");
 
         assert_eq!(
@@ -1566,11 +1577,11 @@ mod tests {
         // A plain instruction, not a terminator: this is about phis coming *first*,
         // not about the block being closed, which is a separate rule.
         cursor
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .unwrap();
 
         let err = cursor
-            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], "result".into(), &mut ctx)
             .expect_err("the block already has an instruction");
 
         assert!(matches!(err, PhiError::PhiInstructionAddError));
@@ -1594,7 +1605,7 @@ mod tests {
 
         for _ in 0..3 {
             cursor
-                .build_alloca(i32_ty, None, None, None, &mut ctx)
+                .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
                 .expect("a block that has not branched still accepts instructions");
         }
 
@@ -1666,7 +1677,7 @@ mod tests {
         let reopened = builder.cursor_at_block(entry);
 
         let err = reopened
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .expect_err("`entry` already ends in a branch");
 
         assert!(
@@ -1701,7 +1712,7 @@ mod tests {
         let reopened = builder.cursor_at_block(body);
 
         let err = reopened
-            .build_phi(&[(entry, v)], Some("result"), &mut ctx)
+            .build_phi(&[(entry, v)], "result".into(), &mut ctx)
             .expect_err("`body` already ends in a branch");
 
         assert!(
@@ -1747,7 +1758,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_alloca(i32_ty, None, None, None, &mut ctx)
+                .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
                 .map(|_| ()),
             "alloca",
         );
@@ -1755,7 +1766,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_load(&ptr, Some(i32_ty), None, None, &mut ctx)
+                .build_load(&ptr, Some(i32_ty), None, RegName::Unnamed, &mut ctx)
                 .map(|_| ()),
             "load",
         );
@@ -1770,7 +1781,14 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_get_element_ptr(&ptr, Some(i32_ty), &[zero], None, None, &mut ctx)
+                .build_get_element_ptr(
+                    &ptr,
+                    Some(i32_ty),
+                    &[zero],
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx,
+                )
                 .map(|_| ()),
             "getelementptr",
         );
@@ -1829,7 +1847,7 @@ mod tests {
 
             assert!(
                 reopened
-                    .build_alloca(i32_ty, None, None, None, &mut ctx)
+                    .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
                     .is_err(),
                 "attempt {attempt} must still be refused"
             );
@@ -1852,11 +1870,11 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         cursor
-            .build_phi(&[(entry, v)], Some("m"), &mut ctx)
+            .build_phi(&[(entry, v)], "m".into(), &mut ctx)
             .expect("a phi opens the block");
 
         cursor
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .expect("instructions follow the phi");
 
         cursor
@@ -2063,7 +2081,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .expect_err("`entry` already returned");
 
         assert!(
@@ -2108,7 +2126,7 @@ mod tests {
         );
 
         cursor
-            .build_load(&base, Some(i32_ty), None, Some("v"), &mut ctx)
+            .build_load(&base, Some(i32_ty), None, "v".into(), &mut ctx)
             .expect("the explicit type stands when inference declines");
     }
 
@@ -2142,7 +2160,7 @@ mod tests {
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
-                .build_load(&base, Some(ty), None, Some(reg), &mut ctx)
+                .build_load(&base, Some(ty), None, reg.into(), &mut ctx)
                 .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
 
             assert_eq!(loaded.ty(), ty, "the load has the type it was given");
@@ -2165,7 +2183,7 @@ mod tests {
                     None,
                     std::slice::from_ref(&zero),
                     None,
-                    None,
+                    RegName::Unnamed,
                     &mut ctx
                 ),
                 Err(InstructionError::Gep(GepError::SourceTypeUnknown))
@@ -2174,7 +2192,7 @@ mod tests {
         );
 
         cursor
-            .build_get_element_ptr(&base, Some(i32_ty), &[zero], None, Some("g"), &mut ctx)
+            .build_get_element_ptr(&base, Some(i32_ty), &[zero], None, "g".into(), &mut ctx)
             .expect("and supplying it is enough");
     }
 
@@ -2207,7 +2225,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, Some("x"), &mut ctx)
+            .build_alloca(i32_ty, None, None, "x".into(), &mut ctx)
             .unwrap();
 
         assert_eq!(
@@ -2247,7 +2265,7 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
 
         let value = cursor
-            .build_call("a".to_string(), &[], None, Some("r"), &mut ctx)
+            .build_call("a".to_string(), &[], None, "r".into(), &mut ctx)
             .unwrap();
 
         assert_eq!(value.ty(), i32_ty, "typed by the callee's result");
@@ -2285,7 +2303,7 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .build_call("nothing".to_string(), &[], None, Some("x"), &mut ctx)
+            .build_call("nothing".to_string(), &[], None, "x".into(), &mut ctx)
             .expect_err("a void callee has no value to return");
 
         assert!(
@@ -2328,13 +2346,13 @@ mod tests {
 
         assert!(
             cursor
-                .build_call("f".to_string(), &[], None, Some("rec"), &mut ctx)
+                .build_call("f".to_string(), &[], None, "rec".into(), &mut ctx)
                 .is_ok(),
             "a function may call itself"
         );
 
         let err = cursor
-            .build_call("later".to_string(), &[], None, Some("fwd"), &mut ctx)
+            .build_call("later".to_string(), &[], None, "fwd".into(), &mut ctx)
             .expect_err("`later` has not been added");
 
         assert!(
@@ -2371,7 +2389,7 @@ mod tests {
 
         // Arity, checked before the argument types so a miscount reads as one.
         let err = cursor
-            .build_call("takes_i32".to_string(), &[], None, Some("a"), &mut ctx)
+            .build_call("takes_i32".to_string(), &[], None, "a".into(), &mut ctx)
             .expect_err("it takes one argument");
 
         assert!(
@@ -2391,7 +2409,7 @@ mod tests {
                 "takes_i32".to_string(),
                 &[(&wide, None)],
                 None,
-                Some("b"),
+                "b".into(),
                 &mut ctx,
             )
             .expect_err("an i64 is not an i32");
@@ -2411,7 +2429,7 @@ mod tests {
                 "takes_i32".to_string(),
                 &[(&seven, None)],
                 Some(f64_ty),
-                Some("c"),
+                "c".into(),
                 &mut ctx,
             )
             .expect_err("it returns i32");
@@ -2432,7 +2450,7 @@ mod tests {
                     "takes_i32".to_string(),
                     &[(&seven, None)],
                     Some(i32_ty),
-                    Some("d"),
+                    "d".into(),
                     &mut ctx
                 )
                 .is_ok(),
@@ -2470,7 +2488,7 @@ mod tests {
                     "takes_i64".to_string(),
                     &[(&seven, Some(i64_ty))],
                     None,
-                    Some("a"),
+                    "a".into(),
                     &mut ctx
                 )
                 .is_ok(),
@@ -2484,7 +2502,7 @@ mod tests {
                 "takes_i64".to_string(),
                 &[(&seven, Some(f64_ty))],
                 None,
-                Some("b"),
+                "b".into(),
                 &mut ctx,
             )
             .expect_err("an integer does not become a double without an instruction");
@@ -2507,7 +2525,7 @@ mod tests {
                     "takes_i64".to_string(),
                     &[(&narrow, Some(i64_ty))],
                     None,
-                    Some("c"),
+                    "c".into(),
                     &mut ctx
                 ),
                 Err(InstructionError::Call(CallError::ParamCastFailed(..)))
@@ -2545,7 +2563,7 @@ mod tests {
         );
 
         cursor
-            .build_alloca(i32_ty, None, None, None, &mut ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed, &mut ctx)
             .expect("the block is still open");
     }
 
@@ -2562,7 +2580,7 @@ mod tests {
         let cursor = builder.cursor_at_block(body);
 
         let (phi, _) = cursor
-            .build_phi(&[(entry, v1), (other, v2)], Some("merged"), &mut ctx)
+            .build_phi(&[(entry, v1), (other, v2)], "merged".into(), &mut ctx)
             .unwrap();
 
         let err = phi
@@ -2610,7 +2628,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, Some("s"), ctx)
+            .build_alloca(struct_ty, None, None, "s".into(), ctx)
             .expect("a struct is allocatable");
 
         (cursor, slot, struct_ty)
@@ -2646,7 +2664,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, Some("s"), ctx)
+            .build_alloca(struct_ty, None, None, "s".into(), ctx)
             .expect("a struct is allocatable");
 
         (cursor, slot, array_ty, f64_ty)
@@ -2669,13 +2687,20 @@ mod tests {
 
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
-            .build_get_element_ptr(&slot, None, &[zero.clone(), one], None, Some("f"), &mut ctx)
+            .build_get_element_ptr(
+                &slot,
+                None,
+                &[zero.clone(), one],
+                None,
+                "f".into(),
+                &mut ctx,
+            )
             .expect("the alloca says what it points to");
 
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
         // so it has to come from the gep above.
         let elem = cursor
-            .build_get_element_ptr(&field, None, &[zero, two], None, Some("e"), &mut ctx)
+            .build_get_element_ptr(&field, None, &[zero, two], None, "e".into(), &mut ctx)
             .expect("the first gep says what it points to");
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -2762,7 +2787,7 @@ mod tests {
 
         // `%n = gep { i32, [4 x double] }, ptr %s, i32 1` — the *next* struct along.
         let next = cursor
-            .build_get_element_ptr(&slot, None, &[one], None, Some("n"), &mut ctx)
+            .build_get_element_ptr(&slot, None, &[one], None, "n".into(), &mut ctx)
             .expect("a single index is pointer arithmetic over the source type");
 
         let pointee = next
@@ -2845,7 +2870,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(outer, None, None, Some("s"), ctx)
+            .build_alloca(outer, None, None, "s".into(), ctx)
             .expect("a struct is allocatable");
 
         (
@@ -2906,7 +2931,14 @@ mod tests {
             }
 
             let elem = cursor
-                .build_get_element_ptr(&slot.clone(), None, &indices, None, None, &mut ctx)
+                .build_get_element_ptr(
+                    &slot.clone(),
+                    None,
+                    &indices,
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx,
+                )
                 .unwrap_or_else(|e| panic!("gep 0,{tail:?} should walk: {e}"));
 
             let pointee = elem
@@ -2950,7 +2982,7 @@ mod tests {
         ];
 
         let err = cursor
-            .build_get_element_ptr(&slot, None, &too_deep, None, None, &mut ctx)
+            .build_get_element_ptr(&slot, None, &too_deep, None, RegName::Unnamed, &mut ctx)
             .expect_err("an i64 has no elements");
 
         assert!(
@@ -2963,7 +2995,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(&slot, None, &past_double, None, None, &mut ctx),
+                cursor.build_get_element_ptr(&slot, None, &past_double, None, RegName::Unnamed, &mut ctx),
                 Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
             ),
             "a double has no elements either"
@@ -2986,11 +3018,11 @@ mod tests {
         ];
 
         let elem = cursor
-            .build_get_element_ptr(&slot, None, deep, None, Some("e"), &mut ctx)
+            .build_get_element_ptr(&slot, None, deep, None, "e".into(), &mut ctx)
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .build_load(&elem, Some(tys.i64), None, Some("v"), &mut ctx)
+            .build_load(&elem, Some(tys.i64), None, "v".into(), &mut ctx)
             .expect("an i64 is loadable");
 
         assert_eq!(ctx.display(loaded.ty()).to_string(), "i64");
@@ -3018,12 +3050,12 @@ mod tests {
         let ptr_field = vec![idx(0, &mut ctx), idx(2, &mut ctx)];
 
         let ptr_field = cursor
-            .build_get_element_ptr(&slot, None, &ptr_field, None, Some("p"), &mut ctx)
+            .build_get_element_ptr(&slot, None, &ptr_field, None, "p".into(), &mut ctx)
             .expect("field 2 is the pointer");
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
         let loaded_ptr = cursor
-            .build_load(&ptr_field, Some(tys.ptr), None, Some("q"), &mut ctx)
+            .build_load(&ptr_field, Some(tys.ptr), None, "q".into(), &mut ctx)
             .expect("a ptr is loadable");
 
         assert!(
@@ -3036,7 +3068,14 @@ mod tests {
         let indices = vec![idx(0, &mut ctx), idx(1, &mut ctx)];
 
         let err = cursor
-            .build_get_element_ptr(&loaded_ptr.clone(), None, &indices, None, None, &mut ctx)
+            .build_get_element_ptr(
+                &loaded_ptr.clone(),
+                None,
+                &indices,
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("nothing can be inferred through a load");
 
         assert!(
@@ -3054,7 +3093,7 @@ mod tests {
                 Some(tys.inner),
                 &indices,
                 None,
-                Some("r"),
+                "r".into(),
                 &mut ctx,
             )
             .expect("with the source type given there is nothing to infer");
@@ -3084,7 +3123,14 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .build_get_element_ptr(&not_a_ptr, Some(i32_ty), &[zero], None, None, &mut ctx)
+            .build_get_element_ptr(
+                &not_a_ptr,
+                Some(i32_ty),
+                &[zero],
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -3103,7 +3149,14 @@ mod tests {
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_get_element_ptr(&ptr, Some(i32_ty), &[a_float], None, None, &mut ctx)
+            .build_get_element_ptr(
+                &ptr,
+                Some(i32_ty),
+                &[a_float],
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("a float is not an index");
 
         assert!(
@@ -3122,7 +3175,7 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .build_get_element_ptr(&ptr, None, &[zero], None, None, &mut ctx)
+            .build_get_element_ptr(&ptr, None, &[zero], None, RegName::Unnamed, &mut ctx)
             .expect_err("null says nothing about its pointee");
 
         assert!(
@@ -3142,7 +3195,14 @@ mod tests {
         let zero = value(0, &mut ctx);
 
         let err = cursor
-            .build_get_element_ptr(&slot, Some(i32_ty), &[zero], None, None, &mut ctx)
+            .build_get_element_ptr(
+                &slot,
+                Some(i32_ty),
+                &[zero],
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("the slot holds a struct, not an i32");
 
         assert!(
@@ -3166,7 +3226,7 @@ mod tests {
         let field = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let elem = cursor
-            .build_get_element_ptr(&slot, None, &[zero, field], None, Some("f"), &mut ctx)
+            .build_get_element_ptr(&slot, None, &[zero, field], None, "f".into(), &mut ctx)
             .expect("the pointee is inferable from the alloca");
 
         assert_eq!(
@@ -3212,7 +3272,7 @@ mod tests {
                 None,
                 &[zero.clone(), wide],
                 None,
-                None,
+                RegName::Unnamed,
                 &mut ctx,
             )
             .expect_err("an i64 struct index is not valid LLVM");
@@ -3230,7 +3290,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(&slot, None, &[zero, reg], None, None, &mut ctx),
+                cursor.build_get_element_ptr(
+                    &slot,
+                    None,
+                    &[zero, reg],
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx
+                ),
                 Err(InstructionError::Gep(GepError::StructIndexNotAConstantI32(
                     _
                 )))
@@ -3256,7 +3323,7 @@ mod tests {
                 None,
                 &[zero.clone(), past_end],
                 None,
-                None,
+                RegName::Unnamed,
                 &mut ctx,
             )
             .expect_err("a two-field struct has no field 5");
@@ -3272,7 +3339,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(&slot, None, &[zero, negative], None, None, &mut ctx),
+                cursor.build_get_element_ptr(
+                    &slot,
+                    None,
+                    &[zero, negative],
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx
+                ),
                 Err(InstructionError::Gep(GepError::StructIndexOutOfRange {
                     index: -1,
                     ..
@@ -3292,14 +3366,14 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let slot = cursor
-            .build_alloca(i32_ty, None, None, Some("p"), &mut ctx)
+            .build_alloca(i32_ty, None, None, "p".into(), &mut ctx)
             .unwrap();
 
         let zero = value(0, &mut ctx);
         let one = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_get_element_ptr(&slot, None, &[zero, one], None, None, &mut ctx)
+            .build_get_element_ptr(&slot, None, &[zero, one], None, RegName::Unnamed, &mut ctx)
             .expect_err("an i32 has no elements");
 
         assert!(
@@ -3379,7 +3453,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = cursor
-            .build_alloca(void_ty, None, None, None, &mut ctx)
+            .build_alloca(void_ty, None, None, RegName::Unnamed, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -3406,7 +3480,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(array_ty, None, None, Some("buf"), &mut ctx)
+            .build_alloca(array_ty, None, None, "buf".into(), &mut ctx)
             .expect("`[4 x i32]` is sized");
 
         assert_eq!(
@@ -3428,7 +3502,13 @@ mod tests {
         let a_float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_alloca(i32_ty, Some((&a_float, None)), None, None, &mut ctx)
+            .build_alloca(
+                i32_ty,
+                Some((&a_float, None)),
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("a float is not a count");
 
         assert!(
@@ -3442,7 +3522,13 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_alloca(i32_ty, Some((&an_int, Some(f64_ty))), None, None, &mut ctx),
+                cursor.build_alloca(
+                    i32_ty,
+                    Some((&an_int, Some(f64_ty))),
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx
+                ),
                 Err(InstructionError::Alloca(
                     AllocaError::AllocaCountNotAnInteger(_)
                 ))
@@ -3463,7 +3549,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_alloca(i32_ty, Some((&one, None)), None, None, &mut ctx)
+                .build_alloca(i32_ty, Some((&one, None)), None, RegName::Unnamed, &mut ctx)
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -3481,7 +3567,13 @@ mod tests {
         let n = Value::from_register("n".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .build_alloca(i32_ty, Some((&n, Some(i64_ty))), None, None, &mut ctx)
+            .build_alloca(
+                i32_ty,
+                Some((&n, Some(i64_ty))),
+                None,
+                RegName::Unnamed,
+                &mut ctx,
+            )
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
@@ -3516,17 +3608,17 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         in_entry
-            .build_load(&ptr.clone(), Some(i32_ty), None, Some("a"), &mut ctx)
+            .build_load(&ptr.clone(), Some(i32_ty), None, "a".into(), &mut ctx)
             .unwrap();
 
         let second = in_entry
-            .build_load(&ptr.clone(), Some(i64_ty), None, Some("b"), &mut ctx)
+            .build_load(&ptr.clone(), Some(i64_ty), None, "b".into(), &mut ctx)
             .unwrap();
 
         let in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .build_load(&ptr, Some(f64_ty), None, Some("c"), &mut ctx)
+            .build_load(&ptr, Some(f64_ty), None, "c".into(), &mut ctx)
             .unwrap();
 
         let func_id = ctx.get_block(entry).func_id;
@@ -3584,7 +3676,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let loaded = cursor
-            .build_load(&ptr, Some(i32_ty), None, Some("x"), &mut ctx)
+            .build_load(&ptr, Some(i32_ty), None, "x".into(), &mut ctx)
             .expect("loading an i32 through a ptr is fine");
 
         assert_eq!(ctx.ty_interner.value(loaded.ty().raw()), &Type::I32);
@@ -3600,7 +3692,7 @@ mod tests {
         let i64_ty = ctx.i64_ty();
 
         cursor
-            .build_load(&ptr, Some(i64_ty), None, Some("x"), &mut ctx)
+            .build_load(&ptr, Some(i64_ty), None, "x".into(), &mut ctx)
             .unwrap();
 
         let block = ctx.blocks.get(cursor.block.raw()).unwrap();
@@ -3626,7 +3718,7 @@ mod tests {
         let i32_ty = ctx.i32_ty();
 
         let err = cursor
-            .build_load(&not_a_ptr, Some(i32_ty), None, Some("x"), &mut ctx)
+            .build_load(&not_a_ptr, Some(i32_ty), None, "x".into(), &mut ctx)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -3652,7 +3744,7 @@ mod tests {
         let void_ty = ctx.void_ty();
 
         let err = cursor
-            .build_load(&ptr, Some(void_ty), None, None, &mut ctx)
+            .build_load(&ptr, Some(void_ty), None, RegName::Unnamed, &mut ctx)
             .expect_err("`void` has no size");
 
         assert!(
@@ -3687,7 +3779,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_load(&ptr.clone(), Some(id), None, None, &mut ctx)
+                    .build_load(&ptr.clone(), Some(id), None, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
@@ -3707,7 +3799,13 @@ mod tests {
         for align in [1, 2, 4, 8, 16, 4096] {
             assert!(
                 cursor
-                    .build_load(&ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
+                    .build_load(
+                        &ptr.clone(),
+                        Some(i32_ty),
+                        Some(align),
+                        RegName::Unnamed,
+                        &mut ctx
+                    )
                     .is_ok(),
                 "align {align} is a power of two"
             );
@@ -3715,7 +3813,13 @@ mod tests {
 
         for align in [0, 3, 6, 10, 12] {
             let err = cursor
-                .build_load(&ptr.clone(), Some(i32_ty), Some(align), None, &mut ctx)
+                .build_load(
+                    &ptr.clone(),
+                    Some(i32_ty),
+                    Some(align),
+                    RegName::Unnamed,
+                    &mut ctx,
+                )
                 .expect_err("not a power of two");
 
             assert!(
@@ -3736,7 +3840,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_load(&ptr, Some(i32_ty), None, None, &mut ctx)
+                .build_load(&ptr, Some(i32_ty), None, RegName::Unnamed, &mut ctx)
                 .is_ok()
         );
     }
@@ -3805,7 +3909,7 @@ mod tests {
         let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
         let result = cursor
-            .build_icmp(ICond::Ult, None, &wide, &narrow, Some("c"), &mut ctx)
+            .build_icmp(ICond::Ult, None, &wide, &narrow, "c".into(), &mut ctx)
             .expect("an i32 constant widens into an i64 comparison");
 
         assert_eq!(
@@ -3836,7 +3940,7 @@ mod tests {
         let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
         cursor
-            .build_icmp(ICond::Slt, None, &wide, &narrow, Some("c"), &mut ctx)
+            .build_icmp(ICond::Slt, None, &wide, &narrow, "c".into(), &mut ctx)
             .expect("an i32 constant widens into an i64 comparison");
 
         assert_eq!(
@@ -3860,7 +3964,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
             let err = cursor
-                .build_icmp(cond, None, &wide, &narrow, None, &mut ctx)
+                .build_icmp(cond, None, &wide, &narrow, RegName::Unnamed, &mut ctx)
                 .expect_err("eq/ne must not widen");
 
             assert!(
@@ -3886,7 +3990,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_icmp(ICond::Ult, None, &wide, &narrow, None, &mut ctx)
+                .build_icmp(ICond::Ult, None, &wide, &narrow, RegName::Unnamed, &mut ctx)
                 .is_ok(),
         );
     }
@@ -3904,7 +4008,7 @@ mod tests {
         let b = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Eq, Some(i64_ty), &a, &b, None, &mut ctx)
+            .build_icmp(ICond::Eq, Some(i64_ty), &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("i32 operands are not i64, and eq will not widen them");
 
         assert!(
@@ -3930,7 +4034,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_icmp(ICond::Eq, Some(i32_ty), &a, &b, None, &mut ctx)
+                .build_icmp(ICond::Eq, Some(i32_ty), &a, &b, RegName::Unnamed, &mut ctx)
                 .is_ok(),
         );
     }
@@ -3949,7 +4053,7 @@ mod tests {
         let b = Value::from_register("b".to_string(), i32_ty, &mut ctx);
 
         let err = cursor
-            .build_icmp(ICond::Ult, None, &a, &b, None, &mut ctx)
+            .build_icmp(ICond::Ult, None, &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("a register cannot be widened by folding");
 
         assert!(
@@ -3974,7 +4078,7 @@ mod tests {
         let b = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Slt, Some(i8_ty), &a, &b, None, &mut ctx)
+            .build_icmp(ICond::Slt, Some(i8_ty), &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("300 does not fit an i8");
 
         assert!(
@@ -3997,7 +4101,7 @@ mod tests {
         let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Eq, None, &a, &b, None, &mut ctx)
+            .build_icmp(ICond::Eq, None, &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("floats are not comparable with icmp");
 
         assert!(
@@ -4022,7 +4126,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_icmp(cond, None, &a, &b, None, &mut ctx)
+                    .build_icmp(cond, None, &a, &b, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`icmp {cond} ptr` is valid LLVM",
             );
@@ -4041,7 +4145,7 @@ mod tests {
         let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
 
         let result = cursor
-            .build_fcmp(FCond::Olt, None, &wide, &narrow, Some("c"), &mut ctx)
+            .build_fcmp(FCond::Olt, None, &wide, &narrow, "c".into(), &mut ctx)
             .expect("an f32 constant widens into an f64 comparison");
 
         assert!(result.ty.is_i1(&ctx), "an fcmp produces an i1");
@@ -4074,7 +4178,7 @@ mod tests {
         let b = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, None, &a, &b, None, &mut ctx)
+            .build_fcmp(FCond::Oeq, None, &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("integers are not comparable with fcmp");
 
         assert!(
@@ -4098,7 +4202,7 @@ mod tests {
         let b = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, None, &a, &b, None, &mut ctx)
+            .build_fcmp(FCond::Oeq, None, &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("nothing bridges the integer and float families");
 
         assert!(
@@ -4128,7 +4232,7 @@ mod tests {
         let b = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, None, &a, &b, None, &mut ctx)
+            .build_fcmp(FCond::Oeq, None, &a, &b, RegName::Unnamed, &mut ctx)
             .expect_err("integers are not comparable with fcmp");
 
         assert!(
@@ -4154,7 +4258,7 @@ mod tests {
         let b = Value::from_register("b".to_string(), f32_ty, &mut ctx);
 
         assert!(matches!(
-            cursor.build_fcmp(FCond::Ogt, None, &a, &b, None, &mut ctx),
+            cursor.build_fcmp(FCond::Ogt, None, &a, &b, RegName::Unnamed, &mut ctx),
             Err(InstructionError::FCmp(FCmpError::OperandsNotCastable(..)))
         ),);
     }
@@ -4189,7 +4293,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_fcmp(cond, None, &a, &b, None, &mut ctx)
+                    .build_fcmp(cond, None, &a, &b, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`fcmp {cond}` is valid LLVM",
             );
@@ -4213,7 +4317,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
             cursor
-                .build_iarithmetic(op, None, &wide, &narrow, Some("r"), &mut ctx)
+                .build_iarithmetic(op, None, &wide, &narrow, "r".into(), &mut ctx)
                 .expect("a signed operation may widen a constant");
 
             let instr = ctx
@@ -4264,7 +4368,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, None, &mut ctx).unwrap();
 
             let err = cursor
-                .build_iarithmetic(op, None, &wide, &narrow, None, &mut ctx)
+                .build_iarithmetic(op, None, &wide, &narrow, RegName::Unnamed, &mut ctx)
                 .expect_err("no reading is available, so widening must be refused");
 
             assert!(
@@ -4290,7 +4394,7 @@ mod tests {
         let b = Value::from_const(-1i64, None, &mut ctx).unwrap();
 
         let result = cursor
-            .build_iarithmetic(IArithmeticOp::Add, None, &a, &b, Some("r"), &mut ctx)
+            .build_iarithmetic(IArithmeticOp::Add, None, &a, &b, "r".into(), &mut ctx)
             .expect("two i64s need no widening");
 
         assert_eq!(
@@ -4311,7 +4415,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_iarithmetic(IArithmeticOp::Add, None, &f, &g, None, &mut ctx),
+                cursor.build_iarithmetic(
+                    IArithmeticOp::Add,
+                    None,
+                    &f,
+                    &g,
+                    RegName::Unnamed,
+                    &mut ctx
+                ),
                 Err(InstructionError::IArithmetic(
                     IArithmeticError::OperandTypeNotInteger(..)
                 ))
@@ -4324,7 +4435,14 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_farithmetic(FArithmeticOp::FAdd, None, &i, &j, None, &mut ctx),
+                cursor.build_farithmetic(
+                    FArithmeticOp::FAdd,
+                    None,
+                    &i,
+                    &j,
+                    RegName::Unnamed,
+                    &mut ctx
+                ),
                 Err(InstructionError::FArithmetic(
                     FArithmeticError::OperandTypeNotFloat(..)
                 ))
@@ -4344,7 +4462,7 @@ mod tests {
         let v = Value::from_const(1.5f64, None, &mut ctx).unwrap();
 
         let result = cursor
-            .build_fneg(v, Some("n"), &mut ctx)
+            .build_fneg(v, "n".into(), &mut ctx)
             .expect("a double may be negated");
 
         assert_eq!(result.ty(), f64_ty);
@@ -4373,7 +4491,7 @@ mod tests {
         let v = Value::from_const(1i32, None, &mut ctx).unwrap();
 
         assert!(matches!(
-            cursor.build_fneg(v, None, &mut ctx),
+            cursor.build_fneg(v, RegName::Unnamed, &mut ctx),
             Err(InstructionError::FArithmetic(
                 FArithmeticError::OperandTypeNotFloat(..)
             ))
@@ -4406,7 +4524,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_iarithmetic(op, None, &a, &b, None, &mut ctx)
+                    .build_iarithmetic(op, None, &a, &b, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );
@@ -4431,7 +4549,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_farithmetic(op, None, &a, &b, None, &mut ctx)
+                    .build_farithmetic(op, None, &a, &b, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );
@@ -4449,7 +4567,7 @@ mod tests {
         let b = Value::from_const(2i64, None, &mut ctx).unwrap();
 
         let result = cursor
-            .build_icmp(ICond::Sgt, None, &a, &b, Some("cmp"), &mut ctx)
+            .build_icmp(ICond::Sgt, None, &a, &b, "cmp".into(), &mut ctx)
             .unwrap();
 
         assert!(result.ty.is_i1(&ctx));
