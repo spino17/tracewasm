@@ -255,9 +255,11 @@ pub enum CallError {
     /// No function of that name has been added to the module.
     ///
     /// The table holds only what
-    /// [`Builder::define_function`](crate::cfg::builder::Builder::define_function) has
-    /// registered so far, so this also covers a **forward call** — one to a function
-    /// that will be added later — and a host import, which nothing declares.
+    /// [`define_function`](crate::cfg::builder::Builder::define_function) and
+    /// [`declare_function`](crate::cfg::builder::Builder::declare_function) have
+    /// registered *so far*, so this also covers a **forward call** — one to a
+    /// function that will be added later — even though LLVM makes every function in
+    /// a module mutually visible. A host import is fine once declared.
     #[error("no function named `{0}` has been added to this module")]
     FunctionNotFound(String),
     /// The callee takes a different number of arguments.
@@ -282,10 +284,24 @@ pub enum CallError {
     /// The declared return type differs from the callee's.
     #[error("`{0}` returns `{1}`, so a call to it cannot return `{2}`")]
     ReturnTypeMismatch(String, String, String),
-    /// A register name was given for a call that produces nothing. `llvm-as` refuses
-    /// `%r = call void @g()` with "instructions returning void cannot have a name".
-    #[error("a call to `{0}` returns `void`, so it cannot be assigned to a register")]
-    RegisterNameForVoidCall(String),
+    /// [`build_call`](crate::instruction::cursor::Cursor::build_call) was used for a
+    /// callee that returns `void`.
+    ///
+    /// A `void` call defines no register — `llvm-as` refuses `%r = call void @g()`
+    /// with "instructions returning void cannot have a name" — so it cannot yield the
+    /// [`Value`](crate::value::Value) this builder promises. Use
+    /// [`build_void_call`](crate::instruction::cursor::Cursor::build_void_call), which
+    /// takes no register name and returns nothing.
+    #[error("`{0}` returns `void`, so it has no value: use `build_void_call`")]
+    VoidCalleeNeedsVoidCall(String),
+    /// [`build_void_call`](crate::instruction::cursor::Cursor::build_void_call) was
+    /// used for a callee that returns a value.
+    ///
+    /// Discarding it would leave the result unnamed and unreachable. Use
+    /// [`build_call`](crate::instruction::cursor::Cursor::build_call), which hands
+    /// back the register it defines.
+    #[error("`{0}` returns `{1}`, not `void`: use `build_call`")]
+    NonVoidCalleeNeedsValueCall(String, String),
 }
 
 /// An `icmp` could not be built.

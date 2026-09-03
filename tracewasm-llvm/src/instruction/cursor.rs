@@ -614,9 +614,13 @@ impl Cursor {
 
     /// Builds `%x = call <ty> @f(...)`, returning the register it defines.
     ///
-    /// `None` comes back for a `void` callee, which defines nothing — LLVM refuses
-    /// `%r = call void @g()` with "instructions returning void cannot have a name",
-    /// so passing `reg` for one is an error rather than something quietly dropped.
+    /// For a callee that returns `void` use
+    /// [`build_void_call`](Self::build_void_call) instead. The two are separate
+    /// because a `void` call defines no register — `llvm-as` refuses
+    /// `%r = call void @g()` with "instructions returning void cannot have a name" —
+    /// so there is no [`Value`] for this one to hand back. Splitting them is what
+    /// makes naming a `void` call unrepresentable rather than a runtime check on
+    /// `reg`, and it is why this returns a `Value` rather than an `Option<Value>`.
     ///
     /// A `call` is not a terminator: the block stays open afterwards.
     ///
@@ -642,8 +646,21 @@ impl Cursor {
     /// - **A forward call does not.** Calling a function that will be added later
     ///   fails, even though LLVM makes every function in a module mutually visible.
     ///   Add all the functions first, then fill in their bodies.
-    /// - **Host imports are not reachable**, since nothing declares a function
-    ///   without also defining it.
+    /// - **Host imports are reachable**, through
+    ///   [`Builder::declare_function`](crate::cfg::builder::Builder::declare_function).
+    ///   A declaration records its signature under the same name, so it resolves and
+    ///   is checked exactly as a definition would be.
+    ///
+    /// # Errors
+    ///
+    /// - [`CallError::FunctionNotFound`] if no function of that name has been added.
+    /// - [`CallError::VoidCalleeNeedsVoidCall`] if the callee returns `void` — use
+    ///   [`build_void_call`](Self::build_void_call).
+    /// - [`CallError::ParamCountMismatch`], [`CallError::ParamTypeMismatch`],
+    ///   [`CallError::ParamCastFailed`] for the arguments.
+    /// - [`CallError::ReturnTypeMismatch`] if `return_ty` disagrees with the
+    ///   signature.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_call(
         &self,
         func_name: String,
@@ -693,8 +710,11 @@ impl Cursor {
             expected_return_ty
         };
 
+        // A `void` call defines no register, so it has no `Value` to hand back — and
+        // `llvm-as` refuses `%r = call void @g()` outright. Splitting the two builders
+        // is what makes that unrepresentable rather than a runtime check on `reg`.
         if return_ty.is_void(ctx) {
-            todo!() // RAISE ERROR: use void_call
+            return Err(CallError::VoidCalleeNeedsVoidCall(name).into());
         }
 
         let final_params =
@@ -713,6 +733,29 @@ impl Cursor {
         )
     }
 
+    /// Builds `call void @f(...)`, which defines no register.
+    ///
+    /// The counterpart to [`build_call`](Self::build_call), for a callee whose result
+    /// is `void`. It takes no `reg` and returns nothing, because there is nothing to
+    /// name: `llvm-as` refuses `%r = call void @g()` with "instructions returning void
+    /// cannot have a name". Having the two as separate builders is what makes that
+    /// mistake unrepresentable instead of a check that could be forgotten.
+    ///
+    /// Arguments are resolved and checked against the callee's signature exactly as in
+    /// [`build_call`](Self::build_call), and the same rules apply for which callees are
+    /// reachable.
+    ///
+    /// A `call` is not a terminator: the block stays open afterwards.
+    ///
+    /// # Errors
+    ///
+    /// - [`CallError::FunctionNotFound`] if no function of that name has been added.
+    /// - [`CallError::NonVoidCalleeNeedsValueCall`] if the callee returns a value,
+    ///   which this builder would silently drop — use
+    ///   [`build_call`](Self::build_call).
+    /// - [`CallError::ParamCountMismatch`], [`CallError::ParamTypeMismatch`],
+    ///   [`CallError::ParamCastFailed`] for the arguments.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_void_call(
         &self,
         func_name: String,
@@ -745,8 +788,15 @@ impl Cursor {
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
+        // The mirror of the check in `build_call`: a callee that returns something
+        // would have its result silently dropped here, since this builder defines no
+        // register and hands nothing back.
         if !expected_return_ty.is_void(ctx) {
-            todo!() // RAISE ERROR: use build_call!
+            return Err(CallError::NonVoidCalleeNeedsValueCall(
+                name,
+                ctx.display(expected_return_ty).to_string(),
+            )
+            .into());
         }
 
         let final_params =
@@ -1133,6 +1183,15 @@ impl Cursor {
     }
 }
 
+/// Resolves a call's arguments against the callee's parameter types.
+///
+/// Shared by both call builders, which differ only in what they do with the *result* —
+/// the argument rules are identical either way.
+///
+/// Arity is checked first, so a mismatched count is reported as such rather than as a
+/// type error on whichever argument happens to line up wrongly. Each argument may
+/// carry an optional type to be folded into first, with the same rule as elsewhere: a
+/// constant converts, a register must already match.
 fn try_cast_param_and_check_with_func_signature(
     name: String,
     params: &[(Value, Option<TyId>)],
@@ -2173,23 +2232,61 @@ mod tests {
 
         assert_eq!(value.ty(), i32_ty, "typed by the callee's result");
 
-        assert!(
-            cursor
-                .build_call("b".to_string(), &[], None, None, &mut ctx)
-                .is_ok(),
-            "a void call defines nothing"
-        );
+        // A `void` callee has no value to define, so it belongs to the other builder.
+        // That is no longer a check on `reg` — `build_void_call` takes no register
+        // name at all, so naming a void call is not expressible.
+        cursor
+            .build_void_call("b".to_string(), &[], &mut ctx)
+            .expect("a void callee is what this builder is for");
+    }
+
+    /// The two call builders each refuse the other's callee, so a result is never
+    /// silently dropped and a `void` call never asks for a register it cannot have.
+    ///
+    /// `llvm-as` refuses `%r = call void @g()` with "instructions returning void
+    /// cannot have a name"; splitting the builders is what turns that into a shape
+    /// the caller cannot write.
+    #[test]
+    fn each_call_builder_refuses_the_other_kind_of_callee() {
+        let (mut ctx, builder) = fixture();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let host = builder
+            .define_function("host".to_string(), &[], i32_ty, &mut ctx)
+            .unwrap();
+
+        builder
+            .define_function("nothing".to_string(), &[], void_ty, &mut ctx)
+            .unwrap();
+
+        let entry = host.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .build_call("b".to_string(), &[], None, Some("x"), &mut ctx)
-            .expect_err("a void call cannot be named");
+            .build_call("nothing".to_string(), &[], None, Some("x"), &mut ctx)
+            .expect_err("a void callee has no value to return");
 
         assert!(
             matches!(
                 &err,
-                InstructionError::Call(CallError::RegisterNameForVoidCall(n)) if n == "b"
+                InstructionError::Call(CallError::VoidCalleeNeedsVoidCall(n)) if n == "nothing"
             ),
-            "got: {err}"
+            "the error must name the callee and point at the other builder: {err}"
+        );
+
+        let err = cursor
+            .build_void_call("host".to_string(), &[], &mut ctx)
+            .expect_err("an i32 callee's result would be dropped");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Call(CallError::NonVoidCalleeNeedsValueCall(n, ty))
+                    if n == "host" && ty == "i32"
+            ),
+            "the error must name the callee and its result type: {err}"
         );
     }
 
@@ -2419,7 +2516,7 @@ mod tests {
         let cursor = builder.cursor_at_block(entry);
 
         cursor
-            .build_call("g".to_string(), &[], None, None, &mut ctx)
+            .build_void_call("g".to_string(), &[], &mut ctx)
             .unwrap();
 
         assert!(

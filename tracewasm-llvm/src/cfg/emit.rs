@@ -1006,7 +1006,7 @@ mod tests {
             .expect("a declared function is callable");
 
         cursor
-            .build_call("host_noop".to_string(), &[], None, None, &mut ctx)
+            .build_void_call("host_noop".to_string(), &[], &mut ctx)
             .unwrap();
 
         cursor
