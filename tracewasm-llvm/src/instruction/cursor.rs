@@ -30,6 +30,7 @@ use rustc_hash::FxHashSet;
 ///
 /// [`From`] is implemented for the string types, so a call site can write
 /// `"sum".into()` rather than naming the variant.
+#[derive(Debug)]
 pub enum RegName {
     /// Use this name, suffixed if it is already taken — a second `%sum` becomes
     /// `%sum1`.
@@ -95,7 +96,7 @@ impl From<&String> for RegName {
 /// The one place a fold is lossy is float narrowing, where `fptrunc` rounds:
 /// `0.1f64` asserted as a `float` is the nearest `float`. That is inherent to the
 /// instruction, not to this type.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum OperandTy {
     /// The operand has this type. If it does not, the call is an error rather than a
     /// silent conversion — see the note above.
