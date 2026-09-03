@@ -6,7 +6,7 @@ use crate::{
         function::{FuncId, Function},
         global::{
             DeclaredFunc, DefinedFunc, GlobalData, GlobalId, GlobalKind, GlobalVar, GlobalVariable,
-            Linkage, Visiblity,
+            Linkage, Visibility,
         },
     },
     error::ContextError,
@@ -111,7 +111,7 @@ impl Builder {
             name_id,
             GlobalData {
                 linkage: Linkage::External,
-                visiblity: Visiblity::Default,
+                visibility: Visibility::Default,
                 kind: GlobalKind::Variable(GlobalVariable {
                     ty: final_ty,
                     initializer,
@@ -188,7 +188,7 @@ impl Builder {
             name_id,
             GlobalData {
                 linkage: Linkage::External,
-                visiblity: Visiblity::Default,
+                visibility: Visibility::Default,
                 kind: GlobalKind::Func(FuncSignature::new(params.to_vec(), result)),
             },
         );
@@ -294,7 +294,7 @@ impl Builder {
             name_id,
             GlobalData {
                 linkage: Linkage::External,
-                visiblity: Visiblity::Default,
+                visibility: Visibility::Default,
                 kind: GlobalKind::Func(FuncSignature::new(param_tys, result)),
             },
         );

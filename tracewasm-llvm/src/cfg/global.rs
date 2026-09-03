@@ -76,7 +76,7 @@ impl Display for Linkage {
 
 /// Whether a symbol is visible outside the object it is defined in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Visiblity {
+pub enum Visibility {
     /// Visible. The default, and the only one a local symbol may have.
     Default,
     /// Not visible to other objects.
@@ -85,12 +85,12 @@ pub enum Visiblity {
     Protected,
 }
 
-impl Display for Visiblity {
+impl Display for Visibility {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Visiblity::Default => "default",
-            Visiblity::Hidden => "hidden",
-            Visiblity::Protected => "protected",
+            Visibility::Default => "default",
+            Visibility::Hidden => "hidden",
+            Visibility::Protected => "protected",
         })
     }
 }
@@ -222,7 +222,7 @@ pub enum GlobalKind {
 /// way — see [`pointee_ty`](Self::pointee_ty).
 pub struct GlobalData {
     pub(crate) linkage: Linkage,
-    pub(crate) visiblity: Visiblity,
+    pub(crate) visibility: Visibility,
     pub(crate) kind: GlobalKind,
 }
 

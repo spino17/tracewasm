@@ -6,7 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::{FuncId, Function},
-        global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
+        global::{GlobalKind, GlobalVariable, Linkage, Visibility},
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
@@ -182,7 +182,7 @@ pub trait CfgVisitor {
 
     /// Visits a global variable.
     ///
-    /// `linkage` and `visiblity` come alongside the [`GlobalVariable`] rather than
+    /// `linkage` and `visibility` come alongside the [`GlobalVariable`] rather than
     /// being read from it, because they live on the enclosing `GlobalData` — and they
     /// are part of how a global is written, not decoration: emitting without them
     /// would turn an `internal` global into an externally visible one.
@@ -194,7 +194,7 @@ pub trait CfgVisitor {
         name: &str,
         data: &GlobalVariable,
         linkage: Linkage,
-        visiblity: Visiblity,
+        visibility: Visibility,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -319,7 +319,7 @@ pub trait CfgVisitor {
                 .expect("hitting this means globals tracking logic by their name is incorrect");
 
             let linkage = data.linkage;
-            let visiblity = data.visiblity;
+            let visibility = data.visibility;
 
             let GlobalKind::Variable(var) = &data.kind else {
                 unreachable!("hitting this means globals tracking logic by their name is incorrect")
@@ -329,7 +329,7 @@ pub trait CfgVisitor {
                 name,
                 var,
                 linkage,
-                visiblity,
+                visibility,
                 &cfg.context,
             )?);
         }

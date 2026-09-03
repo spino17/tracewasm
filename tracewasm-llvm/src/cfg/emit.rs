@@ -6,7 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::Function,
-        global::{GlobalVariable, Linkage, Visiblity},
+        global::{GlobalVariable, Linkage, Visibility},
         walk::CfgVisitor,
     },
     instruction::{
@@ -243,7 +243,7 @@ impl CfgVisitor for IREmitter {
         name: &str,
         data: &GlobalVariable,
         linkage: Linkage,
-        visiblity: Visiblity,
+        visibility: Visibility,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // A *definition* with external linkage omits the keyword — that is the
@@ -259,10 +259,10 @@ impl CfgVisitor for IREmitter {
         // `default` is the default, and a *local* symbol may have nothing else —
         // `@g = internal hidden global i32 0` is refused with "symbol with local
         // linkage must have default visibility".
-        let visiblity = if visiblity == Visiblity::Default {
+        let visibility = if visibility == Visibility::Default {
             String::new()
         } else {
-            format!("{visiblity} ")
+            format!("{visibility} ")
         };
 
         // A declaration names a type and stops; every other linkage needs a value.
@@ -277,7 +277,7 @@ impl CfgVisitor for IREmitter {
             "@{} = {}{}global {}{}",
             name,
             linkage,
-            visiblity,
+            visibility,
             ctx.display(data.ty),
             initializer
         ));
@@ -1371,12 +1371,12 @@ mod tests {
             assert_eq!(linkage.to_string(), expected);
         }
 
-        for (visiblity, expected) in [
-            (Visiblity::Default, "default"),
-            (Visiblity::Hidden, "hidden"),
-            (Visiblity::Protected, "protected"),
+        for (visibility, expected) in [
+            (Visibility::Default, "default"),
+            (Visibility::Hidden, "hidden"),
+            (Visibility::Protected, "protected"),
         ] {
-            assert_eq!(visiblity.to_string(), expected);
+            assert_eq!(visibility.to_string(), expected);
         }
     }
 
