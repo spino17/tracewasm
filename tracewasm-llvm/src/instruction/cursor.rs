@@ -1203,8 +1203,7 @@ fn try_cast_param_and_check_with_func_signature(
             name,
             expected: expected_param_tys.len(),
             given: params.len(),
-        }
-        .into());
+        });
     }
 
     let mut final_params: Vec<Value> = Vec::with_capacity(params.len());
@@ -1221,8 +1220,7 @@ fn try_cast_param_and_check_with_func_signature(
                     index,
                     given,
                     ctx.display(*param_ty).to_string(),
-                )
-                .into());
+                ));
             };
 
             casted_val
@@ -1236,8 +1234,7 @@ fn try_cast_param_and_check_with_func_signature(
                 index,
                 ctx.display(*expected_param_ty).to_string(),
                 ctx.display(final_val.ty()).to_string(),
-            )
-            .into());
+            ));
         }
 
         final_params.push(final_val);
