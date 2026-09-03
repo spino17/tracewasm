@@ -178,6 +178,12 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    /// How many bits this type occupies, or `None` if that is not a fixed number.
+    ///
+    /// `None` for `ptr` (target-dependent) and for `void` and the aggregates. Note
+    /// that a width does **not** identify a type: `i32` and `float` are both 32, and
+    /// `i16`, `half` and `bfloat` are all 16 — so this is not a substitute for
+    /// comparing [`TyId`]s, which is exact.
     pub fn width(&self, ctx: &Context) -> Option<u8> {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -351,10 +357,25 @@ impl Display for TypeDisplay<'_> {
     }
 }
 
+/// How to read an integer's bits when a cast changes its width.
+///
+/// Only widening needs this, and it is exactly LLVM's `zext`/`sext` split: the source
+/// bits do not say what the high bits of a wider value should be, so someone has to.
+/// `-1i32` widens to `-1` sign-extended and to `4294967295` zero-extended, and both
+/// are correct answers to different questions.
+///
+/// Narrowing needs no such choice — LLVM has a single `trunc`, and dropping high bits
+/// is unambiguous — but this still selects the range a narrowing cast is *checked*
+/// against, since `255` fits a byte read unsigned and does not read signed.
 #[derive(Clone, Copy)]
 pub enum Signedness {
-    Unsigned, // zext
-    Signed,   // sext
+    /// Read the bits as unsigned. Widening fills the new high bits with zeros, which
+    /// is LLVM's `zext`; narrowing is checked against the target's *unsigned* range.
+    Unsigned,
+    /// Read the bits as signed. Widening copies the sign bit into the new high bits,
+    /// which is LLVM's `sext`; narrowing is checked against the target's *signed*
+    /// range.
+    Signed,
 }
 
 /// How a [`Value`] is obtained — the three forms an LLVM operand can take.
@@ -567,6 +588,22 @@ impl Value {
         Some(final_value)
     }
 
+    /// Brings two values to one type, so an instruction that needs matching operands
+    /// can have them.
+    ///
+    /// With `ty`, both are cast to it. Without, the wider of the two wins and the
+    /// narrower is widened to meet it — which only works if the narrower is a
+    /// constant, since widening a register needs a real `zext`/`sext` instruction that
+    /// this cannot emit.
+    ///
+    /// `signedness` decides how that widening fills the high bits, and picking it
+    /// wrongly produces valid IR that computes the wrong answer — see
+    /// [`Signedness`]. A caller with no basis for choosing should not call this;
+    /// [`ICond::signedness`](crate::instruction::ICond::signedness) returning `None`
+    /// is what makes `icmp eq` refuse rather than guess.
+    ///
+    /// `None` if no common type works. On success the two returned values are
+    /// guaranteed to have equal types, so callers may check just one.
     pub fn try_cast_two(
         a: Value,
         b: Value,
@@ -575,45 +612,30 @@ impl Value {
         ctx: &mut Context,
     ) -> Option<(Value, Value)> {
         if let Some(ty) = ty {
-            let Some(casted_a) = a.try_cast(ty, signedness, ctx) else {
-                return None;
-            };
-
-            let Some(casted_b) = b.try_cast(ty, signedness, ctx) else {
-                return None;
-            };
-
-            return Some((casted_a, casted_b));
+            return Some((
+                a.try_cast(ty, signedness, ctx)?,
+                b.try_cast(ty, signedness, ctx)?,
+            ));
         }
 
         if a.ty() == b.ty() {
             return Some((a, b));
         }
 
-        let Some(a_width) = a.ty().width(ctx) else {
-            return None;
-        };
-
-        let Some(b_width) = b.ty().width(ctx) else {
-            return None;
-        };
+        // An unsized type has no width, so there is nothing to widen towards. Two
+        // `ptr`s already left through the equality above; anything reaching here with
+        // a `ptr` is a genuine mismatch.
+        let a_width = a.ty().width(ctx)?;
+        let b_width = b.ty().width(ctx)?;
 
         if a_width >= b_width {
             let ref_ty = a.ty();
 
-            let Some(casted_b) = b.try_cast(ref_ty, signedness, ctx) else {
-                return None;
-            };
-
-            Some((a, casted_b))
+            Some((a, b.try_cast(ref_ty, signedness, ctx)?))
         } else {
             let ref_ty = b.ty();
 
-            let Some(casted_a) = a.try_cast(ref_ty, signedness, ctx) else {
-                return None;
-            };
-
-            Some((casted_a, b))
+            Some((a.try_cast(ref_ty, signedness, ctx)?, b))
         }
     }
 

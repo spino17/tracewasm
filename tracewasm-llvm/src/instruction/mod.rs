@@ -118,6 +118,10 @@ pub enum InstructionKind {
     /// Not a terminator: control returns to the next instruction, so the block stays
     /// open.
     Call(CallOperands),
+    /// Compares two integers or pointers, producing an `i1`.
+    ///
+    /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
+    /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
 }
 
@@ -238,24 +242,55 @@ pub struct CallOperands {
     pub params: Vec<Value>,
 }
 
+/// The operands of an `icmp`.
+///
+/// Emitted as `icmp <cond> <ty> <a>, <b>` — the type is written **once**, and the
+/// operands untyped, because LLVM requires both to have it. That requirement is
+/// enforced when the instruction is built, so nothing here can disagree.
 pub struct ICmpOperands {
+    /// Which comparison, and — for the ordered predicates — how to read the operands.
     pub cond: ICond,
+    /// The type both operands have.
+    ///
+    /// An integer or a pointer. `llvm-as` accepts `ptr` with every predicate, signed
+    /// ones included, but refuses floats with "icmp requires integer operands".
     pub ty: TyId,
+    /// The left operand.
     pub a: Value,
+    /// The right operand.
     pub b: Value,
 }
 
+/// Which comparison an [`ICmpOperands`] performs.
+///
+/// Ten predicates, and the signedness lives here rather than in the operand type:
+/// LLVM's integer types say nothing about sign, so `ult` and `slt` are what
+/// distinguish an unsigned comparison from a signed one over the same bits. See
+/// [`signedness`](Self::signedness).
+///
+/// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
 pub enum ICond {
+    /// Equal. Neither signed nor unsigned — at equal widths the reading cannot
+    /// change the answer.
     Eq,
+    /// Not equal. Signedness-free for the same reason as [`Eq`](Self::Eq).
     Ne,
+    /// Unsigned greater than.
     Ugt,
+    /// Unsigned greater than or equal.
     Uge,
+    /// Unsigned less than.
     Ult,
+    /// Unsigned less than or equal.
     Ule,
+    /// Signed greater than.
     Sgt,
+    /// Signed greater than or equal.
     Sge,
+    /// Signed less than.
     Slt,
+    /// Signed less than or equal.
     Sle,
 }
 
@@ -307,4 +342,5 @@ impl ICond {
     }
 }
 
+/// The operands of an `fcmp`. Not yet built or emitted.
 pub struct FCmpOperands {}

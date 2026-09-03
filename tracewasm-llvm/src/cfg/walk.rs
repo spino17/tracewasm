@@ -123,6 +123,10 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an `icmp`.
+    ///
+    /// The result is an [`I1Value`] rather than a `Value`, and never `None`: an
+    /// `icmp` always defines a register, and that register is always an `i1`.
     fn visit_icmp(
         &mut self,
         operands: &ICmpOperands,

@@ -547,7 +547,23 @@ impl CfgVisitor for IREmitter {
         value: &I1Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // The operand type is written once, between the predicate and the first
+        // operand, and the operands themselves are untyped — `icmp eq i32 %a, %b`,
+        // not `icmp eq i32 %a, i32 %b`. Both are known to share `operands.ty` by
+        // construction, so there is nothing to reconcile here.
+        //
+        // The result is an `I1Value`, so the register renders through `operand_kind`
+        // for the same reason a branch condition does.
+        self.push_line(&format!(
+            "{} = icmp {} {} {}, {}",
+            Self::operand_kind(&value.kind, ctx)?,
+            operands.cond,
+            ctx.display(operands.ty),
+            Self::operand(&operands.a, ctx)?,
+            Self::operand(&operands.b, ctx)?
+        ));
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -572,7 +588,7 @@ mod tests {
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
         error::ContextError,
-        instruction::GetElementPtrOperands,
+        instruction::{GetElementPtrOperands, ICond},
         interner::TyId,
         test_support::fixture,
         value::{ConstExpr, FuncSignature, NullPtr, Type},
@@ -730,9 +746,16 @@ mod tests {
         // requires one phi entry per predecessor.
         phi_handler.add_branch((body, phi), &mut ctx).unwrap();
 
-        let cond = Value::from_const(true, None, &mut ctx)
-            .unwrap()
-            .into_i1(&ctx)
+        // The branch condition comes from a real comparison rather than a literal, so
+        // the `icmp` line and the `i1` it feeds are both covered here.
+        let limit = Value::from_const(10i32, None, &mut ctx).unwrap();
+        let counter = f
+            .nth_param(0, &ctx)
+            .expect("main takes an i32 first parameter")
+            .clone();
+
+        let cond = in_body
+            .build_icmp(ICond::Ult, None, counter, limit, Some("cmp"), &mut ctx)
             .unwrap();
 
         in_body
@@ -796,7 +819,8 @@ mod tests {
             "    br label %body\n",
             "body:\n",
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
-            "    br i1 true, label %body, label %exit\n",
+            "    %cmp = icmp ult i32 %n, 10\n",
+            "    br i1 %cmp, label %body, label %exit\n",
             "exit:\n",
             "    %c = call i32 @helper(i32 7)\n",
             "    call void @noop()\n",

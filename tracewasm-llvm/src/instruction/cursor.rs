@@ -771,6 +771,41 @@ impl Cursor {
         Ok(val)
     }
 
+    /// Compares two integers or pointers, defining an `i1`.
+    ///
+    /// Emits `icmp <cond> <ty> <a>, <b>`. The result is an [`I1Value`], so it can be
+    /// handed straight to [`build_conditional_br`](Self::build_conditional_br) without
+    /// a second check that it is an `i1`.
+    ///
+    /// # Operand types must agree
+    ///
+    /// LLVM requires it — `llvm-as` refuses `icmp slt i64 %a, %b` where `%b` is an
+    /// `i32`. Where the predicate carries a signedness, a differing-width **constant**
+    /// is widened to match, using `zext` for the `u*` predicates and `sext` for the
+    /// `s*` ones. A differing-width *register* is always refused: widening one needs
+    /// an instruction this builder will not insert on the caller's behalf.
+    ///
+    /// `eq` and `ne` carry no signedness and so widen nothing — they require operands
+    /// that already share a type. That is not a limitation but the absence of an
+    /// answer: against `i64 4294967295`, a `-1i32` operand is equal zero-extended and
+    /// unequal sign-extended, and only the caller knows which was meant.
+    ///
+    /// # The `ty` argument means two things
+    ///
+    /// For the ordered predicates it **coerces**: both operands are cast to it. For
+    /// `eq`/`ne` it **asserts**: it must equal the type the operands already have,
+    /// since there is no signedness with which to coerce them.
+    ///
+    /// # Errors
+    ///
+    /// - [`ICmpError::OperandsNotCastable`] — no common type, or a constant that does
+    ///   not fit one under the predicate's reading.
+    /// - [`ICmpError::OperandTypesDiffer`] — `eq`/`ne` given operands of two types.
+    /// - [`ICmpError::ProvidedTypeDoesNotMatchOperands`] — `eq`/`ne` given a `ty` its
+    ///   operands do not have.
+    /// - [`ICmpError::OperandTypeNotComparable`] — not an integer or a pointer.
+    ///   Pointers are fine with every predicate; floats need `fcmp`.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_icmp(
         &self,
         cond: ICond,
