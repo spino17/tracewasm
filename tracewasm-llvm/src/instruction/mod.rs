@@ -9,7 +9,7 @@ use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::PhiError,
     interner::{StrId, TyId},
-    value::{I1Value, Value},
+    value::{I1Value, Signedness, Value},
 };
 use rustc_hash::FxHashSet;
 
@@ -256,6 +256,25 @@ pub enum ICond {
     Sge,
     Slt,
     Sle,
+}
+
+impl ICond {
+    pub fn signedness(&self) -> Option<Signedness> {
+        let signedness = match self {
+            ICond::Eq => return None,
+            ICond::Ne => return None,
+            ICond::Ugt => Signedness::Unsigned,
+            ICond::Uge => Signedness::Unsigned,
+            ICond::Ult => Signedness::Unsigned,
+            ICond::Ule => Signedness::Unsigned,
+            ICond::Sgt => Signedness::Signed,
+            ICond::Sge => Signedness::Signed,
+            ICond::Slt => Signedness::Signed,
+            ICond::Sle => Signedness::Signed,
+        };
+
+        Some(signedness)
+    }
 }
 
 pub struct FCmpOperands {}

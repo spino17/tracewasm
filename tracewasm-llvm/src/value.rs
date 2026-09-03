@@ -351,6 +351,12 @@ impl Display for TypeDisplay<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Signedness {
+    Unsigned, // zext
+    Signed,   // sext
+}
+
 /// How a [`Value`] is obtained — the three forms an LLVM operand can take.
 #[derive(Debug, Clone)]
 pub enum ValueKind {
@@ -402,7 +408,7 @@ impl Value {
         ctx: &mut Context,
     ) -> Result<Self, TypeError> {
         let (val, ty) = if let Some(ty) = optional_cast {
-            let Some(c) = val.try_cast(ty, ctx) else {
+            let Some(c) = val.try_cast(ty, Signedness::Signed, ctx) else {
                 return Err(TypeError::ConstantCastToProvidedTypeFailed(
                     C::ty(ctx).display(ctx).to_string(),
                     ty.display(ctx).to_string(),
@@ -534,7 +540,7 @@ impl Value {
     ///
     /// `None` covers all of: an unsized target type, a constant that does not fold,
     /// and a register whose type does not already match.
-    pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<Self> {
+    pub fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<Self> {
         if !ty.is_first_class(ctx) {
             return None;
         }
@@ -544,7 +550,7 @@ impl Value {
         let final_value = match self.kind() {
             ValueKind::ConstExpr(ConstExpr::Const(const_id)) => {
                 let const_val = *ctx.const_interner.value(const_id.raw());
-                let casted_const_val = const_val.try_cast(ty, ctx)?;
+                let casted_const_val = const_val.try_cast(ty, signedness, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
 
                 Value::new(ty, ValueKind::ConstExpr(ConstExpr::Const(casted_const_id)))
@@ -565,14 +571,15 @@ impl Value {
         a: Value,
         b: Value,
         ty: Option<TyId>,
+        signedness: Signedness,
         ctx: &mut Context,
     ) -> Option<(Value, Value)> {
         if let Some(ty) = ty {
-            let Some(casted_a) = a.try_cast(ty, ctx) else {
+            let Some(casted_a) = a.try_cast(ty, signedness, ctx) else {
                 return None;
             };
 
-            let Some(casted_b) = b.try_cast(ty, ctx) else {
+            let Some(casted_b) = b.try_cast(ty, signedness, ctx) else {
                 return None;
             };
 
@@ -594,7 +601,7 @@ impl Value {
         if a_width >= b_width {
             let ref_ty = a.ty();
 
-            let Some(casted_b) = b.try_cast(ref_ty, ctx) else {
+            let Some(casted_b) = b.try_cast(ref_ty, signedness, ctx) else {
                 return None;
             };
 
@@ -602,7 +609,7 @@ impl Value {
         } else {
             let ref_ty = b.ty();
 
-            let Some(casted_a) = a.try_cast(ref_ty, ctx) else {
+            let Some(casted_a) = a.try_cast(ref_ty, signedness, ctx) else {
                 return None;
             };
 
@@ -859,15 +866,20 @@ impl ConstValue {
     /// Dispatches to the [`Const`] impl for whichever literal it holds, so the rules
     /// are the same ones described there: widths convert among integers and among
     /// floats, and nothing crosses between them or reaches a pointer.
-    pub fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    pub fn try_cast(
+        &self,
+        ty: TyId,
+        signedness: Signedness,
+        ctx: &mut Context,
+    ) -> Option<ConstValue> {
         match self {
-            ConstValue::I1(val) => val.try_cast(ty, ctx),
-            ConstValue::I8(val) => val.try_cast(ty, ctx),
-            ConstValue::I16(val) => val.try_cast(ty, ctx),
-            ConstValue::I32(val) => val.try_cast(ty, ctx),
-            ConstValue::I64(val) => val.try_cast(ty, ctx),
-            ConstValue::Float(val) => val.try_cast(ty, ctx),
-            ConstValue::Double(val) => val.try_cast(ty, ctx),
+            ConstValue::I1(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::I8(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::I16(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::I32(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::I64(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::Float(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::Double(val) => val.try_cast(ty, signedness, ctx),
             ConstValue::NullPtr => {
                 if ty.is_ptr(ctx) {
                     Some(ConstValue::NullPtr)
@@ -994,7 +1006,7 @@ pub trait Const {
     /// would; floats convert between `float` and `double`. Nothing crosses between
     /// integers and floats, and nothing reaches a pointer — those need a real
     /// conversion instruction.
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue>;
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue>;
 }
 
 impl Const for bool {
@@ -1006,7 +1018,7 @@ impl Const for bool {
         ConstValue::I1(if self { 1 } else { 0 })
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         if ty.is_i1(ctx) {
             Some(ConstValue::I1(if *self { 1 } else { 0 }))
         } else {
@@ -1024,15 +1036,24 @@ impl Const for i8 {
         ConstValue::I8(self)
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
-        let v = match ty_obj {
-            Type::I8 => ConstValue::I8(*self),
-            Type::I16 => ConstValue::I16(*self as i16),
-            Type::I32 => ConstValue::I32(*self as i32),
-            Type::I64 => ConstValue::I64(*self as i64),
-            _ => return None,
+        let v = match signedness {
+            Signedness::Signed => match ty_obj {
+                Type::I8 => ConstValue::I8(*self),
+                Type::I16 => ConstValue::I16(*self as i16),
+                Type::I32 => ConstValue::I32(*self as i32),
+                Type::I64 => ConstValue::I64(*self as i64),
+                _ => return None,
+            },
+            Signedness::Unsigned => match ty_obj {
+                Type::I8 => ConstValue::I8(*self),
+                Type::I16 => ConstValue::I16(*self as u8 as u16 as i16),
+                Type::I32 => ConstValue::I32(*self as u8 as u32 as i32),
+                Type::I64 => ConstValue::I64(*self as u8 as u64 as i64),
+                _ => return None,
+            },
         };
 
         Some(v)
@@ -1048,15 +1069,38 @@ impl Const for i16 {
         ConstValue::I16(self)
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
-        let v = match ty_obj {
-            Type::I8 => ConstValue::I8(*self as i8),
-            Type::I16 => ConstValue::I16(*self),
-            Type::I32 => ConstValue::I32(*self as i32),
-            Type::I64 => ConstValue::I64(*self as i64),
-            _ => return None,
+        let v = match signedness {
+            Signedness::Signed => match ty_obj {
+                Type::I8 => {
+                    if *self > i8::MAX as i16 || *self < i8::MIN as i16 {
+                        return None;
+                    }
+
+                    ConstValue::I8(*self as i8)
+                }
+                Type::I16 => ConstValue::I16(*self),
+                Type::I32 => ConstValue::I32(*self as i32),
+                Type::I64 => ConstValue::I64(*self as i64),
+                _ => return None,
+            },
+            Signedness::Unsigned => match ty_obj {
+                Type::I8 => {
+                    let val = *self as u16;
+
+                    if val > u8::MAX as u16 {
+                        return None;
+                    }
+
+                    ConstValue::I8(val as u8 as i8)
+                }
+                Type::I16 => ConstValue::I16(*self),
+                Type::I32 => ConstValue::I32(*self as u16 as u32 as i32),
+                Type::I64 => ConstValue::I64(*self as u16 as u64 as i64),
+                _ => return None,
+            },
         };
 
         Some(v)
@@ -1072,15 +1116,56 @@ impl Const for i32 {
         ConstValue::I32(self)
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
-        let v = match ty_obj {
-            Type::I8 => ConstValue::I8(*self as i8),
-            Type::I16 => ConstValue::I16(*self as i16),
-            Type::I32 => ConstValue::I32(*self),
-            Type::I64 => ConstValue::I64(*self as i64),
-            _ => return None,
+        let v = match signedness {
+            Signedness::Signed => {
+                let val = *self;
+
+                match ty_obj {
+                    Type::I8 => {
+                        if val > i8::MAX as i32 || val < i8::MIN as i32 {
+                            return None;
+                        }
+
+                        ConstValue::I8(*self as i8)
+                    }
+                    Type::I16 => {
+                        if val > i16::MAX as i32 || val < i16::MIN as i32 {
+                            return None;
+                        }
+
+                        ConstValue::I16(*self as i16)
+                    }
+                    Type::I32 => ConstValue::I32(*self),
+                    Type::I64 => ConstValue::I64(*self as i64),
+                    _ => return None,
+                }
+            }
+            Signedness::Unsigned => {
+                let val = *self as u32;
+
+                match ty_obj {
+                    Type::I8 => {
+                        if val > u8::MAX as u32 {
+                            return None;
+                        }
+
+                        ConstValue::I8(val as u8 as i8)
+                    }
+                    Type::I16 => {
+                        if val > u16::MAX as u32 {
+                            return None;
+                        }
+
+                        ConstValue::I16(val as u16 as i16)
+                    }
+                    Type::I32 => ConstValue::I32(*self),
+                    Type::I64 => ConstValue::I64(*self as u32 as u64 as i64),
+                    _ => return None,
+                }
+            }
         };
 
         Some(v)
@@ -1096,15 +1181,68 @@ impl Const for i64 {
         ConstValue::I64(self)
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
-        let v = match ty_obj {
-            Type::I8 => ConstValue::I8(*self as i8),
-            Type::I16 => ConstValue::I16(*self as i16),
-            Type::I32 => ConstValue::I32(*self as i32),
-            Type::I64 => ConstValue::I64(*self),
-            _ => return None,
+        let v = match signedness {
+            Signedness::Signed => {
+                let val = *self;
+
+                match ty_obj {
+                    Type::I8 => {
+                        if val > i8::MAX as i64 || val < i8::MIN as i64 {
+                            return None;
+                        }
+
+                        ConstValue::I8(*self as i8)
+                    }
+                    Type::I16 => {
+                        if val > i16::MAX as i64 || val < i16::MIN as i64 {
+                            return None;
+                        }
+
+                        ConstValue::I16(*self as i16)
+                    }
+                    Type::I32 => {
+                        if val > i32::MAX as i64 || val < i32::MIN as i64 {
+                            return None;
+                        }
+
+                        ConstValue::I32(*self as i32)
+                    }
+                    Type::I64 => ConstValue::I64(*self),
+                    _ => return None,
+                }
+            }
+            Signedness::Unsigned => {
+                let val = *self as u64;
+
+                match ty_obj {
+                    Type::I8 => {
+                        if val > u8::MAX as u64 {
+                            return None;
+                        }
+
+                        ConstValue::I8(val as u8 as i8)
+                    }
+                    Type::I16 => {
+                        if val > u16::MAX as u64 {
+                            return None;
+                        }
+
+                        ConstValue::I16(val as u16 as i16)
+                    }
+                    Type::I32 => {
+                        if val > u32::MAX as u64 {
+                            return None;
+                        }
+
+                        ConstValue::I32(val as u32 as i32)
+                    }
+                    Type::I64 => ConstValue::I64(*self),
+                    _ => return None,
+                }
+            }
         };
 
         Some(v)
@@ -1120,7 +1258,7 @@ impl Const for f32 {
         ConstValue::Float(OrderedFloat(self))
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
@@ -1142,7 +1280,7 @@ impl Const for f64 {
         ConstValue::Double(OrderedFloat(self))
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
         let v = match ty_obj {
@@ -1171,7 +1309,7 @@ impl Const for NullPtr {
         ConstValue::NullPtr
     }
 
-    fn try_cast(&self, ty: TyId, ctx: &mut Context) -> Option<ConstValue> {
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         if NullPtr::ty(ctx) != ty {
             return None;
         }

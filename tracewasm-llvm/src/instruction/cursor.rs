@@ -13,7 +13,7 @@ use crate::{
         RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
-    value::{I1Value, Value, ValueKind},
+    value::{I1Value, Signedness, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -202,7 +202,7 @@ impl Cursor {
 
                 let val_ty = ctx.display(val.ty()).to_string();
 
-                let Some(casted_val) = val.try_cast(ty, ctx) else {
+                let Some(casted_val) = val.try_cast(ty, Signedness::Signed, ctx) else {
                     return Err(RetError::ReturnedValueTypeMismatch(
                         val_ty,
                         ty.display(ctx).to_string(),
@@ -319,7 +319,9 @@ impl Cursor {
 
                 let count_ty = ctx.display(count_val.ty()).to_string();
 
-                let Some(casted_val) = count_val.try_cast(count_expected_ty, ctx) else {
+                let Some(casted_val) =
+                    count_val.try_cast(count_expected_ty, Signedness::Signed, ctx)
+                else {
                     return Err(AllocaError::AllocaCountTypeMismatch(
                         count_ty,
                         count_expected_ty.display(ctx).to_string(),
@@ -463,7 +465,7 @@ impl Cursor {
         let final_val = if let Some(ty) = ty {
             let value_ty = ctx.display(value.ty()).to_string();
 
-            let Some(casted_value) = value.try_cast(ty, ctx) else {
+            let Some(casted_value) = value.try_cast(ty, Signedness::Signed, ctx) else {
                 return Err(StoreError::StoredValueTypeMismatch(
                     value_ty,
                     ty.display(ctx).to_string(),
@@ -700,7 +702,8 @@ impl Cursor {
             let final_val = if let Some(param_ty) = param_ty {
                 let given = ctx.display(param_val.ty()).to_string();
 
-                let Some(casted_val) = param_val.try_cast(*param_ty, ctx) else {
+                let Some(casted_val) = param_val.try_cast(*param_ty, Signedness::Signed, ctx)
+                else {
                     return Err(CallError::ParamCastFailed(
                         name,
                         index,
@@ -774,8 +777,24 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, ctx) else {
-            todo!() // RAISE ERRRO: two values cannot be casted!
+        let (a, b) = if let Some(signedness) = cond.signedness() {
+            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
+                todo!() // RAISE ERRRO: two values cannot be casted!
+            };
+
+            (a, b)
+        } else {
+            if a.ty() != b.ty() {
+                todo!() // RAISE ERROR: types of operands not matching!
+            }
+
+            if let Some(ty) = ty
+                && ty != a.ty()
+            {
+                todo!() // RAISE ERROR: provided type not matching with operands type
+            }
+
+            (a, b)
         };
 
         let ty = a.ty();
