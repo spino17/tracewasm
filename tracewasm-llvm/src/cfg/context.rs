@@ -8,6 +8,7 @@ use crate::{
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::ContextError,
+    instruction::cursor::RegName,
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
     value::{Type, TypeDisplay},
 };
@@ -88,7 +89,7 @@ impl Context {
     /// [`ContextError::InvalidRegisterName`] if the hint is not a legal LLVM local.
     pub(crate) fn name_for_reg(
         &mut self,
-        name: Option<&str>,
+        name: RegName,
         func_id: FuncId,
     ) -> Result<String, ContextError> {
         let assigner = self.reg_name_assigner.entry(func_id).or_default();
@@ -249,19 +250,19 @@ impl FuncRegNameIndex {
     ///
     /// The loop retries suffixes until it finds one not already issued, which is what
     /// keeps a requested `x1` distinct from the `x1` generated for a second `x`.
-    fn name_from_hint(&mut self, hint: Option<&str>) -> Result<String, ContextError> {
-        let Some(hint) = hint else {
+    fn name_from_hint(&mut self, hint: RegName) -> Result<String, ContextError> {
+        let RegName::Named(hint) = hint else {
             return Ok(self.next_unnamed_index().to_string());
         };
 
         let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
 
-        if !re.is_match(hint) {
+        if !re.is_match(&hint) {
             return Err(ContextError::InvalidRegisterName(hint.to_string()));
         }
 
         let final_name = loop {
-            let index = self.next_named_index(hint);
+            let index = self.next_named_index(&hint);
 
             let name = if index == 0 {
                 hint.to_string()

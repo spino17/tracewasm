@@ -10,7 +10,7 @@ use crate::{
         },
     },
     error::ContextError,
-    instruction::cursor::Cursor,
+    instruction::cursor::{Cursor, RegName},
     interner::{StrId, TyId},
     value::{ConstExpr, FuncSignature, Value},
 };
@@ -274,9 +274,9 @@ impl Builder {
         for (param_ty, param_name) in params {
             let name = ctx.name_for_reg(
                 if let Some(param) = param_name {
-                    Some(param.as_ref())
+                    param.into()
                 } else {
-                    None
+                    RegName::Unnamed
                 },
                 id,
             )?;

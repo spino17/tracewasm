@@ -21,6 +21,29 @@ use crate::{
 };
 use rustc_hash::FxHashSet;
 
+pub enum RegName {
+    Named(String),
+    Unnamed,
+}
+
+impl From<String> for RegName {
+    fn from(value: String) -> Self {
+        RegName::Named(value)
+    }
+}
+
+impl From<&str> for RegName {
+    fn from(value: &str) -> Self {
+        RegName::Named(value.to_string())
+    }
+}
+
+impl From<&String> for RegName {
+    fn from(value: &String) -> Self {
+        RegName::Named(value.to_string())
+    }
+}
+
 /// Writes instructions into one basic block.
 ///
 /// Obtained from [`Builder::cursor_at_block`](crate::cfg::builder::Builder::cursor_at_block).
@@ -80,7 +103,7 @@ impl Cursor {
     pub fn build_phi(
         &self,
         branches: &[(BasicBlockId, Value)],
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<(PhiInstrHandler, Value), PhiError> {
         if branches.is_empty() {
@@ -290,7 +313,7 @@ impl Cursor {
         ty: TyId,
         count: Option<(&Value, Option<TyId>)>,
         align: Option<u32>,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         if !ty.is_first_class(ctx) {
@@ -378,7 +401,7 @@ impl Cursor {
         ptr: &Value,
         ty: Option<TyId>,
         align: Option<u32>,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         if !ptr.is_ptr(ctx) {
@@ -542,7 +565,7 @@ impl Cursor {
         source_ty: Option<TyId>,
         indices: &[Value],
         inbounds: Option<bool>,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let inbounds = inbounds.unwrap_or(false);
@@ -666,7 +689,7 @@ impl Cursor {
         func_name: String,
         params: &[(&Value, Option<TyId>)],
         return_ty: Option<TyId>,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let params: Vec<(Value, Option<TyId>)> = params
@@ -858,7 +881,7 @@ impl Cursor {
         ty: Option<TyId>,
         a: &Value,
         b: &Value,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
         let (a, b) = if let Some(signedness) = cond.signedness() {
@@ -961,7 +984,7 @@ impl Cursor {
         ty: Option<TyId>,
         a: &Value,
         b: &Value,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let (a, b) = if let Some(signedness) = op.signedness() {
@@ -1052,7 +1075,7 @@ impl Cursor {
         ty: Option<TyId>,
         a: &Value,
         b: &Value,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
         // Ids are `Copy`, so the operand types survive the move into the cast and are
@@ -1113,7 +1136,7 @@ impl Cursor {
         ty: Option<TyId>,
         a: &Value,
         b: &Value,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let (given_a, given_b) = (a.ty(), b.ty());
@@ -1160,7 +1183,7 @@ impl Cursor {
     pub fn build_fneg(
         &self,
         value: Value,
-        reg: Option<&str>,
+        reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let ty = value.ty();
@@ -1253,7 +1276,7 @@ fn add_instruction_to_block_and_get_value(
     kind: InstructionKind,
     result_ty: TyId,
     block: BasicBlockId,
-    reg: Option<&str>,
+    reg: RegName,
     ctx: &mut Context,
 ) -> Result<Value, InstructionError> {
     let func_id = ctx.get_block(block).func_id;
