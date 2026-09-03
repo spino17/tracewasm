@@ -904,14 +904,12 @@ mod tests {
                 Some("c"),
                 &mut ctx,
             )
-            .expect("helper takes an i32 and returns one")
-            .expect("a non-void call defines a register");
+            .expect("helper takes an i32 and returns one");
 
         assert!(
             in_exit
-                .build_call("noop".to_string(), &[], None, None, &mut ctx)
-                .unwrap()
-                .is_none(),
+                .build_void_call("noop".to_string(), &[], &mut ctx)
+                .is_ok(),
             "a void call defines nothing"
         );
 
@@ -1005,8 +1003,7 @@ mod tests {
                 Some("r"),
                 &mut ctx,
             )
-            .expect("a declared function is callable")
-            .expect("it returns an i32");
+            .expect("a declared function is callable");
 
         cursor
             .build_call("host_noop".to_string(), &[], None, None, &mut ctx)

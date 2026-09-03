@@ -651,7 +651,7 @@ impl Cursor {
         return_ty: Option<TyId>,
         reg: Option<&str>,
         ctx: &mut Context,
-    ) -> Result<Option<Value>, InstructionError> {
+    ) -> Result<Value, InstructionError> {
         let params: Vec<(Value, Option<TyId>)> = params
             .iter()
             .copied()
@@ -678,17 +678,6 @@ impl Cursor {
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
-        // Arity first, so a mismatched count is reported as such rather than as a
-        // type error on whichever argument happens to line up wrongly.
-        if params.len() != expected_param_tys.len() {
-            return Err(CallError::ParamCountMismatch {
-                name,
-                expected: expected_param_tys.len(),
-                given: params.len(),
-            }
-            .into());
-        }
-
         let return_ty = if let Some(return_ty) = return_ty {
             if return_ty != expected_return_ty {
                 return Err(CallError::ReturnTypeMismatch(
@@ -704,78 +693,78 @@ impl Cursor {
             expected_return_ty
         };
 
-        let mut final_params: Vec<Value> = Vec::with_capacity(params.len());
-
-        for (index, ((param_val, param_ty), expected_param_ty)) in
-            params.iter().zip(&expected_param_tys).enumerate()
-        {
-            let final_val = if let Some(param_ty) = param_ty {
-                let given = ctx.display(param_val.ty()).to_string();
-
-                let Some(casted_val) = param_val.try_cast(*param_ty, Signedness::Signed, ctx)
-                else {
-                    return Err(CallError::ParamCastFailed(
-                        name,
-                        index,
-                        given,
-                        ctx.display(*param_ty).to_string(),
-                    )
-                    .into());
-                };
-
-                casted_val
-            } else {
-                param_val.clone()
-            };
-
-            if final_val.ty() != *expected_param_ty {
-                return Err(CallError::ParamTypeMismatch(
-                    name,
-                    index,
-                    ctx.display(*expected_param_ty).to_string(),
-                    ctx.display(final_val.ty()).to_string(),
-                )
-                .into());
-            }
-
-            final_params.push(final_val);
+        if return_ty.is_void(ctx) {
+            todo!() // RAISE ERROR: use void_call
         }
 
-        let params = final_params;
+        let final_params =
+            try_cast_param_and_check_with_func_signature(name, &params, &expected_param_tys, ctx)?;
 
-        let val = if return_ty.is_void(ctx) {
-            if reg.is_some() {
-                return Err(CallError::RegisterNameForVoidCall(name).into());
-            }
-
-            self.block.add_instruction(
-                Instruction {
-                    kind: InstructionKind::Call(CallOperands {
-                        func_name: func_name_id,
-                        return_ty,
-                        params,
-                    }),
-                    value: None,
-                },
-                ctx,
-            )?;
-
-            None
-        } else {
-            Some(add_instruction_to_block_and_get_value(
-                InstructionKind::Call(CallOperands {
-                    func_name: func_name_id,
-                    return_ty,
-                    params,
-                }),
+        add_instruction_to_block_and_get_value(
+            InstructionKind::Call(CallOperands {
+                func_name: func_name_id,
                 return_ty,
-                self.block,
-                reg,
-                ctx,
-            )?)
+                params: final_params,
+            }),
+            return_ty,
+            self.block,
+            reg,
+            ctx,
+        )
+    }
+
+    pub fn build_void_call(
+        &self,
+        func_name: String,
+        params: &[(&Value, Option<TyId>)],
+        ctx: &mut Context,
+    ) -> Result<(), InstructionError> {
+        let params: Vec<(Value, Option<TyId>)> = params
+            .iter()
+            .copied()
+            .map(|(x, y)| (x.clone(), y))
+            .collect();
+
+        let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
+
+        // The signature is read out by value before anything below borrows `ctx`
+        // mutably: casting an argument interns into the type pool, which a live
+        // borrow of the function table would forbid.
+        let Some(global) = ctx.module.globals.get(&func_name_id) else {
+            return Err(CallError::FunctionNotFound(
+                ctx.str_interner.value(func_name_id.0).to_string(),
+            )
+            .into());
         };
 
-        Ok(val)
+        let GlobalKind::Func(func_sig) = &global.kind else {
+            unreachable!("hitting this means globals tracking logic by their name is incorrect")
+        };
+
+        let name = ctx.str_interner.value(func_name_id.0).to_string();
+        let expected_return_ty = func_sig.result;
+        let expected_param_tys = func_sig.params.clone();
+
+        if !expected_return_ty.is_void(ctx) {
+            todo!() // RAISE ERROR: use build_call!
+        }
+
+        let final_params =
+            try_cast_param_and_check_with_func_signature(name, &params, &expected_param_tys, ctx)?;
+
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Call(CallOperands {
+                    func_name: func_name_id,
+                    return_ty: ctx.void_ty(),
+                    params: final_params,
+                }),
+                value: None,
+            },
+            ctx,
+        )?;
+
+        Ok(())
     }
 
     /// Compares two integers or pointers, defining an `i1`.
@@ -1142,6 +1131,60 @@ impl Cursor {
             ctx,
         )
     }
+}
+
+fn try_cast_param_and_check_with_func_signature(
+    name: String,
+    params: &[(Value, Option<TyId>)],
+    expected_param_tys: &[TyId],
+    ctx: &mut Context,
+) -> Result<Vec<Value>, CallError> {
+    if params.len() != expected_param_tys.len() {
+        return Err(CallError::ParamCountMismatch {
+            name,
+            expected: expected_param_tys.len(),
+            given: params.len(),
+        }
+        .into());
+    }
+
+    let mut final_params: Vec<Value> = Vec::with_capacity(params.len());
+
+    for (index, ((param_val, param_ty), expected_param_ty)) in
+        params.iter().zip(expected_param_tys).enumerate()
+    {
+        let final_val = if let Some(param_ty) = param_ty {
+            let given = ctx.display(param_val.ty()).to_string();
+
+            let Some(casted_val) = param_val.try_cast(*param_ty, Signedness::Signed, ctx) else {
+                return Err(CallError::ParamCastFailed(
+                    name,
+                    index,
+                    given,
+                    ctx.display(*param_ty).to_string(),
+                )
+                .into());
+            };
+
+            casted_val
+        } else {
+            param_val.clone()
+        };
+
+        if final_val.ty() != *expected_param_ty {
+            return Err(CallError::ParamTypeMismatch(
+                name,
+                index,
+                ctx.display(*expected_param_ty).to_string(),
+                ctx.display(final_val.ty()).to_string(),
+            )
+            .into());
+        }
+
+        final_params.push(final_val);
+    }
+
+    Ok(final_params)
 }
 
 /// Appends an instruction that defines a register, and records where it was defined.
@@ -2126,16 +2169,14 @@ mod tests {
 
         let value = cursor
             .build_call("a".to_string(), &[], None, Some("r"), &mut ctx)
-            .unwrap()
-            .expect("a non-void call defines a register");
+            .unwrap();
 
         assert_eq!(value.ty(), i32_ty, "typed by the callee's result");
 
         assert!(
             cursor
                 .build_call("b".to_string(), &[], None, None, &mut ctx)
-                .unwrap()
-                .is_none(),
+                .is_ok(),
             "a void call defines nothing"
         );
 
