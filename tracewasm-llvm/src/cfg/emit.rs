@@ -665,7 +665,8 @@ mod tests {
         },
         error::ContextError,
         instruction::{
-            FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond, cursor::RegName,
+            FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond,
+            cursor::{OperandTy, RegName},
         },
         interner::TyId,
         test_support::fixture,
@@ -729,7 +730,7 @@ mod tests {
 
         builder
             .cursor_at_block(helper_entry)
-            .build_ret(Some(&passed), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&passed), i32_ty.into(), &mut ctx)
             .unwrap();
 
         let noop = builder
@@ -740,7 +741,7 @@ mod tests {
 
         builder
             .cursor_at_block(noop_entry)
-            .build_ret(None, Some(void_ty), &mut ctx)
+            .build_ret(None, void_ty.into(), &mut ctx)
             .unwrap();
 
         let f = builder
@@ -781,7 +782,7 @@ mod tests {
         let elem = in_entry
             .build_get_element_ptr(
                 &slot,
-                None,
+                OperandTy::Inferred,
                 &[zero, one, two],
                 Some(true),
                 "e".into(),
@@ -790,11 +791,17 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .build_load(&elem.clone(), Some(f64_ty), Some(8), "d".into(), &mut ctx)
+            .build_load(&elem.clone(), f64_ty.into(), Some(8), "d".into(), &mut ctx)
             .unwrap();
 
         in_entry
-            .build_store(&elem, &loaded.clone(), None, Some(8), &mut ctx)
+            .build_store(
+                &elem,
+                &loaded.clone(),
+                OperandTy::Inferred,
+                Some(8),
+                &mut ctx,
+            )
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
@@ -806,7 +813,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .build_store(&float_slot, &a_float, None, None, &mut ctx)
+            .build_store(&float_slot, &a_float, OperandTy::Inferred, None, &mut ctx)
             .unwrap();
 
         let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -816,7 +823,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .build_store(&ptr_slot, &null, None, None, &mut ctx)
+            .build_store(&ptr_slot, &null, OperandTy::Inferred, None, &mut ctx)
             .unwrap();
         in_entry.build_unconditional_br(body, &mut ctx).unwrap();
 
@@ -843,7 +850,7 @@ mod tests {
         let cond = in_body
             .build_icmp(
                 ICond::Ult,
-                None,
+                OperandTy::Inferred,
                 &counter.clone(),
                 &limit,
                 "cmp".into(),
@@ -859,7 +866,7 @@ mod tests {
         in_body
             .build_fcmp(
                 FCond::Ord,
-                None,
+                OperandTy::Inferred,
                 &phi.clone(),
                 &half.clone(),
                 "fcmp".into(),
@@ -874,7 +881,7 @@ mod tests {
         in_body
             .build_iarithmetic(
                 IArithmeticOp::Add,
-                None,
+                OperandTy::Inferred,
                 &counter,
                 &step,
                 "next".into(),
@@ -885,7 +892,7 @@ mod tests {
         in_body
             .build_farithmetic(
                 FArithmeticOp::FMul,
-                None,
+                OperandTy::Inferred,
                 &phi.clone(),
                 &half,
                 "scaled".into(),
@@ -908,7 +915,7 @@ mod tests {
             .build_call(
                 "helper".to_string(),
                 &[(&seven, None)],
-                Some(i32_ty),
+                i32_ty.into(),
                 "c".into(),
                 &mut ctx,
             )
@@ -922,7 +929,7 @@ mod tests {
         );
 
         in_exit
-            .build_ret(Some(&answer), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&answer), i32_ty.into(), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -1007,7 +1014,7 @@ mod tests {
             .build_call(
                 "host_add".to_string(),
                 &[(&seven, None), (&half, None)],
-                None,
+                OperandTy::Inferred,
                 "r".into(),
                 &mut ctx,
             )
@@ -1018,7 +1025,7 @@ mod tests {
             .unwrap();
 
         cursor
-            .build_ret(Some(&result), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&result), i32_ty.into(), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -1135,16 +1142,22 @@ mod tests {
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(&address.clone(), None, None, "v".into(), &mut ctx)
+            .build_load(
+                &address.clone(),
+                OperandTy::Inferred,
+                None,
+                "v".into(),
+                &mut ctx,
+            )
             .expect("the global says what it points at");
 
         assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
 
         cursor
-            .build_store(&address, &loaded, None, None, &mut ctx)
+            .build_store(&address, &loaded, OperandTy::Inferred, None, &mut ctx)
             .unwrap();
 
-        cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
+        cursor.build_ret(None, void_ty.into(), &mut ctx).unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
 
@@ -1440,10 +1453,10 @@ mod tests {
             .unwrap();
 
         cursor
-            .build_store(&slot, &const_gep, None, None, &mut ctx)
+            .build_store(&slot, &const_gep, OperandTy::Inferred, None, &mut ctx)
             .expect("a constant expression is a valid store value");
 
-        cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
+        cursor.build_ret(None, void_ty.into(), &mut ctx).unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
 

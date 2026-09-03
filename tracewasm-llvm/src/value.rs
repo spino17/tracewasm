@@ -1716,8 +1716,14 @@ mod tests {
         let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
         let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
 
-        let (a, b) = Value::try_cast_two(&a, &b, None, Signedness::NotApplicable, &mut ctx)
-            .expect("two doubles already agree");
+        let (a, b) = Value::try_cast_two(
+            &a,
+            &b,
+            OperandTy::Inferred,
+            Signedness::NotApplicable,
+            &mut ctx,
+        )
+        .expect("two doubles already agree");
 
         assert_eq!(a.ty(), f64_ty);
         assert_eq!(b.ty(), f64_ty);
@@ -1727,8 +1733,14 @@ mod tests {
         let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
         let wide = Value::from_const(1.0f64, None, &mut ctx).unwrap();
 
-        let (x, y) = Value::try_cast_two(&wide, &narrow, None, Signedness::NotApplicable, &mut ctx)
-            .expect("f32 widens into f64 exactly");
+        let (x, y) = Value::try_cast_two(
+            &wide,
+            &narrow,
+            OperandTy::Inferred,
+            Signedness::NotApplicable,
+            &mut ctx,
+        )
+        .expect("f32 widens into f64 exactly");
 
         assert_eq!(x.ty(), f64_ty);
         assert_eq!(y.ty(), f64_ty);
@@ -1738,7 +1750,14 @@ mod tests {
         let float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
 
         assert!(
-            Value::try_cast_two(&int, &float, None, Signedness::NotApplicable, &mut ctx).is_none(),
+            Value::try_cast_two(
+                &int,
+                &float,
+                OperandTy::Inferred,
+                Signedness::NotApplicable,
+                &mut ctx
+            )
+            .is_none(),
             "nothing bridges the integer and float families",
         );
     }
