@@ -123,11 +123,13 @@ pub enum InstructionKind {
     /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
     /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
+    IArithmetic(IArithmeticOperands),
     /// Compares two floating-point values, producing an `i1`.
     ///
     /// Separate from [`ICmp`](Self::ICmp) because LLVM keeps them separate: `icmp`
     /// refuses floats and `fcmp` refuses integers.
     FCmp(FCmpOperands),
+    FArithmetic(FArithmeticOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -345,6 +347,67 @@ impl ICond {
 
         Some(signedness)
     }
+}
+
+pub struct IArithmeticOperands {
+    pub op: IArithmeticOp,
+    pub ty: TyId,
+    pub a: Value,
+    pub b: Value,
+}
+
+#[derive(Clone, Copy)]
+pub enum IArithmeticOp {
+    Add,
+    Sub,
+    Mul,
+    Udiv,
+    Sdiv,
+    Urem,
+    Srem,
+    Shl,
+    Lshr,
+    Ashr,
+    And,
+    Or,
+    Xor,
+}
+
+impl IArithmeticOp {
+    pub fn signedness(&self) -> Signedness {
+        match self {
+            IArithmeticOp::Add => Signedness::Signed,
+            IArithmeticOp::Sub => Signedness::Signed,
+            IArithmeticOp::Mul => Signedness::Signed,
+            IArithmeticOp::Udiv => Signedness::Unsigned,
+            IArithmeticOp::Sdiv => Signedness::Signed,
+            IArithmeticOp::Urem => Signedness::Unsigned,
+            IArithmeticOp::Srem => Signedness::Signed,
+            IArithmeticOp::Shl => Signedness::Signed,
+            IArithmeticOp::Lshr => Signedness::Unsigned,
+            IArithmeticOp::Ashr => Signedness::Signed,
+            IArithmeticOp::And => Signedness::Signed,
+            IArithmeticOp::Or => Signedness::Signed,
+            IArithmeticOp::Xor => Signedness::Signed,
+        }
+    }
+}
+
+pub struct FArithmeticOperands {
+    pub op: FArithmeticOp,
+    pub ty: TyId,
+    pub a: Value,
+    pub b: Value,
+}
+
+#[derive(Clone, Copy)]
+pub enum FArithmeticOp {
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FRem,
+    FNeg,
 }
 
 /// The operands of an `fcmp`.

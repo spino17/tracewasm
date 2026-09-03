@@ -9,9 +9,9 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, FCmpOperands, GetElementPtrOperands,
-        ICmpOperands, InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
-        UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
+        GetElementPtrOperands, IArithmeticOperands, ICmpOperands, InstructionKind, LoadOperands,
+        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, Value},
 };
@@ -134,6 +134,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_iarithmetic(
+        &mut self,
+        operands: &IArithmeticOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits an `fcmp`.
     ///
     /// Like [`visit_icmp`](Self::visit_icmp), the result is an [`I1Value`] and never
@@ -142,6 +149,13 @@ pub trait CfgVisitor {
         &mut self,
         operands: &FCmpOperands,
         value: &I1Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
+    fn visit_farithmetic(
+        &mut self,
+        operands: &FArithmeticOperands,
+        value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -233,8 +247,14 @@ pub trait CfgVisitor {
                 InstructionKind::ICmp(operands) => {
                     self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
                 }
+                InstructionKind::IArithmetic(operands) => {
+                    self.visit_iarithmetic(operands, val.unwrap(), ctx)?
+                }
                 InstructionKind::FCmp(operands) => {
                     self.visit_fcmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                }
+                InstructionKind::FArithmetic(operands) => {
+                    self.visit_farithmetic(operands, val.unwrap(), ctx)?
                 }
             });
         }
