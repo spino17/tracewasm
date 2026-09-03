@@ -95,6 +95,7 @@ impl From<&String> for RegName {
 /// The one place a fold is lossy is float narrowing, where `fptrunc` rounds:
 /// `0.1f64` asserted as a `float` is the nearest `float`. That is inherent to the
 /// instruction, not to this type.
+#[derive(Clone, Copy)]
 pub enum OperandTy {
     /// The operand has this type. If it does not, the call is an error rather than a
     /// silent conversion — see the note above.
@@ -377,7 +378,7 @@ impl Cursor {
     pub fn build_alloca(
         &self,
         ty: TyId,
-        count: Option<(&Value, Option<TyId>)>,
+        count: Option<(&Value, OperandTy)>,
         align: Option<u32>,
         reg: RegName,
         ctx: &mut Context,
@@ -402,7 +403,8 @@ impl Cursor {
                 .into());
             }
 
-            let final_count_val = if let Some(count_expected_ty) = count_expected_ty {
+            let final_count_val = if let OperandTy::Asserted(count_expected_ty) = count_expected_ty
+            {
                 if !count_expected_ty.is_integer(ctx) {
                     return Err(AllocaError::AllocaCountNotAnInteger(
                         count_expected_ty.display(ctx).to_string(),
@@ -753,12 +755,12 @@ impl Cursor {
     pub fn build_call(
         &self,
         func_name: String,
-        params: &[(&Value, Option<TyId>)],
+        params: &[(&Value, OperandTy)],
         return_ty: OperandTy,
         reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
-        let params: Vec<(Value, Option<TyId>)> = params
+        let params: Vec<(Value, OperandTy)> = params
             .iter()
             .copied()
             .map(|(x, y)| (x.clone(), y))
@@ -848,10 +850,10 @@ impl Cursor {
     pub fn build_void_call(
         &self,
         func_name: String,
-        params: &[(&Value, Option<TyId>)],
+        params: &[(&Value, OperandTy)],
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
-        let params: Vec<(Value, Option<TyId>)> = params
+        let params: Vec<(Value, OperandTy)> = params
             .iter()
             .copied()
             .map(|(x, y)| (x.clone(), y))
@@ -1283,7 +1285,7 @@ impl Cursor {
 /// constant converts, a register must already match.
 fn try_cast_param_and_check_with_func_signature(
     name: String,
-    params: &[(Value, Option<TyId>)],
+    params: &[(Value, OperandTy)],
     expected_param_tys: &[TyId],
     ctx: &mut Context,
 ) -> Result<Vec<Value>, CallError> {
@@ -1300,7 +1302,7 @@ fn try_cast_param_and_check_with_func_signature(
     for (index, ((param_val, param_ty), expected_param_ty)) in
         params.iter().zip(expected_param_tys).enumerate()
     {
-        let final_val = if let Some(param_ty) = param_ty {
+        let final_val = if let OperandTy::Asserted(param_ty) = param_ty {
             let given = ctx.display(param_val.ty()).to_string();
 
             let Some(casted_val) = param_val.try_cast(*param_ty, Signedness::Signed, ctx) else {
@@ -2496,7 +2498,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i32".to_string(),
-                &[(&wide, None)],
+                &[(&wide, OperandTy::Inferred)],
                 OperandTy::Inferred,
                 "b".into(),
                 &mut ctx,
@@ -2516,7 +2518,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i32".to_string(),
-                &[(&seven, None)],
+                &[(&seven, OperandTy::Inferred)],
                 f64_ty.into(),
                 "c".into(),
                 &mut ctx,
@@ -2537,7 +2539,7 @@ mod tests {
             cursor
                 .build_call(
                     "takes_i32".to_string(),
-                    &[(&seven, None)],
+                    &[(&seven, OperandTy::Inferred)],
                     i32_ty.into(),
                     "d".into(),
                     &mut ctx
@@ -2575,7 +2577,7 @@ mod tests {
             cursor
                 .build_call(
                     "takes_i64".to_string(),
-                    &[(&seven, Some(i64_ty))],
+                    &[(&seven, i64_ty.into())],
                     OperandTy::Inferred,
                     "a".into(),
                     &mut ctx
@@ -2589,7 +2591,7 @@ mod tests {
         let err = cursor
             .build_call(
                 "takes_i64".to_string(),
-                &[(&seven, Some(f64_ty))],
+                &[(&seven, f64_ty.into())],
                 OperandTy::Inferred,
                 "b".into(),
                 &mut ctx,
@@ -2612,7 +2614,7 @@ mod tests {
             matches!(
                 cursor.build_call(
                     "takes_i64".to_string(),
-                    &[(&narrow, Some(i64_ty))],
+                    &[(&narrow, i64_ty.into())],
                     OperandTy::Inferred,
                     "c".into(),
                     &mut ctx
@@ -3035,7 +3037,7 @@ mod tests {
 
             let elem = cursor
                 .build_get_element_ptr(
-                    &slot.clone(),
+                    &slot,
                     OperandTy::Inferred,
                     &indices,
                     None,
@@ -3186,7 +3188,7 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &loaded_ptr.clone(),
+                &loaded_ptr,
                 OperandTy::Inferred,
                 &indices,
                 None,
@@ -3399,7 +3401,7 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &slot.clone(),
+                &slot,
                 OperandTy::Inferred,
                 &[zero.clone(), wide],
                 None,
@@ -3450,7 +3452,7 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &slot.clone(),
+                &slot,
                 OperandTy::Inferred,
                 &[zero.clone(), past_end],
                 None,
@@ -3642,7 +3644,7 @@ mod tests {
         let err = cursor
             .build_alloca(
                 i32_ty,
-                Some((&a_float, None)),
+                Some((&a_float, OperandTy::Inferred)),
                 None,
                 RegName::Unnamed,
                 &mut ctx,
@@ -3662,7 +3664,7 @@ mod tests {
             matches!(
                 cursor.build_alloca(
                     i32_ty,
-                    Some((&an_int, Some(f64_ty))),
+                    Some((&an_int, f64_ty.into())),
                     None,
                     RegName::Unnamed,
                     &mut ctx
@@ -3687,7 +3689,13 @@ mod tests {
 
         assert!(
             cursor
-                .build_alloca(i32_ty, Some((&one, None)), None, RegName::Unnamed, &mut ctx)
+                .build_alloca(
+                    i32_ty,
+                    Some((&one, OperandTy::Inferred)),
+                    None,
+                    RegName::Unnamed,
+                    &mut ctx
+                )
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -3707,7 +3715,7 @@ mod tests {
         let err = cursor
             .build_alloca(
                 i32_ty,
-                Some((&n, Some(i64_ty))),
+                Some((&n, i64_ty.into())),
                 None,
                 RegName::Unnamed,
                 &mut ctx,
@@ -3746,11 +3754,11 @@ mod tests {
         let f64_ty = ctx.f64_ty();
 
         in_entry
-            .build_load(&ptr.clone(), i32_ty.into(), None, "a".into(), &mut ctx)
+            .build_load(&ptr, i32_ty.into(), None, "a".into(), &mut ctx)
             .unwrap();
 
         let second = in_entry
-            .build_load(&ptr.clone(), i64_ty.into(), None, "b".into(), &mut ctx)
+            .build_load(&ptr, i64_ty.into(), None, "b".into(), &mut ctx)
             .unwrap();
 
         let in_body = builder.cursor_at_block(body);
@@ -3917,7 +3925,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_load(&ptr.clone(), id.into(), None, RegName::Unnamed, &mut ctx)
+                    .build_load(&ptr, id.into(), None, RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
@@ -3937,13 +3945,7 @@ mod tests {
         for align in [1, 2, 4, 8, 16, 4096] {
             assert!(
                 cursor
-                    .build_load(
-                        &ptr.clone(),
-                        i32_ty.into(),
-                        Some(align),
-                        RegName::Unnamed,
-                        &mut ctx
-                    )
+                    .build_load(&ptr, i32_ty.into(), Some(align), RegName::Unnamed, &mut ctx)
                     .is_ok(),
                 "align {align} is a power of two"
             );
@@ -3951,13 +3953,7 @@ mod tests {
 
         for align in [0, 3, 6, 10, 12] {
             let err = cursor
-                .build_load(
-                    &ptr.clone(),
-                    i32_ty.into(),
-                    Some(align),
-                    RegName::Unnamed,
-                    &mut ctx,
-                )
+                .build_load(&ptr, i32_ty.into(), Some(align), RegName::Unnamed, &mut ctx)
                 .expect_err("not a power of two");
 
             assert!(

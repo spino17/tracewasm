@@ -768,7 +768,7 @@ mod tests {
         in_entry
             .build_alloca(
                 i64_ty,
-                Some((&count, None)),
+                Some((&count, OperandTy::Inferred)),
                 None,
                 RegName::Unnamed,
                 &mut ctx,
@@ -791,17 +791,11 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .build_load(&elem.clone(), f64_ty.into(), Some(8), "d".into(), &mut ctx)
+            .build_load(&elem, f64_ty.into(), Some(8), "d".into(), &mut ctx)
             .unwrap();
 
         in_entry
-            .build_store(
-                &elem,
-                &loaded.clone(),
-                OperandTy::Inferred,
-                Some(8),
-                &mut ctx,
-            )
+            .build_store(&elem, &loaded, OperandTy::Inferred, Some(8), &mut ctx)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
@@ -851,7 +845,7 @@ mod tests {
             .build_icmp(
                 ICond::Ult,
                 OperandTy::Inferred,
-                &counter.clone(),
+                &counter,
                 &limit,
                 "cmp".into(),
                 &mut ctx,
@@ -867,8 +861,8 @@ mod tests {
             .build_fcmp(
                 FCond::Ord,
                 OperandTy::Inferred,
-                &phi.clone(),
-                &half.clone(),
+                &phi,
+                &half,
                 "fcmp".into(),
                 &mut ctx,
             )
@@ -893,7 +887,7 @@ mod tests {
             .build_farithmetic(
                 FArithmeticOp::FMul,
                 OperandTy::Inferred,
-                &phi.clone(),
+                &phi,
                 &half,
                 "scaled".into(),
                 &mut ctx,
@@ -914,7 +908,7 @@ mod tests {
         let answer = in_exit
             .build_call(
                 "helper".to_string(),
-                &[(&seven, None)],
+                &[(&seven, OperandTy::Inferred)],
                 i32_ty.into(),
                 "c".into(),
                 &mut ctx,
@@ -1013,7 +1007,7 @@ mod tests {
         let result = cursor
             .build_call(
                 "host_add".to_string(),
-                &[(&seven, None), (&half, None)],
+                &[(&seven, OperandTy::Inferred), (&half, OperandTy::Inferred)],
                 OperandTy::Inferred,
                 "r".into(),
                 &mut ctx,
@@ -1142,13 +1136,7 @@ mod tests {
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(
-                &address.clone(),
-                OperandTy::Inferred,
-                None,
-                "v".into(),
-                &mut ctx,
-            )
+            .build_load(&address, OperandTy::Inferred, None, "v".into(), &mut ctx)
             .expect("the global says what it points at");
 
         assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
