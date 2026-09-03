@@ -370,22 +370,3 @@ pub enum FCond {
     True,
     False,
 }
-
-impl FCond {
-    pub fn is_ordered(&self) -> bool {
-        matches!(
-            self,
-            FCond::Oeq
-                | FCond::Ogt
-                | FCond::Oge
-                | FCond::Olt
-                | FCond::Ole
-                | FCond::One
-                | FCond::Ord
-        )
-    }
-
-    pub fn is_unordered(&self) -> bool {
-        !self.is_ordered()
-    }
-}

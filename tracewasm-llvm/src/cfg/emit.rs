@@ -10,8 +10,9 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperands,
-        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, FCmpOperands, GetElementPtrOperands,
+        ICmpOperands, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
+        UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
 };
@@ -564,6 +565,15 @@ impl CfgVisitor for IREmitter {
         ));
 
         Ok(())
+    }
+
+    fn visit_fcmp(
+        &mut self,
+        operands: &FCmpOperands,
+        value: &I1Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
     }
 
     fn post_func_visit(

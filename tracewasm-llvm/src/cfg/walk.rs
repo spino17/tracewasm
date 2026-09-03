@@ -9,8 +9,8 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visiblity},
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, GetElementPtrOperands, ICmpOperands,
-        InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
+        AllocaOperands, CallOperands, ConditionalBrOperands, FCmpOperands, GetElementPtrOperands,
+        ICmpOperands, InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, Value},
@@ -134,6 +134,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_fcmp(
+        &mut self,
+        operands: &FCmpOperands,
+        value: &I1Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -221,6 +228,9 @@ pub trait CfgVisitor {
                 InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
                 InstructionKind::ICmp(operands) => {
                     self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                }
+                InstructionKind::FCmp(operands) => {
+                    self.visit_fcmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
                 }
             });
         }

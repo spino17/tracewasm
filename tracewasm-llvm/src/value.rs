@@ -385,6 +385,7 @@ pub enum Signedness {
     /// which is LLVM's `sext`; narrowing is checked against the target's *signed*
     /// range.
     Signed,
+    None,
 }
 
 /// How a [`Value`] is obtained — the three forms an LLVM operand can take.
@@ -1085,6 +1086,7 @@ impl Const for i8 {
                 Type::I64 => ConstValue::I64(*self as u8 as u64 as i64),
                 _ => return None,
             },
+            Signedness::None => return None,
         };
 
         Some(v)
@@ -1132,6 +1134,7 @@ impl Const for i16 {
                 Type::I64 => ConstValue::I64(*self as u16 as u64 as i64),
                 _ => return None,
             },
+            Signedness::None => return None,
         };
 
         Some(v)
@@ -1197,6 +1200,7 @@ impl Const for i32 {
                     _ => return None,
                 }
             }
+            Signedness::None => return None,
         };
 
         Some(v)
@@ -1274,6 +1278,7 @@ impl Const for i64 {
                     _ => return None,
                 }
             }
+            Signedness::None => return None,
         };
 
         Some(v)
@@ -1641,6 +1646,77 @@ mod tests {
         );
     }
 
+    /// [`Signedness::None`] refuses every integer cast, including one to the type the
+    /// value already has.
+    ///
+    /// It means "no reading was supplied", which is the honest answer for `fcmp`,
+    /// where the predicate says nothing about signedness because its operands are
+    /// floats. Refusing rather than defaulting is what keeps an integer from reaching
+    /// a float comparison by way of a silent widening.
+    #[test]
+    fn no_signedness_refuses_every_integer_cast() {
+        let mut ctx = crate::test_support::ctx();
+        let i8_ty = ctx.i8_ty();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+
+        // Widening, narrowing and identity alike.
+        assert_eq!(1i32.try_cast(i64_ty, Signedness::None, &mut ctx), None);
+        assert_eq!(1i32.try_cast(i8_ty, Signedness::None, &mut ctx), None);
+        assert_eq!(
+            1i32.try_cast(i32_ty, Signedness::None, &mut ctx),
+            None,
+            "even the identity cast, since no reading was given",
+        );
+        assert_eq!(1i8.try_cast(i8_ty, Signedness::None, &mut ctx), None);
+        assert_eq!(1i64.try_cast(i64_ty, Signedness::None, &mut ctx), None);
+
+        // Floats are unaffected: they have no signedness to withhold.
+        let f64_ty = ctx.f64_ty();
+
+        assert_eq!(
+            0.5f32.try_cast(f64_ty, Signedness::None, &mut ctx),
+            Some(ConstValue::Double(OrderedFloat(0.5f64))),
+        );
+    }
+
+    /// Two operands that already share a float type need no cast, so
+    /// [`Signedness::None`] never gets in the way — which is what lets `fcmp` pass it.
+    #[test]
+    fn no_signedness_still_pairs_matching_floats() {
+        let mut ctx = crate::test_support::ctx();
+        let f64_ty = ctx.f64_ty();
+
+        let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+
+        let (a, b) = Value::try_cast_two(a, b, None, Signedness::None, &mut ctx)
+            .expect("two doubles already agree");
+
+        assert_eq!(a.ty(), f64_ty);
+        assert_eq!(b.ty(), f64_ty);
+
+        // And a narrower float constant still widens, because `fpext` is exact and
+        // needs no reading to be chosen.
+        let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
+        let wide = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+
+        let (x, y) = Value::try_cast_two(wide, narrow, None, Signedness::None, &mut ctx)
+            .expect("f32 widens into f64 exactly");
+
+        assert_eq!(x.ty(), f64_ty);
+        assert_eq!(y.ty(), f64_ty);
+
+        // An integer paired with a float has no common type under any reading.
+        let int = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
+
+        assert!(
+            Value::try_cast_two(int, float, None, Signedness::None, &mut ctx).is_none(),
+            "nothing bridges the integer and float families",
+        );
+    }
+
     /// A cast to the width a value already has is the identity, whichever reading is
     /// asked for — there are no bits to add or drop, so the flag cannot apply.
     #[test]
@@ -1675,7 +1751,7 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let f64_ty = ctx.f64_ty();
 
-        for signedness in [Signedness::Signed, Signedness::Unsigned] {
+        for signedness in [Signedness::Signed, Signedness::Unsigned, Signedness::None] {
             assert_eq!(
                 0.5f32.try_cast(f64_ty, signedness, &mut ctx),
                 Some(ConstValue::Double(OrderedFloat(0.5f64))),
@@ -1697,34 +1773,46 @@ mod tests {
         }
     }
 
-    /// `f64` -> `f32` is `fptrunc`. Unlike integer narrowing this is **not** range
-    /// checked: out-of-range values become infinity and tiny ones become zero, rather
-    /// than being refused.
+    /// `f64` -> `f32` is `fptrunc`, and it is range-checked like an integer
+    /// narrowing: a value too large for an `f32` is refused rather than quietly
+    /// becoming infinity.
     ///
-    /// Asserted as it behaves today so that changing it is a deliberate act — the
-    /// integer path refuses `300i32 -> i8`, and this path does not refuse the
-    /// equivalent.
+    /// Ordinary rounding is still allowed — every `fptrunc` rounds, so refusing that
+    /// would refuse the instruction itself. What is refused is leaving the range.
     #[test]
-    fn narrowing_a_float_is_lossy_and_unchecked() {
+    fn narrowing_a_float_refuses_what_does_not_fit() {
         let mut ctx = crate::test_support::ctx();
         let f32_ty = ctx.f32_ty();
 
         assert_eq!(
             0.1f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::Float(OrderedFloat(0.1f64 as f32))),
-            "ordinary precision loss",
+            "precision loss is inherent to fptrunc and stays allowed",
+        );
+        assert_eq!(
+            (f32::MAX as f64).try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::MAX))),
+            "the boundary itself is representable",
         );
 
         assert_eq!(
             1e300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
-            Some(ConstValue::Float(OrderedFloat(f32::INFINITY))),
-            "overflow becomes infinity rather than being refused",
+            None,
+            "past f32::MAX, so refused rather than folded to infinity",
+        );
+        assert_eq!(
+            (-1e300f64).try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "the lower bound is checked too, not just the upper",
         );
 
+        // Underflow is *not* checked: a value too small for an `f32` still becomes
+        // zero rather than being refused. Pinned so that changing it is deliberate,
+        // since it is the same kind of categorical loss as overflow.
         assert_eq!(
             1e-300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::Float(OrderedFloat(0.0f32))),
-            "underflow becomes zero rather than being refused",
+            "underflow silently flushes to zero, unlike overflow",
         );
 
         // The sign of a zero survives, which the constant pool depends on: `+0.0` and
@@ -1738,7 +1826,6 @@ mod tests {
             ConstValue::Float(OrderedFloat(-0.0f32)),
             "-0.0 must not come back as +0.0",
         );
-
         assert!(!negative_zero.is_sign_positive());
     }
 

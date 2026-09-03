@@ -872,12 +872,12 @@ impl Cursor {
 
         let i1val = val
             .into_i1(ctx)
-            .expect("the result type passed just above is ");
+            .expect("the result type passed just above is i1");
 
         Ok(i1val)
     }
 
-    fn build_fcmp(
+    pub fn build_fcmp(
         &self,
         cond: FCond,
         ty: Option<TyId>,
@@ -886,7 +886,7 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::Signed, ctx) else {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::None, ctx) else {
             todo!() // RAISE ERROR
         };
 
@@ -906,7 +906,7 @@ impl Cursor {
 
         let i1val = val
             .into_i1(ctx)
-            .expect("the result type passed just above is ");
+            .expect("the result type passed just above is i1");
 
         Ok(i1val)
     }
