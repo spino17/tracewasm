@@ -16,7 +16,7 @@ use crate::{
         global::{Global, GlobalEntity, GlobalId},
     },
     error::{GepError, TypeError},
-    instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind},
+    instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind, cursor::OperandTy},
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -629,11 +629,11 @@ impl Value {
     pub fn try_cast_two(
         a: &Value,
         b: &Value,
-        ty: Option<TyId>,
+        ty: OperandTy,
         signedness: Signedness,
         ctx: &mut Context,
     ) -> Option<(Value, Value)> {
-        if let Some(ty) = ty {
+        if let OperandTy::Asserted(ty) = ty {
             return Some((
                 a.try_cast(ty, signedness, ctx)?,
                 b.try_cast(ty, signedness, ctx)?,

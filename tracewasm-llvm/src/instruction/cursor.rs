@@ -227,11 +227,11 @@ impl Cursor {
     pub fn build_ret(
         self,
         val: Option<&Value>,
-        ty: Option<TyId>,
+        ty: OperandTy,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
         let (val, ty) = match (val, ty) {
-            (Some(val), Some(ty)) => {
+            (Some(val), OperandTy::Asserted(ty)) => {
                 if ty.is_void(ctx) {
                     return Err(
                         RetError::ValueGivenForVoid(ctx.display(val.ty()).to_string()).into(),
@@ -250,12 +250,12 @@ impl Cursor {
 
                 (Some(casted_val), ty)
             }
-            (Some(val), None) => {
+            (Some(val), OperandTy::Inferred) => {
                 let ty = val.ty();
 
                 (Some(val.clone()), ty)
             }
-            (None, Some(ty)) => {
+            (None, OperandTy::Asserted(ty)) => {
                 if !ty.is_void(ctx) {
                     return Err(
                         RetError::NonVoidTypeWithoutValue(ty.display(ctx).to_string()).into(),
@@ -264,7 +264,7 @@ impl Cursor {
 
                 (None, ty)
             }
-            (None, None) => return Err(RetError::TypeAndValueBothAbsent.into()),
+            (None, OperandTy::Inferred) => return Err(RetError::TypeAndValueBothAbsent.into()),
         };
 
         // LLVM checks the return against the *function's* result type, not just
@@ -410,7 +410,7 @@ impl Cursor {
     pub fn build_load(
         &self,
         ptr: &Value,
-        ty: Option<TyId>,
+        ty: OperandTy,
         align: Option<u32>,
         reg: RegName,
         ctx: &mut Context,
@@ -429,7 +429,7 @@ impl Cursor {
 
         let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
 
-        let final_ty = if let Some(ty) = ty {
+        let final_ty = if let OperandTy::Asserted(ty) = ty {
             if !ty.is_first_class(ctx) {
                 return Err(InstructionError::TypeNotLoadable(
                     ty.display(ctx).to_string(),
@@ -484,7 +484,7 @@ impl Cursor {
         &self,
         ptr: &Value,
         value: &Value,
-        ty: Option<TyId>,
+        ty: OperandTy,
         align: Option<u32>,
         ctx: &mut Context,
     ) -> Result<(), InstructionError> {
@@ -500,7 +500,7 @@ impl Cursor {
             return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
-        let final_val = if let Some(ty) = ty {
+        let final_val = if let OperandTy::Asserted(ty) = ty {
             let value_ty = ctx.display(value.ty()).to_string();
 
             let Some(casted_value) = value.try_cast(ty, Signedness::Signed, ctx) else {
@@ -573,7 +573,7 @@ impl Cursor {
     pub fn build_get_element_ptr(
         &self,
         ptr: &Value,
-        source_ty: Option<TyId>,
+        source_ty: OperandTy,
         indices: &[Value],
         inbounds: Option<bool>,
         reg: RegName,
@@ -597,7 +597,7 @@ impl Cursor {
 
         let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
 
-        let final_source_ty = if let Some(source_ty) = source_ty {
+        let final_source_ty = if let OperandTy::Asserted(source_ty) = source_ty {
             if !source_ty.is_first_class(ctx) {
                 return Err(
                     GepError::SourceTypeNotSized(source_ty.display(ctx).to_string()).into(),
@@ -699,7 +699,7 @@ impl Cursor {
         &self,
         func_name: String,
         params: &[(&Value, Option<TyId>)],
-        return_ty: Option<TyId>,
+        return_ty: OperandTy,
         reg: RegName,
         ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
@@ -729,7 +729,7 @@ impl Cursor {
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
-        let return_ty = if let Some(return_ty) = return_ty {
+        let return_ty = if let OperandTy::Asserted(return_ty) = return_ty {
             if return_ty != expected_return_ty {
                 return Err(CallError::ReturnTypeMismatch(
                     name,
@@ -889,7 +889,7 @@ impl Cursor {
     pub fn build_icmp(
         &self,
         cond: ICond,
-        ty: Option<TyId>,
+        ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
@@ -920,7 +920,7 @@ impl Cursor {
                 .into());
             }
 
-            if let Some(ty) = ty
+            if let OperandTy::Asserted(ty) = ty
                 && ty != a.ty()
             {
                 return Err(ICmpError::ProvidedTypeDoesNotMatchOperands(
@@ -992,7 +992,7 @@ impl Cursor {
     pub fn build_iarithmetic(
         &self,
         op: IArithmeticOp,
-        ty: Option<TyId>,
+        ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
@@ -1023,7 +1023,7 @@ impl Cursor {
                 .into());
             }
 
-            if let Some(ty) = ty
+            if let OperandTy::Asserted(ty) = ty
                 && ty != a.ty()
             {
                 return Err(IArithmeticError::ProvidedTypeDoesNotMatchOperands(
@@ -1083,7 +1083,7 @@ impl Cursor {
     pub fn build_fcmp(
         &self,
         cond: FCond,
-        ty: Option<TyId>,
+        ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
@@ -1144,7 +1144,7 @@ impl Cursor {
     pub fn build_farithmetic(
         &self,
         op: FArithmeticOp,
-        ty: Option<TyId>,
+        ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
