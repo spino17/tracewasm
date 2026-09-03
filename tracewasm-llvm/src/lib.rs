@@ -35,7 +35,7 @@
 //! let entry = f.add_basic_block("entry".to_string(), &mut ctx)?;
 //!
 //! let zero = tracewasm_llvm::value::Value::from_const(0i32, None, &mut ctx)?;
-//! builder.cursor_at_block(entry).build_ret(Some(zero), Some(i32_ty), &mut ctx)?;
+//! builder.cursor_at_block(entry).build_ret(Some(&zero), Some(i32_ty), &mut ctx)?;
 //!
 //! let ir = IREmitter::emit(builder.build(ctx))?;
 //!

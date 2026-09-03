@@ -664,7 +664,7 @@ mod tests {
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
         error::ContextError,
-        instruction::{FCond, GetElementPtrOperands, ICond},
+        instruction::{FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond},
         interner::TyId,
         test_support::fixture,
         value::{ConstExpr, FuncSignature, NullPtr, Type},
@@ -727,7 +727,7 @@ mod tests {
 
         builder
             .cursor_at_block(helper_entry)
-            .build_ret(Some(passed), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&passed), Some(i32_ty), &mut ctx)
             .unwrap();
 
         let noop = builder
@@ -763,7 +763,7 @@ mod tests {
         let count = Value::from_const(4i32, None, &mut ctx).unwrap();
 
         in_entry
-            .build_alloca(i64_ty, Some((count, None)), None, None, &mut ctx)
+            .build_alloca(i64_ty, Some((&count, None)), None, None, &mut ctx)
             .unwrap();
 
         let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
@@ -772,9 +772,9 @@ mod tests {
 
         let elem = in_entry
             .build_get_element_ptr(
-                slot,
+                &slot,
                 None,
-                vec![zero, one, two],
+                &[zero, one, two],
                 Some(true),
                 Some("e"),
                 &mut ctx,
@@ -782,11 +782,11 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .build_load(elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
+            .build_load(&elem.clone(), Some(f64_ty), Some(8), Some("d"), &mut ctx)
             .unwrap();
 
         in_entry
-            .build_store(elem, loaded.clone(), None, Some(8), &mut ctx)
+            .build_store(&elem, &loaded.clone(), None, Some(8), &mut ctx)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
@@ -798,7 +798,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .build_store(float_slot, a_float, None, None, &mut ctx)
+            .build_store(&float_slot, &a_float, None, None, &mut ctx)
             .unwrap();
 
         let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
@@ -808,7 +808,7 @@ mod tests {
             .unwrap();
 
         in_entry
-            .build_store(ptr_slot, null, None, None, &mut ctx)
+            .build_store(&ptr_slot, &null, None, None, &mut ctx)
             .unwrap();
         in_entry.build_unconditional_br(body, &mut ctx).unwrap();
 
@@ -833,7 +833,14 @@ mod tests {
             .clone();
 
         let cond = in_body
-            .build_icmp(ICond::Ult, None, counter.clone(), limit, Some("cmp"), &mut ctx)
+            .build_icmp(
+                ICond::Ult,
+                None,
+                &counter.clone(),
+                &limit,
+                Some("cmp"),
+                &mut ctx,
+            )
             .unwrap();
 
         // An `fcmp` alongside it, so the float comparison is emitted and assembled
@@ -842,7 +849,14 @@ mod tests {
         let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
 
         in_body
-            .build_fcmp(FCond::Ord, None, phi.clone(), half.clone(), Some("fcmp"), &mut ctx)
+            .build_fcmp(
+                FCond::Ord,
+                None,
+                &phi.clone(),
+                &half.clone(),
+                Some("fcmp"),
+                &mut ctx,
+            )
             .unwrap();
 
         // One of each arithmetic shape, so all three emitters are assembled: an
@@ -853,8 +867,8 @@ mod tests {
             .build_iarithmetic(
                 IArithmeticOp::Add,
                 None,
-                counter,
-                step,
+                &counter,
+                &step,
                 Some("next"),
                 &mut ctx,
             )
@@ -864,8 +878,8 @@ mod tests {
             .build_farithmetic(
                 FArithmeticOp::FMul,
                 None,
-                phi.clone(),
-                half,
+                &phi.clone(),
+                &half,
                 Some("scaled"),
                 &mut ctx,
             )
@@ -885,7 +899,7 @@ mod tests {
         let answer = in_exit
             .build_call(
                 "helper".to_string(),
-                &[(seven, None)],
+                &[(&seven, None)],
                 Some(i32_ty),
                 Some("c"),
                 &mut ctx,
@@ -902,7 +916,7 @@ mod tests {
         );
 
         in_exit
-            .build_ret(Some(answer), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&answer), Some(i32_ty), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -986,7 +1000,7 @@ mod tests {
         let result = cursor
             .build_call(
                 "host_add".to_string(),
-                &[(seven, None), (half, None)],
+                &[(&seven, None), (&half, None)],
                 None,
                 Some("r"),
                 &mut ctx,
@@ -999,7 +1013,7 @@ mod tests {
             .unwrap();
 
         cursor
-            .build_ret(Some(result), Some(i32_ty), &mut ctx)
+            .build_ret(Some(&result), Some(i32_ty), &mut ctx)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build(ctx)).unwrap();
@@ -1116,13 +1130,13 @@ mod tests {
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(address.clone(), None, None, Some("v"), &mut ctx)
+            .build_load(&address.clone(), None, None, Some("v"), &mut ctx)
             .expect("the global says what it points at");
 
         assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
 
         cursor
-            .build_store(address, loaded, None, None, &mut ctx)
+            .build_store(&address, &loaded, None, None, &mut ctx)
             .unwrap();
 
         cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
@@ -1421,7 +1435,7 @@ mod tests {
             .unwrap();
 
         cursor
-            .build_store(slot, const_gep, None, None, &mut ctx)
+            .build_store(&slot, &const_gep, None, None, &mut ctx)
             .expect("a constant expression is a valid store value");
 
         cursor.build_ret(None, Some(void_ty), &mut ctx).unwrap();
