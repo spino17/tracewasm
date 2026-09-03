@@ -573,7 +573,17 @@ impl CfgVisitor for IREmitter {
         value: &I1Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // Same shape as `icmp`: the type once, then two untyped operands.
+        self.push_line(&format!(
+            "{} = fcmp {} {} {}, {}",
+            Self::operand_kind(&value.kind, ctx)?,
+            operands.cond,
+            ctx.display(operands.ty),
+            Self::operand(&operands.a, ctx)?,
+            Self::operand(&operands.b, ctx)?
+        ));
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -598,7 +608,7 @@ mod tests {
             module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         },
         error::ContextError,
-        instruction::{GetElementPtrOperands, ICond},
+        instruction::{FCond, GetElementPtrOperands, ICond},
         interner::TyId,
         test_support::fixture,
         value::{ConstExpr, FuncSignature, NullPtr, Type},
@@ -754,7 +764,9 @@ mod tests {
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
         // requires one phi entry per predecessor.
-        phi_handler.add_branch((body, phi), &mut ctx).unwrap();
+        phi_handler
+            .add_branch((body, phi.clone()), &mut ctx)
+            .unwrap();
 
         // The branch condition comes from a real comparison rather than a literal, so
         // the `icmp` line and the `i1` it feeds are both covered here.
@@ -766,6 +778,15 @@ mod tests {
 
         let cond = in_body
             .build_icmp(ICond::Ult, None, counter, limit, Some("cmp"), &mut ctx)
+            .unwrap();
+
+        // An `fcmp` alongside it, so the float comparison is emitted and assembled
+        // too. `ord` is the predicate with no integer analogue: it asks only whether
+        // neither operand is a NaN.
+        let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
+
+        in_body
+            .build_fcmp(FCond::Ord, None, phi, half, Some("fcmp"), &mut ctx)
             .unwrap();
 
         in_body
@@ -830,6 +851,7 @@ mod tests {
             "body:\n",
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
             "    %cmp = icmp ult i32 %n, 10\n",
+            "    %fcmp = fcmp ord double %m, 0x3FE0000000000000\n",
             "    br i1 %cmp, label %body, label %exit\n",
             "exit:\n",
             "    %c = call i32 @helper(i32 7)\n",

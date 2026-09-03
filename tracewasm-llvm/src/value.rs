@@ -160,6 +160,11 @@ impl TyId {
         )
     }
 
+    /// Whether this is a floating-point type.
+    ///
+    /// All four count: `llvm-as` assembles `fcmp` on `half`, `bfloat`, `float` and
+    /// `double` alike. Note that only `float` and `double` have a
+    /// [`ConstValue`] — the other two are reachable as register types only.
     pub fn is_float(&self, ctx: &Context) -> bool {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -385,6 +390,13 @@ pub enum Signedness {
     /// which is LLVM's `sext`; narrowing is checked against the target's *signed*
     /// range.
     Signed,
+    /// No reading was supplied, so no integer cast is possible — not even the
+    /// identity.
+    ///
+    /// This is the honest answer where the operation itself carries no signedness:
+    /// `fcmp` compares floats, whose sign is part of the format. Refusing rather than
+    /// defaulting is what stops an integer reaching a float comparison by way of a
+    /// silent widening. Float casts are unaffected, since they never consult this.
     None,
 }
 
@@ -1663,11 +1675,13 @@ mod tests {
         // Widening, narrowing and identity alike.
         assert_eq!(1i32.try_cast(i64_ty, Signedness::None, &mut ctx), None);
         assert_eq!(1i32.try_cast(i8_ty, Signedness::None, &mut ctx), None);
+
         assert_eq!(
             1i32.try_cast(i32_ty, Signedness::None, &mut ctx),
             None,
             "even the identity cast, since no reading was given",
         );
+
         assert_eq!(1i8.try_cast(i8_ty, Signedness::None, &mut ctx), None);
         assert_eq!(1i64.try_cast(i64_ty, Signedness::None, &mut ctx), None);
 

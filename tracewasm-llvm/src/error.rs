@@ -16,6 +16,7 @@
 //!     ├── CallError
 //!     ├── GepError
 //!     ├── ICmpError
+//!     ├── FCmpError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -188,6 +189,9 @@ pub enum InstructionError {
     /// See [`ICmpError`].
     #[error("{0}")]
     ICmp(#[from] ICmpError),
+    /// See [`FCmpError`].
+    #[error("{0}")]
+    FCmp(#[from] FCmpError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -321,6 +325,32 @@ pub enum ICmpError {
     /// `fcmp`.
     #[error("`icmp` compares integers or pointers, but its operands have type `{0}`")]
     OperandTypeNotComparable(String),
+}
+
+/// An `fcmp` could not be built.
+///
+/// Like `icmp`, LLVM requires both operands to have the same type. Unlike `icmp`,
+/// there is no signedness to resolve — a float's sign is part of its format — so a
+/// narrower float **constant** widens by `fpext`, which is exact and needs no choice
+/// made on the caller's behalf.
+#[derive(Error, Debug)]
+pub enum FCmpError {
+    /// The operands have different types and could not be brought to a common one.
+    ///
+    /// Either the narrower operand is a register — widening one needs a real `fpext`,
+    /// which this builder will not insert — or it is a constant that does not fit the
+    /// common type. Integer operands land here too: nothing bridges the integer and
+    /// float families without a real `sitofp`.
+    ///
+    /// Fields: the predicate, and the two operand types.
+    #[error("`fcmp {0}` cannot bring operands of type `{1}` and `{2}` to a common type")]
+    OperandsNotCastable(String, String, String),
+    /// `fcmp` compares floats, and this is not one.
+    ///
+    /// `half`, `bfloat`, `float` and `double` are all accepted — `llvm-as` assembles
+    /// `fcmp oeq` on every one of them. Integers are not: comparing those is `icmp`.
+    #[error("`fcmp` compares floating-point values, but its operands have type `{0}`")]
+    OperandTypeNotFloat(String),
 }
 
 /// A `store` could not be built.

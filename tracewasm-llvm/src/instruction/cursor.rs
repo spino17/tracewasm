@@ -7,8 +7,8 @@ use crate::{
         global::GlobalKind,
     },
     error::{
-        AllocaError, CallError, GepError, ICmpError, InstructionError, PhiError, RetError,
-        StoreError,
+        AllocaError, CallError, FCmpError, GepError, ICmpError, InstructionError, PhiError,
+        RetError, StoreError,
     },
     instruction::{
         AllocaOperands, CallOperands, ConditionalBrOperands, FCmpOperands, FCond,
@@ -16,7 +16,7 @@ use crate::{
         PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::{StrId, TyId},
-    value::{I1Value, Signedness, Type, Value, ValueKind},
+    value::{I1Value, Signedness, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 
@@ -877,6 +877,29 @@ impl Cursor {
         Ok(i1val)
     }
 
+    /// Compares two floating-point values, defining an `i1`.
+    ///
+    /// Emits `fcmp <cond> <ty> <a>, <b>`. The result is an [`I1Value`], so it can be
+    /// handed straight to [`build_conditional_br`](Self::build_conditional_br).
+    ///
+    /// # Operand types must agree
+    ///
+    /// As with [`build_icmp`](Self::build_icmp), LLVM requires it. A differing-width
+    /// **constant** is widened to match; a differing-width *register* is refused,
+    /// since widening one needs an `fpext` this builder will not insert.
+    ///
+    /// No signedness is involved — a float carries its sign in its format, so `fpext`
+    /// is exact and there is nothing for a caller to choose. That is why the cast runs
+    /// under [`Signedness::None`](crate::value::Signedness::None), which also refuses
+    /// every integer cast and so keeps an integer from reaching a float comparison by
+    /// way of a silent widening.
+    ///
+    /// # Errors
+    ///
+    /// - [`FCmpError::OperandsNotCastable`] — no common type. Integer operands land
+    ///   here, since nothing bridges the two families without a real `sitofp`.
+    /// - [`FCmpError::OperandTypeNotFloat`] — the common type is not a float.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_fcmp(
         &self,
         cond: FCond,
@@ -886,14 +909,24 @@ impl Cursor {
         reg: Option<&str>,
         ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
+        // Ids are `Copy`, so the operand types survive the move into the cast and are
+        // rendered only on the failing path.
+        let (given_a, given_b) = (a.ty(), b.ty());
+
         let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::None, ctx) else {
-            todo!() // RAISE ERROR
+            return Err(FCmpError::OperandsNotCastable(
+                cond.to_string(),
+                ctx.display(given_a).to_string(),
+                ctx.display(given_b).to_string(),
+            )
+            .into());
         };
 
+        // Both operands share a type by here, so checking one covers both.
         let ty = a.ty();
 
         if !ty.is_float(ctx) {
-            todo!() // RAISE ERROR: not a float!
+            return Err(FCmpError::OperandTypeNotFloat(ctx.display(ty).to_string()).into());
         }
 
         let val = add_instruction_to_block_and_get_value(
@@ -3647,6 +3680,171 @@ mod tests {
             assert!(
                 cursor.build_icmp(cond, None, a, b, None, &mut ctx).is_ok(),
                 "`icmp {cond} ptr` is valid LLVM",
+            );
+        }
+    }
+
+    /// `fcmp` widens a narrower float constant, and needs no signedness to do it:
+    /// `fpext` is exact, so there is nothing for a caller to choose.
+    #[test]
+    fn fcmp_widens_a_narrower_float_constant() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, block) = block_for_icmp(&mut ctx, &mut builder);
+
+        let f64_ty = ctx.f64_ty();
+        let wide = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
+
+        let result = cursor
+            .build_fcmp(FCond::Olt, None, wide, narrow, Some("c"), &mut ctx)
+            .expect("an f32 constant widens into an f64 comparison");
+
+        assert!(result.ty.is_i1(&ctx), "an fcmp produces an i1");
+
+        let instr = ctx
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .unwrap();
+
+        let InstructionKind::FCmp(operands) = &instr.kind else {
+            panic!("the last instruction is not an fcmp");
+        };
+
+        assert_eq!(operands.ty, f64_ty, "the comparison is at the wider type");
+        assert_eq!(operands.a.ty(), f64_ty);
+        assert_eq!(operands.b.ty(), f64_ty);
+    }
+
+    /// Integers are not comparable with `fcmp` — that is what `icmp` is for, and
+    /// `llvm-as` keeps the two apart.
+    #[test]
+    fn fcmp_refuses_integers() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let a = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_fcmp(FCond::Oeq, None, a, b, None, &mut ctx)
+            .expect_err("integers are not comparable with fcmp");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::FCmp(FCmpError::OperandTypeNotFloat(ty)) if ty == "i32"
+            ),
+            "the error must name the offending type, got: {err}",
+        );
+    }
+
+    /// An integer paired with a float has no common type under
+    /// [`Signedness::None`](crate::value::Signedness::None), so the mismatch is caught
+    /// as a cast failure before the float check is ever reached.
+    #[test]
+    fn fcmp_refuses_an_integer_paired_with_a_float() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_fcmp(FCond::Oeq, None, a, b, None, &mut ctx)
+            .expect_err("nothing bridges the integer and float families");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::FCmp(FCmpError::OperandsNotCastable(p, a, b))
+                    if p == "oeq" && a == "double" && b == "i32"
+            ),
+            "got: {err}",
+        );
+    }
+
+    /// Two integers of *different* widths are refused as an uncastable pair, not as
+    /// a non-float type.
+    ///
+    /// This is what [`Signedness::None`](crate::value::Signedness::None) buys. Under a
+    /// real signedness the narrower constant would widen happily, and the mismatch
+    /// would only surface a step later at the float check — reporting the *widened*
+    /// type, which the caller never wrote. Refusing the cast keeps the error pointing
+    /// at what was actually passed.
+    #[test]
+    fn fcmp_refuses_two_integers_of_different_widths_as_a_cast_failure() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let a = Value::from_const(1i64, None, &mut ctx).unwrap();
+        let b = Value::from_const(2i32, None, &mut ctx).unwrap();
+
+        let err = cursor
+            .build_fcmp(FCond::Oeq, None, a, b, None, &mut ctx)
+            .expect_err("integers are not comparable with fcmp");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::FCmp(FCmpError::OperandsNotCastable(p, a, b))
+                    if p == "oeq" && a == "i64" && b == "i32"
+            ),
+            "both original types must be named, not a widened one: {err}",
+        );
+    }
+
+    /// Widening a *register* would need a real `fpext`, which this builder does not
+    /// insert — so a mismatch between registers is refused.
+    #[test]
+    fn fcmp_does_not_widen_a_register() {
+        let (mut ctx, mut builder) = fixture();
+        let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+        let f32_ty = ctx.f32_ty();
+        let f64_ty = ctx.f64_ty();
+        let a = Value::from_register("a".to_string(), f64_ty, &mut ctx);
+        let b = Value::from_register("b".to_string(), f32_ty, &mut ctx);
+
+        assert!(matches!(
+            cursor.build_fcmp(FCond::Ogt, None, a, b, None, &mut ctx),
+            Err(InstructionError::FCmp(FCmpError::OperandsNotCastable(..)))
+        ),);
+    }
+
+    /// Every predicate assembles, including the two constants — `llvm-as` refuses
+    /// `fcmp true` written *without* operands, so they still take two.
+    #[test]
+    fn every_float_predicate_builds() {
+        for cond in [
+            FCond::Oeq,
+            FCond::Ogt,
+            FCond::Oge,
+            FCond::Olt,
+            FCond::Ole,
+            FCond::One,
+            FCond::Ord,
+            FCond::Ueq,
+            FCond::Ugt,
+            FCond::Uge,
+            FCond::Ult,
+            FCond::Ule,
+            FCond::Une,
+            FCond::Uno,
+            FCond::True,
+            FCond::False,
+        ] {
+            let (mut ctx, mut builder) = fixture();
+            let (cursor, _) = block_for_icmp(&mut ctx, &mut builder);
+
+            let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+            let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+
+            assert!(
+                cursor.build_fcmp(cond, None, a, b, None, &mut ctx).is_ok(),
+                "`fcmp {cond}` is valid LLVM",
             );
         }
     }

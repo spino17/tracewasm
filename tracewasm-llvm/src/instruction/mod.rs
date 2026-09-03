@@ -123,6 +123,10 @@ pub enum InstructionKind {
     /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
     /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
+    /// Compares two floating-point values, producing an `i1`.
+    ///
+    /// Separate from [`ICmp`](Self::ICmp) because LLVM keeps them separate: `icmp`
+    /// refuses floats and `fcmp` refuses integers.
     FCmp(FCmpOperands),
 }
 
@@ -343,30 +347,96 @@ impl ICond {
     }
 }
 
-/// The operands of an `fcmp`. Not yet built or emitted.
+/// The operands of an `fcmp`.
+///
+/// Emitted as `fcmp <cond> <ty> <a>, <b>` — the same shape as [`ICmpOperands`], with
+/// the type written once because LLVM requires both operands to have it.
 pub struct FCmpOperands {
+    /// Which comparison, and how it treats a NaN operand.
     pub cond: FCond,
+    /// The type both operands have.
+    ///
+    /// A floating-point type: `half`, `bfloat`, `float` or `double`. Integers are
+    /// compared with `icmp` instead.
     pub ty: TyId,
+    /// The left operand.
     pub a: Value,
+    /// The right operand.
     pub b: Value,
 }
 
+/// Which comparison an [`FCmpOperands`] performs.
+///
+/// Sixteen predicates, in three groups, and the distinction is entirely about **NaN**:
+///
+/// - **Ordered** (`o…`) — false whenever either operand is a NaN, *and* the comparison
+///   must also hold. `Ord` alone asks only "is neither a NaN".
+/// - **Unordered** (`u…`) — true whenever either operand is a NaN, *or* the comparison
+///   holds. `Uno` alone asks only "is either a NaN".
+/// - **Constant** ([`True`](Self::True), [`False`](Self::False)) — neither group.
+///   These ignore their operands entirely, NaN included, and still take two of them:
+///   `llvm-as` refuses `fcmp true` written without operands.
+///
+/// So the two constants are *not* the complement of "ordered". Measured against a NaN
+/// operand, `True` yields 1 like an unordered predicate and `False` yields 0 like an
+/// ordered one.
+///
+/// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
 pub enum FCond {
+    /// Ordered and equal.
     Oeq,
+    /// Ordered and greater than.
     Ogt,
+    /// Ordered and greater than or equal.
     Oge,
+    /// Ordered and less than.
     Olt,
+    /// Ordered and less than or equal.
     Ole,
+    /// Ordered and not equal.
     One,
+    /// Ordered: neither operand is a NaN.
     Ord,
+    /// Unordered or equal.
     Ueq,
+    /// Unordered or greater than.
     Ugt,
+    /// Unordered or greater than or equal.
     Uge,
+    /// Unordered or less than.
     Ult,
+    /// Unordered or less than or equal.
     Ule,
+    /// Unordered or not equal.
     Une,
+    /// Unordered: either operand is a NaN.
     Uno,
+    /// Always true, whatever the operands — NaN included.
     True,
+    /// Always false, whatever the operands — NaN included.
     False,
+}
+
+impl Display for FCond {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FCond::Oeq => "oeq",
+            FCond::Ogt => "ogt",
+            FCond::Oge => "oge",
+            FCond::Olt => "olt",
+            FCond::Ole => "ole",
+            FCond::One => "one",
+            FCond::Ord => "ord",
+            FCond::Ueq => "ueq",
+            FCond::Ugt => "ugt",
+            FCond::Uge => "uge",
+            FCond::Ult => "ult",
+            FCond::Ule => "ule",
+            FCond::Une => "une",
+            FCond::Uno => "uno",
+            FCond::True => "true",
+            FCond::False => "false",
+        })
+    }
 }
