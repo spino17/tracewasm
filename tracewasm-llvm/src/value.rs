@@ -227,7 +227,7 @@ impl TyId {
     /// `getelementptr` with one index or none points at its source type unchanged.
     pub(crate) fn walk_pointee_ty_in_gep(
         &self,
-        indices: &[&Value],
+        indices: &[Value],
         ctx: &Context,
     ) -> Result<TyId, GepError> {
         if indices.is_empty() {

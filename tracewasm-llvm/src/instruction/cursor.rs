@@ -540,7 +540,7 @@ impl Cursor {
         &self,
         ptr: &Value,
         source_ty: Option<TyId>,
-        indices: &[&Value],
+        indices: &[Value],
         inbounds: Option<bool>,
         reg: Option<&str>,
         ctx: &mut Context,
@@ -602,7 +602,7 @@ impl Cursor {
                 // with, and it is the one the walk above validated.
                 source_ty: final_source_ty,
                 ptr: ptr.clone(),
-                indices: indices.iter().copied().map(|x| x.clone()).collect(),
+                indices: indices.to_vec().into_boxed_slice(),
                 inbounds,
             }),
             result_ty,
