@@ -767,10 +767,10 @@ mod tests {
             .build_alloca(struct_ty, None, Some(8), "s".into())
             .unwrap();
 
-        let count = Value::from_const(4i32, None, &mut in_entry).unwrap();
-        let zero = Value::from_const(0i32, None, &mut in_entry).unwrap();
-        let one = Value::from_const(1i32, None, &mut in_entry).unwrap();
-        let two = Value::from_const(2i32, None, &mut in_entry).unwrap();
+        let count = in_entry.const_value(4i32, OperandTy::Inferred).unwrap();
+        let zero = in_entry.const_value(0i32, OperandTy::Inferred).unwrap();
+        let one = in_entry.const_value(1i32, OperandTy::Inferred).unwrap();
+        let two = in_entry.const_value(2i32, OperandTy::Inferred).unwrap();
 
         in_entry
             .build_alloca(
@@ -801,7 +801,7 @@ mod tests {
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
         // `llvm-as` with "floating point constant invalid for type".
-        let a_float = Value::from_const(0.1f32, None, &mut in_entry).unwrap();
+        let a_float = in_entry.const_value(0.1f32, OperandTy::Inferred).unwrap();
 
         let float_slot = in_entry
             .build_alloca(f32_ty, None, None, "fs".into())
@@ -811,7 +811,7 @@ mod tests {
             .build_store(&float_slot, &a_float, OperandTy::Inferred, None)
             .unwrap();
 
-        let null = Value::from_const(NullPtr, None, &mut in_entry).unwrap();
+        let null = in_entry.const_value(NullPtr, OperandTy::Inferred).unwrap();
 
         let ptr_slot = in_entry
             .build_alloca(ptr_ty, None, None, "np".into())
@@ -834,7 +834,8 @@ mod tests {
 
         // The branch condition comes from a real comparison rather than a literal, so
         // the `icmp` line and the `i1` it feeds are both covered here.
-        let limit = Value::from_const(10i32, None, &mut in_body).unwrap();
+        let limit = in_body.const_value(10i32, OperandTy::Inferred).unwrap();
+
         let counter = f
             .nth_param(0, &in_body)
             .expect("main takes an i32 first parameter")
@@ -853,7 +854,7 @@ mod tests {
         // An `fcmp` alongside it, so the float comparison is emitted and assembled
         // too. `ord` is the predicate with no integer analogue: it asks only whether
         // neither operand is a NaN.
-        let half = Value::from_const(0.5f64, None, &mut in_body).unwrap();
+        let half = in_body.const_value(0.5f64, OperandTy::Inferred).unwrap();
 
         in_body
             .build_fcmp(FCond::Ord, OperandTy::Inferred, &phi, &half, "fcmp".into())
@@ -861,7 +862,7 @@ mod tests {
 
         // One of each arithmetic shape, so all three emitters are assembled: an
         // integer op, a float op, and the unary `fneg`.
-        let step = Value::from_const(1i32, None, &mut in_body).unwrap();
+        let step = in_body.const_value(1i32, OperandTy::Inferred).unwrap();
 
         in_body
             .build_iarithmetic(
@@ -890,7 +891,7 @@ mod tests {
         // Both call shapes: one returning a value, one `void`. `helper` was added
         // before `main`, since the callee has to already exist.
         let mut in_exit = builder.cursor_at_block(exit);
-        let seven = Value::from_const(7i32, None, &mut in_exit).unwrap();
+        let seven = in_exit.const_value(7i32, OperandTy::Inferred).unwrap();
 
         let answer = in_exit
             .build_call(

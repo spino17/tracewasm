@@ -447,10 +447,10 @@ impl Value {
     /// into the requested type.
     pub fn from_const<C: Const>(
         val: C,
-        optional_cast: Option<TyId>,
+        optional_cast: OperandTy,
         ctx: &mut Context,
     ) -> Result<Self, TypeError> {
-        let (val, ty) = if let Some(ty) = optional_cast {
+        let (val, ty) = if let OperandTy::Asserted(ty) = optional_cast {
             let Some(c) = val.try_cast(ty, Signedness::Signed, ctx) else {
                 return Err(TypeError::ConstantCastToProvidedTypeFailed(
                     C::ty(ctx).display(ctx).to_string(),

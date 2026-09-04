@@ -5,13 +5,14 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         builder::Builder,
         function::{FuncId, Function},
+        global::{GlobalEntity, GlobalId},
         module::{DataLayout, Module, Triple},
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
-    error::ContextError,
-    instruction::cursor::RegName,
+    error::{ContextError, TypeError},
+    instruction::cursor::{OperandTy, RegName},
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
-    value::{Type, TypeDisplay},
+    value::{Const, ConstExpr, Type, TypeDisplay, Value},
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -94,7 +95,7 @@ impl Context {
     /// [`ContextError::InvalidRegisterName`] if the hint is not a legal LLVM local.
     pub(crate) fn name_for_reg(
         &mut self,
-        name: RegName,
+        name: &RegName,
         func_id: FuncId,
     ) -> Result<String, ContextError> {
         let assigner = self.reg_name_assigner.entry(func_id).or_default();
@@ -200,6 +201,22 @@ impl Context {
     pub fn void_ty(&mut self) -> TyId {
         self.ty_interner.intern(Type::Void).into()
     }
+
+    pub fn const_value<C: Const>(
+        &mut self,
+        val: C,
+        optional_cast: OperandTy,
+    ) -> Result<Value, TypeError> {
+        Value::from_const(val, optional_cast, self)
+    }
+
+    pub fn const_expr(&mut self, expr: ConstExpr) -> Value {
+        Value::from_const_expr(expr, self)
+    }
+
+    pub fn global_value<T: GlobalEntity>(&mut self, global: GlobalId<T>) -> Value {
+        Value::from_global(global, self)
+    }
 }
 
 /// Hands out unique register names within one function.
@@ -255,7 +272,7 @@ impl FuncRegNameIndex {
     ///
     /// The loop retries suffixes until it finds one not already issued, which is what
     /// keeps a requested `x1` distinct from the `x1` generated for a second `x`.
-    fn name_from_hint(&mut self, hint: RegName) -> Result<String, ContextError> {
+    fn name_from_hint(&mut self, hint: &RegName) -> Result<String, ContextError> {
         let RegName::Named(hint) = hint else {
             return Ok(self.next_unnamed_index().to_string());
         };

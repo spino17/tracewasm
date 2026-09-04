@@ -245,7 +245,7 @@ impl Builder {
     pub fn define_function(
         &mut self,
         name: String,
-        params: &[(TyId, Option<String>)],
+        params: &[(TyId, RegName)],
         result: TyId,
     ) -> Result<GlobalId<DefinedFunc>, ContextError> {
         let name_id: StrId = self.ctx.str_interner.intern(name).into();
@@ -290,14 +290,7 @@ impl Builder {
         let mut param_tys = vec![];
 
         for (param_ty, param_name) in params {
-            let name = self.ctx.name_for_reg(
-                if let Some(param) = param_name {
-                    param.into()
-                } else {
-                    RegName::Unnamed
-                },
-                id,
-            )?;
+            let name = self.ctx.name_for_reg(param_name, id)?;
 
             param_tys.push(*param_ty);
             final_params.push(Value::from_register(name, *param_ty, &mut self.ctx));

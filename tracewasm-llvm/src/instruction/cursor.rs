@@ -196,7 +196,7 @@ impl<'a> Cursor<'a> {
 
         let ref_ty = branches[0].1.ty();
         let func_id = self.ctx.get_block(self.block).func_id;
-        let reg_name = self.ctx.name_for_reg(reg, func_id)?;
+        let reg_name = self.ctx.name_for_reg(&reg, func_id)?;
         let val = Value::from_register(reg_name, ref_ty, self.ctx);
 
         let phi_id = self.block.add_phi(
@@ -1355,7 +1355,7 @@ fn add_instruction_to_block_and_get_value(
     ctx: &mut Context,
 ) -> Result<Value, InstructionError> {
     let func_id = ctx.get_block(block).func_id;
-    let reg_name = ctx.name_for_reg(reg, func_id)?;
+    let reg_name = ctx.name_for_reg(&reg, func_id)?;
     let val = Value::from_register(reg_name, result_ty, ctx);
 
     let ValueKind::Reg(reg) = val.kind() else {
