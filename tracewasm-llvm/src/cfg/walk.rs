@@ -135,7 +135,7 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
-    /// Visits an integer arithmetic, bitwise or shift instruction.
+    /// Visits an integer binary operation — arithmetic, bitwise or a shift.
     ///
     /// The result has the operands' type, not `i1`.
     fn visit_ibinop(
@@ -156,7 +156,7 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
-    /// Visits a floating-point arithmetic instruction.
+    /// Visits a floating-point binary operation.
     fn visit_fbinop(
         &mut self,
         operands: &FBinOpOperands,
@@ -166,7 +166,7 @@ pub trait CfgVisitor {
 
     /// Visits an `fneg`.
     ///
-    /// One operand, unlike every other arithmetic instruction.
+    /// One operand — which is why it is not an [`FBinOp`](crate::instruction::FBinOp).
     fn visit_fneg(
         &mut self,
         operands: &FNegOperands,

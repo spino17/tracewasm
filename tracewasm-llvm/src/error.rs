@@ -17,8 +17,8 @@
 //!     ├── GepError
 //!     ├── ICmpError
 //!     ├── FCmpError
-//!     ├── IArithmeticError
-//!     ├── FArithmeticError
+//!     ├── IBinOpError
+//!     ├── FBinOpError
 //!     ├── CastError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
@@ -209,10 +209,10 @@ pub enum InstructionError {
     /// See [`FCmpError`].
     #[error("{0}")]
     FCmp(#[from] FCmpError),
-    /// See [`IArithmeticError`].
+    /// See [`IBinOpError`].
     #[error("{0}")]
     IBinOp(#[from] IBinOpError),
-    /// See [`FArithmeticError`].
+    /// See [`FBinOpError`].
     #[error("{0}")]
     FBinOp(#[from] FBinOpError),
     /// See [`CastError`].
@@ -395,7 +395,10 @@ pub enum FCmpError {
     OperandTypeNotFloat(String),
 }
 
-/// An integer arithmetic, bitwise or shift instruction could not be built.
+/// An integer binary operation could not be built.
+///
+/// Covers arithmetic, bitwise logic and shifts — every LLVM opcode taking two
+/// integers and yielding one.
 #[derive(Error, Debug)]
 pub enum IBinOpError {
     /// The operands have different types and could not be brought to a common one.
@@ -432,7 +435,10 @@ pub enum IBinOpError {
     OperandTypeNotInteger(String, String),
 }
 
-/// A floating-point arithmetic instruction could not be built.
+/// A floating-point binary operation could not be built.
+///
+/// `fneg` is unary and does not come through here, though it shares this error's
+/// [`OperandTypeNotFloat`](Self::OperandTypeNotFloat).
 #[derive(Error, Debug)]
 pub enum FBinOpError {
     /// The operands have different types and could not be brought to a common one.

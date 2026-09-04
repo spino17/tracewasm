@@ -574,7 +574,7 @@ impl CfgVisitor for IREmitter {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // `<reg> = <op> <ty> <a>, <b>` — the type once, then two untyped operands, the
-        // same shape as a comparison. What differs is the result type: an arithmetic
+        // same shape as a comparison. What differs is the result type: a binary
         // instruction defines a value of the *operand* type, not an `i1`.
         self.push_line(&format!(
             "{}{} {} {}, {}",
@@ -871,7 +871,7 @@ mod tests {
             .build_fcmp(FCond::Ord, OperandTy::Inferred, &phi, &half, "fcmp".into())
             .unwrap();
 
-        // One of each arithmetic shape, so all three emitters are assembled: an
+        // One of each binary-op shape, so all three emitters are assembled: an
         // integer op, a float op, and the unary `fneg`.
         let step = in_body.const_value(1i32, OperandTy::Inferred).unwrap();
 

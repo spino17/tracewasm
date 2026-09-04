@@ -123,20 +123,22 @@ pub enum InstructionKind {
     /// Not a terminator, and not a branch: the `i1` is an ordinary value that a
     /// conditional branch may later consume, or that may be stored like any other.
     ICmp(ICmpOperands),
-    /// Integer arithmetic, bitwise logic or a shift, producing a value of the
-    /// operand type.
+    /// A binary operation on two integers, producing a value of the operand type.
+    ///
+    /// Arithmetic, bitwise logic and shifts alike: LLVM spells them as separate
+    /// opcodes but they all take two integers and yield one.
     IBinOp(IBinOpOperands),
     /// Compares two floating-point values, producing an `i1`.
     ///
     /// Separate from [`ICmp`](Self::ICmp) because LLVM keeps them separate: `icmp`
     /// refuses floats and `fcmp` refuses integers.
     FCmp(FCmpOperands),
-    /// Floating-point arithmetic, producing a value of the operand type.
+    /// A binary operation on two floats, producing a value of the operand type.
     FBinOp(FBinOpOperands),
     /// Negates a floating-point value.
     ///
-    /// Its own kind rather than an [`FArithmetic`](Self::FArithmetic) op, because
-    /// `fneg` is the one arithmetic instruction that takes a **single** operand —
+    /// Its own kind rather than an [`FBinOp`](Self::FBinOp) op, because
+    /// `fneg` is the one such instruction that takes a **single** operand —
     /// `llvm-as` refuses `fneg double %a, %b`. Integers have no counterpart; negating
     /// one is `sub 0, %x`.
     FNeg(FNegOperands),
@@ -365,7 +367,7 @@ impl ICond {
     }
 }
 
-/// The operands of an integer arithmetic, bitwise or shift instruction.
+/// The operands of an integer binary operation — arithmetic, bitwise or a shift.
 ///
 /// Emitted as `<op> <ty> <a>, <b>` — the type written once, since LLVM requires both
 /// operands to have it. The result has that same type, unlike a comparison's `i1`.
@@ -380,7 +382,7 @@ pub struct IBinOpOperands {
     pub b: Value,
 }
 
-/// Which integer operation an [`IArithmeticOperands`] performs.
+/// Which integer operation an [`IBinOpOperands`] performs.
 ///
 /// Only six of these carry a signedness, and LLVM is the authority on which: it spells
 /// `sdiv`/`udiv`, `srem`/`urem` and `ashr`/`lshr` as distinct opcodes, and has exactly
@@ -446,7 +448,7 @@ impl IBinOp {
     /// `None` for `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — LLVM has a
     /// single opcode for each, because the *result* bits are the same either way.
     /// That absence is load-bearing: it is what makes
-    /// [`build_iarithmetic`](crate::instruction::cursor::Cursor::build_iarithmetic)
+    /// [`build_ibinop`](crate::instruction::cursor::Cursor::build_ibinop)
     /// refuse to widen a narrower constant rather than guess. The result may not
     /// depend on the reading, but the widening does — `add i64 100, -1` is 99, while
     /// the same `i32` constant zero-extended gives 4294967395.
@@ -473,7 +475,7 @@ impl IBinOp {
     }
 }
 
-/// The operands of a floating-point arithmetic instruction.
+/// The operands of a floating-point binary operation.
 ///
 /// Emitted as `<op> <ty> <a>, <b>`. Every variant here is binary; `fneg` is unary and
 /// lives in [`FNegOperands`] instead.
@@ -488,7 +490,7 @@ pub struct FBinOpOperands {
     pub b: Value,
 }
 
-/// Which floating-point operation an [`FArithmeticOperands`] performs.
+/// Which floating-point operation an [`FBinOpOperands`] performs.
 ///
 /// None of these carry a signedness — a float's sign is part of its format, so there
 /// is no signed/unsigned split to make.
@@ -524,7 +526,7 @@ impl Display for FBinOp {
 ///
 /// Emitted as `fneg <ty> <value>`. One operand, not two: `llvm-as` refuses
 /// `fneg double %a, %b` with "expected metadata after comma". That is why `fneg` is
-/// not an [`FArithmeticOp`] — giving it a second operand would make an
+/// not an [`FBinOp`] — giving it a second operand would make an
 /// unrepresentable instruction constructible.
 pub struct FNegOperands {
     /// The type of the operand, and of the result.

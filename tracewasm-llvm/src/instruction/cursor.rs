@@ -1038,8 +1038,8 @@ impl<'a> Cursor<'a> {
         Ok(i1val)
     }
 
-    /// Integer arithmetic, bitwise logic or a shift, defining a value of the operand
-    /// type.
+    /// A binary operation on two integers — arithmetic, bitwise logic or a shift —
+    /// defining a value of the operand type.
     ///
     /// Emits `<op> <ty> <a>, <b>`. Unlike a comparison, the result has the operands'
     /// type rather than `i1`.
@@ -1061,13 +1061,13 @@ impl<'a> Cursor<'a> {
     ///
     /// # Errors
     ///
-    /// - [`IArithmeticError::OperandsNotCastable`] — a signed operation whose operands
+    /// - [`IBinOpError::OperandsNotCastable`] — a signed operation whose operands
     ///   have no common type.
-    /// - [`IArithmeticError::OperandTypesDiffer`] — a signedness-free operation given
+    /// - [`IBinOpError::OperandTypesDiffer`] — a signedness-free operation given
     ///   two types.
-    /// - [`IArithmeticError::ProvidedTypeDoesNotMatchOperands`] — a signedness-free
+    /// - [`IBinOpError::ProvidedTypeDoesNotMatchOperands`] — a signedness-free
     ///   operation given a `ty` its operands do not have.
-    /// - [`IArithmeticError::OperandTypeNotInteger`] — floats need the `f`-prefixed
+    /// - [`IBinOpError::OperandTypeNotInteger`] — floats need the `f`-prefixed
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_ibinop(
@@ -1204,7 +1204,7 @@ impl<'a> Cursor<'a> {
         Ok(i1val)
     }
 
-    /// Floating-point arithmetic, defining a value of the operand type.
+    /// A binary operation on two floats, defining a value of the operand type.
     ///
     /// Emits `<op> <ty> <a>, <b>`. A narrower float **constant** widens to match, and
     /// needs no signedness to do it: `fpext` is exact, so there is nothing for a
@@ -1217,9 +1217,9 @@ impl<'a> Cursor<'a> {
     ///
     /// # Errors
     ///
-    /// - [`FArithmeticError::OperandsNotCastable`] — no common type. Integer operands
+    /// - [`FBinOpError::OperandsNotCastable`] — no common type. Integer operands
     ///   land here.
-    /// - [`FArithmeticError::OperandTypeNotFloat`] — the common type is not a float.
+    /// - [`FBinOpError::OperandTypeNotFloat`] — the common type is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_fbinop(
         &mut self,
@@ -1263,13 +1263,13 @@ impl<'a> Cursor<'a> {
     /// Negates a floating-point value, defining one of the same type.
     ///
     /// Emits `fneg <ty> <value>`. Separate from
-    /// [`build_farithmetic`](Self::build_farithmetic) because `fneg` takes a **single**
+    /// [`build_fbinop`](Self::build_fbinop) because `fneg` takes a **single**
     /// operand — `llvm-as` refuses `fneg double %a, %b`. There is no integer
     /// counterpart; negating one is `sub 0, %x`.
     ///
     /// # Errors
     ///
-    /// - [`FArithmeticError::OperandTypeNotFloat`] if the operand is not a float.
+    /// - [`FBinOpError::OperandTypeNotFloat`] if the operand is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_fneg(&mut self, value: Value, reg: RegName) -> Result<Value, InstructionError> {
         let ty = value.ty();
@@ -4512,7 +4512,7 @@ mod tests {
                 .unwrap();
 
             let InstructionKind::IBinOp(operands) = &instr.kind else {
-                panic!("not an iarithmetic");
+                panic!("not an ibinop");
             };
 
             let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind() else {
