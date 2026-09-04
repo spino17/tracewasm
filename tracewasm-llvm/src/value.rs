@@ -1333,11 +1333,28 @@ impl Const for f64 {
 
         let v = match ty_obj {
             Type::Float => {
-                if self.is_finite() && (*self > f32::MAX as f64 || *self < f32::MIN as f64) {
+                let narrowed = *self as f32;
+
+                // Both bounds are checked on the *result* rather than against
+                // `f32::MAX`, because the conversion rounds: `3.4028235e38` is above
+                // `f32::MAX` yet rounds down onto it, so comparing the input would
+                // refuse a value that converts exactly.
+
+                // Overflow — a finite value that came out infinite.
+                if self.is_finite() && narrowed.is_infinite() {
                     return None;
                 }
 
-                ConstValue::Float(OrderedFloat(*self as f32))
+                // Underflow — a nonzero value that came out zero. The mirror of
+                // overflow: both leave the value categorically different rather than
+                // merely rounded, which is what separates them from ordinary
+                // precision loss. A signed zero reads as zero here, since
+                // `-0.0 == 0.0`, so it is left alone and keeps its sign.
+                if *self != 0.0 && narrowed == 0.0 {
+                    return None;
+                }
+
+                ConstValue::Float(OrderedFloat(narrowed))
             }
             Type::Double => ConstValue::Double(OrderedFloat(*self)),
             _ => return None,
@@ -1822,12 +1839,16 @@ mod tests {
         }
     }
 
-    /// `f64` -> `f32` is `fptrunc`, and it is range-checked like an integer
-    /// narrowing: a value too large for an `f32` is refused rather than quietly
-    /// becoming infinity.
+    /// `f64` -> `f32` is `fptrunc`, and it is range-checked at **both** ends like an
+    /// integer narrowing: a value too large is refused rather than quietly becoming
+    /// infinity, and one too small rather than quietly becoming zero.
     ///
     /// Ordinary rounding is still allowed — every `fptrunc` rounds, so refusing that
-    /// would refuse the instruction itself. What is refused is leaving the range.
+    /// would refuse the instruction itself. What is refused is the value becoming
+    /// *categorically* different: finite turning infinite, or nonzero turning zero.
+    ///
+    /// Both are tested on the result rather than against `f32::MAX`, since the
+    /// conversion rounds and a value above the maximum may still land on it.
     #[test]
     fn narrowing_a_float_refuses_what_does_not_fit() {
         let mut ctx = crate::test_support::ctx();
@@ -1855,13 +1876,52 @@ mod tests {
             "the lower bound is checked too, not just the upper",
         );
 
-        // Underflow is *not* checked: a value too small for an `f32` still becomes
-        // zero rather than being refused. Pinned so that changing it is deliberate,
-        // since it is the same kind of categorical loss as overflow.
+        // Underflow is refused for the same reason as overflow: a nonzero value that
+        // comes out exactly zero has not been rounded, it has been erased. Left in, a
+        // `0.0` used as a divisor gives infinity where the real value would have given
+        // something huge but finite.
         assert_eq!(
             1e-300f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "a nonzero value must not silently become zero",
+        );
+        assert_eq!(
+            (-1e-300f64).try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "and the same from below zero",
+        );
+        assert_eq!(
+            f64::MIN_POSITIVE.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            None,
+            "the smallest normal f64 is far below anything an f32 can hold",
+        );
+
+        // Values that stay nonzero are fine, including f32 subnormals — they lose
+        // precision, which every `fptrunc` does, but they do not vanish.
+        assert_eq!(
+            1e-40f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(1e-40f64 as f32))),
+            "a subnormal f32 is still a value",
+        );
+        assert_eq!(
+            (f32::MIN_POSITIVE as f64).try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::MIN_POSITIVE))),
+            "the smallest normal f32 round-trips exactly",
+        );
+
+        // Zero itself is not underflow — it was already zero.
+        assert_eq!(
+            0.0f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             Some(ConstValue::Float(OrderedFloat(0.0f32))),
-            "underflow silently flushes to zero, unlike overflow",
+        );
+
+        // Both bounds are tested on the *result*, because the conversion rounds. This
+        // value is above `f32::MAX` yet rounds down onto it, so comparing the input
+        // instead would refuse something that converts exactly.
+        assert_eq!(
+            3.4028235e38f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            Some(ConstValue::Float(OrderedFloat(f32::MAX))),
+            "above f32::MAX but rounds onto it, so it is not an overflow",
         );
 
         // The sign of a zero survives, which the constant pool depends on: `+0.0` and
