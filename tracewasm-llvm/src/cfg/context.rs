@@ -371,12 +371,12 @@ impl FuncRegNameIndex {
 
         let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
 
-        if !re.is_match(&hint) {
+        if !re.is_match(hint) {
             return Err(ContextError::InvalidRegisterName(hint.to_string()));
         }
 
         let final_name = loop {
-            let index = self.next_named_index(&hint);
+            let index = self.next_named_index(hint);
 
             let name = if index == 0 {
                 hint.to_string()

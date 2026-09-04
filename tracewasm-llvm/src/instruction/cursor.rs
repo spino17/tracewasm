@@ -9,8 +9,8 @@ use crate::{
         global::{FuncRef, GlobalKind},
     },
     error::{
-        AllocaError, CallError, FArithmeticError, FCmpError, GepError, IArithmeticError, ICmpError,
-        InstructionError, PhiError, RetError, StoreError,
+        AllocaError, CallError, CastError, FArithmeticError, FCmpError, GepError, IArithmeticError,
+        ICmpError, InstructionError, PhiError, RetError, StoreError,
     },
     instruction::{
         AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FArithmeticOp,
@@ -168,7 +168,7 @@ impl<'a> Deref for Cursor<'a> {
     type Target = Context;
 
     fn deref(&self) -> &Self::Target {
-        &self.ctx
+        self.ctx
     }
 }
 
@@ -181,12 +181,12 @@ impl<'a> DerefMut for Cursor<'a> {
 impl<'a> Cursor<'a> {
     /// Returns the immutable reference to the underlying `Context`.
     pub fn ctx(&self) -> &Context {
-        &self.ctx
+        self.ctx
     }
 
     /// Returns the mutable reference to the underlying `Context`.
     pub fn ctx_mut(&mut self) -> &mut Context {
-        &mut self.ctx
+        self.ctx
     }
 
     /// Builds a phi node, returning a handle for adding later branches and the register
@@ -1293,28 +1293,73 @@ impl<'a> Cursor<'a> {
         )
     }
 
+    /// Converts a value to another type, defining a register of that type.
+    ///
+    /// Emits `%x = <op> <src> <value> to <dest>`. The result has `dest`.
+    ///
+    /// # Two types, doing different jobs
+    ///
+    /// `src` names what the operand is converted **from**, and is an assertion in the
+    /// usual sense: [`OperandTy::Inferred`] takes the operand's own type, and naming
+    /// one requires the operand to have it. As everywhere, only a literal folds — so
+    /// `src` can retype a literal before the conversion, which is worth knowing since
+    /// that means two conversions in one call.
+    ///
+    /// `dest` is what it converts **to**, and is never inferred: nothing else in the
+    /// call says what the caller wanted.
+    ///
+    /// # Picking the opcode
+    ///
+    /// LLVM has one opcode per narrow case rather than a general "convert", and the
+    /// pairing has to match — see
+    /// [`CastOp::is_cast_allowed`](crate::instruction::CastOp::is_cast_allowed). The
+    /// trap worth naming: `trunc`, `zext`, `sext`, `fptrunc` and `fpext` all require
+    /// the widths to *differ*, so a same-width conversion is an error rather than a
+    /// no-op.
+    ///
+    /// # Errors
+    ///
+    /// - [`CastError::OperandNotOfSourceType`] if the operand is not of the asserted
+    ///   `src`, and is not a literal that folds into it.
+    /// - [`CastError::ConversionNotAllowed`] if the opcode does not connect the two
+    ///   types.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_cast(
         &mut self,
         op: CastOp,
-        value: Value,
+        value: &Value,
         src: OperandTy,
         dest: TyId,
         reg: RegName,
     ) -> Result<Value, InstructionError> {
         let value = if let OperandTy::Asserted(ty) = src {
+            let given = self.ctx.display(value.ty()).to_string();
+
             let Some(casted_val) = value.try_cast(ty, Signedness::Signed, self.ctx) else {
-                todo!() // RAISE ERROR
+                return Err(CastError::OperandNotOfSourceType(
+                    op.to_string(),
+                    given,
+                    self.ctx.display(ty).to_string(),
+                )
+                .into());
             };
 
             casted_val
         } else {
-            value
+            value.clone()
         };
 
+        // Read off the operand rather than trusting `src`, so the type recorded on the
+        // instruction is the one the operand actually has.
         let src = value.ty();
 
         if !op.is_cast_allowed(src, dest, self.ctx) {
-            todo!() // RAISE ERROR
+            return Err(CastError::ConversionNotAllowed(
+                op.to_string(),
+                self.ctx.display(src).to_string(),
+                self.ctx.display(dest).to_string(),
+            )
+            .into());
         }
 
         add_instruction_to_block_and_get_value(
@@ -4692,6 +4737,174 @@ mod tests {
                 "`{op}` is valid LLVM",
             );
         }
+    }
+
+    /// Every opcode connects exactly the pairing LLVM gives it, and refuses the
+    /// rest. Each row was checked against `llvm-as`.
+    #[test]
+    fn each_cast_opcode_accepts_only_its_own_pairing() {
+        let mut builder = fixture();
+        let (i32_ty, i64_ty, i8_ty) = (builder.i32_ty(), builder.i64_ty(), builder.i8_ty());
+        let (f32_ty, f64_ty, ptr_ty) = (builder.f32_ty(), builder.f64_ty(), builder.ptr_ty());
+
+        let allowed = [
+            (CastOp::Trunc, i64_ty, i32_ty),
+            (CastOp::Zext, i8_ty, i32_ty),
+            (CastOp::Sext, i8_ty, i64_ty),
+            (CastOp::Fptrunc, f64_ty, f32_ty),
+            (CastOp::Fpext, f32_ty, f64_ty),
+            (CastOp::Fptoui, f64_ty, i32_ty),
+            (CastOp::Fptosi, f64_ty, i32_ty),
+            (CastOp::Uitofp, i32_ty, f64_ty),
+            (CastOp::Sitofp, i32_ty, f64_ty),
+            (CastOp::Ptrtoint, ptr_ty, i64_ty),
+            (CastOp::Inttoptr, i64_ty, ptr_ty),
+            (CastOp::Bitcast, i32_ty, f32_ty),
+            (CastOp::Bitcast, i64_ty, f64_ty),
+        ];
+
+        for (op, src, dest) in allowed {
+            assert!(
+                op.is_cast_allowed(src, dest, &builder),
+                "`{op}` connects these two",
+            );
+        }
+
+        let refused = [
+            // The widths have to *differ*: a same-width conversion is an error, not a
+            // no-op. `llvm-as` says "invalid cast opcode for cast from 'i32' to 'i32'".
+            (CastOp::Trunc, i32_ty, i32_ty),
+            (CastOp::Zext, i32_ty, i32_ty),
+            (CastOp::Sext, i32_ty, i32_ty),
+            (CastOp::Fpext, f32_ty, f32_ty),
+            // And in the right direction.
+            (CastOp::Trunc, i32_ty, i64_ty),
+            (CastOp::Zext, i64_ty, i32_ty),
+            (CastOp::Fptrunc, f32_ty, f64_ty),
+            // Crossing the families needs the right opcode, not these.
+            (CastOp::Trunc, f64_ty, f32_ty),
+            (CastOp::Fptrunc, i64_ty, i32_ty),
+            (CastOp::Fptoui, i32_ty, i32_ty),
+            (CastOp::Uitofp, f64_ty, f64_ty),
+            // A `ptr` is reachable only through ptrtoint/inttoptr. A pointer
+            // `bitcast` is refused: with opaque pointers there is a single `ptr`
+            // type, so it would name a conversion that no longer exists.
+            (CastOp::Bitcast, ptr_ty, i64_ty),
+            (CastOp::Bitcast, ptr_ty, ptr_ty),
+            (CastOp::Ptrtoint, i64_ty, i64_ty),
+            (CastOp::Inttoptr, ptr_ty, ptr_ty),
+            // `bitcast` needs equal widths.
+            (CastOp::Bitcast, i32_ty, i64_ty),
+            (CastOp::Bitcast, i32_ty, f64_ty),
+        ];
+
+        for (op, src, dest) in refused {
+            assert!(
+                !op.is_cast_allowed(src, dest, &builder),
+                "`{op}` must not connect `{}` to `{}`",
+                builder.display(src),
+                builder.display(dest),
+            );
+        }
+    }
+
+    /// `half` and `bfloat` are both 16 bits, which separates the two rules: `fpext`
+    /// wants a *wider* destination and has none, while `bitcast` wants an equal width
+    /// and has one. `llvm-as` agrees on both.
+    #[test]
+    fn two_floats_of_the_same_width_bitcast_but_do_not_extend() {
+        let mut builder = fixture();
+
+        let half = builder.f16_ty();
+        let bfloat = builder.ty_interner.intern(Type::Bfloat).into();
+
+        assert!(!CastOp::Fpext.is_cast_allowed(half, bfloat, &builder));
+        assert!(!CastOp::Fptrunc.is_cast_allowed(half, bfloat, &builder));
+        assert!(CastOp::Bitcast.is_cast_allowed(half, bfloat, &builder));
+    }
+
+    /// The recorded source type is the operand's own, so it cannot disagree with it.
+    #[test]
+    fn a_cast_records_the_type_its_operand_actually_has() {
+        let mut builder = fixture();
+        let (i8_ty, i32_ty) = (builder.i8_ty(), builder.i32_ty());
+        let (cursor, block) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let v = cursor.const_value(7i8, OperandTy::Inferred).unwrap();
+
+        let out = cursor
+            .build_cast(CastOp::Sext, &v, OperandTy::Inferred, i32_ty, "s".into())
+            .expect("i8 sign-extends to i32");
+
+        assert_eq!(out.ty(), i32_ty, "the result has the destination type");
+
+        let instr = cursor
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .expect("the cast was added");
+
+        let InstructionKind::Cast(operands) = &instr.kind else {
+            panic!("not a cast");
+        };
+
+        assert_eq!(operands.src_ty, i8_ty);
+        assert_eq!(operands.dest_ty, i32_ty);
+        assert_eq!(operands.value.ty(), operands.src_ty, "the two agree");
+    }
+
+    /// A disallowed pairing is an error naming both types, not a silent
+    /// reinterpretation.
+    #[test]
+    fn a_cast_refuses_a_pairing_its_opcode_does_not_cover() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let v = cursor.const_value(1i32, OperandTy::Inferred).unwrap();
+
+        let err = cursor
+            .build_cast(CastOp::Zext, &v, OperandTy::Inferred, i32_ty, "z".into())
+            .expect_err("zext needs a wider destination");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Cast(CastError::ConversionNotAllowed(op, s, d))
+                    if op == "zext" && s == "i32" && d == "i32"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Asserting a source type the operand does not have, and cannot fold into, is an
+    /// error rather than a quiet reinterpretation.
+    #[test]
+    fn a_cast_refuses_an_operand_that_is_not_of_the_asserted_source_type() {
+        let mut builder = fixture();
+        let (i32_ty, i64_ty, f64_ty) = (builder.i32_ty(), builder.i64_ty(), builder.f64_ty());
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        // A register cannot be retyped — only a literal folds.
+        let reg = Value::from_register("r".to_string(), i32_ty, &mut cursor);
+
+        let err = cursor
+            .build_cast(CastOp::Sext, &reg, f64_ty.into(), i64_ty, "s".into())
+            .expect_err("an i32 register is not a double");
+
+        assert!(
+            matches!(
+                &err,
+                InstructionError::Cast(CastError::OperandNotOfSourceType(op, given, asked))
+                    if op == "sext" && given == "i32" && asked == "double"
+            ),
+            "got: {err}"
+        );
     }
 
     /// An `icmp` defines an `i1` whatever it compared, and the register it defines is

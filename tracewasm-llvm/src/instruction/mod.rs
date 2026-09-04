@@ -140,6 +140,11 @@ pub enum InstructionKind {
     /// `llvm-as` refuses `fneg double %a, %b`. Integers have no counterpart; negating
     /// one is `sub 0, %x`.
     FNeg(FNegOperands),
+    /// Converts a value from one type to another.
+    ///
+    /// Not a computation on the value's *number* so much as on how those bits are
+    /// read — except where LLVM says otherwise, as `sitofp` and `fptosi` genuinely
+    /// recompute.
     Cast(CastOperands),
 }
 
@@ -622,30 +627,96 @@ impl Display for FCond {
     }
 }
 
+/// The operands of a conversion.
+///
+/// Emitted as `<op> <src_ty> <value> to <dest_ty>` — the source type is written out
+/// even though the operand carries it, because that is the syntax LLVM reads.
 pub struct CastOperands {
+    /// Which conversion.
     pub op: CastOp,
+    /// The type being converted from. Always the operand's own type: it is read off
+    /// the value rather than supplied, so the two cannot disagree.
     pub src_ty: TyId,
+    /// The value being converted.
     pub value: Value,
+    /// The type being converted to, and the type of the result.
     pub dest_ty: TyId,
 }
 
+/// Which conversion a [`CastOperands`] performs.
+///
+/// LLVM has one opcode per case rather than a general "convert", and each covers a
+/// narrow pairing — see [`is_cast_allowed`](Self::is_cast_allowed). Picking the wrong
+/// one is refused with "invalid cast opcode" rather than silently reinterpreted.
+///
+/// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
 pub enum CastOp {
+    /// Drop the high bits of a narrower integer. The one integer narrowing — there is
+    /// no signed variant, because dropping bits needs no interpretation.
     Trunc,
+    /// Widen an integer, filling the new high bits with zeros.
     Zext,
+    /// Widen an integer, copying the sign bit into the new high bits.
     Sext,
+    /// Narrow a float, rounding to the nearest value the smaller format holds.
     Fptrunc,
+    /// Widen a float. Exact — every value of the smaller format is one of the larger.
     Fpext,
+    /// Float to unsigned integer, truncating toward zero.
     Fptoui,
+    /// Float to signed integer, truncating toward zero.
     Fptosi,
+    /// Unsigned integer to float.
     Uitofp,
+    /// Signed integer to float.
     Sitofp,
+    /// A pointer to an integer holding its address.
     Ptrtoint,
+    /// An integer to the pointer at that address.
     Inttoptr,
+    /// Reread the same bits as another type of the same width — `i32` as `float`, say.
+    /// The only conversion that changes nothing about the value.
     Bitcast,
 }
 
+impl Display for CastOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CastOp::Trunc => "trunc",
+            CastOp::Zext => "zext",
+            CastOp::Sext => "sext",
+            CastOp::Fptrunc => "fptrunc",
+            CastOp::Fpext => "fpext",
+            CastOp::Fptoui => "fptoui",
+            CastOp::Fptosi => "fptosi",
+            CastOp::Uitofp => "uitofp",
+            CastOp::Sitofp => "sitofp",
+            CastOp::Ptrtoint => "ptrtoint",
+            CastOp::Inttoptr => "inttoptr",
+            CastOp::Bitcast => "bitcast",
+        })
+    }
+}
+
 impl CastOp {
+    /// Whether this opcode connects those two types.
+    ///
+    /// Each answer matches `llvm-as`, which refuses everything else with "invalid cast
+    /// opcode" rather than reinterpreting:
+    ///
+    /// - `trunc` / `zext` / `sext` — integers whose widths **differ** in the right
+    ///   direction. Equal widths are refused: `trunc i32 to i32` is not a no-op, it is
+    ///   an error.
+    /// - `fptrunc` / `fpext` — the same, for floats. So `fpext half to bfloat` is
+    ///   refused even though both are floats: at 16 bits each, neither is wider.
+    /// - `fptoui` / `fptosi` / `uitofp` / `sitofp` — across the two families, in the
+    ///   direction the name gives.
+    /// - `ptrtoint` / `inttoptr` — the only ways to reach a `ptr`.
+    /// - `bitcast` — two sized types of **equal** width, so `i32` to `float` is fine.
+    ///   A `ptr` cannot appear at either end: it has no width here, and under opaque
+    ///   pointers a pointer `bitcast` would name a conversion that no longer exists.
+    ///   Aggregates are excluded for the same reason — no width.
     pub fn is_cast_allowed(&self, src: TyId, dest: TyId, ctx: &Context) -> bool {
         match self {
             CastOp::Trunc => {
@@ -679,7 +750,7 @@ impl CastOp {
                     && let Some(dest_width) = dest.width(ctx)
                     && src_width == dest_width
                 {
-                    !src.is_ptr(ctx) && !dest.is_ptr(ctx)
+                    true
                 } else {
                     false
                 }

@@ -174,6 +174,7 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a conversion. The result has the destination type.
     fn visit_cast(
         &mut self,
         operands: &CastOperands,

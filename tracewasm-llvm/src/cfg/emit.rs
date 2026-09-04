@@ -648,7 +648,18 @@ impl CfgVisitor for IREmitter {
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // `<reg> = <op> <src> <operand> to <dest>` — the source type is spelled out
+        // even though the operand carries it, because that is the syntax LLVM reads.
+        self.push_line(&format!(
+            "{}{} {} {} to {}",
+            Self::assignment(value, ctx)?,
+            operands.op,
+            ctx.display(operands.src_ty),
+            Self::operand(&operands.value, ctx)?,
+            ctx.display(operands.dest_ty)
+        ));
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -671,7 +682,7 @@ mod tests {
         cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         error::ContextError,
         instruction::{
-            FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond,
+            CastOp, FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond,
             cursor::{OperandTy, RegName},
         },
         interner::TyId,
@@ -886,6 +897,28 @@ mod tests {
 
         in_body.build_fneg(phi, "neg".into()).unwrap();
 
+        // A conversion, so `visit_cast` is assembled too. `sitofp` crosses the two
+        // families, which is the shape a bitcast could not express.
+        let widened = in_body
+            .build_cast(
+                CastOp::Sitofp,
+                &counter,
+                OperandTy::Inferred,
+                f64_ty,
+                "wide".into(),
+            )
+            .unwrap();
+
+        in_body
+            .build_cast(
+                CastOp::Fptrunc,
+                &widened,
+                OperandTy::Inferred,
+                f32_ty,
+                "narrow".into(),
+            )
+            .unwrap();
+
         in_body.build_conditional_br(cond, body, exit).unwrap();
 
         // Both call shapes: one returning a value, one `void`. `helper` was added
@@ -943,6 +976,8 @@ mod tests {
             "    %next = add i32 %n, 1\n",
             "    %scaled = fmul double %m, 0x3FE0000000000000\n",
             "    %neg = fneg double %m\n",
+            "    %wide = sitofp i32 %n to double\n",
+            "    %narrow = fptrunc double %wide to float\n",
             "    br i1 %cmp, label %body, label %exit\n",
             "exit:\n",
             "    %c = call i32 @helper(i32 7)\n",

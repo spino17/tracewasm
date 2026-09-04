@@ -19,6 +19,7 @@
 //!     ├── FCmpError
 //!     ├── IArithmeticError
 //!     ├── FArithmeticError
+//!     ├── CastError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -214,6 +215,9 @@ pub enum InstructionError {
     /// See [`FArithmeticError`].
     #[error("{0}")]
     FArithmetic(#[from] FArithmeticError),
+    /// See [`CastError`].
+    #[error("{0}")]
+    Cast(#[from] CastError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -442,6 +446,30 @@ pub enum FArithmeticError {
     /// These operations take floats. Integers use the unprefixed instructions.
     #[error("`{0}` takes floating-point operands, but got ones of type `{1}`")]
     OperandTypeNotFloat(String, String),
+}
+
+/// A conversion could not be built.
+#[derive(Error, Debug)]
+pub enum CastError {
+    /// The operand could not be given the source type it was asserted to have.
+    ///
+    /// Only a literal folds; anything else must already have that type.
+    ///
+    /// Fields: the operation, the operand's type, and the type asserted for it.
+    #[error("`{0}` was given an operand of type `{1}`, which is not `{2}`")]
+    OperandNotOfSourceType(String, String, String),
+    /// This conversion does not connect those two types.
+    ///
+    /// Each opcode covers one narrow case, and LLVM refuses the rest with "invalid
+    /// cast opcode": widths must *differ* in the right direction for `trunc`/`zext`/
+    /// `sext` and `fptrunc`/`fpext`, and `bitcast` needs two sized types of equal
+    /// width. Reaching a `ptr` is `ptrtoint`/`inttoptr` and nothing else — under
+    /// opaque pointers there is one `ptr` type, so a pointer `bitcast` would name a
+    /// conversion that does not exist.
+    ///
+    /// Fields: the operation, the source type, and the destination type.
+    #[error("`{0}` cannot convert `{1}` to `{2}`")]
+    ConversionNotAllowed(String, String, String),
 }
 
 /// A `store` could not be built.

@@ -109,7 +109,7 @@ impl GlobalId<DefinedFunc> {
     /// no defining instruction, so
     /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
     /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
-    pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<Value> {
+    pub fn nth_param(&self, n: usize, ctx: &Context) -> Option<Value> {
         let func = ctx.get_func(self.tag.raw());
         let params = &func.params;
 
