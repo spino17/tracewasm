@@ -20,10 +20,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Builds a module: adds functions and opens cursors onto their blocks.
 ///
-/// Stateless — the [`Context`] owns everything, the module included, so the builder
-/// is just the set of operations that extend it. Construct it as `Builder` and pass
-/// `&mut Context` to each call; [`build`](Self::build) takes the context by value and
-/// hands back the finished [`ControlFlowGraph`].
+/// Owns the [`Context`], so no call takes one. Obtain it from
+/// [`Context::builder`](Context::builder) and hand it to
+/// [`build`](Self::build) at the end for the finished [`ControlFlowGraph`].
+///
+/// It derefs to [`Context`], so everything a context can do — interning a type,
+/// making a constant — is reachable straight through the builder. That is also what
+/// lets a `&mut Builder` stand in wherever a `&mut Context` is wanted, which is how
+/// [`add_basic_block`](crate::cfg::global::GlobalId::add_basic_block) and friends
+/// still take a context without the caller holding one separately.
 pub struct Builder {
     pub(crate) ctx: Context,
 }
@@ -45,10 +50,13 @@ impl DerefMut for Builder {
 impl Builder {
     /// Opens a cursor that writes into `id`.
     ///
-    /// A cursor is a position, not a lock: several may be opened at one block over
-    /// time. What prevents writing past a terminator is that the terminator builders
-    /// consume the cursor, plus the block's own
-    /// [`is_locked`](crate::cfg::basic_block::BasicBlock) flag for cursors opened
+    /// The cursor borrows the builder for as long as it lives, so exactly one is open
+    /// at a time. Opening another at the same block later is fine — a cursor is a
+    /// position, not a claim on the block.
+    ///
+    /// Two things stop anything being written past a terminator: the terminator
+    /// builders consume the cursor, and the block carries an
+    /// [`is_locked`](crate::cfg::basic_block::BasicBlock) flag for a cursor opened
     /// afterwards.
     pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor<'_> {
         Cursor {

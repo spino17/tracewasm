@@ -28,9 +28,11 @@ use std::collections::hash_map::Entry;
 /// provenance. The same holds for [`StrId`] and the arena ids, though those at least
 /// panic rather than acting on the wrong entry.
 ///
-/// In practice: one context per module, threaded through every builder call. That is
-/// why so much of this crate takes `&mut Context` rather than the individual pool it
-/// happens to need.
+/// In practice: one context per module, handed to a [`Builder`] with
+/// [`builder`](Self::builder) and owned by it from then on. Both `Builder` and an open
+/// [`Cursor`](crate::instruction::cursor::Cursor) deref here, so everything below is
+/// reachable through whichever one is in hand — which is why so much of this crate
+/// takes `&mut Context` rather than the individual pool it happens to need.
 pub struct Context {
     pub(crate) module: Module,
     pub(crate) blocks: Arena<BasicBlock>,
@@ -60,6 +62,11 @@ impl Context {
         }
     }
 
+    /// Hands the context to a [`Builder`], which is how anything gets built.
+    ///
+    /// Takes `self` by value: the builder owns the context from here, so the two are
+    /// never held at once. Everything a context can do stays reachable, since
+    /// `Builder` derefs to it. [`Builder::build`] gives back the finished graph.
     pub fn builder(self) -> Builder {
         Builder { ctx: self }
     }
@@ -202,6 +209,20 @@ impl Context {
         self.ty_interner.intern(Type::Void).into()
     }
 
+    /// Interns a literal and hands back the operand naming it.
+    ///
+    /// With [`OperandTy::Inferred`] the literal keeps its own type — `1i32` is an
+    /// `i32`. Naming a type instead asserts the literal has it, which for a literal is
+    /// a real question with a real answer: `43` is an `i64`, and `0.1` is not a
+    /// `float`.
+    ///
+    /// Reachable through a [`Builder`] or an open [`Cursor`](crate::instruction::cursor::Cursor),
+    /// since both deref here — which is what lets a constant be made mid-block.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ConstantCastToProvidedTypeFailed`] if the literal does not have
+    /// the named type and cannot be folded into it without loss.
     pub fn const_value<C: Const>(
         &mut self,
         val: C,
@@ -210,10 +231,20 @@ impl Context {
         Value::from_const(val, optional_cast, self)
     }
 
+    /// Wraps a constant expression as an operand.
+    ///
+    /// Unlike an instruction, a constant expression is written inline wherever a
+    /// constant may appear, so it defines no register and cannot fail.
     pub fn const_expr(&mut self, expr: ConstExpr) -> Value {
         Value::from_const_expr(expr, self)
     }
 
+    /// Takes a global's address as an operand.
+    ///
+    /// The result is typed `ptr` whatever the global holds — `@g` is an address, and a
+    /// function's address is as much a `ptr` as a variable's. What it points *at* is
+    /// recorded separately, which is how a `load` or `store` through it can have its
+    /// type inferred.
     pub fn global_value<T: GlobalEntity>(&mut self, global: GlobalId<T>) -> Value {
         Value::from_global(global, self)
     }

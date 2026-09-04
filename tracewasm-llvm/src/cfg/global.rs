@@ -242,9 +242,25 @@ impl GlobalData {
     }
 }
 
+/// A callable function, however the module came by it.
+///
+/// A call names its callee with one of these rather than with a string, and the only
+/// sources of one are
+/// [`define_function`](crate::cfg::builder::Builder::define_function) and
+/// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call to
+/// a function the module does not have cannot be written — there is no handle to pass
+/// — and the signature behind it is guaranteed to be on record.
+///
+/// The two are separate at every other point in the API, because only a definition has
+/// blocks to add. They come together here because a call does not care: it needs a
+/// name and a signature, and both kinds have those. `From` is implemented for each, so
+/// a call site can write `f.into()`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FuncRef {
+    /// A function this module defines.
     Defined(GlobalId<DefinedFunc>),
+    /// A function this module declares but does not define — a host import, or
+    /// anything else resolved at link time.
     Declared(GlobalId<DeclaredFunc>),
 }
 

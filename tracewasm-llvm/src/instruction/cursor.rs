@@ -128,27 +128,36 @@ impl From<TyId> for OperandTy {
 /// compiler enforces it:
 ///
 /// ```compile_fail
-/// # use tracewasm_llvm::cfg::{builder::Builder, context::Context};
-/// # let mut ctx = crate::test_support::ctx();
-/// # let mut builder = Builder;
-/// # let void_ty = ctx.void_ty();
-/// # let f = builder.define_function("f".to_string(), &[], void_ty, &mut ctx).unwrap();
-/// # let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+/// # use tracewasm_llvm::cfg::{context::Context, module::{DataLayout, Triple}};
+/// # let ctx = Context::new(
+/// #     Triple::new("arm64".to_string(), "apple".to_string(), "macosx".to_string(), None),
+/// #     DataLayout::default(),
+/// # );
+/// # let mut builder = ctx.builder();
+/// # let void_ty = builder.void_ty();
+/// # let f = builder.define_function("f".to_string(), &[], void_ty).unwrap();
+/// # let entry = f.add_basic_block("entry".to_string(), &mut builder).unwrap();
 /// let cursor = builder.cursor_at_block(entry);
-/// cursor.build_unconditional_br(entry, &mut ctx)?;
-/// cursor.build_unconditional_br(entry, &mut ctx)?;  // cursor was moved
-/// # Ok::<(), anyhow::Error>(())
+/// cursor.build_unconditional_br(entry).unwrap();
+/// cursor.build_unconditional_br(entry).unwrap();  // cursor was moved
 /// ```
 ///
-/// That cannot see a *second* cursor opened at the same block, so the block also
+/// That cannot see a cursor opened at the same block *afterwards*, so the block also
 /// carries a flag: any builder on an ended block returns
 /// [`InstructionError::BasicBlockAlreadyTerminated`].
 ///
 /// # Naming
 ///
-/// Builders that define a register take a `reg: Option<&str>` name hint. `None` gives
-/// the value LLVM's next unnamed number; a hint is used as given, suffixed if it is
-/// already taken.
+/// Builders that define a register take a [`RegName`]. [`RegName::Unnamed`] takes
+/// LLVM's next unnamed number; a [`Named`](RegName::Named) one is used as given,
+/// suffixed if it is already taken. `"x".into()` is the short way to write one.
+///
+/// # Reaching the context
+///
+/// A cursor borrows the [`Context`] and derefs to it, so a constant or a type can be
+/// made straight through the cursor while it is open — `cursor.i32_ty()`,
+/// `cursor.const_value(..)`. That matters because the builder is borrowed for as long
+/// as the cursor lives, so it cannot be used for those in the meantime.
 pub struct Cursor<'a> {
     pub(crate) ctx: &'a mut Context,
     pub(crate) block: BasicBlockId,
@@ -715,42 +724,36 @@ impl<'a> Cursor<'a> {
     /// [`build_void_call`](Self::build_void_call) instead. The two are separate
     /// because a `void` call defines no register — `llvm-as` refuses
     /// `%r = call void @g()` with "instructions returning void cannot have a name" —
-    /// so there is no [`Value`] for this one to hand back. Splitting them is what
+    /// so there is no [`Value`] for this one to hand back. Keeping them apart is what
     /// makes naming a `void` call unrepresentable rather than a runtime check on
-    /// `reg`, and it is why this returns a `Value` rather than an `Option<Value>`.
+    /// `reg`, and it is why this always yields a value.
     ///
     /// A `call` is not a terminator: the block stays open afterwards.
     ///
-    /// # Checking against the callee
+    /// # Naming the callee
     ///
-    /// The callee is looked up by name in the module's function table and everything
-    /// is checked against its recorded signature — arity, each parameter type, and
-    /// the return type. Each argument may carry an optional type to be folded into
-    /// first, with the same rule as elsewhere: a constant converts, a register must
+    /// The callee is a [`FuncRef`], and the only sources of one are
+    /// [`define_function`](crate::cfg::builder::Builder::define_function) and
+    /// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call
+    /// to a function that is not in the module cannot be written: there is no handle
+    /// to pass. A host import is reachable through the second of those, and is checked
+    /// exactly as a definition would be.
+    ///
+    /// A function's own handle exists from the moment it is defined, before any of its
+    /// body — which is what makes self-recursion work.
+    ///
+    /// # Checking against the signature
+    ///
+    /// Arity, each parameter type, and the return type are all checked against what
+    /// the callee recorded. Each argument may carry an [`OperandTy`] to be folded into
+    /// first, with the same rule as elsewhere: a literal folds, anything else must
     /// already match.
     ///
-    /// `return_ty` is optional; omitted, it is taken from the signature. Given, it
-    /// has to agree with it.
-    ///
-    /// # The callee must already exist
-    ///
-    /// Only functions added through
-    /// [`Builder::define_function`](crate::cfg::builder::Builder::define_function) are in
-    /// the table, and they are added as the module is built. So:
-    ///
-    /// - **Self-recursion works** — a function's name is registered before its body
-    ///   is built.
-    /// - **A forward call does not.** Calling a function that will be added later
-    ///   fails, even though LLVM makes every function in a module mutually visible.
-    ///   Add all the functions first, then fill in their bodies.
-    /// - **Host imports are reachable**, through
-    ///   [`Builder::declare_function`](crate::cfg::builder::Builder::declare_function).
-    ///   A declaration records its signature under the same name, so it resolves and
-    ///   is checked exactly as a definition would be.
+    /// `return_ty` may be [`OperandTy::Inferred`], in which case it is taken from the
+    /// signature; given, it has to agree with it.
     ///
     /// # Errors
     ///
-    /// - [`CallError::FunctionNotFound`] if no function of that name has been added.
     /// - [`CallError::VoidCalleeNeedsVoidCall`] if the callee returns `void` — use
     ///   [`build_void_call`](Self::build_void_call).
     /// - [`CallError::ParamCountMismatch`], [`CallError::ParamTypeMismatch`],
@@ -849,7 +852,6 @@ impl<'a> Cursor<'a> {
     ///
     /// # Errors
     ///
-    /// - [`CallError::FunctionNotFound`] if no function of that name has been added.
     /// - [`CallError::NonVoidCalleeNeedsValueCall`] if the callee returns a value,
     ///   which this builder would silently drop — use
     ///   [`build_call`](Self::build_call).

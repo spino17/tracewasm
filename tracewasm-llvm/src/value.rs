@@ -431,10 +431,13 @@ impl Value {
 
     /// Interns a Rust literal as an LLVM constant.
     ///
-    /// With `optional_cast` as `None` the value keeps the type [`Const::ty`] gives it
-    /// — `7i32` becomes `i32 7`. With a type given, the constant is folded into it
-    /// *now*: `Value::from_const(7i8, Some(i64_ty), ctx)` interns `i64 7`, not an
-    /// `i8` to be widened later.
+    /// With [`OperandTy::Inferred`] the value keeps the type [`Const::ty`] gives it —
+    /// `7i32` becomes `i32 7`. With a type named, the constant is folded into it
+    /// *now*: `from_const(7i8, i64_ty.into(), ctx)` interns `i64 7`, not an `i8` to be
+    /// widened later.
+    ///
+    /// Usually reached as [`const_value`](crate::cfg::context::Context::const_value)
+    /// on whichever of the builder or cursor is in hand.
     ///
     /// Widths convert freely among integers, and between `float` and `double`.
     /// Crossing between integers and floats, or reaching a pointer, is refused —
@@ -1490,13 +1493,34 @@ mod tests {
         // Built first, then checked: resolving an id back needs a shared borrow of
         // the context the values were built through.
         let cases = [
-            (Value::from_const(1i8, OperandTy::Inferred, &mut ctx), Type::I8),
-            (Value::from_const(1i16, OperandTy::Inferred, &mut ctx), Type::I16),
-            (Value::from_const(1i32, OperandTy::Inferred, &mut ctx), Type::I32),
-            (Value::from_const(1i64, OperandTy::Inferred, &mut ctx), Type::I64),
-            (Value::from_const(1.0f32, OperandTy::Inferred, &mut ctx), Type::Float),
-            (Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx), Type::Double),
-            (Value::from_const(true, OperandTy::Inferred, &mut ctx), Type::I1),
+            (
+                Value::from_const(1i8, OperandTy::Inferred, &mut ctx),
+                Type::I8,
+            ),
+            (
+                Value::from_const(1i16, OperandTy::Inferred, &mut ctx),
+                Type::I16,
+            ),
+            (
+                Value::from_const(1i32, OperandTy::Inferred, &mut ctx),
+                Type::I32,
+            ),
+            (
+                Value::from_const(1i64, OperandTy::Inferred, &mut ctx),
+                Type::I64,
+            ),
+            (
+                Value::from_const(1.0f32, OperandTy::Inferred, &mut ctx),
+                Type::Float,
+            ),
+            (
+                Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx),
+                Type::Double,
+            ),
+            (
+                Value::from_const(true, OperandTy::Inferred, &mut ctx),
+                Type::I1,
+            ),
         ];
 
         for (value, expected) in cases {

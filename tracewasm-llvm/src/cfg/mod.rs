@@ -51,7 +51,9 @@ mod tests {
     fn simple_api_usage() {
         let mut builder = fixture();
         let func = add_fn("sum", &mut builder).unwrap();
-        let entry = func.add_basic_block("entry".to_string(), &mut builder).unwrap();
+        let entry = func
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
         let cursor = builder.cursor_at_block(entry);
 
         cursor.build_unconditional_br(entry).unwrap();
