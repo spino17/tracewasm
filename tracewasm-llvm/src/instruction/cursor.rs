@@ -7,15 +7,14 @@ use crate::{
         global::{FuncRef, GlobalKind},
     },
     error::{
-        AllocaError, CallError, CastError, FArithmeticError, FCmpError, GepError, IArithmeticError,
+        AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
         ICmpError, InstructionError, PhiError, RetError, StoreError,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FArithmeticOp,
-        FArithmeticOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands,
-        IArithmeticOp, IArithmeticOperands, ICmpOperands, ICond, Instruction, InstructionKind,
-        LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
-        UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
+        FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
+        IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
+        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     interner::TyId,
     value::{I1Value, Signedness, Value, ValueKind},
@@ -1071,9 +1070,9 @@ impl<'a> Cursor<'a> {
     /// - [`IArithmeticError::OperandTypeNotInteger`] — floats need the `f`-prefixed
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
-    pub fn build_iarithmetic(
+    pub fn build_ibinop(
         &mut self,
-        op: IArithmeticOp,
+        op: IBinOp,
         ty: OperandTy,
         a: &Value,
         b: &Value,
@@ -1085,7 +1084,7 @@ impl<'a> Cursor<'a> {
             let (given_a, given_b) = (a.ty(), b.ty());
 
             let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, self.ctx) else {
-                return Err(IArithmeticError::OperandsNotCastable(
+                return Err(IBinOpError::OperandsNotCastable(
                     op.to_string(),
                     self.ctx.display(given_a).to_string(),
                     self.ctx.display(given_b).to_string(),
@@ -1096,7 +1095,7 @@ impl<'a> Cursor<'a> {
             (a, b)
         } else {
             if a.ty() != b.ty() {
-                return Err(IArithmeticError::OperandTypesDiffer(
+                return Err(IBinOpError::OperandTypesDiffer(
                     op.to_string(),
                     self.ctx.display(a.ty()).to_string(),
                     self.ctx.display(b.ty()).to_string(),
@@ -1107,7 +1106,7 @@ impl<'a> Cursor<'a> {
             if let OperandTy::Asserted(ty) = ty
                 && ty != a.ty()
             {
-                return Err(IArithmeticError::ProvidedTypeDoesNotMatchOperands(
+                return Err(IBinOpError::ProvidedTypeDoesNotMatchOperands(
                     op.to_string(),
                     self.ctx.display(ty).to_string(),
                     self.ctx.display(a.ty()).to_string(),
@@ -1122,7 +1121,7 @@ impl<'a> Cursor<'a> {
         let ty = a.ty();
 
         if !ty.is_integer(self.ctx) {
-            return Err(IArithmeticError::OperandTypeNotInteger(
+            return Err(IBinOpError::OperandTypeNotInteger(
                 op.to_string(),
                 self.ctx.display(ty).to_string(),
             )
@@ -1130,7 +1129,7 @@ impl<'a> Cursor<'a> {
         }
 
         add_instruction_to_block_and_get_value(
-            InstructionKind::IArithmetic(IArithmeticOperands { op, ty, a, b }),
+            InstructionKind::IBinOp(IBinOpOperands { op, ty, a, b }),
             ty,
             self.block,
             reg,
@@ -1222,9 +1221,9 @@ impl<'a> Cursor<'a> {
     ///   land here.
     /// - [`FArithmeticError::OperandTypeNotFloat`] — the common type is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
-    pub fn build_farithmetic(
+    pub fn build_fbinop(
         &mut self,
-        op: FArithmeticOp,
+        op: FBinOp,
         ty: OperandTy,
         a: &Value,
         b: &Value,
@@ -1234,7 +1233,7 @@ impl<'a> Cursor<'a> {
 
         let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
         else {
-            return Err(FArithmeticError::OperandsNotCastable(
+            return Err(FBinOpError::OperandsNotCastable(
                 op.to_string(),
                 self.ctx.display(given_a).to_string(),
                 self.ctx.display(given_b).to_string(),
@@ -1245,7 +1244,7 @@ impl<'a> Cursor<'a> {
         let ty = a.ty();
 
         if !ty.is_float(self.ctx) {
-            return Err(FArithmeticError::OperandTypeNotFloat(
+            return Err(FBinOpError::OperandTypeNotFloat(
                 op.to_string(),
                 self.ctx.display(ty).to_string(),
             )
@@ -1253,7 +1252,7 @@ impl<'a> Cursor<'a> {
         }
 
         add_instruction_to_block_and_get_value(
-            InstructionKind::FArithmetic(FArithmeticOperands { op, ty, a, b }),
+            InstructionKind::FBinOp(FBinOpOperands { op, ty, a, b }),
             ty,
             self.block,
             reg,
@@ -1276,7 +1275,7 @@ impl<'a> Cursor<'a> {
         let ty = value.ty();
 
         if !ty.is_float(self.ctx) {
-            return Err(FArithmeticError::OperandTypeNotFloat(
+            return Err(FBinOpError::OperandTypeNotFloat(
                 "fneg".to_string(),
                 self.ctx.display(ty).to_string(),
             )
@@ -4489,10 +4488,10 @@ mod tests {
     #[test]
     fn a_signed_operation_widens_a_constant_by_its_own_reading() {
         for (op, expected) in [
-            (IArithmeticOp::Lshr, ConstValue::I64(4_294_967_295)),
-            (IArithmeticOp::Ashr, ConstValue::I64(-1)),
-            (IArithmeticOp::Udiv, ConstValue::I64(4_294_967_295)),
-            (IArithmeticOp::Sdiv, ConstValue::I64(-1)),
+            (IBinOp::Lshr, ConstValue::I64(4_294_967_295)),
+            (IBinOp::Ashr, ConstValue::I64(-1)),
+            (IBinOp::Udiv, ConstValue::I64(4_294_967_295)),
+            (IBinOp::Sdiv, ConstValue::I64(-1)),
         ] {
             let mut builder = fixture();
             let (mut cursor, block) = block_for_icmp(&mut builder);
@@ -4501,7 +4500,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
             cursor
-                .build_iarithmetic(op, OperandTy::Inferred, &wide, &narrow, "r".into())
+                .build_ibinop(op, OperandTy::Inferred, &wide, &narrow, "r".into())
                 .expect("a signed operation may widen a constant");
 
             let instr = builder
@@ -4512,7 +4511,7 @@ mod tests {
                 .last()
                 .unwrap();
 
-            let InstructionKind::IArithmetic(operands) = &instr.kind else {
+            let InstructionKind::IBinOp(operands) = &instr.kind else {
                 panic!("not an iarithmetic");
             };
 
@@ -4537,13 +4536,13 @@ mod tests {
     #[test]
     fn a_signedness_free_operation_refuses_to_widen() {
         for op in [
-            IArithmeticOp::Add,
-            IArithmeticOp::Sub,
-            IArithmeticOp::Mul,
-            IArithmeticOp::Shl,
-            IArithmeticOp::And,
-            IArithmeticOp::Or,
-            IArithmeticOp::Xor,
+            IBinOp::Add,
+            IBinOp::Sub,
+            IBinOp::Mul,
+            IBinOp::Shl,
+            IBinOp::And,
+            IBinOp::Or,
+            IBinOp::Xor,
         ] {
             let mut builder = fixture();
             let (mut cursor, _) = block_for_icmp(&mut builder);
@@ -4552,13 +4551,13 @@ mod tests {
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
             let err = cursor
-                .build_iarithmetic(op, OperandTy::Inferred, &wide, &narrow, RegName::Unnamed)
+                .build_ibinop(op, OperandTy::Inferred, &wide, &narrow, RegName::Unnamed)
                 .expect_err("no reading is available, so widening must be refused");
 
             assert!(
                 matches!(
                     &err,
-                    InstructionError::IArithmetic(IArithmeticError::OperandTypesDiffer(o, a, b))
+                    InstructionError::IBinOp(IBinOpError::OperandTypesDiffer(o, a, b))
                         if o == &op.to_string() && a == "i64" && b == "i32"
                 ),
                 "got: {err}",
@@ -4578,7 +4577,7 @@ mod tests {
         let b = Value::from_const(-1i64, OperandTy::Inferred, &mut cursor).unwrap();
 
         let result = cursor
-            .build_iarithmetic(IArithmeticOp::Add, OperandTy::Inferred, &a, &b, "r".into())
+            .build_ibinop(IBinOp::Add, OperandTy::Inferred, &a, &b, "r".into())
             .expect("two i64s need no widening");
 
         assert_eq!(
@@ -4599,15 +4598,9 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_iarithmetic(
-                    IArithmeticOp::Add,
-                    OperandTy::Inferred,
-                    &f,
-                    &g,
-                    RegName::Unnamed
-                ),
-                Err(InstructionError::IArithmetic(
-                    IArithmeticError::OperandTypeNotInteger(..)
+                cursor.build_ibinop(IBinOp::Add, OperandTy::Inferred, &f, &g, RegName::Unnamed),
+                Err(InstructionError::IBinOp(
+                    IBinOpError::OperandTypeNotInteger(..)
                 ))
             ),
             "`add` does not take doubles",
@@ -4618,16 +4611,10 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_farithmetic(
-                    FArithmeticOp::FAdd,
-                    OperandTy::Inferred,
-                    &i,
-                    &j,
-                    RegName::Unnamed
-                ),
-                Err(InstructionError::FArithmetic(
-                    FArithmeticError::OperandTypeNotFloat(..)
-                ))
+                cursor.build_fbinop(FBinOp::FAdd, OperandTy::Inferred, &i, &j, RegName::Unnamed),
+                Err(InstructionError::FBinOp(FBinOpError::OperandTypeNotFloat(
+                    ..
+                )))
             ),
             "`fadd` does not take i32s",
         );
@@ -4674,9 +4661,9 @@ mod tests {
 
         assert!(matches!(
             cursor.build_fneg(v, RegName::Unnamed),
-            Err(InstructionError::FArithmetic(
-                FArithmeticError::OperandTypeNotFloat(..)
-            ))
+            Err(InstructionError::FBinOp(FBinOpError::OperandTypeNotFloat(
+                ..
+            )))
         ),);
     }
 
@@ -4684,19 +4671,19 @@ mod tests {
     #[test]
     fn every_integer_operation_builds() {
         for op in [
-            IArithmeticOp::Add,
-            IArithmeticOp::Sub,
-            IArithmeticOp::Mul,
-            IArithmeticOp::Udiv,
-            IArithmeticOp::Sdiv,
-            IArithmeticOp::Urem,
-            IArithmeticOp::Srem,
-            IArithmeticOp::Shl,
-            IArithmeticOp::Lshr,
-            IArithmeticOp::Ashr,
-            IArithmeticOp::And,
-            IArithmeticOp::Or,
-            IArithmeticOp::Xor,
+            IBinOp::Add,
+            IBinOp::Sub,
+            IBinOp::Mul,
+            IBinOp::Udiv,
+            IBinOp::Sdiv,
+            IBinOp::Urem,
+            IBinOp::Srem,
+            IBinOp::Shl,
+            IBinOp::Lshr,
+            IBinOp::Ashr,
+            IBinOp::And,
+            IBinOp::Or,
+            IBinOp::Xor,
         ] {
             let mut builder = fixture();
             let (mut cursor, _) = block_for_icmp(&mut builder);
@@ -4706,7 +4693,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_iarithmetic(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_ibinop(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );
@@ -4717,11 +4704,11 @@ mod tests {
     #[test]
     fn every_float_operation_builds() {
         for op in [
-            FArithmeticOp::FAdd,
-            FArithmeticOp::FSub,
-            FArithmeticOp::FMul,
-            FArithmeticOp::FDiv,
-            FArithmeticOp::FRem,
+            FBinOp::FAdd,
+            FBinOp::FSub,
+            FBinOp::FMul,
+            FBinOp::FDiv,
+            FBinOp::FRem,
         ] {
             let mut builder = fixture();
             let (mut cursor, _) = block_for_icmp(&mut builder);
@@ -4731,7 +4718,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_farithmetic(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_fbinop(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );

@@ -9,8 +9,8 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visibility},
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FArithmeticOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
+        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
         UnconditionalBrOperands,
     },
@@ -138,9 +138,9 @@ pub trait CfgVisitor {
     /// Visits an integer arithmetic, bitwise or shift instruction.
     ///
     /// The result has the operands' type, not `i1`.
-    fn visit_iarithmetic(
+    fn visit_ibinop(
         &mut self,
-        operands: &IArithmeticOperands,
+        operands: &IBinOpOperands,
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
@@ -157,9 +157,9 @@ pub trait CfgVisitor {
     ) -> Result<Self::OkType, Self::ErrType>;
 
     /// Visits a floating-point arithmetic instruction.
-    fn visit_farithmetic(
+    fn visit_fbinop(
         &mut self,
-        operands: &FArithmeticOperands,
+        operands: &FBinOpOperands,
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
@@ -270,14 +270,14 @@ pub trait CfgVisitor {
                 InstructionKind::ICmp(operands) => {
                     self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
                 }
-                InstructionKind::IArithmetic(operands) => {
-                    self.visit_iarithmetic(operands, val.unwrap(), ctx)?
+                InstructionKind::IBinOp(operands) => {
+                    self.visit_ibinop(operands, val.unwrap(), ctx)?
                 }
                 InstructionKind::FCmp(operands) => {
                     self.visit_fcmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
                 }
-                InstructionKind::FArithmetic(operands) => {
-                    self.visit_farithmetic(operands, val.unwrap(), ctx)?
+                InstructionKind::FBinOp(operands) => {
+                    self.visit_fbinop(operands, val.unwrap(), ctx)?
                 }
                 InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
                 InstructionKind::Cast(operands) => self.visit_cast(operands, val.unwrap(), ctx)?,

@@ -10,8 +10,8 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FArithmeticOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
+        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
         LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
@@ -567,9 +567,9 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
-    fn visit_iarithmetic(
+    fn visit_ibinop(
         &mut self,
-        operands: &IArithmeticOperands,
+        operands: &IBinOpOperands,
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
@@ -607,9 +607,9 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
-    fn visit_farithmetic(
+    fn visit_fbinop(
         &mut self,
-        operands: &FArithmeticOperands,
+        operands: &FBinOpOperands,
         value: &Value,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
@@ -682,7 +682,7 @@ mod tests {
         cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         error::ContextError,
         instruction::{
-            CastOp, FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond,
+            CastOp, FBinOp, FCond, GetElementPtrOperands, IBinOp, ICond,
             cursor::{OperandTy, RegName},
         },
         interner::TyId,
@@ -876,8 +876,8 @@ mod tests {
         let step = in_body.const_value(1i32, OperandTy::Inferred).unwrap();
 
         in_body
-            .build_iarithmetic(
-                IArithmeticOp::Add,
+            .build_ibinop(
+                IBinOp::Add,
                 OperandTy::Inferred,
                 &counter,
                 &step,
@@ -886,8 +886,8 @@ mod tests {
             .unwrap();
 
         in_body
-            .build_farithmetic(
-                FArithmeticOp::FMul,
+            .build_fbinop(
+                FBinOp::FMul,
                 OperandTy::Inferred,
                 &phi,
                 &half,

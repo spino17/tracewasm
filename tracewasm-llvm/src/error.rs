@@ -211,10 +211,10 @@ pub enum InstructionError {
     FCmp(#[from] FCmpError),
     /// See [`IArithmeticError`].
     #[error("{0}")]
-    IArithmetic(#[from] IArithmeticError),
+    IBinOp(#[from] IBinOpError),
     /// See [`FArithmeticError`].
     #[error("{0}")]
-    FArithmetic(#[from] FArithmeticError),
+    FBinOp(#[from] FBinOpError),
     /// See [`CastError`].
     #[error("{0}")]
     Cast(#[from] CastError),
@@ -397,7 +397,7 @@ pub enum FCmpError {
 
 /// An integer arithmetic, bitwise or shift instruction could not be built.
 #[derive(Error, Debug)]
-pub enum IArithmeticError {
+pub enum IBinOpError {
     /// The operands have different types and could not be brought to a common one.
     ///
     /// Reached only by the six operations that carry a signedness. Either the narrower
@@ -434,7 +434,7 @@ pub enum IArithmeticError {
 
 /// A floating-point arithmetic instruction could not be built.
 #[derive(Error, Debug)]
-pub enum FArithmeticError {
+pub enum FBinOpError {
     /// The operands have different types and could not be brought to a common one.
     ///
     /// Integer operands land here too: nothing bridges the two families without a

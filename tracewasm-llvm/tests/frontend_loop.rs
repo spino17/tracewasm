@@ -11,7 +11,7 @@ use tracewasm_llvm::{
         emit::IREmitter,
         module::{DataLayout, Triple},
     },
-    instruction::{IArithmeticOp, ICond, cursor::OperandTy},
+    instruction::{IBinOp, ICond, cursor::OperandTy},
 };
 
 /// ```text
@@ -74,23 +74,11 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
 
     let next = in_loop
-        .build_iarithmetic(
-            IArithmeticOp::Add,
-            OperandTy::Inferred,
-            &acc,
-            &i,
-            "next".into(),
-        )
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "next".into())
         .unwrap();
 
     let dec = in_loop
-        .build_iarithmetic(
-            IArithmeticOp::Sub,
-            OperandTy::Inferred,
-            &i,
-            &one,
-            "dec".into(),
-        )
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
         .unwrap();
 
     let cond = in_loop
@@ -219,13 +207,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
 
     let bit = in_loop
-        .build_iarithmetic(
-            IArithmeticOp::And,
-            OperandTy::Inferred,
-            &i,
-            &one,
-            "bit".into(),
-        )
+        .build_ibinop(IBinOp::And, OperandTy::Inferred, &i, &one, "bit".into())
         .unwrap();
     let even = in_loop
         .build_icmp(ICond::Eq, OperandTy::Inferred, &bit, &zero, "even".into())
@@ -236,25 +218,13 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     // --- the two arms ---
     let mut in_then = builder.cursor_at_block(then_b);
     let a = in_then
-        .build_iarithmetic(
-            IArithmeticOp::Add,
-            OperandTy::Inferred,
-            &acc,
-            &i,
-            "a".into(),
-        )
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "a".into())
         .unwrap();
     in_then.build_unconditional_br(latch).unwrap();
 
     let mut in_else = builder.cursor_at_block(else_b);
     let b = in_else
-        .build_iarithmetic(
-            IArithmeticOp::Add,
-            OperandTy::Inferred,
-            &acc,
-            &one,
-            "b".into(),
-        )
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &one, "b".into())
         .unwrap();
     in_else.build_unconditional_br(latch).unwrap();
 
@@ -265,13 +235,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
         .build_phi(&[(then_b, a), (else_b, b)], "merged".into())
         .unwrap();
     let dec = in_latch
-        .build_iarithmetic(
-            IArithmeticOp::Sub,
-            OperandTy::Inferred,
-            &i,
-            &one,
-            "dec".into(),
-        )
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
         .unwrap();
     let cont = in_latch
         .build_icmp(ICond::Sgt, OperandTy::Inferred, &dec, &zero, "cont".into())

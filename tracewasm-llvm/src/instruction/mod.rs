@@ -125,14 +125,14 @@ pub enum InstructionKind {
     ICmp(ICmpOperands),
     /// Integer arithmetic, bitwise logic or a shift, producing a value of the
     /// operand type.
-    IArithmetic(IArithmeticOperands),
+    IBinOp(IBinOpOperands),
     /// Compares two floating-point values, producing an `i1`.
     ///
     /// Separate from [`ICmp`](Self::ICmp) because LLVM keeps them separate: `icmp`
     /// refuses floats and `fcmp` refuses integers.
     FCmp(FCmpOperands),
     /// Floating-point arithmetic, producing a value of the operand type.
-    FArithmetic(FArithmeticOperands),
+    FBinOp(FBinOpOperands),
     /// Negates a floating-point value.
     ///
     /// Its own kind rather than an [`FArithmetic`](Self::FArithmetic) op, because
@@ -369,9 +369,9 @@ impl ICond {
 ///
 /// Emitted as `<op> <ty> <a>, <b>` — the type written once, since LLVM requires both
 /// operands to have it. The result has that same type, unlike a comparison's `i1`.
-pub struct IArithmeticOperands {
+pub struct IBinOpOperands {
     /// Which operation.
-    pub op: IArithmeticOp,
+    pub op: IBinOp,
     /// The type both operands have, and the type of the result.
     pub ty: TyId,
     /// The left operand.
@@ -390,7 +390,7 @@ pub struct IArithmeticOperands {
 ///
 /// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
-pub enum IArithmeticOp {
+pub enum IBinOp {
     /// Addition. No signedness — see the type-level note.
     Add,
     /// Subtraction. No signedness.
@@ -420,27 +420,27 @@ pub enum IArithmeticOp {
     Xor,
 }
 
-impl Display for IArithmeticOp {
+impl Display for IBinOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            IArithmeticOp::Add => "add",
-            IArithmeticOp::Sub => "sub",
-            IArithmeticOp::Mul => "mul",
-            IArithmeticOp::Udiv => "udiv",
-            IArithmeticOp::Sdiv => "sdiv",
-            IArithmeticOp::Urem => "urem",
-            IArithmeticOp::Srem => "srem",
-            IArithmeticOp::Shl => "shl",
-            IArithmeticOp::Lshr => "lshr",
-            IArithmeticOp::Ashr => "ashr",
-            IArithmeticOp::And => "and",
-            IArithmeticOp::Or => "or",
-            IArithmeticOp::Xor => "xor",
+            IBinOp::Add => "add",
+            IBinOp::Sub => "sub",
+            IBinOp::Mul => "mul",
+            IBinOp::Udiv => "udiv",
+            IBinOp::Sdiv => "sdiv",
+            IBinOp::Urem => "urem",
+            IBinOp::Srem => "srem",
+            IBinOp::Shl => "shl",
+            IBinOp::Lshr => "lshr",
+            IBinOp::Ashr => "ashr",
+            IBinOp::And => "and",
+            IBinOp::Or => "or",
+            IBinOp::Xor => "xor",
         })
     }
 }
 
-impl IArithmeticOp {
+impl IBinOp {
     /// How to read the operands, or `None` if the operation does not say.
     ///
     /// `None` for `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — LLVM has a
@@ -454,19 +454,19 @@ impl IArithmeticOp {
     /// The six that do carry one are the pairs LLVM spells separately.
     pub fn signedness(&self) -> Option<Signedness> {
         let v = match self {
-            IArithmeticOp::Add => return None,
-            IArithmeticOp::Sub => return None,
-            IArithmeticOp::Mul => return None,
-            IArithmeticOp::And => return None,
-            IArithmeticOp::Or => return None,
-            IArithmeticOp::Xor => return None,
-            IArithmeticOp::Shl => return None,
-            IArithmeticOp::Udiv => Signedness::Unsigned,
-            IArithmeticOp::Sdiv => Signedness::Signed,
-            IArithmeticOp::Urem => Signedness::Unsigned,
-            IArithmeticOp::Srem => Signedness::Signed,
-            IArithmeticOp::Lshr => Signedness::Unsigned,
-            IArithmeticOp::Ashr => Signedness::Signed,
+            IBinOp::Add => return None,
+            IBinOp::Sub => return None,
+            IBinOp::Mul => return None,
+            IBinOp::And => return None,
+            IBinOp::Or => return None,
+            IBinOp::Xor => return None,
+            IBinOp::Shl => return None,
+            IBinOp::Udiv => Signedness::Unsigned,
+            IBinOp::Sdiv => Signedness::Signed,
+            IBinOp::Urem => Signedness::Unsigned,
+            IBinOp::Srem => Signedness::Signed,
+            IBinOp::Lshr => Signedness::Unsigned,
+            IBinOp::Ashr => Signedness::Signed,
         };
 
         Some(v)
@@ -477,9 +477,9 @@ impl IArithmeticOp {
 ///
 /// Emitted as `<op> <ty> <a>, <b>`. Every variant here is binary; `fneg` is unary and
 /// lives in [`FNegOperands`] instead.
-pub struct FArithmeticOperands {
+pub struct FBinOpOperands {
     /// Which operation.
-    pub op: FArithmeticOp,
+    pub op: FBinOp,
     /// The type both operands have, and the type of the result.
     pub ty: TyId,
     /// The left operand.
@@ -495,7 +495,7 @@ pub struct FArithmeticOperands {
 ///
 /// [`Display`] writes the LLVM keyword, which is what the emitter uses.
 #[derive(Clone, Copy)]
-pub enum FArithmeticOp {
+pub enum FBinOp {
     /// Addition.
     FAdd,
     /// Subtraction.
@@ -508,14 +508,14 @@ pub enum FArithmeticOp {
     FRem,
 }
 
-impl Display for FArithmeticOp {
+impl Display for FBinOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            FArithmeticOp::FAdd => "fadd",
-            FArithmeticOp::FSub => "fsub",
-            FArithmeticOp::FMul => "fmul",
-            FArithmeticOp::FDiv => "fdiv",
-            FArithmeticOp::FRem => "frem",
+            FBinOp::FAdd => "fadd",
+            FBinOp::FSub => "fsub",
+            FBinOp::FMul => "fmul",
+            FBinOp::FDiv => "fdiv",
+            FBinOp::FRem => "frem",
         })
     }
 }
