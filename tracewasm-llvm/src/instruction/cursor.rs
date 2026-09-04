@@ -178,6 +178,16 @@ impl<'a> DerefMut for Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// Returns the immutable reference to the underlying `Context`.
+    pub fn ctx(&self) -> &Context {
+        &self.ctx
+    }
+
+    /// Returns the mutable reference to the underlying `Context`.
+    pub fn ctx_mut(&mut self) -> &mut Context {
+        &mut self.ctx
+    }
+
     /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///

@@ -209,6 +209,67 @@ impl Context {
         self.ty_interner.intern(Type::Void).into()
     }
 
+    /// Interns a struct type and returns its id.
+    ///
+    /// `is_packed` writes it as `<{ … }>` rather than `{ … }`, which drops the
+    /// padding LLVM would otherwise insert between fields.
+    ///
+    /// An empty field list is legal — `{}` assembles.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::AggregateMemberTypeNotSized`] if a field is `void` or a function
+    /// type. This is checked here rather than where the struct is used, because
+    /// [`is_first_class`](TyId::is_first_class) does not look inside an aggregate — a
+    /// `{i32, void}` reads as a plain `Struct` to every later check, and would reach
+    /// emission as IR `llvm-as` rejects.
+    pub fn struct_ty(&mut self, fields: &[TyId], is_packed: bool) -> Result<TyId, TypeError> {
+        for field in fields {
+            if !field.is_first_class(self) {
+                return Err(TypeError::AggregateMemberTypeNotSized(
+                    field.display(self).to_string(),
+                    "struct".to_string(),
+                ));
+            }
+        }
+
+        Ok(self
+            .ty_interner
+            .intern(Type::Struct {
+                fields: fields.to_vec().into_boxed_slice(),
+                packed: is_packed,
+            })
+            .into())
+    }
+
+    /// Interns an array type and returns its id.
+    ///
+    /// `size` is a plain count, not a [`Value`]: LLVM writes the length into the type,
+    /// so it has to be known when the type is built. A variable-length allocation is
+    /// `alloca <ty>, <count>` instead — see
+    /// [`build_alloca`](crate::instruction::cursor::Cursor::build_alloca).
+    ///
+    /// A zero-length array is legal — `[0 x i32]` assembles, and is how LLVM spells a
+    /// flexible array member.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::AggregateMemberTypeNotSized`] if the element is `void` or a
+    /// function type, for the same reason as [`struct_ty`](Self::struct_ty).
+    pub fn array_ty(&mut self, element_ty: TyId, size: u64) -> Result<TyId, TypeError> {
+        if !element_ty.is_first_class(self) {
+            return Err(TypeError::AggregateMemberTypeNotSized(
+                element_ty.display(self).to_string(),
+                "array".to_string(),
+            ));
+        }
+
+        Ok(self
+            .ty_interner
+            .intern(Type::Array { size, element_ty })
+            .into())
+    }
+
     /// Interns a literal and hands back the operand naming it.
     ///
     /// With [`OperandTy::Inferred`] the literal keeps its own type — `1i32` is an

@@ -48,6 +48,16 @@ impl DerefMut for Builder {
 }
 
 impl Builder {
+    /// Returns the immutable reference to the underlying `Context`.
+    pub fn ctx(&self) -> &Context {
+        &self.ctx
+    }
+
+    /// Returns the mutable reference to the underlying `Context`.
+    pub fn ctx_mut(&mut self) -> &mut Context {
+        &mut self.ctx
+    }
+
     /// Opens a cursor that writes into `id`.
     ///
     /// The cursor borrows the builder for as long as it lives, so exactly one is open

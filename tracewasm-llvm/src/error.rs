@@ -65,6 +65,20 @@ pub enum TypeError {
     /// needs a real instruction.
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(String, String),
+    /// An aggregate was given a member that has no size.
+    ///
+    /// A struct field or an array element holds a value, so it needs one — the same
+    /// exclusion as a parameter or an `alloca`. `llvm-as` refuses `[4 x void]` and
+    /// `{i32, void}` with "void type only allowed for function results", and
+    /// `[4 x i32 (i32)]` with "invalid array element type".
+    ///
+    /// Checked when the type is built rather than when it is used, because
+    /// [`is_first_class`](crate::interner::TyId::is_first_class) does not look inside
+    /// an aggregate: `{i32, void}` is a `Struct`, so every later check would pass it.
+    ///
+    /// Fields: the offending member type, and the aggregate being built.
+    #[error("a `{1}` cannot have a member of type `{0}`: it has no size")]
+    AggregateMemberTypeNotSized(String, String),
 }
 
 /// Something about the module's own structure is wrong: a name that collides, is not
