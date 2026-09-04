@@ -19,8 +19,8 @@ use crate::{
 ///
 /// The triple is fixed so the emitter tests can assert on the `target triple` line;
 /// the layout is left unset, so no `target datalayout` line is emitted.
-pub(crate) fn fixture() -> (Context, Builder) {
-    (ctx(), Builder)
+pub(crate) fn fixture() -> Context {
+    ctx()
 }
 
 /// Just the context, for the tests that never touch a builder.
@@ -40,12 +40,12 @@ pub(crate) fn ctx() -> Context {
 /// the graph rather than the signature.
 pub(crate) fn add_fn(
     name: &str,
-    builder: &Builder,
+    builder: &mut Builder,
     ctx: &mut Context,
 ) -> Result<GlobalId<DefinedFunc>, ContextError> {
     let void_ty = ctx.void_ty();
 
-    builder.define_function(name.to_string(), &[], void_ty, ctx)
+    builder.define_function(name.to_string(), &[], void_ty)
 }
 
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather

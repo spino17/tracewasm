@@ -3,6 +3,7 @@
 use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
+        builder::Builder,
         context::Context,
         global::{DefinedFunc, GlobalId},
     },

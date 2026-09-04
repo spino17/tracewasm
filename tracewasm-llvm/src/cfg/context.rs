@@ -3,6 +3,7 @@
 use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
+        builder::Builder,
         function::{FuncId, Function},
         module::{DataLayout, Module, Triple},
     },
@@ -56,6 +57,10 @@ impl Context {
             reg_name_assigner: FxHashMap::default(),
             register_def_instr_index: FxHashMap::default(),
         }
+    }
+
+    pub fn builder(self) -> Builder {
+        Builder { ctx: self }
     }
 }
 

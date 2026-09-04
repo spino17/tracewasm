@@ -1,3 +1,5 @@
+use std::ops::{Deref, DerefMut};
+
 use crate::{
     cfg::{
         ControlFlowGraph,
@@ -22,7 +24,23 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// is just the set of operations that extend it. Construct it as `Builder` and pass
 /// `&mut Context` to each call; [`build`](Self::build) takes the context by value and
 /// hands back the finished [`ControlFlowGraph`].
-pub struct Builder;
+pub struct Builder {
+    pub(crate) ctx: Context,
+}
+
+impl Deref for Builder {
+    type Target = Context;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl DerefMut for Builder {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ctx
+    }
+}
 
 impl Builder {
     /// Opens a cursor that writes into `id`.
@@ -32,8 +50,11 @@ impl Builder {
     /// consume the cursor, plus the block's own
     /// [`is_locked`](crate::cfg::basic_block::BasicBlock) flag for cursors opened
     /// afterwards.
-    pub fn cursor_at_block(&self, id: BasicBlockId) -> Cursor {
-        Cursor { block: id }
+    pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor<'_> {
+        Cursor {
+            ctx: &mut self.ctx,
+            block: id,
+        }
     }
 
     /// Adds a global variable to the module.
@@ -63,26 +84,25 @@ impl Builder {
     /// [`ContextError::GlobalVariableTypeNotSized`] if `ty` is `void` or a function
     /// type, neither of which a variable can hold. Plus the two above.
     pub fn declare_global_variable(
-        &self,
+        &mut self,
         name: String,
         ty: Option<TyId>,
         initializer: Option<ConstExpr>,
-        ctx: &mut Context,
     ) -> Result<GlobalId<GlobalVar>, ContextError> {
-        let name_id: StrId = ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name).into();
 
-        if ctx.module.globals.contains_key(&name_id) {
+        if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
-                ctx.str_interner.value(name_id.0).to_string(),
+                self.ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
 
         let final_ty = if let Some(ty) = ty {
             // A global holds a value, so its type needs a size — the same `void`-and-
             // function-types exclusion as a parameter or an `alloca`.
-            if !ty.is_first_class(ctx) {
+            if !ty.is_first_class(&self.ctx) {
                 return Err(ContextError::GlobalVariableTypeNotSized(
-                    ty.display(ctx).to_string(),
+                    ty.display(&self.ctx).to_string(),
                 ));
             }
 
@@ -90,24 +110,24 @@ impl Builder {
             // compatible: `llvm-as` refuses `@g = global i32 true` with "constant
             // expression type mismatch", even though an `i1` is an integer.
             if let Some(initializer) = &initializer {
-                let init_ty = initializer.ty(ctx);
+                let init_ty = initializer.ty(&mut self.ctx);
 
                 if init_ty != ty {
                     return Err(ContextError::GlobalInitializerTypeMismatch(
-                        ty.display(ctx).to_string(),
-                        init_ty.display(ctx).to_string(),
+                        ty.display(&self.ctx).to_string(),
+                        init_ty.display(&self.ctx).to_string(),
                     ));
                 }
             }
 
             ty
         } else if let Some(initializer) = &initializer {
-            initializer.ty(ctx)
+            initializer.ty(&mut self.ctx)
         } else {
             return Err(ContextError::GlobalTypeAndInitializerBothAbsent);
         };
 
-        ctx.module.globals.insert(
+        self.ctx.module.globals.insert(
             name_id,
             GlobalData {
                 linkage: Linkage::External,
@@ -119,7 +139,7 @@ impl Builder {
             },
         );
 
-        ctx.module.global_variables.push(name_id);
+        self.ctx.module.global_variables.push(name_id);
 
         Ok(GlobalId {
             name: name_id,
@@ -154,37 +174,36 @@ impl Builder {
     /// - [`ContextError::FunctionResultTypeInvalid`] — a result may be `void` but not
     ///   a function type.
     pub fn declare_function(
-        &self,
+        &mut self,
         name: String,
         params: &[TyId],
         result: TyId,
-        ctx: &mut Context,
     ) -> Result<GlobalId<DeclaredFunc>, ContextError> {
-        let name_id: StrId = ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name).into();
 
-        if ctx.module.globals.contains_key(&name_id) {
+        if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
-                ctx.str_interner.value(name_id.0).to_string(),
+                self.ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
 
-        let void_ty = ctx.void_ty();
+        let void_ty = self.ctx.void_ty();
 
         for param_ty in params {
-            if !param_ty.is_first_class(ctx) {
+            if !param_ty.is_first_class(&self.ctx) {
                 return Err(ContextError::FunctionParamTypeNotSized(
-                    param_ty.display(ctx).to_string(),
+                    param_ty.display(&self.ctx).to_string(),
                 ));
             }
         }
 
-        if result != void_ty && !result.is_first_class(ctx) {
+        if result != void_ty && !result.is_first_class(&self.ctx) {
             return Err(ContextError::FunctionResultTypeInvalid(
-                result.display(ctx).to_string(),
+                result.display(&self.ctx).to_string(),
             ));
         }
 
-        ctx.module.globals.insert(
+        self.ctx.module.globals.insert(
             name_id,
             GlobalData {
                 linkage: Linkage::External,
@@ -193,7 +212,7 @@ impl Builder {
             },
         );
 
-        ctx.module.imported_functions.push(name_id);
+        self.ctx.module.imported_functions.push(name_id);
 
         Ok(GlobalId {
             name: name_id,
@@ -224,43 +243,42 @@ impl Builder {
     /// - [`ContextError::InvalidRegisterName`] — a parameter's name hint is not a
     ///   legal LLVM local.
     pub fn define_function(
-        &self,
+        &mut self,
         name: String,
         params: &[(TyId, Option<String>)],
         result: TyId,
-        ctx: &mut Context,
     ) -> Result<GlobalId<DefinedFunc>, ContextError> {
-        let name_id: StrId = ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name).into();
 
-        if ctx.module.globals.contains_key(&name_id) {
+        if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
-                ctx.str_interner.value(name_id.0).to_string(),
+                self.ctx.str_interner.value(name_id.0).to_string(),
             ));
         }
 
-        let void_ty = ctx.void_ty();
+        let void_ty = self.ctx.void_ty();
 
         // A parameter is passed by value, so it has to have a size: `llvm-as` refuses
         // a `void` one with "void type only allowed for function results" and a
         // function-typed one with "invalid type for function argument". Aggregates
         // are fine — `define void @f({i32, double} %x)` assembles.
         for (param_ty, _) in params {
-            if !param_ty.is_first_class(ctx) {
+            if !param_ty.is_first_class(&self.ctx) {
                 return Err(ContextError::FunctionParamTypeNotSized(
-                    param_ty.display(ctx).to_string(),
+                    param_ty.display(&self.ctx).to_string(),
                 ));
             }
         }
 
         // A result may be `void` as well, but still not a function type — that one
         // `llvm-as` refuses with "invalid function return type".
-        if result != void_ty && !result.is_first_class(ctx) {
+        if result != void_ty && !result.is_first_class(&self.ctx) {
             return Err(ContextError::FunctionResultTypeInvalid(
-                result.display(ctx).to_string(),
+                result.display(&self.ctx).to_string(),
             ));
         }
 
-        let id = FuncId::new(ctx.funcs.alloc(Function {
+        let id = FuncId::new(self.ctx.funcs.alloc(Function {
             name: name_id,
             blocks: vec![],
             params: vec![],
@@ -272,7 +290,7 @@ impl Builder {
         let mut param_tys = vec![];
 
         for (param_ty, param_name) in params {
-            let name = ctx.name_for_reg(
+            let name = self.ctx.name_for_reg(
                 if let Some(param) = param_name {
                     param.into()
                 } else {
@@ -282,15 +300,15 @@ impl Builder {
             )?;
 
             param_tys.push(*param_ty);
-            final_params.push(Value::from_register(name, *param_ty, ctx));
+            final_params.push(Value::from_register(name, *param_ty, &mut self.ctx));
         }
 
-        let func = ctx.get_func_mut(id);
+        let func = self.ctx.get_func_mut(id);
 
         func.params = final_params;
         func.result = result;
 
-        ctx.module.globals.insert(
+        self.ctx.module.globals.insert(
             name_id,
             GlobalData {
                 linkage: Linkage::External,
@@ -299,9 +317,10 @@ impl Builder {
             },
         );
 
-        ctx.module.functions.push(id);
+        self.ctx.module.functions.push(id);
 
-        ctx.register_def_instr_index
+        self.ctx
+            .register_def_instr_index
             .insert(id, FxHashMap::default());
 
         Ok(GlobalId {
@@ -318,8 +337,8 @@ impl Builder {
     /// Nothing is verified here: whether each block ends in a terminator, and whether
     /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
     /// reports both.
-    pub fn build(self, ctx: Context) -> ControlFlowGraph {
-        ControlFlowGraph { context: ctx }
+    pub fn build(self) -> ControlFlowGraph {
+        ControlFlowGraph { context: self.ctx }
     }
 }
 

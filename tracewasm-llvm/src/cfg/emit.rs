@@ -683,7 +683,7 @@ mod tests {
     /// up here as a diff.
     #[test]
     fn a_module_emits_ir_that_llvm_assembles() {
-        let (mut ctx, builder) = fixture();
+        let mut ctx = fixture();
 
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
@@ -708,6 +708,8 @@ mod tests {
             })
             .into();
 
+        let mut builder = ctx.builder();
+
         // The callees come first: a call resolves against the functions added so far,
         // so a forward reference would not resolve.
         let helper = builder
@@ -715,33 +717,34 @@ mod tests {
                 "helper".to_string(),
                 &[(i32_ty, Some("v".to_string()))],
                 i32_ty,
-                &mut ctx,
             )
             .unwrap();
 
         let helper_entry = helper
-            .add_basic_block("entry".to_string(), &mut ctx)
+            .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
 
         let passed = helper
-            .nth_param(0, &ctx)
+            .nth_param(0, &builder)
             .expect("helper takes one parameter")
             .clone();
 
         builder
             .cursor_at_block(helper_entry)
-            .build_ret(Some(&passed), i32_ty.into(), &mut ctx)
+            .build_ret(Some(&passed), i32_ty.into())
             .unwrap();
 
         let noop = builder
-            .define_function("noop".to_string(), &[], void_ty, &mut ctx)
+            .define_function("noop".to_string(), &[], void_ty)
             .unwrap();
 
-        let noop_entry = noop.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let noop_entry = noop
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
 
         builder
             .cursor_at_block(noop_entry)
-            .build_ret(None, void_ty.into(), &mut ctx)
+            .build_ret(None, void_ty.into())
             .unwrap();
 
         let f = builder
@@ -749,21 +752,25 @@ mod tests {
                 "main".to_string(),
                 &[(i32_ty, Some("n".to_string())), (ptr_ty, None)],
                 i32_ty,
-                &mut ctx,
             )
             .unwrap();
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let body = f.add_basic_block("body".to_string(), &mut ctx).unwrap();
-        let exit = f.add_basic_block("exit".to_string(), &mut ctx).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let exit = f.add_basic_block("exit".to_string(), &mut builder).unwrap();
 
-        let in_entry = builder.cursor_at_block(entry);
+        let mut in_entry = builder.cursor_at_block(entry);
 
         let slot = in_entry
-            .build_alloca(struct_ty, None, Some(8), "s".into(), &mut ctx)
+            .build_alloca(struct_ty, None, Some(8), "s".into())
             .unwrap();
 
-        let count = Value::from_const(4i32, None, &mut ctx).unwrap();
+        let count = Value::from_const(4i32, None, &mut in_entry).unwrap();
+        let zero = Value::from_const(0i32, None, &mut in_entry).unwrap();
+        let one = Value::from_const(1i32, None, &mut in_entry).unwrap();
+        let two = Value::from_const(2i32, None, &mut in_entry).unwrap();
 
         in_entry
             .build_alloca(
@@ -771,13 +778,8 @@ mod tests {
                 Some((&count, OperandTy::Inferred)),
                 None,
                 RegName::Unnamed,
-                &mut ctx,
             )
             .unwrap();
-
-        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
-        let one = Value::from_const(1i32, None, &mut ctx).unwrap();
-        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
 
         let elem = in_entry
             .build_get_element_ptr(
@@ -786,58 +788,55 @@ mod tests {
                 &[zero, one, two],
                 Some(true),
                 "e".into(),
-                &mut ctx,
             )
             .unwrap();
 
         let loaded = in_entry
-            .build_load(&elem, f64_ty.into(), Some(8), "d".into(), &mut ctx)
+            .build_load(&elem, f64_ty.into(), Some(8), "d".into())
             .unwrap();
 
         in_entry
-            .build_store(&elem, &loaded, OperandTy::Inferred, Some(8), &mut ctx)
+            .build_store(&elem, &loaded, OperandTy::Inferred, Some(8))
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
         // `llvm-as` with "floating point constant invalid for type".
-        let a_float = Value::from_const(0.1f32, None, &mut ctx).unwrap();
+        let a_float = Value::from_const(0.1f32, None, &mut in_entry).unwrap();
 
         let float_slot = in_entry
-            .build_alloca(f32_ty, None, None, "fs".into(), &mut ctx)
+            .build_alloca(f32_ty, None, None, "fs".into())
             .unwrap();
 
         in_entry
-            .build_store(&float_slot, &a_float, OperandTy::Inferred, None, &mut ctx)
+            .build_store(&float_slot, &a_float, OperandTy::Inferred, None)
             .unwrap();
 
-        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let null = Value::from_const(NullPtr, None, &mut in_entry).unwrap();
 
         let ptr_slot = in_entry
-            .build_alloca(ptr_ty, None, None, "np".into(), &mut ctx)
+            .build_alloca(ptr_ty, None, None, "np".into())
             .unwrap();
 
         in_entry
-            .build_store(&ptr_slot, &null, OperandTy::Inferred, None, &mut ctx)
+            .build_store(&ptr_slot, &null, OperandTy::Inferred, None)
             .unwrap();
-        in_entry.build_unconditional_br(body, &mut ctx).unwrap();
+        in_entry.build_unconditional_br(body).unwrap();
 
-        let in_body = builder.cursor_at_block(body);
+        let mut in_body = builder.cursor_at_block(body);
 
-        let (phi_handler, phi) = in_body
-            .build_phi(&[(entry, loaded)], "m".into(), &mut ctx)
-            .unwrap();
+        let (phi_handler, phi) = in_body.build_phi(&[(entry, loaded)], "m".into()).unwrap();
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
         // requires one phi entry per predecessor.
         phi_handler
-            .add_branch((body, phi.clone()), &mut ctx)
+            .add_branch((body, phi.clone()), &mut in_body)
             .unwrap();
 
         // The branch condition comes from a real comparison rather than a literal, so
         // the `icmp` line and the `i1` it feeds are both covered here.
-        let limit = Value::from_const(10i32, None, &mut ctx).unwrap();
+        let limit = Value::from_const(10i32, None, &mut in_body).unwrap();
         let counter = f
-            .nth_param(0, &ctx)
+            .nth_param(0, &in_body)
             .expect("main takes an i32 first parameter")
             .clone();
 
@@ -848,29 +847,21 @@ mod tests {
                 &counter,
                 &limit,
                 "cmp".into(),
-                &mut ctx,
             )
             .unwrap();
 
         // An `fcmp` alongside it, so the float comparison is emitted and assembled
         // too. `ord` is the predicate with no integer analogue: it asks only whether
         // neither operand is a NaN.
-        let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
+        let half = Value::from_const(0.5f64, None, &mut in_body).unwrap();
 
         in_body
-            .build_fcmp(
-                FCond::Ord,
-                OperandTy::Inferred,
-                &phi,
-                &half,
-                "fcmp".into(),
-                &mut ctx,
-            )
+            .build_fcmp(FCond::Ord, OperandTy::Inferred, &phi, &half, "fcmp".into())
             .unwrap();
 
         // One of each arithmetic shape, so all three emitters are assembled: an
         // integer op, a float op, and the unary `fneg`.
-        let step = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let step = Value::from_const(1i32, None, &mut in_body).unwrap();
 
         in_body
             .build_iarithmetic(
@@ -879,7 +870,6 @@ mod tests {
                 &counter,
                 &step,
                 "next".into(),
-                &mut ctx,
             )
             .unwrap();
 
@@ -890,20 +880,17 @@ mod tests {
                 &phi,
                 &half,
                 "scaled".into(),
-                &mut ctx,
             )
             .unwrap();
 
-        in_body.build_fneg(phi, "neg".into(), &mut ctx).unwrap();
+        in_body.build_fneg(phi, "neg".into()).unwrap();
 
-        in_body
-            .build_conditional_br(cond, body, exit, &mut ctx)
-            .unwrap();
+        in_body.build_conditional_br(cond, body, exit).unwrap();
 
         // Both call shapes: one returning a value, one `void`. `helper` was added
         // before `main`, since the callee has to already exist.
-        let in_exit = builder.cursor_at_block(exit);
-        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+        let mut in_exit = builder.cursor_at_block(exit);
+        let seven = Value::from_const(7i32, None, &mut in_exit).unwrap();
 
         let answer = in_exit
             .build_call(
@@ -911,22 +898,17 @@ mod tests {
                 &[(&seven, OperandTy::Inferred)],
                 i32_ty.into(),
                 "c".into(),
-                &mut ctx,
             )
             .expect("helper takes an i32 and returns one");
 
         assert!(
-            in_exit
-                .build_void_call("noop".to_string(), &[], &mut ctx)
-                .is_ok(),
+            in_exit.build_void_call("noop".to_string(), &[]).is_ok(),
             "a void call defines nothing"
         );
 
-        in_exit
-            .build_ret(Some(&answer), i32_ty.into(), &mut ctx)
-            .unwrap();
+        in_exit.build_ret(Some(&answer), i32_ty.into()).unwrap();
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         let expected = concat!(
             "target triple = \"arm64-apple-macosx\"\n",

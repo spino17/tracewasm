@@ -1,5 +1,7 @@
 //! The cursor: a position in a basic block, and the builders that write into it.
 
+use std::ops::{Deref, DerefMut};
+
 use crate::{
     cfg::{
         basic_block::BasicBlockId,
@@ -147,11 +149,26 @@ impl From<TyId> for OperandTy {
 /// Builders that define a register take a `reg: Option<&str>` name hint. `None` gives
 /// the value LLVM's next unnamed number; a hint is used as given, suffixed if it is
 /// already taken.
-pub struct Cursor {
+pub struct Cursor<'a> {
+    pub(crate) ctx: &'a mut Context,
     pub(crate) block: BasicBlockId,
 }
 
-impl Cursor {
+impl<'a> Deref for Cursor<'a> {
+    type Target = Context;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl<'a> DerefMut for Cursor<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ctx
+    }
+}
+
+impl<'a> Cursor<'a> {
     /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///
@@ -169,19 +186,18 @@ impl Cursor {
     /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — a branch disagrees with the
     ///   phi's type.
     pub fn build_phi(
-        &self,
+        &mut self,
         branches: &[(BasicBlockId, Value)],
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<(PhiInstrHandler, Value), PhiError> {
         if branches.is_empty() {
             return Err(PhiError::PhiInstructionWithNoBranches);
         }
 
         let ref_ty = branches[0].1.ty();
-        let func_id = ctx.get_block(self.block).func_id;
-        let reg_name = ctx.name_for_reg(reg, func_id)?;
-        let val = Value::from_register(reg_name, ref_ty, ctx);
+        let func_id = self.ctx.get_block(self.block).func_id;
+        let reg_name = self.ctx.name_for_reg(reg, func_id)?;
+        let val = Value::from_register(reg_name, ref_ty, self.ctx);
 
         let phi_id = self.block.add_phi(
             PhiInstruction {
@@ -190,11 +206,11 @@ impl Cursor {
                 ref_ty,
                 value: val.clone(),
             },
-            ctx,
+            self.ctx,
         )?;
 
         for (branch, val) in branches {
-            phi_id.add_branch((*branch, val.clone()), ctx)?;
+            phi_id.add_branch((*branch, val.clone()), self.ctx)?;
         }
 
         Ok((phi_id, val))
@@ -208,20 +224,16 @@ impl Cursor {
     ///
     /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
     /// already ended this block.
-    pub fn build_unconditional_br(
-        self,
-        label: BasicBlockId,
-        ctx: &mut Context,
-    ) -> Result<(), InstructionError> {
+    pub fn build_unconditional_br(self, label: BasicBlockId) -> Result<(), InstructionError> {
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::UnconditionalBr(UnconditionalBrOperands { label }),
                 value: None,
             },
-            ctx,
+            self.ctx,
         )?;
 
-        self.block.set_locked(ctx);
+        self.block.set_locked(self.ctx);
 
         Ok(())
     }
@@ -240,7 +252,6 @@ impl Cursor {
         cond: I1Value,
         true_label: BasicBlockId,
         false_label: BasicBlockId,
-        ctx: &mut Context,
     ) -> Result<(), InstructionError> {
         self.block.add_instruction(
             Instruction {
@@ -251,10 +262,10 @@ impl Cursor {
                 }),
                 value: None,
             },
-            ctx,
+            self.ctx,
         )?;
 
-        self.block.set_locked(ctx);
+        self.block.set_locked(self.ctx);
 
         Ok(())
     }
@@ -281,26 +292,22 @@ impl Cursor {
     ///   a type from.
     /// - [`RetError::ReturnedValueTypeMismatch`] — the value does not fold into `ty`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn build_ret(
-        self,
-        val: Option<&Value>,
-        ty: OperandTy,
-        ctx: &mut Context,
-    ) -> Result<(), InstructionError> {
+    pub fn build_ret(self, val: Option<&Value>, ty: OperandTy) -> Result<(), InstructionError> {
         let (val, ty) = match (val, ty) {
             (Some(val), OperandTy::Asserted(ty)) => {
-                if ty.is_void(ctx) {
-                    return Err(
-                        RetError::ValueGivenForVoid(ctx.display(val.ty()).to_string()).into(),
-                    );
+                if ty.is_void(self.ctx) {
+                    return Err(RetError::ValueGivenForVoid(
+                        self.ctx.display(val.ty()).to_string(),
+                    )
+                    .into());
                 }
 
-                let val_ty = ctx.display(val.ty()).to_string();
+                let val_ty = self.ctx.display(val.ty()).to_string();
 
-                let Some(casted_val) = val.try_cast(ty, Signedness::Signed, ctx) else {
+                let Some(casted_val) = val.try_cast(ty, Signedness::Signed, self.ctx) else {
                     return Err(RetError::ReturnedValueTypeMismatch(
                         val_ty,
-                        ty.display(ctx).to_string(),
+                        ty.display(self.ctx).to_string(),
                     )
                     .into());
                 };
@@ -313,10 +320,11 @@ impl Cursor {
                 (Some(val.clone()), ty)
             }
             (None, OperandTy::Asserted(ty)) => {
-                if !ty.is_void(ctx) {
-                    return Err(
-                        RetError::NonVoidTypeWithoutValue(ty.display(ctx).to_string()).into(),
-                    );
+                if !ty.is_void(self.ctx) {
+                    return Err(RetError::NonVoidTypeWithoutValue(
+                        ty.display(self.ctx).to_string(),
+                    )
+                    .into());
                 }
 
                 (None, ty)
@@ -327,19 +335,20 @@ impl Cursor {
         // LLVM checks the return against the *function's* result type, not just
         // against whatever the caller passed here: `define i32 @f() { ret void }` is
         // refused with "value doesn't match function result type".
-        let func_id = ctx.get_block(self.block).func_id;
-        let result_ty = ctx.get_func(func_id).result;
+        let func_id = self.ctx.get_block(self.block).func_id;
+        let result_ty = self.ctx.get_func(func_id).result;
 
         if ty != result_ty {
-            let func_name = ctx
+            let func_name = self
+                .ctx
                 .str_interner
-                .value(ctx.get_func(func_id).name.0)
+                .value(self.ctx.get_func(func_id).name.0)
                 .to_string();
 
             return Err(RetError::DoesNotMatchFunctionResult(
                 func_name,
-                ctx.display(result_ty).to_string(),
-                ctx.display(ty).to_string(),
+                self.ctx.display(result_ty).to_string(),
+                self.ctx.display(ty).to_string(),
             )
             .into());
         }
@@ -349,10 +358,10 @@ impl Cursor {
                 kind: InstructionKind::Ret(RetOperands { ty, value: val }),
                 value: None,
             },
-            ctx,
+            self.ctx,
         )?;
 
-        self.block.set_locked(ctx);
+        self.block.set_locked(self.ctx);
 
         Ok(())
     }
@@ -377,15 +386,14 @@ impl Cursor {
     ///   `align` off is how the default is asked for.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_alloca(
-        &self,
+        &mut self,
         ty: TyId,
         count: Option<(&Value, OperandTy)>,
         align: Option<u32>,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
-        if !ty.is_first_class(ctx) {
-            return Err(AllocaError::TypeNotAllocatable(ty.display(ctx).to_string()).into());
+        if !ty.is_first_class(self.ctx) {
+            return Err(AllocaError::TypeNotAllocatable(ty.display(self.ctx).to_string()).into());
         }
 
         if let Some(align) = align
@@ -397,30 +405,30 @@ impl Cursor {
         let mut final_count: Option<Value> = None;
 
         if let Some((count_val, count_expected_ty)) = count {
-            if !count_val.is_integer(ctx) {
+            if !count_val.is_integer(self.ctx) {
                 return Err(AllocaError::AllocaCountNotAnInteger(
-                    ctx.display(count_val.ty()).to_string(),
+                    self.ctx.display(count_val.ty()).to_string(),
                 )
                 .into());
             }
 
             let final_count_val = if let OperandTy::Asserted(count_expected_ty) = count_expected_ty
             {
-                if !count_expected_ty.is_integer(ctx) {
+                if !count_expected_ty.is_integer(self.ctx) {
                     return Err(AllocaError::AllocaCountNotAnInteger(
-                        count_expected_ty.display(ctx).to_string(),
+                        count_expected_ty.display(self.ctx).to_string(),
                     )
                     .into());
                 }
 
-                let count_ty = ctx.display(count_val.ty()).to_string();
+                let count_ty = self.ctx.display(count_val.ty()).to_string();
 
                 let Some(casted_val) =
-                    count_val.try_cast(count_expected_ty, Signedness::Signed, ctx)
+                    count_val.try_cast(count_expected_ty, Signedness::Signed, self.ctx)
                 else {
                     return Err(AllocaError::AllocaCountTypeMismatch(
                         count_ty,
-                        count_expected_ty.display(ctx).to_string(),
+                        count_expected_ty.display(self.ctx).to_string(),
                     )
                     .into());
                 };
@@ -433,7 +441,7 @@ impl Cursor {
             final_count = Some(final_count_val);
         }
 
-        let result_ty = ctx.ptr_ty();
+        let result_ty = self.ctx.ptr_ty();
 
         add_instruction_to_block_and_get_value(
             InstructionKind::Alloca(AllocaOperands {
@@ -444,7 +452,7 @@ impl Cursor {
             result_ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -466,16 +474,15 @@ impl Cursor {
     /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_load(
-        &self,
+        &mut self,
         ptr: &Value,
         ty: OperandTy,
         align: Option<u32>,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
-        if !ptr.is_ptr(ctx) {
+        if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(ctx).to_string(),
+                ptr.ty().display(self.ctx).to_string(),
             ));
         }
 
@@ -485,12 +492,12 @@ impl Cursor {
             return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
-        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
+        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, self.ctx);
 
         let final_ty = if let OperandTy::Asserted(ty) = ty {
-            if !ty.is_first_class(ctx) {
+            if !ty.is_first_class(self.ctx) {
                 return Err(InstructionError::TypeNotLoadable(
-                    ty.display(ctx).to_string(),
+                    ty.display(self.ctx).to_string(),
                 ));
             }
 
@@ -498,8 +505,8 @@ impl Cursor {
                 && pointee_ty.ty != ty
             {
                 return Err(InstructionError::LoadedTypeDoesNotMatchPointee(
-                    ty.display(ctx).to_string(),
-                    ctx.display(pointee_ty.ty).to_string(),
+                    ty.display(self.ctx).to_string(),
+                    self.ctx.display(pointee_ty.ty).to_string(),
                 ));
             }
 
@@ -519,7 +526,7 @@ impl Cursor {
             final_ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -539,16 +546,15 @@ impl Cursor {
     /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_store(
-        &self,
+        &mut self,
         ptr: &Value,
         value: &Value,
         ty: OperandTy,
         align: Option<u32>,
-        ctx: &mut Context,
     ) -> Result<(), InstructionError> {
-        if !ptr.is_ptr(ctx) {
+        if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(ctx).to_string(),
+                ptr.ty().display(self.ctx).to_string(),
             ));
         }
 
@@ -559,12 +565,12 @@ impl Cursor {
         }
 
         let final_val = if let OperandTy::Asserted(ty) = ty {
-            let value_ty = ctx.display(value.ty()).to_string();
+            let value_ty = self.ctx.display(value.ty()).to_string();
 
-            let Some(casted_value) = value.try_cast(ty, Signedness::Signed, ctx) else {
+            let Some(casted_value) = value.try_cast(ty, Signedness::Signed, self.ctx) else {
                 return Err(StoreError::StoredValueTypeMismatch(
                     value_ty,
-                    ty.display(ctx).to_string(),
+                    ty.display(self.ctx).to_string(),
                 )
                 .into());
             };
@@ -574,12 +580,12 @@ impl Cursor {
             value.clone()
         };
 
-        if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, ctx)
+        if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, self.ctx)
             && pointee_ty.ty != final_val.ty()
         {
             return Err(StoreError::StoredValueDoesNotMatchPointee(
-                ctx.display(final_val.ty()).to_string(),
-                ctx.display(pointee_ty.ty).to_string(),
+                self.ctx.display(final_val.ty()).to_string(),
+                self.ctx.display(pointee_ty.ty).to_string(),
             )
             .into());
         }
@@ -593,7 +599,7 @@ impl Cursor {
                 }),
                 value: None,
             },
-            ctx,
+            self.ctx,
         )?;
 
         Ok(())
@@ -629,36 +635,35 @@ impl Cursor {
     ///   scalar.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_get_element_ptr(
-        &self,
+        &mut self,
         ptr: &Value,
         source_ty: OperandTy,
         indices: &[Value],
         inbounds: Option<bool>,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let inbounds = inbounds.unwrap_or(false);
 
-        if !ptr.is_ptr(ctx) {
+        if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(ctx).to_string(),
+                ptr.ty().display(self.ctx).to_string(),
             ));
         }
 
         for index in indices {
-            if !index.is_integer(ctx) {
+            if !index.is_integer(self.ctx) {
                 return Err(
-                    GepError::IndexNotAnInteger(ctx.display(index.ty()).to_string()).into(),
+                    GepError::IndexNotAnInteger(self.ctx.display(index.ty()).to_string()).into(),
                 );
             }
         }
 
-        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, ctx);
+        let pointee_ty = ptr.try_inferring_pointee_ty(self.block, self.ctx);
 
         let final_source_ty = if let OperandTy::Asserted(source_ty) = source_ty {
-            if !source_ty.is_first_class(ctx) {
+            if !source_ty.is_first_class(self.ctx) {
                 return Err(
-                    GepError::SourceTypeNotSized(source_ty.display(ctx).to_string()).into(),
+                    GepError::SourceTypeNotSized(source_ty.display(self.ctx).to_string()).into(),
                 );
             }
 
@@ -666,8 +671,8 @@ impl Cursor {
                 && source_ty != pointee_ty.ty
             {
                 return Err(GepError::SourceTypeDoesNotMatchPointee(
-                    source_ty.display(ctx).to_string(),
-                    ctx.display(pointee_ty.ty).to_string(),
+                    source_ty.display(self.ctx).to_string(),
+                    self.ctx.display(pointee_ty.ty).to_string(),
                 )
                 .into());
             }
@@ -682,10 +687,10 @@ impl Cursor {
         // The first index steps over the source type as pointer arithmetic rather than
         // descending into it, so the walk starts at the second.
         if indices.len() > 1 {
-            final_source_ty.walk_pointee_ty_in_gep(&indices[1..], ctx)?;
+            final_source_ty.walk_pointee_ty_in_gep(&indices[1..], self.ctx)?;
         }
 
-        let result_ty = ctx.ptr_ty();
+        let result_ty = self.ctx.ptr_ty();
 
         add_instruction_to_block_and_get_value(
             InstructionKind::GetElementPtr(GetElementPtrOperands {
@@ -700,7 +705,7 @@ impl Cursor {
             result_ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -754,12 +759,11 @@ impl Cursor {
     ///   signature.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_call(
-        &self,
+        &mut self,
         func_name: String,
         params: &[(&Value, OperandTy)],
         return_ty: OperandTy,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let params: Vec<(Value, OperandTy)> = params
             .iter()
@@ -767,14 +771,14 @@ impl Cursor {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
+        let func_name_id: StrId = self.ctx.str_interner.intern(func_name).into();
 
         // The signature is read out by value before anything below borrows `ctx`
         // mutably: casting an argument interns into the type pool, which a live
         // borrow of the function table would forbid.
-        let Some(global) = ctx.module.globals.get(&func_name_id) else {
+        let Some(global) = self.ctx.module.globals.get(&func_name_id) else {
             return Err(CallError::FunctionNotFound(
-                ctx.str_interner.value(func_name_id.0).to_string(),
+                self.ctx.str_interner.value(func_name_id.0).to_string(),
             )
             .into());
         };
@@ -783,7 +787,7 @@ impl Cursor {
             unreachable!("hitting this means globals tracking logic by their name is incorrect")
         };
 
-        let name = ctx.str_interner.value(func_name_id.0).to_string();
+        let name = self.ctx.str_interner.value(func_name_id.0).to_string();
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
@@ -791,8 +795,8 @@ impl Cursor {
             if return_ty != expected_return_ty {
                 return Err(CallError::ReturnTypeMismatch(
                     name,
-                    ctx.display(expected_return_ty).to_string(),
-                    ctx.display(return_ty).to_string(),
+                    self.ctx.display(expected_return_ty).to_string(),
+                    self.ctx.display(return_ty).to_string(),
                 )
                 .into());
             }
@@ -805,12 +809,16 @@ impl Cursor {
         // A `void` call defines no register, so it has no `Value` to hand back — and
         // `llvm-as` refuses `%r = call void @g()` outright. Splitting the two builders
         // is what makes that unrepresentable rather than a runtime check on `reg`.
-        if return_ty.is_void(ctx) {
+        if return_ty.is_void(self.ctx) {
             return Err(CallError::VoidCalleeNeedsVoidCall(name).into());
         }
 
-        let final_params =
-            try_cast_param_and_check_with_func_signature(name, &params, &expected_param_tys, ctx)?;
+        let final_params = try_cast_param_and_check_with_func_signature(
+            name,
+            &params,
+            &expected_param_tys,
+            self.ctx,
+        )?;
 
         add_instruction_to_block_and_get_value(
             InstructionKind::Call(CallOperands {
@@ -821,7 +829,7 @@ impl Cursor {
             return_ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -849,10 +857,9 @@ impl Cursor {
     ///   [`CallError::ParamCastFailed`] for the arguments.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_void_call(
-        &self,
+        &mut self,
         func_name: String,
         params: &[(&Value, OperandTy)],
-        ctx: &mut Context,
     ) -> Result<(), InstructionError> {
         let params: Vec<(Value, OperandTy)> = params
             .iter()
@@ -860,14 +867,14 @@ impl Cursor {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id: StrId = ctx.str_interner.intern(func_name).into();
+        let func_name_id: StrId = self.ctx.str_interner.intern(func_name).into();
 
         // The signature is read out by value before anything below borrows `ctx`
         // mutably: casting an argument interns into the type pool, which a live
         // borrow of the function table would forbid.
-        let Some(global) = ctx.module.globals.get(&func_name_id) else {
+        let Some(global) = self.ctx.module.globals.get(&func_name_id) else {
             return Err(CallError::FunctionNotFound(
-                ctx.str_interner.value(func_name_id.0).to_string(),
+                self.ctx.str_interner.value(func_name_id.0).to_string(),
             )
             .into());
         };
@@ -876,34 +883,38 @@ impl Cursor {
             unreachable!("hitting this means globals tracking logic by their name is incorrect")
         };
 
-        let name = ctx.str_interner.value(func_name_id.0).to_string();
+        let name = self.ctx.str_interner.value(func_name_id.0).to_string();
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
         // The mirror of the check in `build_call`: a callee that returns something
         // would have its result silently dropped here, since this builder defines no
         // register and hands nothing back.
-        if !expected_return_ty.is_void(ctx) {
+        if !expected_return_ty.is_void(self.ctx) {
             return Err(CallError::NonVoidCalleeNeedsValueCall(
                 name,
-                ctx.display(expected_return_ty).to_string(),
+                self.ctx.display(expected_return_ty).to_string(),
             )
             .into());
         }
 
-        let final_params =
-            try_cast_param_and_check_with_func_signature(name, &params, &expected_param_tys, ctx)?;
+        let final_params = try_cast_param_and_check_with_func_signature(
+            name,
+            &params,
+            &expected_param_tys,
+            self.ctx,
+        )?;
 
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::Call(CallOperands {
                     func_name: func_name_id,
-                    return_ty: ctx.void_ty(),
+                    return_ty: self.ctx.void_ty(),
                     params: final_params,
                 }),
                 value: None,
             },
-            ctx,
+            self.ctx,
         )?;
 
         Ok(())
@@ -945,24 +956,23 @@ impl Cursor {
     ///   Pointers are fine with every predicate; floats need `fcmp`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_icmp(
-        &self,
+        &mut self,
         cond: ICond,
         ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
         let (a, b) = if let Some(signedness) = cond.signedness() {
             // Ids are `Copy`, so the operand types survive the move into the cast and
             // are rendered only on the failing path.
             let (given_a, given_b) = (a.ty(), b.ty());
 
-            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
+            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, self.ctx) else {
                 return Err(ICmpError::OperandsNotCastable(
                     cond.to_string(),
-                    ctx.display(given_a).to_string(),
-                    ctx.display(given_b).to_string(),
+                    self.ctx.display(given_a).to_string(),
+                    self.ctx.display(given_b).to_string(),
                 )
                 .into());
             };
@@ -972,8 +982,8 @@ impl Cursor {
             if a.ty() != b.ty() {
                 return Err(ICmpError::OperandTypesDiffer(
                     cond.to_string(),
-                    ctx.display(a.ty()).to_string(),
-                    ctx.display(b.ty()).to_string(),
+                    self.ctx.display(a.ty()).to_string(),
+                    self.ctx.display(b.ty()).to_string(),
                 )
                 .into());
             }
@@ -983,8 +993,8 @@ impl Cursor {
             {
                 return Err(ICmpError::ProvidedTypeDoesNotMatchOperands(
                     cond.to_string(),
-                    ctx.display(ty).to_string(),
-                    ctx.display(a.ty()).to_string(),
+                    self.ctx.display(ty).to_string(),
+                    self.ctx.display(a.ty()).to_string(),
                 )
                 .into());
             }
@@ -996,20 +1006,22 @@ impl Cursor {
         // returns a pair that agrees. So checking one covers both.
         let ty = a.ty();
 
-        if !ty.is_integer(ctx) && !ty.is_ptr(ctx) {
-            return Err(ICmpError::OperandTypeNotComparable(ctx.display(ty).to_string()).into());
+        if !ty.is_integer(self.ctx) && !ty.is_ptr(self.ctx) {
+            return Err(
+                ICmpError::OperandTypeNotComparable(self.ctx.display(ty).to_string()).into(),
+            );
         }
 
         let val = add_instruction_to_block_and_get_value(
             InstructionKind::ICmp(ICmpOperands { cond, ty, a, b }),
-            ctx.i1_ty(),
+            self.ctx.i1_ty(),
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )?;
 
         let i1val = val
-            .into_i1(ctx)
+            .into_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1048,24 +1060,23 @@ impl Cursor {
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_iarithmetic(
-        &self,
+        &mut self,
         op: IArithmeticOp,
         ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let (a, b) = if let Some(signedness) = op.signedness() {
             // Ids are `Copy`, so the operand types survive the move into the cast and
             // are rendered only on the failing path.
             let (given_a, given_b) = (a.ty(), b.ty());
 
-            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, ctx) else {
+            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, self.ctx) else {
                 return Err(IArithmeticError::OperandsNotCastable(
                     op.to_string(),
-                    ctx.display(given_a).to_string(),
-                    ctx.display(given_b).to_string(),
+                    self.ctx.display(given_a).to_string(),
+                    self.ctx.display(given_b).to_string(),
                 )
                 .into());
             };
@@ -1075,8 +1086,8 @@ impl Cursor {
             if a.ty() != b.ty() {
                 return Err(IArithmeticError::OperandTypesDiffer(
                     op.to_string(),
-                    ctx.display(a.ty()).to_string(),
-                    ctx.display(b.ty()).to_string(),
+                    self.ctx.display(a.ty()).to_string(),
+                    self.ctx.display(b.ty()).to_string(),
                 )
                 .into());
             }
@@ -1086,8 +1097,8 @@ impl Cursor {
             {
                 return Err(IArithmeticError::ProvidedTypeDoesNotMatchOperands(
                     op.to_string(),
-                    ctx.display(ty).to_string(),
-                    ctx.display(a.ty()).to_string(),
+                    self.ctx.display(ty).to_string(),
+                    self.ctx.display(a.ty()).to_string(),
                 )
                 .into());
             }
@@ -1098,10 +1109,10 @@ impl Cursor {
         // Both operands share a type by here, so checking one covers both.
         let ty = a.ty();
 
-        if !ty.is_integer(ctx) {
+        if !ty.is_integer(self.ctx) {
             return Err(IArithmeticError::OperandTypeNotInteger(
                 op.to_string(),
-                ctx.display(ty).to_string(),
+                self.ctx.display(ty).to_string(),
             )
             .into());
         }
@@ -1111,7 +1122,7 @@ impl Cursor {
             ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -1139,23 +1150,23 @@ impl Cursor {
     /// - [`FCmpError::OperandTypeNotFloat`] — the common type is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_fcmp(
-        &self,
+        &mut self,
         cond: FCond,
         ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<I1Value, InstructionError> {
         // Ids are `Copy`, so the operand types survive the move into the cast and are
         // rendered only on the failing path.
         let (given_a, given_b) = (a.ty(), b.ty());
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, ctx) else {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
+        else {
             return Err(FCmpError::OperandsNotCastable(
                 cond.to_string(),
-                ctx.display(given_a).to_string(),
-                ctx.display(given_b).to_string(),
+                self.ctx.display(given_a).to_string(),
+                self.ctx.display(given_b).to_string(),
             )
             .into());
         };
@@ -1163,20 +1174,20 @@ impl Cursor {
         // Both operands share a type by here, so checking one covers both.
         let ty = a.ty();
 
-        if !ty.is_float(ctx) {
-            return Err(FCmpError::OperandTypeNotFloat(ctx.display(ty).to_string()).into());
+        if !ty.is_float(self.ctx) {
+            return Err(FCmpError::OperandTypeNotFloat(self.ctx.display(ty).to_string()).into());
         }
 
         let val = add_instruction_to_block_and_get_value(
             InstructionKind::FCmp(FCmpOperands { cond, ty, a, b }),
-            ctx.i1_ty(),
+            self.ctx.i1_ty(),
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )?;
 
         let i1val = val
-            .into_i1(ctx)
+            .into_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1200,31 +1211,31 @@ impl Cursor {
     /// - [`FArithmeticError::OperandTypeNotFloat`] — the common type is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_farithmetic(
-        &self,
+        &mut self,
         op: FArithmeticOp,
         ty: OperandTy,
         a: &Value,
         b: &Value,
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<Value, InstructionError> {
         let (given_a, given_b) = (a.ty(), b.ty());
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, ctx) else {
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
+        else {
             return Err(FArithmeticError::OperandsNotCastable(
                 op.to_string(),
-                ctx.display(given_a).to_string(),
-                ctx.display(given_b).to_string(),
+                self.ctx.display(given_a).to_string(),
+                self.ctx.display(given_b).to_string(),
             )
             .into());
         };
 
         let ty = a.ty();
 
-        if !ty.is_float(ctx) {
+        if !ty.is_float(self.ctx) {
             return Err(FArithmeticError::OperandTypeNotFloat(
                 op.to_string(),
-                ctx.display(ty).to_string(),
+                self.ctx.display(ty).to_string(),
             )
             .into());
         }
@@ -1234,7 +1245,7 @@ impl Cursor {
             ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 
@@ -1249,18 +1260,13 @@ impl Cursor {
     ///
     /// - [`FArithmeticError::OperandTypeNotFloat`] if the operand is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
-    pub fn build_fneg(
-        &self,
-        value: Value,
-        reg: RegName,
-        ctx: &mut Context,
-    ) -> Result<Value, InstructionError> {
+    pub fn build_fneg(&mut self, value: Value, reg: RegName) -> Result<Value, InstructionError> {
         let ty = value.ty();
 
-        if !ty.is_float(ctx) {
+        if !ty.is_float(self.ctx) {
             return Err(FArithmeticError::OperandTypeNotFloat(
                 "fneg".to_string(),
-                ctx.display(ty).to_string(),
+                self.ctx.display(ty).to_string(),
             )
             .into());
         }
@@ -1270,7 +1276,7 @@ impl Cursor {
             ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 }
