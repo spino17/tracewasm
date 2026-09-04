@@ -1,5 +1,3 @@
-use std::ops::{Deref, DerefMut};
-
 use crate::{
     cfg::{
         ControlFlowGraph,
@@ -17,6 +15,7 @@ use crate::{
     value::{ConstExpr, FuncSignature, Value},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::ops::{Deref, DerefMut};
 
 /// Builds a module: adds functions and opens cursors onto their blocks.
 ///

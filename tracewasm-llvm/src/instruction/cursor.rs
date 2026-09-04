@@ -1,7 +1,5 @@
 //! The cursor: a position in a basic block, and the builders that write into it.
 
-use std::ops::{Deref, DerefMut};
-
 use crate::{
     cfg::{
         basic_block::BasicBlockId,
@@ -23,6 +21,7 @@ use crate::{
     value::{I1Value, Signedness, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
+use std::ops::{Deref, DerefMut};
 
 /// What to call the register an instruction defines.
 ///
