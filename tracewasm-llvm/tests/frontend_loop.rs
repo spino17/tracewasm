@@ -42,11 +42,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     let mut builder = ctx.builder();
 
     let f = builder
-        .define_function(
-            "sum_to".to_string(),
-            &[(i32_ty, Some("n".to_string()))],
-            i32_ty,
-        )
+        .define_function("sum_to".to_string(), &[(i32_ty, "n".into())], i32_ty)
         .unwrap();
 
     // All three blocks up front, before any is filled — a frontend knows the shape of
@@ -187,11 +183,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut builder = ctx.builder();
 
     let f = builder
-        .define_function(
-            "alternating".to_string(),
-            &[(i32_ty, Some("n".to_string()))],
-            i32_ty,
-        )
+        .define_function("alternating".to_string(), &[(i32_ty, "n".into())], i32_ty)
         .unwrap();
 
     // Every block up front. A frontend knows the CFG shape from the syntax tree,

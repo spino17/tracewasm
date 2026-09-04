@@ -713,11 +713,7 @@ mod tests {
         // The callees come first: a call resolves against the functions added so far,
         // so a forward reference would not resolve.
         let helper = builder
-            .define_function(
-                "helper".to_string(),
-                &[(i32_ty, Some("v".to_string()))],
-                i32_ty,
-            )
+            .define_function("helper".to_string(), &[(i32_ty, "v".into())], i32_ty)
             .unwrap();
 
         let helper_entry = helper
@@ -750,7 +746,7 @@ mod tests {
         let f = builder
             .define_function(
                 "main".to_string(),
-                &[(i32_ty, Some("n".to_string())), (ptr_ty, None)],
+                &[(i32_ty, "n".into()), (ptr_ty, RegName::Unnamed)],
                 i32_ty,
             )
             .unwrap();
@@ -895,7 +891,7 @@ mod tests {
 
         let answer = in_exit
             .build_call(
-                "helper".to_string(),
+                helper.into(),
                 &[(&seven, OperandTy::Inferred)],
                 i32_ty.into(),
                 "c".into(),
@@ -903,7 +899,7 @@ mod tests {
             .expect("helper takes an i32 and returns one");
 
         assert!(
-            in_exit.build_void_call("noop".to_string(), &[]).is_ok(),
+            in_exit.build_void_call(noop.into(), &[]).is_ok(),
             "a void call defines nothing"
         );
 

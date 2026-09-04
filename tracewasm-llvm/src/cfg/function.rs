@@ -3,7 +3,6 @@
 use crate::{
     cfg::{
         basic_block::{BasicBlock, BasicBlockId},
-        builder::Builder,
         context::Context,
         global::{DefinedFunc, GlobalId},
     },
@@ -110,7 +109,7 @@ impl GlobalId<DefinedFunc> {
     /// no defining instruction, so
     /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
     /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
-    pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<&'a Value> {
+    pub fn nth_param<'a>(&self, n: usize, ctx: &'a Context) -> Option<Value> {
         let func = ctx.get_func(self.tag.raw());
         let params = &func.params;
 
@@ -118,7 +117,7 @@ impl GlobalId<DefinedFunc> {
             return None;
         }
 
-        Some(&params[n])
+        Some(params[n].clone())
     }
 
     /// The declared result type, `void` included.
