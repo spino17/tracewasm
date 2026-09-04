@@ -226,7 +226,7 @@ impl Builder {
             GlobalData {
                 linkage: Linkage::External,
                 visibility: Visibility::Default,
-                kind: GlobalKind::Func(FuncSignature::new(params.to_vec(), result)),
+                kind: GlobalKind::Func(FuncSignature::new(params, result)),
             },
         );
 
@@ -324,7 +324,7 @@ impl Builder {
             GlobalData {
                 linkage: Linkage::External,
                 visibility: Visibility::Default,
-                kind: GlobalKind::Func(FuncSignature::new(param_tys, result)),
+                kind: GlobalKind::Func(FuncSignature::new(&param_tys, result)),
             },
         );
 
@@ -709,7 +709,7 @@ mod tests {
             "got: {err}"
         );
 
-        let signature = FuncSignature::new(vec![i32_ty], i32_ty);
+        let signature = FuncSignature::new(&[i32_ty], i32_ty);
         let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         assert!(
@@ -860,7 +860,7 @@ mod tests {
             "`void` is a result like any other"
         );
 
-        let signature = FuncSignature::new(vec![i32_ty], i32_ty);
+        let signature = FuncSignature::new(&[i32_ty], i32_ty);
         let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         let err = builder

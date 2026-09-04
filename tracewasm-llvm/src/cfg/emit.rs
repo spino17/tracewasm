@@ -1158,7 +1158,7 @@ mod tests {
             "the error must name the offending type, got: {err}"
         );
 
-        let signature = FuncSignature::new(vec![i32_ty], i32_ty);
+        let signature = FuncSignature::new(&[i32_ty], i32_ty);
         let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         assert!(

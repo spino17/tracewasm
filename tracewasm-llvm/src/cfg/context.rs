@@ -407,6 +407,92 @@ mod tests {
         value::Type,
     };
 
+    /// An aggregate's members need a size, and this is checked when the type is
+    /// built rather than when it is used.
+    ///
+    /// [`is_first_class`](TyId::is_first_class) does not look inside an aggregate, so
+    /// a `{i32, void}` reads as a plain `Struct` to every later check and would reach
+    /// emission untouched. `llvm-as` refuses it with "void type only allowed for
+    /// function results", and `[4 x i32 (i32)]` with "invalid array element type".
+    #[test]
+    fn an_aggregate_refuses_a_member_with_no_size() {
+        let mut ctx = crate::test_support::ctx();
+
+        let i32_ty = ctx.i32_ty();
+        let void_ty = ctx.void_ty();
+
+        let func_ty = ctx
+            .ty_interner
+            .intern(Type::Func(crate::value::FuncSignature {
+                params: Box::new([]),
+                result: i32_ty,
+            }));
+
+        let func_ty: TyId = func_ty.into();
+
+        for (bad, spelled) in [(void_ty, "void"), (func_ty, "i32 ()")] {
+            let err = ctx
+                .struct_ty(&[i32_ty, bad], false)
+                .expect_err("a struct field must have a size");
+
+            assert!(
+                matches!(&err, TypeError::AggregateMemberTypeNotSized(m, agg)
+                    if m == spelled && agg == "struct"),
+                "got: {err}"
+            );
+
+            let err = ctx
+                .array_ty(bad, 4)
+                .expect_err("an array element must have a size");
+
+            assert!(
+                matches!(&err, TypeError::AggregateMemberTypeNotSized(m, agg)
+                    if m == spelled && agg == "array"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// The empty and zero-length forms are legal — `{}` and `[0 x i32]` both
+    /// assemble — so neither is refused for having nothing in it.
+    #[test]
+    fn an_empty_struct_and_a_zero_length_array_are_allowed() {
+        let mut ctx = crate::test_support::ctx();
+        let i32_ty = ctx.i32_ty();
+
+        let empty = ctx.struct_ty(&[], false).expect("`{}` is a valid type");
+        let zero = ctx
+            .array_ty(i32_ty, 0)
+            .expect("`[0 x i32]` is a valid type");
+
+        // The empty struct spells as `{  }` — the braces carry a space each and there
+        // is nothing between them. `llvm-as` accepts it: whitespace inside the braces
+        // is insignificant, unlike the trailing comma of `{ i32,  }`, which it
+        // refuses.
+        assert_eq!(ctx.display(empty).to_string(), "{  }");
+        assert_eq!(ctx.display(zero).to_string(), "[0 x i32]");
+    }
+
+    /// Packing changes the spelling, and the two are *different* types — so they must
+    /// not share a pool entry.
+    #[test]
+    fn a_packed_struct_is_distinct_from_an_unpacked_one() {
+        let mut ctx = crate::test_support::ctx();
+
+        let i32_ty = ctx.i32_ty();
+        let i8_ty = ctx.i8_ty();
+
+        let plain = ctx.struct_ty(&[i32_ty, i8_ty], false).unwrap();
+        let packed = ctx.struct_ty(&[i32_ty, i8_ty], true).unwrap();
+
+        assert_ne!(plain, packed, "packing is part of the type");
+        assert_eq!(ctx.display(plain).to_string(), "{ i32, i8 }");
+        assert_eq!(ctx.display(packed).to_string(), "<{ i32, i8 }>");
+
+        // Interning still dedups: the same shape asked for twice is one entry.
+        assert_eq!(plain, ctx.struct_ty(&[i32_ty, i8_ty], false).unwrap());
+    }
+
     /// A builder over a fresh context, plus two functions to scope names against.
     fn two_functions() -> (Builder, GlobalId<DefinedFunc>, GlobalId<DefinedFunc>) {
         let mut builder = crate::test_support::fixture();

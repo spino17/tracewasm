@@ -34,15 +34,18 @@ use std::{
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct FuncSignature {
     /// Parameter types, in declaration order.
-    pub params: Vec<TyId>,
+    pub params: Box<[TyId]>,
     /// The result type, `void` included.
     pub result: TyId,
 }
 
 impl FuncSignature {
     /// Builds a signature from already-interned parameter and result types.
-    pub(crate) fn new(params: Vec<TyId>, result: TyId) -> Self {
-        FuncSignature { params, result }
+    pub(crate) fn new(params: &[TyId], result: TyId) -> Self {
+        FuncSignature {
+            params: params.to_vec().into_boxed_slice(),
+            result,
+        }
     }
 }
 
