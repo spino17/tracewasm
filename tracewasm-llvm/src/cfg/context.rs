@@ -315,15 +315,14 @@ mod tests {
         value::Type,
     };
 
-    /// A context, a builder, and two functions to scope names against.
-    fn two_functions() -> (Context, GlobalId<DefinedFunc>, GlobalId<DefinedFunc>) {
-        let mut ctx = crate::test_support::ctx();
-        let builder = Builder;
+    /// A builder over a fresh context, plus two functions to scope names against.
+    fn two_functions() -> (Builder, GlobalId<DefinedFunc>, GlobalId<DefinedFunc>) {
+        let mut builder = crate::test_support::fixture();
 
-        let f = add_fn("f", &builder, &mut ctx).unwrap();
-        let g = add_fn("g", &builder, &mut ctx).unwrap();
+        let f = add_fn("f", &mut builder).unwrap();
+        let g = add_fn("g", &mut builder).unwrap();
 
-        (ctx, f, g)
+        (builder, f, g)
     }
 
     fn name(ctx: &mut Context, hint: RegName, func: GlobalId<DefinedFunc>) -> String {
@@ -332,7 +331,7 @@ mod tests {
             RegName::Unnamed => "<unnamed>".to_string(),
         };
 
-        ctx.name_for_reg(hint, func.tag.raw())
+        ctx.name_for_reg(&hint, func.tag.raw())
             .unwrap_or_else(|e| panic!("hint `{spelled}` should be accepted: {e}"))
     }
 
@@ -441,7 +440,7 @@ mod tests {
         let (mut ctx, f, _) = two_functions();
 
         assert!(
-            ctx.name_for_reg("0".into(), f.tag.raw()).is_err(),
+            ctx.name_for_reg(&"0".into(), f.tag.raw()).is_err(),
             "`%0` is the unnamed form, not a name a caller may ask for"
         );
 
@@ -460,7 +459,7 @@ mod tests {
 
         for hint in ["my reg", "a+b", "", "a\"b", "café", "x\ny"] {
             assert!(
-                ctx.name_for_reg(hint.into(), f.tag.raw()).is_err(),
+                ctx.name_for_reg(&hint.into(), f.tag.raw()).is_err(),
                 "`{hint}` is not a legal unquoted LLVM identifier"
             );
         }
@@ -491,34 +490,39 @@ mod tests {
     fn an_id_from_another_context_panics_rather_than_writing_elsewhere() {
         // A builder per context: a builder's duplicate-name set holds `StrId`s,
         // which only mean anything against the context they were interned in.
-        let (mut ctx_a, builder_a) = fixture();
-        let (mut ctx_b, builder_b) = fixture();
+        let mut builder_a = fixture();
+        let mut builder_b = fixture();
 
-        let f = add_fn("f", &builder_a, &mut ctx_a).unwrap();
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx_a).unwrap();
-        let g = add_fn("g", &builder_b, &mut ctx_b).unwrap();
+        let f = add_fn("f", &mut builder_a).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder_a)
+            .unwrap();
+        let g = add_fn("g", &mut builder_b).unwrap();
 
-        g.add_basic_block("entry".to_string(), &mut ctx_b).unwrap();
+        g.add_basic_block("entry".to_string(), &mut builder_b)
+            .unwrap();
 
-        // `entry` indexes `ctx_a`'s block arena, so reaching for it in `ctx_b` must
-        // not land on whatever block sits at the same position there.
-        let cursor = builder_a.cursor_at_block(entry);
+        // `entry` indexes `builder_a`'s block arena, so reaching for it through
+        // `builder_b` must not land on whatever block sits at the same position
+        // there — both arenas hold exactly one block, so the raw index collides.
+        let cursor = builder_b.cursor_at_block(entry);
 
-        cursor.build_unconditional_br(entry, &mut ctx_b).unwrap();
+        cursor.build_unconditional_br(entry).unwrap();
     }
 
     /// The string pool is shared across the whole context, so a name used by both
     /// a function and a block costs one entry.
     #[test]
     fn names_are_interned_once_across_the_context() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let f = add_fn("shared", &builder, &mut ctx).unwrap();
+        let f = add_fn("shared", &mut builder).unwrap();
 
-        f.add_basic_block("shared".to_string(), &mut ctx).unwrap();
+        f.add_basic_block("shared".to_string(), &mut builder)
+            .unwrap();
 
         assert_eq!(
-            ctx.str_interner.len(),
+            builder.str_interner.len(),
             1,
             "the function and the block share one pooled name"
         );

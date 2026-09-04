@@ -363,14 +363,14 @@ mod tests {
     }
 
     /// An unnamed temporary in `f`'s body, which is what advances the counter.
-    fn unnamed_temp(cursor: &Cursor, ctx: &mut Context) -> String {
-        let i32_ty = ctx.i32_ty();
+    fn unnamed_temp(cursor: &mut Cursor) -> String {
+        let i32_ty = cursor.i32_ty();
 
         let val = cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed, ctx)
+            .build_alloca(i32_ty, None, None, RegName::Unnamed)
             .expect("an i32 is allocatable");
 
-        reg_name(&val, ctx)
+        reg_name(&val, cursor)
     }
 
     /// LLVM numbers unnamed values per function starting at `%0`, and **parameters
@@ -381,32 +381,37 @@ mod tests {
     /// block, `%2` is the first legal instruction number.
     #[test]
     fn unnamed_params_take_the_first_numbers_and_the_body_continues() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let f = builder
             .define_function(
                 "f".to_string(),
-                &[(i32_ty, None), (i32_ty, None)],
+                &[(i32_ty, RegName::Unnamed), (i32_ty, RegName::Unnamed)],
                 void_ty,
-                &mut ctx,
             )
             .unwrap();
 
-        assert_eq!(param_names(f, &ctx), ["0", "1"], "parameters number first");
+        assert_eq!(
+            param_names(f, &builder),
+            ["0", "1"],
+            "parameters number first"
+        );
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
 
         assert_eq!(
-            unnamed_temp(&cursor, &mut ctx),
+            unnamed_temp(&mut cursor),
             "2",
             "the body continues the parameters' numbering, it does not restart"
         );
 
-        assert_eq!(unnamed_temp(&cursor, &mut ctx), "3");
+        assert_eq!(unnamed_temp(&mut cursor), "3");
     }
 
     /// A *named* parameter takes no number. `llvm-as` is explicit: in
@@ -414,31 +419,32 @@ mod tests {
     /// instruction `%0` is refused with "expected to be numbered '%1' or greater".
     #[test]
     fn a_named_param_does_not_consume_a_number() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let f = builder
             .define_function(
                 "f".to_string(),
-                &[(i32_ty, Some("n".to_string())), (i32_ty, None)],
+                &[(i32_ty, "n".to_string().into()), (i32_ty, RegName::Unnamed)],
                 void_ty,
-                &mut ctx,
             )
             .unwrap();
 
         assert_eq!(
-            param_names(f, &ctx),
+            param_names(f, &builder),
             ["n", "0"],
             "only the unnamed parameter draws from the counter"
         );
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
 
         assert_eq!(
-            unnamed_temp(&cursor, &mut ctx),
+            unnamed_temp(&mut cursor),
             "1",
             "one number was taken, so the body starts at 1"
         );
@@ -449,63 +455,68 @@ mod tests {
     /// assembles.
     #[test]
     fn all_named_params_leave_the_body_starting_at_zero() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let f = builder
             .define_function(
                 "f".to_string(),
                 &[
-                    (i32_ty, Some("a".to_string())),
-                    (i32_ty, Some("b".to_string())),
+                    (i32_ty, "a".to_string().into()),
+                    (i32_ty, "b".to_string().into()),
                 ],
                 void_ty,
-                &mut ctx,
             )
             .unwrap();
 
-        assert_eq!(param_names(f, &ctx), ["a", "b"]);
+        assert_eq!(param_names(f, &builder), ["a", "b"]);
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
 
-        assert_eq!(unnamed_temp(&cursor, &mut ctx), "0");
+        assert_eq!(unnamed_temp(&mut cursor), "0");
     }
 
     /// The counter is per *function*, not per block: it runs on across a branch, which
     /// is what `llvm-as` accepts for `%1` in `entry` and `%2` in `next`.
     #[test]
     fn the_counter_continues_across_blocks() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let f = builder
-            .define_function("f".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(i32_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(param_names(f, &ctx), ["0"]);
+        assert_eq!(param_names(f, &builder), ["0"]);
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let next = f.add_basic_block("next".to_string(), &mut ctx).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let next = f.add_basic_block("next".to_string(), &mut builder).unwrap();
 
-        let in_entry = builder.cursor_at_block(entry);
+        let mut in_entry = builder.cursor_at_block(entry);
 
-        assert_eq!(unnamed_temp(&in_entry, &mut ctx), "1");
+        assert_eq!(unnamed_temp(&mut in_entry), "1");
 
-        let in_next = builder.cursor_at_block(next);
+        let mut in_next = builder.cursor_at_block(next);
 
         assert_eq!(
-            unnamed_temp(&in_next, &mut ctx),
+            unnamed_temp(&mut in_next),
             "2",
             "a new block does not restart the numbering"
         );
 
+        let mut in_entry = builder.cursor_at_block(entry);
+
         assert_eq!(
-            unnamed_temp(&in_entry, &mut ctx),
+            unnamed_temp(&mut in_entry),
             "3",
             "and going back to the first block does not either"
         );
@@ -515,36 +526,41 @@ mod tests {
     /// different value from `%0` in the other.
     #[test]
     fn each_function_restarts_the_counter_including_its_params() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let f = builder
             .define_function(
                 "f".to_string(),
-                &[(i32_ty, None), (i32_ty, None)],
+                &[(i32_ty, RegName::Unnamed), (i32_ty, RegName::Unnamed)],
                 void_ty,
-                &mut ctx,
             )
             .unwrap();
 
         let g = builder
-            .define_function("g".to_string(), &[(i32_ty, None)], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[(i32_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(param_names(f, &ctx), ["0", "1"]);
-        assert_eq!(param_names(g, &ctx), ["0"], "`g` starts over");
+        assert_eq!(param_names(f, &builder), ["0", "1"]);
+        assert_eq!(param_names(g, &builder), ["0"], "`g` starts over");
 
-        let in_f = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let in_g = g.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let in_f = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let in_g = g
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
 
-        let f_cursor = builder.cursor_at_block(in_f);
-        let g_cursor = builder.cursor_at_block(in_g);
+        let mut f_cursor = builder.cursor_at_block(in_f);
 
-        assert_eq!(unnamed_temp(&f_cursor, &mut ctx), "2");
+        assert_eq!(unnamed_temp(&mut f_cursor), "2");
+
+        let mut g_cursor = builder.cursor_at_block(in_g);
+
         assert_eq!(
-            unnamed_temp(&g_cursor, &mut ctx),
+            unnamed_temp(&mut g_cursor),
             "1",
             "`g` has one parameter, so its body starts at 1"
         );
@@ -554,44 +570,48 @@ mod tests {
     /// a definition does — but adds no function to the arena, since there is no body.
     #[test]
     fn a_declaration_records_a_signature_without_a_definition() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
+        let i32_ty = builder.i32_ty();
 
         builder
-            .declare_function("host".to_string(), &[i32_ty], i32_ty, &mut ctx)
+            .declare_function("host".to_string(), &[i32_ty], i32_ty)
             .expect("a valid signature");
 
         assert_eq!(
-            ctx.module.imported_functions.len(),
+            builder.module.imported_functions.len(),
             1,
             "the declaration is recorded"
         );
 
         assert_eq!(
-            ctx.module.functions.len(),
+            builder.module.functions.len(),
             0,
             "but it defines no function, so the module has no body for it"
         );
 
-        assert_eq!(ctx.funcs.len(), 0, "and nothing is allocated in the arena");
+        assert_eq!(
+            builder.funcs.len(),
+            0,
+            "and nothing is allocated in the arena"
+        );
     }
 
     /// Declarations and definitions share one namespace, so a name is one or the
     /// other. Either order collides.
     #[test]
     fn a_declaration_and_a_definition_cannot_share_a_name() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         builder
-            .declare_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .declare_function("f".to_string(), &[], i32_ty)
             .unwrap();
 
         let err = builder
-            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i32_ty)
             .expect_err("`f` is already declared");
 
         assert!(
@@ -601,12 +621,12 @@ mod tests {
 
         // And the other way round.
         builder
-            .define_function("g".to_string(), &[], void_ty, &mut ctx)
+            .define_function("g".to_string(), &[], void_ty)
             .unwrap();
 
         assert!(
             matches!(
-                builder.declare_function("g".to_string(), &[], void_ty, &mut ctx),
+                builder.declare_function("g".to_string(), &[], void_ty),
                 Err(ContextError::DuplicateGlobalName(_))
             ),
             "`g` is already defined"
@@ -620,17 +640,17 @@ mod tests {
     /// function-specific.
     #[test]
     fn a_variable_and_a_function_cannot_share_a_name() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
+        let i32_ty = builder.i32_ty();
 
         // A variable, then a function of the same name.
         builder
-            .declare_global_variable("shared".to_string(), Some(i32_ty), None, &mut ctx)
+            .declare_global_variable("shared".to_string(), Some(i32_ty), None)
             .unwrap();
 
         let err = builder
-            .define_function("shared".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("shared".to_string(), &[], i32_ty)
             .expect_err("`shared` is already a global variable");
 
         assert!(
@@ -640,11 +660,11 @@ mod tests {
 
         // And the other way round: a function, then a variable.
         builder
-            .define_function("taken".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("taken".to_string(), &[], i32_ty)
             .unwrap();
 
         let err = builder
-            .declare_global_variable("taken".to_string(), Some(i32_ty), None, &mut ctx)
+            .declare_global_variable("taken".to_string(), Some(i32_ty), None)
             .expect_err("`taken` is already a function");
 
         assert!(
@@ -657,13 +677,13 @@ mod tests {
     /// size, and a result may be `void` but not a function type.
     #[test]
     fn a_declaration_signature_is_checked() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         let err = builder
-            .declare_function("a".to_string(), &[void_ty], i32_ty, &mut ctx)
+            .declare_function("a".to_string(), &[void_ty], i32_ty)
             .expect_err("`void` is not a parameter type");
 
         assert!(
@@ -672,11 +692,11 @@ mod tests {
         );
 
         let signature = FuncSignature::new(vec![i32_ty], i32_ty);
-        let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
+        let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         assert!(
             matches!(
-                builder.declare_function("b".to_string(), &[], func_ty, &mut ctx),
+                builder.declare_function("b".to_string(), &[], func_ty),
                 Err(ContextError::FunctionResultTypeInvalid(_))
             ),
             "a function type is not a result"
@@ -685,12 +705,12 @@ mod tests {
         // `void` *is* a legal result, and no parameters is a legal signature.
         assert!(
             builder
-                .declare_function("c".to_string(), &[], void_ty, &mut ctx)
+                .declare_function("c".to_string(), &[], void_ty)
                 .is_ok()
         );
 
         assert_eq!(
-            ctx.module.imported_functions.len(),
+            builder.module.imported_functions.len(),
             1,
             "only the accepted declaration was recorded"
         );
@@ -700,26 +720,25 @@ mod tests {
     /// result is recorded as given.
     #[test]
     fn a_signature_becomes_typed_registers_and_a_result() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let f64_ty = ctx.f64_ty();
-        let ptr_ty = ctx.ptr_ty();
+        let i32_ty = builder.i32_ty();
+        let f64_ty = builder.f64_ty();
+        let ptr_ty = builder.ptr_ty();
 
         let f = builder
             .define_function(
                 "sum".to_string(),
                 &[
-                    (i32_ty, Some("n".to_string())),
-                    (f64_ty, Some("x".to_string())),
-                    (ptr_ty, None),
+                    (i32_ty, "n".to_string().into()),
+                    (f64_ty, "x".to_string().into()),
+                    (ptr_ty, RegName::Unnamed),
                 ],
                 i32_ty,
-                &mut ctx,
             )
             .expect("a valid signature");
 
-        let func = ctx.get_func(f.tag.raw());
+        let func = builder.get_func(f.tag.raw());
 
         assert_eq!(func.result, i32_ty, "the result is the one given");
         assert_eq!(func.params.len(), 3);
@@ -727,7 +746,7 @@ mod tests {
         let spelled: Vec<String> = func
             .params
             .iter()
-            .map(|p| ctx.display(p.ty()).to_string())
+            .map(|p| builder.display(p.ty()).to_string())
             .collect();
 
         assert_eq!(spelled, ["i32", "double", "ptr"], "in declaration order");
@@ -749,7 +768,7 @@ mod tests {
                     panic!("a parameter is a register")
                 };
 
-                ctx.str_interner.value(reg.name.0).to_string()
+                builder.str_interner.value(reg.name.0).to_string()
             })
             .collect();
 
@@ -760,13 +779,13 @@ mod tests {
     /// `define void @f({i32, double} %x)` assembles.
     #[test]
     fn an_aggregate_parameter_is_allowed() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let f64_ty = ctx.f64_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let f64_ty = builder.f64_ty();
+        let void_ty = builder.void_ty();
 
-        let struct_ty = ctx
+        let struct_ty = builder
             .ty_interner
             .intern(Type::Struct {
                 fields: Box::new([i32_ty, f64_ty]),
@@ -776,7 +795,7 @@ mod tests {
 
         assert!(
             builder
-                .define_function("f".to_string(), &[(struct_ty, None)], void_ty, &mut ctx)
+                .define_function("f".to_string(), &[(struct_ty, RegName::Unnamed)], void_ty)
                 .is_ok(),
             "an aggregate is sized, so it can be passed"
         );
@@ -787,12 +806,12 @@ mod tests {
     /// function-typed one with "invalid type for function argument".
     #[test]
     fn an_unsized_parameter_is_refused() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let void_ty = ctx.void_ty();
+        let void_ty = builder.void_ty();
 
         let err = builder
-            .define_function("f".to_string(), &[(void_ty, None)], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[(void_ty, RegName::Unnamed)], void_ty)
             .expect_err("`void` is not a parameter type");
 
         assert!(
@@ -801,7 +820,7 @@ mod tests {
         );
 
         assert_eq!(
-            ctx.module.functions.len(),
+            builder.module.functions.len(),
             0,
             "the refused function must not have been added to the module"
         );
@@ -811,23 +830,23 @@ mod tests {
     /// function type is not: `llvm-as` refuses it with "invalid function return type".
     #[test]
     fn a_result_may_be_void_but_not_a_function_type() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         assert!(
             builder
-                .define_function("returns_void".to_string(), &[], void_ty, &mut ctx)
+                .define_function("returns_void".to_string(), &[], void_ty)
                 .is_ok(),
             "`void` is a result like any other"
         );
 
         let signature = FuncSignature::new(vec![i32_ty], i32_ty);
-        let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
+        let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         let err = builder
-            .define_function("returns_fn".to_string(), &[], func_ty, &mut ctx)
+            .define_function("returns_fn".to_string(), &[], func_ty)
             .expect_err("a function cannot return a function type");
 
         assert!(

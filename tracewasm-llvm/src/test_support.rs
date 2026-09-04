@@ -12,15 +12,20 @@ use crate::{
         module::{DataLayout, Triple},
     },
     error::ContextError,
+    instruction::cursor::OperandTy,
     value::Value,
 };
 
-/// A context targeting `arm64-apple-macosx`, with no data layout, and a builder.
+/// A builder over a context targeting `arm64-apple-macosx`, with no data layout.
 ///
 /// The triple is fixed so the emitter tests can assert on the `target triple` line;
 /// the layout is left unset, so no `target datalayout` line is emitted.
-pub(crate) fn fixture() -> Context {
-    ctx()
+///
+/// Returns the [`Builder`] rather than the [`Context`] because the builder now owns
+/// it — and since `Builder` derefs to `Context`, everything a context can do is
+/// reachable through it anyway.
+pub(crate) fn fixture() -> Builder {
+    ctx().builder()
 }
 
 /// Just the context, for the tests that never touch a builder.
@@ -41,9 +46,8 @@ pub(crate) fn ctx() -> Context {
 pub(crate) fn add_fn(
     name: &str,
     builder: &mut Builder,
-    ctx: &mut Context,
 ) -> Result<GlobalId<DefinedFunc>, ContextError> {
-    let void_ty = ctx.void_ty();
+    let void_ty = builder.void_ty();
 
     builder.define_function(name.to_string(), &[], void_ty)
 }
@@ -51,5 +55,6 @@ pub(crate) fn add_fn(
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather
 /// than the value flowing through it.
 pub(crate) fn value(n: i32, ctx: &mut Context) -> Value {
-    Value::from_const(n, None, ctx).expect("constant interns")
+    ctx.const_value(n, OperandTy::Inferred)
+        .expect("constant interns")
 }

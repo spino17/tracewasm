@@ -28,16 +28,16 @@
 //!     Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
 //!     DataLayout::default(),
 //! );
-//! let mut builder = Builder;
+//! let mut builder = ctx.builder();
 //!
-//! let i32_ty = ctx.i32_ty();
-//! let f = builder.define_function("main".to_string(), &[], i32_ty, &mut ctx)?;
-//! let entry = f.add_basic_block("entry".to_string(), &mut ctx)?;
+//! let i32_ty = builder.i32_ty();
+//! let f = builder.define_function("main", &[], i32_ty)?;
+//! let entry = f.add_basic_block("entry", &mut builder)?;
 //!
-//! let zero = tracewasm_llvm::value::Value::from_const(0i32, None, &mut ctx)?;
-//! builder.cursor_at_block(entry).build_ret(Some(&zero), i32_ty.into(), &mut ctx)?;
+//! let zero = builder.const_value(0i32, tracewasm_llvm::instruction::cursor::OperandTy::Inferred)?;
+//! builder.cursor_at_block(entry).build_ret(Some(&zero), i32_ty.into())?;
 //!
-//! let ir = IREmitter::emit(builder.build(ctx))?;
+//! let ir = IREmitter::emit(builder.build())?;
 //!
 //! assert!(ir.contains("define i32 @main() {"));
 //! assert!(ir.contains("ret i32 0"));

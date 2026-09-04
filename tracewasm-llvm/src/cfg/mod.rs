@@ -49,20 +49,20 @@ mod tests {
 
     #[test]
     fn simple_api_usage() {
-        let (mut ctx, builder) = fixture();
-        let func = add_fn("sum", &builder, &mut ctx).unwrap();
-        let entry = func.add_basic_block("entry".to_string(), &mut ctx).unwrap();
+        let mut builder = fixture();
+        let func = add_fn("sum", &mut builder).unwrap();
+        let entry = func.add_basic_block("entry".to_string(), &mut builder).unwrap();
         let cursor = builder.cursor_at_block(entry);
 
-        cursor.build_unconditional_br(entry, &mut ctx).unwrap();
+        cursor.build_unconditional_br(entry).unwrap();
 
         assert_eq!(
-            ctx.blocks.get(entry.raw()).unwrap().instructions.len(),
+            builder.blocks.get(entry.raw()).unwrap().instructions.len(),
             1,
             "the cursor writes into the block it was opened at"
         );
 
-        let cfg = builder.build(ctx);
+        let cfg = builder.build();
 
         assert_eq!(cfg.context.module.functions.len(), 1);
     }
@@ -71,24 +71,24 @@ mod tests {
     /// they were added.
     #[test]
     fn functions_get_distinct_ids_in_order() {
-        let (mut ctx, builder) = fixture();
-        let a = add_fn("a", &builder, &mut ctx).unwrap();
-        let b = add_fn("b", &builder, &mut ctx).unwrap();
+        let mut builder = fixture();
+        let a = add_fn("a", &mut builder).unwrap();
+        let b = add_fn("b", &mut builder).unwrap();
 
         assert_ne!(a.raw(), b.raw());
-        assert_eq!(ctx.module.functions.len(), 2);
-        assert_eq!(ctx.funcs.len(), 2);
+        assert_eq!(builder.module.functions.len(), 2);
+        assert_eq!(builder.funcs.len(), 2);
     }
 
     /// LLVM identifies a definition by its name, so two `@sum`s in one module is
     /// not something to discover at emit time.
     #[test]
     fn a_duplicate_function_name_is_refused() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        add_fn("sum", &builder, &mut ctx).unwrap();
+        add_fn("sum", &mut builder).unwrap();
 
-        let err = add_fn("sum", &builder, &mut ctx).expect_err("the name is taken");
+        let err = add_fn("sum", &mut builder).expect_err("the name is taken");
 
         assert!(
             matches!(&err, ContextError::DuplicateGlobalName(name) if name == "sum"),
@@ -96,7 +96,7 @@ mod tests {
         );
 
         assert_eq!(
-            ctx.module.functions.len(),
+            builder.module.functions.len(),
             1,
             "the refused function must not have been added"
         );

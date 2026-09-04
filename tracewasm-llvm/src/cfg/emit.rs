@@ -683,16 +683,16 @@ mod tests {
     /// up here as a diff.
     #[test]
     fn a_module_emits_ir_that_llvm_assembles() {
-        let mut ctx = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let i64_ty = ctx.i64_ty();
-        let f32_ty = ctx.f32_ty();
-        let f64_ty = ctx.f64_ty();
-        let ptr_ty = ctx.ptr_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let f32_ty = builder.f32_ty();
+        let f64_ty = builder.f64_ty();
+        let ptr_ty = builder.ptr_ty();
+        let void_ty = builder.void_ty();
 
-        let array_ty: TyId = ctx
+        let array_ty: TyId = builder
             .ty_interner
             .intern(Type::Array {
                 size: 4,
@@ -700,15 +700,13 @@ mod tests {
             })
             .into();
 
-        let struct_ty: TyId = ctx
+        let struct_ty: TyId = builder
             .ty_interner
             .intern(Type::Struct {
                 fields: Box::new([i32_ty, array_ty]),
                 packed: false,
             })
             .into();
-
-        let mut builder = ctx.builder();
 
         // The callees come first: a call resolves against the functions added so far,
         // so a forward reference would not resolve.
@@ -959,49 +957,47 @@ mod tests {
     /// `build_call` to resolve, but not for the module to be valid.
     #[test]
     fn a_declared_function_is_emitted_and_callable() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let f64_ty = ctx.f64_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let f64_ty = builder.f64_ty();
+        let void_ty = builder.void_ty();
 
-        builder
-            .declare_function("host_add".to_string(), &[i32_ty, f64_ty], i32_ty, &mut ctx)
+        let host_add = builder
+            .declare_function("host_add".to_string(), &[i32_ty, f64_ty], i32_ty)
             .unwrap();
 
-        builder
-            .declare_function("host_noop".to_string(), &[], void_ty, &mut ctx)
+        let host_noop = builder
+            .declare_function("host_noop".to_string(), &[], void_ty)
             .unwrap();
 
         let f = builder
-            .define_function("f".to_string(), &[], i32_ty, &mut ctx)
+            .define_function("f".to_string(), &[], i32_ty)
             .unwrap();
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
 
-        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
-        let half = Value::from_const(0.5f64, None, &mut ctx).unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let seven = cursor.const_value(7i32, OperandTy::Inferred).unwrap();
+        let half = cursor.const_value(0.5f64, OperandTy::Inferred).unwrap();
 
         let result = cursor
             .build_call(
-                "host_add".to_string(),
+                host_add.into(),
                 &[(&seven, OperandTy::Inferred), (&half, OperandTy::Inferred)],
                 OperandTy::Inferred,
                 "r".into(),
-                &mut ctx,
             )
             .expect("a declared function is callable");
 
-        cursor
-            .build_void_call("host_noop".to_string(), &[], &mut ctx)
-            .unwrap();
+        cursor.build_void_call(host_noop.into(), &[]).unwrap();
 
-        cursor
-            .build_ret(Some(&result), i32_ty.into(), &mut ctx)
-            .unwrap();
+        cursor.build_ret(Some(&result), i32_ty.into()).unwrap();
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert_eq!(
             ir,
@@ -1029,15 +1025,15 @@ mod tests {
     /// `@g = external global i32 0` does not parse.
     #[test]
     fn a_global_variable_without_an_initializer_is_a_declaration() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
+        let i32_ty = builder.i32_ty();
 
         builder
-            .declare_global_variable("counter".to_string(), Some(i32_ty), None, &mut ctx)
+            .declare_global_variable("counter".to_string(), Some(i32_ty), None)
             .expect("an i32 is a legal global type");
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert_eq!(
             ir,
@@ -1055,14 +1051,14 @@ mod tests {
     /// initialised. Writing both is refused by `llvm-as`.
     #[test]
     fn an_initialised_global_variable_omits_the_external_keyword() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let ptr_ty = ctx.ptr_ty();
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
 
         // A constant gep is the one initializer `ConstExpr` can express today.
-        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
-        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
+        let zero = Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap();
 
         let init = ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
             source_ty: i32_ty,
@@ -1072,10 +1068,10 @@ mod tests {
         }));
 
         builder
-            .declare_global_variable("p".to_string(), Some(ptr_ty), Some(init), &mut ctx)
+            .declare_global_variable("p".to_string(), Some(ptr_ty), Some(init))
             .unwrap();
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert_eq!(
             ir,
@@ -1092,41 +1088,43 @@ mod tests {
     /// That is what lets one be stored, loaded through, or passed as an argument.
     #[test]
     fn a_global_is_an_operand_referred_to_by_name() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let ptr_ty = ctx.ptr_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+        let void_ty = builder.void_ty();
 
         let counter = builder
-            .declare_global_variable("counter".to_string(), Some(i32_ty), None, &mut ctx)
+            .declare_global_variable("counter".to_string(), Some(i32_ty), None)
             .unwrap();
 
         let f = builder
-            .define_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty)
             .unwrap();
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
 
-        let address = Value::from_global(counter, &mut ctx);
+        let address = Value::from_global(counter, &mut cursor);
 
         assert_eq!(address.ty(), ptr_ty, "a global's value is its address");
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(&address, OperandTy::Inferred, None, "v".into(), &mut ctx)
+            .build_load(&address, OperandTy::Inferred, None, "v".into())
             .expect("the global says what it points at");
 
         assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
 
         cursor
-            .build_store(&address, &loaded, OperandTy::Inferred, None, &mut ctx)
+            .build_store(&address, &loaded, OperandTy::Inferred, None)
             .unwrap();
 
-        cursor.build_ret(None, void_ty.into(), &mut ctx).unwrap();
+        cursor.build_ret(None, void_ty.into()).unwrap();
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert!(
             ir.contains("    %v = load i32, ptr @counter\n"),
@@ -1145,14 +1143,14 @@ mod tests {
     /// pair excluded everywhere else. Aggregates and pointers are fine.
     #[test]
     fn a_global_variable_needs_a_sized_type() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let f64_ty = ctx.f64_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let f64_ty = builder.f64_ty();
+        let void_ty = builder.void_ty();
 
         let err = builder
-            .declare_global_variable("a".to_string(), Some(void_ty), None, &mut ctx)
+            .declare_global_variable("a".to_string(), Some(void_ty), None)
             .expect_err("`void` has no size");
 
         assert!(
@@ -1161,18 +1159,18 @@ mod tests {
         );
 
         let signature = FuncSignature::new(vec![i32_ty], i32_ty);
-        let func_ty: TyId = ctx.ty_interner.intern(Type::Func(signature)).into();
+        let func_ty: TyId = builder.ty_interner.intern(Type::Func(signature)).into();
 
         assert!(
             matches!(
-                builder.declare_global_variable("b".to_string(), Some(func_ty), None, &mut ctx),
+                builder.declare_global_variable("b".to_string(), Some(func_ty), None),
                 Err(ContextError::GlobalVariableTypeNotSized(_))
             ),
             "a function type is not a global's type either"
         );
 
         // An aggregate is sized, so it is accepted.
-        let struct_ty: TyId = ctx
+        let struct_ty: TyId = builder
             .ty_interner
             .intern(Type::Struct {
                 fields: Box::new([i32_ty, f64_ty]),
@@ -1182,13 +1180,13 @@ mod tests {
 
         assert!(
             builder
-                .declare_global_variable("c".to_string(), Some(struct_ty), None, &mut ctx)
+                .declare_global_variable("c".to_string(), Some(struct_ty), None)
                 .is_ok(),
             "an aggregate has a size"
         );
 
         assert_eq!(
-            ctx.module.global_variables.len(),
+            builder.module.global_variables.len(),
             1,
             "only the accepted global was recorded"
         );
@@ -1198,19 +1196,19 @@ mod tests {
     /// the type omitted, since the initializer already determines it.
     #[test]
     fn a_global_variable_infers_its_type_from_a_constant_initializer() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let seven = Value::from_const(7i32, None, &mut ctx).unwrap();
+        let seven = Value::from_const(7i32, OperandTy::Inferred, &mut builder).unwrap();
 
         let ValueKind::ConstExpr(init) = seven.kind() else {
             panic!("a constant is a constant expression")
         };
 
         builder
-            .declare_global_variable("count".to_string(), None, Some(init.clone()), &mut ctx)
+            .declare_global_variable("count".to_string(), None, Some(init.clone()))
             .expect("the initializer says what the type is");
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert_eq!(
             ir,
@@ -1229,10 +1227,10 @@ mod tests {
     /// have integer type".
     #[test]
     fn a_global_initializer_must_match_the_declared_type_exactly() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let f64_ty = ctx.f64_ty();
+        let i32_ty = builder.i32_ty();
+        let f64_ty = builder.f64_ty();
 
         let const_of = |v: &Value| {
             let ValueKind::ConstExpr(expr) = v.kind() else {
@@ -1242,10 +1240,10 @@ mod tests {
             expr.clone()
         };
 
-        let a_bool = const_of(&Value::from_const(true, None, &mut ctx).unwrap());
+        let a_bool = const_of(&Value::from_const(true, OperandTy::Inferred, &mut builder).unwrap());
 
         let err = builder
-            .declare_global_variable("a".to_string(), Some(i32_ty), Some(a_bool), &mut ctx)
+            .declare_global_variable("a".to_string(), Some(i32_ty), Some(a_bool))
             .expect_err("an i1 does not initialise an i32");
 
         assert!(
@@ -1258,32 +1256,27 @@ mod tests {
         );
 
         // An integer does not initialise a float either, in either direction.
-        let an_int = const_of(&Value::from_const(0i32, None, &mut ctx).unwrap());
+        let an_int = const_of(&Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap());
 
         assert!(
             matches!(
-                builder.declare_global_variable(
-                    "b".to_string(),
-                    Some(f64_ty),
-                    Some(an_int),
-                    &mut ctx
-                ),
+                builder.declare_global_variable("b".to_string(), Some(f64_ty), Some(an_int)),
                 Err(ContextError::GlobalInitializerTypeMismatch(..))
             ),
             "an i32 does not initialise a double"
         );
 
         // The matching case still goes through.
-        let an_i32 = const_of(&Value::from_const(1i32, None, &mut ctx).unwrap());
+        let an_i32 = const_of(&Value::from_const(1i32, OperandTy::Inferred, &mut builder).unwrap());
 
         assert!(
             builder
-                .declare_global_variable("c".to_string(), Some(i32_ty), Some(an_i32), &mut ctx)
+                .declare_global_variable("c".to_string(), Some(i32_ty), Some(an_i32))
                 .is_ok()
         );
 
         assert_eq!(
-            ctx.module.global_variables.len(),
+            builder.module.global_variables.len(),
             1,
             "only the accepted global was recorded"
         );
@@ -1293,10 +1286,10 @@ mod tests {
     /// infer from — the same shape as a `ret` with neither.
     #[test]
     fn a_global_variable_needs_a_type_or_an_initializer() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
         let err = builder
-            .declare_global_variable("g".to_string(), None, None, &mut ctx)
+            .declare_global_variable("g".to_string(), None, None)
             .expect_err("nothing to go on");
 
         assert!(
@@ -1305,7 +1298,7 @@ mod tests {
         );
 
         assert!(
-            ctx.module.global_variables.is_empty(),
+            builder.module.global_variables.is_empty(),
             "the refused global was not recorded"
         );
     }
@@ -1313,25 +1306,25 @@ mod tests {
     /// Globals and functions share one namespace, so a name is used once.
     #[test]
     fn a_global_variable_cannot_reuse_a_name() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
 
         builder
-            .declare_global_variable("g".to_string(), Some(i32_ty), None, &mut ctx)
+            .declare_global_variable("g".to_string(), Some(i32_ty), None)
             .unwrap();
 
         assert!(
             builder
-                .declare_global_variable("g".to_string(), Some(i32_ty), None, &mut ctx)
+                .declare_global_variable("g".to_string(), Some(i32_ty), None)
                 .is_err(),
             "a second global of that name collides"
         );
 
         assert!(
             builder
-                .define_function("g".to_string(), &[], void_ty, &mut ctx)
+                .define_function("g".to_string(), &[], void_ty)
                 .is_err(),
             "and so does a function, since the namespace is shared"
         );
@@ -1373,13 +1366,13 @@ mod tests {
     /// assignment.
     #[test]
     fn a_constant_getelementptr_is_emitted_inline() {
-        let (mut ctx, builder) = fixture();
+        let mut builder = fixture();
 
-        let i32_ty = ctx.i32_ty();
-        let void_ty = ctx.void_ty();
-        let ptr_ty = ctx.ptr_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
+        let ptr_ty = builder.ptr_ty();
 
-        let array_ty: TyId = ctx
+        let array_ty: TyId = builder
             .ty_interner
             .intern(Type::Array {
                 size: 4,
@@ -1388,15 +1381,17 @@ mod tests {
             .into();
 
         let f = builder
-            .define_function("f".to_string(), &[], void_ty, &mut ctx)
+            .define_function("f".to_string(), &[], void_ty)
             .unwrap();
 
-        let entry = f.add_basic_block("entry".to_string(), &mut ctx).unwrap();
-        let cursor = builder.cursor_at_block(entry);
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let mut cursor = builder.cursor_at_block(entry);
 
-        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
-        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
-        let two = Value::from_const(2i32, None, &mut ctx).unwrap();
+        let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut cursor).unwrap();
+        let zero = Value::from_const(0i32, OperandTy::Inferred, &mut cursor).unwrap();
+        let two = Value::from_const(2i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         // `getelementptr inbounds ([4 x i32], ptr null, i32 0, i32 2)`
         let const_gep = Value::from_const_expr(
@@ -1406,7 +1401,7 @@ mod tests {
                 indices: Box::new([zero, two]),
                 inbounds: true,
             })),
-            &mut ctx,
+            &mut cursor,
         );
 
         assert_eq!(
@@ -1415,17 +1410,15 @@ mod tests {
             "a constant gep is a pointer, like the instruction"
         );
 
-        let slot = cursor
-            .build_alloca(ptr_ty, None, None, "s".into(), &mut ctx)
-            .unwrap();
+        let slot = cursor.build_alloca(ptr_ty, None, None, "s".into()).unwrap();
 
         cursor
-            .build_store(&slot, &const_gep, OperandTy::Inferred, None, &mut ctx)
+            .build_store(&slot, &const_gep, OperandTy::Inferred, None)
             .expect("a constant expression is a valid store value");
 
-        cursor.build_ret(None, void_ty.into(), &mut ctx).unwrap();
+        cursor.build_ret(None, void_ty.into()).unwrap();
 
-        let ir = IREmitter::emit(builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(builder.build()).unwrap();
 
         assert!(
             ir.contains(
@@ -1450,8 +1443,8 @@ mod tests {
             })
             .into();
 
-        let null = Value::from_const(NullPtr, None, &mut ctx).unwrap();
-        let zero = Value::from_const(0i32, None, &mut ctx).unwrap();
+        let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut ctx).unwrap();
+        let zero = Value::from_const(0i32, OperandTy::Inferred, &mut ctx).unwrap();
 
         let expr = ConstExpr::GetElementPtr(Box::new(GetElementPtrOperands {
             source_ty: array_ty,
@@ -1528,7 +1521,7 @@ mod tests {
     #[test]
     fn an_unset_data_layout_emits_no_datalayout_line() {
         let ctx = crate::test_support::ctx();
-        let ir = IREmitter::emit(Builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(ctx.builder().build()).unwrap();
 
         assert_eq!(
             ir, "target triple = \"arm64-apple-macosx\"\n\n",
@@ -1558,7 +1551,7 @@ mod tests {
             ]),
         );
 
-        let ir = IREmitter::emit(Builder.build(ctx)).unwrap();
+        let ir = IREmitter::emit(ctx.builder().build()).unwrap();
 
         assert_eq!(
             ir,

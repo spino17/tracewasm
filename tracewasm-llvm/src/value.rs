@@ -1447,11 +1447,11 @@ mod tests {
         let i32_ty = ctx.i32_ty();
         let i1_ty = ctx.i1_ty();
 
-        let a = Value::from_const(32, None, &mut ctx);
-        let b = Value::from_const(2.3, Some(i32_ty), &mut ctx);
-        let c = Value::from_const(true, None, &mut ctx);
-        let d = Value::from_const(true, Some(i1_ty), &mut ctx);
-        let e = Value::from_const(false, Some(i32_ty), &mut ctx);
+        let a = Value::from_const(32, OperandTy::Inferred, &mut ctx);
+        let b = Value::from_const(2.3, i32_ty.into(), &mut ctx);
+        let c = Value::from_const(true, OperandTy::Inferred, &mut ctx);
+        let d = Value::from_const(true, i1_ty.into(), &mut ctx);
+        let e = Value::from_const(false, i32_ty.into(), &mut ctx);
 
         assert!(a.is_ok());
         assert!(b.is_err());
@@ -1468,7 +1468,7 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let i64_ty = ctx.i64_ty();
 
-        let widened = Value::from_const(7i8, Some(i64_ty), &mut ctx).unwrap();
+        let widened = Value::from_const(7i8, i64_ty.into(), &mut ctx).unwrap();
 
         assert_eq!(ty_of(&widened, &ctx), Type::I64);
 
@@ -1490,13 +1490,13 @@ mod tests {
         // Built first, then checked: resolving an id back needs a shared borrow of
         // the context the values were built through.
         let cases = [
-            (Value::from_const(1i8, None, &mut ctx), Type::I8),
-            (Value::from_const(1i16, None, &mut ctx), Type::I16),
-            (Value::from_const(1i32, None, &mut ctx), Type::I32),
-            (Value::from_const(1i64, None, &mut ctx), Type::I64),
-            (Value::from_const(1.0f32, None, &mut ctx), Type::Float),
-            (Value::from_const(1.0f64, None, &mut ctx), Type::Double),
-            (Value::from_const(true, None, &mut ctx), Type::I1),
+            (Value::from_const(1i8, OperandTy::Inferred, &mut ctx), Type::I8),
+            (Value::from_const(1i16, OperandTy::Inferred, &mut ctx), Type::I16),
+            (Value::from_const(1i32, OperandTy::Inferred, &mut ctx), Type::I32),
+            (Value::from_const(1i64, OperandTy::Inferred, &mut ctx), Type::I64),
+            (Value::from_const(1.0f32, OperandTy::Inferred, &mut ctx), Type::Float),
+            (Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx), Type::Double),
+            (Value::from_const(true, OperandTy::Inferred, &mut ctx), Type::I1),
         ];
 
         for (value, expected) in cases {
@@ -1731,8 +1731,8 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let f64_ty = ctx.f64_ty();
 
-        let a = Value::from_const(1.0f64, None, &mut ctx).unwrap();
-        let b = Value::from_const(2.0f64, None, &mut ctx).unwrap();
+        let a = Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx).unwrap();
+        let b = Value::from_const(2.0f64, OperandTy::Inferred, &mut ctx).unwrap();
 
         let (a, b) = Value::try_cast_two(
             &a,
@@ -1748,8 +1748,8 @@ mod tests {
 
         // And a narrower float constant still widens, because `fpext` is exact and
         // needs no reading to be chosen.
-        let narrow = Value::from_const(0.5f32, None, &mut ctx).unwrap();
-        let wide = Value::from_const(1.0f64, None, &mut ctx).unwrap();
+        let narrow = Value::from_const(0.5f32, OperandTy::Inferred, &mut ctx).unwrap();
+        let wide = Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx).unwrap();
 
         let (x, y) = Value::try_cast_two(
             &wide,
@@ -1764,8 +1764,8 @@ mod tests {
         assert_eq!(y.ty(), f64_ty);
 
         // An integer paired with a float has no common type under any reading.
-        let int = Value::from_const(1i32, None, &mut ctx).unwrap();
-        let float = Value::from_const(1.0f32, None, &mut ctx).unwrap();
+        let int = Value::from_const(1i32, OperandTy::Inferred, &mut ctx).unwrap();
+        let float = Value::from_const(1.0f32, OperandTy::Inferred, &mut ctx).unwrap();
 
         assert!(
             Value::try_cast_two(
@@ -1985,9 +1985,9 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
         let f64_ty = ctx.f64_ty();
 
-        let first = Value::from_const(f64::NAN, None, &mut ctx).unwrap();
+        let first = Value::from_const(f64::NAN, OperandTy::Inferred, &mut ctx).unwrap();
         let before = ctx.const_interner.len();
-        let second = Value::from_const(f64::NAN, None, &mut ctx).unwrap();
+        let second = Value::from_const(f64::NAN, OperandTy::Inferred, &mut ctx).unwrap();
 
         assert_eq!(
             ctx.const_interner.len(),
@@ -2087,8 +2087,8 @@ mod tests {
 
         let before = ctx.const_interner.len();
 
-        assert!(Value::from_const(300i32, Some(i8_ty), &mut ctx).is_err());
-        assert!(Value::from_const(-1i32, Some(i8_ty), &mut ctx).is_ok());
+        assert!(Value::from_const(300i32, i8_ty.into(), &mut ctx).is_err());
+        assert!(Value::from_const(-1i32, i8_ty.into(), &mut ctx).is_ok());
 
         assert_eq!(
             ctx.const_interner.len(),
@@ -2106,7 +2106,7 @@ mod tests {
         assert_eq!(rendered(NullPtr::ty(&mut ctx), &ctx), "ptr");
         assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
 
-        let value = Value::from_const(NullPtr, None, &mut ctx).unwrap();
+        let value = Value::from_const(NullPtr, OperandTy::Inferred, &mut ctx).unwrap();
 
         assert_eq!(ty_of(&value, &ctx), Type::Ptr);
         assert_eq!(ctx.const_interner.values(), [ConstValue::NullPtr]);
@@ -2190,8 +2190,8 @@ mod tests {
 
         let ptr_ty = ctx.ptr_ty();
 
-        let first = Value::from_const(NullPtr, None, &mut ctx).unwrap();
-        let again = Value::from_const(NullPtr, Some(ptr_ty), &mut ctx).unwrap();
+        let first = Value::from_const(NullPtr, OperandTy::Inferred, &mut ctx).unwrap();
+        let again = Value::from_const(NullPtr, ptr_ty.into(), &mut ctx).unwrap();
 
         assert_eq!(ty_of(&first, &ctx), Type::Ptr);
         assert_eq!(ty_of(&again, &ctx), Type::Ptr);
@@ -2223,7 +2223,7 @@ mod tests {
 
         let i64_ty = ctx.i64_ty();
 
-        let err = Value::from_const(NullPtr, Some(i64_ty), &mut ctx)
+        let err = Value::from_const(NullPtr, i64_ty.into(), &mut ctx)
             .expect_err("null does not cast to i64");
 
         let msg = err.to_string();
@@ -2281,7 +2281,7 @@ mod tests {
 
         let i32_ty = ctx.i32_ty();
 
-        let err = Value::from_const(1.0f64, Some(i32_ty), &mut ctx)
+        let err = Value::from_const(1.0f64, i32_ty.into(), &mut ctx)
             .expect_err("f64 does not cast to i32");
 
         let msg = err.to_string();
@@ -2308,7 +2308,7 @@ mod tests {
             &mut ctx,
         );
 
-        let err = Value::from_const(1i32, Some(array), &mut ctx)
+        let err = Value::from_const(1i32, array.into(), &mut ctx)
             .expect_err("an i32 does not cast to an array");
 
         assert!(
@@ -2323,8 +2323,8 @@ mod tests {
     fn into_i1_accepts_only_i1() {
         let mut ctx = crate::test_support::ctx();
 
-        let ok = Value::from_const(true, None, &mut ctx).unwrap();
-        let not_i1 = Value::from_const(1i32, None, &mut ctx).unwrap();
+        let ok = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
+        let not_i1 = Value::from_const(1i32, OperandTy::Inferred, &mut ctx).unwrap();
 
         assert!(ok.into_i1(&ctx).is_ok());
 
@@ -2342,7 +2342,7 @@ mod tests {
     fn an_i1_value_converts_back_to_a_value() {
         let mut ctx = crate::test_support::ctx();
 
-        let value = Value::from_const(true, None, &mut ctx).unwrap();
+        let value = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
         let ty = value.ty();
         let i1 = value.into_i1(&ctx).unwrap();
         let back = Value::from(i1);
