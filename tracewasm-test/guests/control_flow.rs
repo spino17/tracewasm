@@ -145,12 +145,14 @@ pub extern "C" fn cf_unreachable_regions(n: i32) -> i64 {
         if black_box(i) < 0 {
             // dead: the condition is never true, but it still has to lower
             let mut dead = 0i64;
+
             for j in 0..10 {
                 dead = dead.wrapping_add(j);
                 if dead > 5 {
                     break;
                 }
             }
+
             return dead;
         }
     }
@@ -291,6 +293,7 @@ pub extern "C" fn cf_iterator_chains(n: i32) -> i64 {
     let any = (0..n).any(|x| x == n - 1) as i64;
     let all = (0..n).all(|x| x < n) as i64;
     let pos = (0..n).position(|x| x * x > 1000).unwrap_or(0) as i64;
+
     let chained: i64 = (0..n)
         .chain(0..n / 2)
         .rev()

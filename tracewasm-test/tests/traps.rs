@@ -36,8 +36,8 @@ use tracewasm_test::{Guest, MAX_TEST_RECURSION, guests, with_large_stack};
 /// what rustc really emits, fixtures reach the instructions rustc guards away.
 #[test]
 fn guest_faults_become_catchable_errors() {
-    with_large_stack(|| guest_faults_become_catchable_errors_on::<Stack>());
-    with_large_stack(|| guest_faults_become_catchable_errors_on::<Register>());
+    with_large_stack(guest_faults_become_catchable_errors_on::<Stack>);
+    with_large_stack(guest_faults_become_catchable_errors_on::<Register>);
 }
 
 fn guest_faults_become_catchable_errors_on<V: VirtualMachine>() {
@@ -77,8 +77,8 @@ fn guest_faults_become_catchable_errors_on<V: VirtualMachine>() {
 /// allocation, bounds checks) should surface with the intervening frames intact.
 #[test]
 fn a_trap_reports_the_wasm_call_chain() {
-    with_large_stack(|| a_trap_reports_the_wasm_call_chain_on::<Stack>());
-    with_large_stack(|| a_trap_reports_the_wasm_call_chain_on::<Register>());
+    with_large_stack(a_trap_reports_the_wasm_call_chain_on::<Stack>);
+    with_large_stack(a_trap_reports_the_wasm_call_chain_on::<Register>);
 }
 
 fn a_trap_reports_the_wasm_call_chain_on<V: VirtualMachine>() {
@@ -118,8 +118,8 @@ fn a_trap_reports_the_wasm_call_chain_on<V: VirtualMachine>() {
 /// which is why this test exists even though it is slow.
 #[test]
 fn runaway_recursion_traps_instead_of_aborting_the_process() {
-    with_large_stack(|| runaway_recursion_traps_instead_of_aborting_the_process_on::<Stack>());
-    with_large_stack(|| runaway_recursion_traps_instead_of_aborting_the_process_on::<Register>());
+    with_large_stack(runaway_recursion_traps_instead_of_aborting_the_process_on::<Stack>);
+    with_large_stack(runaway_recursion_traps_instead_of_aborting_the_process_on::<Register>);
 }
 
 fn runaway_recursion_traps_instead_of_aborting_the_process_on<V: VirtualMachine>() {
@@ -155,8 +155,8 @@ fn runaway_recursion_traps_instead_of_aborting_the_process_on<V: VirtualMachine>
 /// exactly that bug.
 #[test]
 fn the_depth_guard_counts_depth_not_total_calls() {
-    with_large_stack(|| the_depth_guard_counts_depth_not_total_calls_on::<Stack>());
-    with_large_stack(|| the_depth_guard_counts_depth_not_total_calls_on::<Register>());
+    with_large_stack(the_depth_guard_counts_depth_not_total_calls_on::<Stack>);
+    with_large_stack(the_depth_guard_counts_depth_not_total_calls_on::<Register>);
 }
 
 fn the_depth_guard_counts_depth_not_total_calls_on<V: VirtualMachine>() {
@@ -188,8 +188,8 @@ fn the_depth_guard_counts_depth_not_total_calls_on<V: VirtualMachine>() {
 /// is genuinely driven by configuration rather than a hardcoded constant.
 #[test]
 fn the_depth_limit_is_configurable() {
-    with_large_stack(|| the_depth_limit_is_configurable_on::<Stack>());
-    with_large_stack(|| the_depth_limit_is_configurable_on::<Register>());
+    with_large_stack(the_depth_limit_is_configurable_on::<Stack>);
+    with_large_stack(the_depth_limit_is_configurable_on::<Register>);
 }
 
 fn the_depth_limit_is_configurable_on<V: VirtualMachine>() {
@@ -226,8 +226,8 @@ fn the_depth_limit_is_configurable_on<V: VirtualMachine>() {
 /// counter in a corrupt state, which would show up as the *second* call failing.
 #[test]
 fn an_instance_is_reusable_after_a_trap() {
-    with_large_stack(|| an_instance_is_reusable_after_a_trap_on::<Stack>());
-    with_large_stack(|| an_instance_is_reusable_after_a_trap_on::<Register>());
+    with_large_stack(an_instance_is_reusable_after_a_trap_on::<Stack>);
+    with_large_stack(an_instance_is_reusable_after_a_trap_on::<Register>);
 }
 
 fn an_instance_is_reusable_after_a_trap_on<V: VirtualMachine>() {

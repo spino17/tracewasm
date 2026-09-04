@@ -89,14 +89,17 @@ pub extern "C" fn fr_call_chain(n: i32) -> i64 {
         let t = x.wrapping_mul(3);
         l2(t, t ^ 1)
     }
+
     fn l2(x: i64, y: i64) -> i64 {
         let t = x.wrapping_add(y);
         l3(t, t >> 1, t << 1)
     }
+
     fn l3(x: i64, y: i64, z: i64) -> i64 {
         let t = x ^ y ^ z;
         l4(t, t.rotate_left(7))
     }
+
     fn l4(x: i64, y: i64) -> i64 {
         let mut acc = x;
         for i in 0..4 {
@@ -104,6 +107,7 @@ pub extern "C" fn fr_call_chain(n: i32) -> i64 {
         }
         l5(acc)
     }
+
     fn l5(x: i64) -> i64 {
         x.wrapping_mul(2_654_435_761)
     }
@@ -300,12 +304,15 @@ pub extern "C" fn fr_mixed_workload(n: i32) -> i64 {
     fn t0(x: i64) -> i64 {
         x.wrapping_mul(2_654_435_761)
     }
+
     fn t1(x: i64) -> i64 {
         x ^ 0x5bf0_3635
     }
+
     fn t2(x: i64) -> i64 {
         x.wrapping_add(0x9e37_79b9)
     }
+
     fn t3(x: i64) -> i64 {
         !x
     }
@@ -315,6 +322,7 @@ pub extern "C" fn fr_mixed_workload(n: i32) -> i64 {
 
     while i < n {
         let f = unsafe { TABLE[(acc & 3) as usize] };
+
         acc = f(acc).wrapping_add(i as i64);
         i += 1;
     }

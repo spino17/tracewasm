@@ -18,6 +18,7 @@
 use super::*;
 use crate::instruction::register::lazy::SpillIndex;
 use crate::module::{FuncKind, TyIndex, ValType};
+use std::mem;
 use std::ops::Range;
 use wasmparser::Parser;
 
@@ -73,7 +74,7 @@ fn layout_of(s: &SimulatedStack) -> RegFrameLayout {
         select_arena: Arena::default(),
         memory_init_arena: Arena::default(),
         dyn_signatures: Arena::default(),
-        memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
+        memory_offsets: Interner::default(),
     }
 }
 
@@ -111,8 +112,9 @@ fn resolve_backpatches(s: &mut SimulatedStack, prog: &mut Instructions) {
     let consts_len = s.const_interner.len() as u16;
     let spills = s.spills.allocation_len();
     let mut layout = layout_of(s);
+    let backpatch_map = mem::take(&mut s.backpatch_map);
 
-    s.backpatch_map.apply(
+    backpatch_map.apply(
         &mut prog.inner,
         locals_count,
         consts_len,
@@ -4564,11 +4566,11 @@ fn const_hash_agrees_with_equality() {
 #[test]
 fn the_pool_keeps_same_bits_of_different_types_apart() {
     let all = same_bits_different_types();
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
     let ids: Vec<(&str, u16)> = all
         .iter()
-        .map(|(name, c)| (*name, interner.intern(*c).unwrap().raw()))
+        .map(|(name, c)| (*name, interner.intern(*c).raw()))
         .collect();
 
     assert_eq!(
@@ -4597,12 +4599,12 @@ fn the_pool_keeps_same_bits_of_different_types_apart() {
 /// survives `f64.min`/`copysign`, and a NaN payload survives arithmetic.
 #[test]
 fn the_pool_keeps_bit_distinct_floats_apart() {
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
-    let pos64 = interner.intern(Const::F64(0.0f64.into())).unwrap();
-    let neg64 = interner.intern(Const::F64((-0.0f64).into())).unwrap();
-    let pos32 = interner.intern(Const::F32(0.0f32.into())).unwrap();
-    let neg32 = interner.intern(Const::F32((-0.0f32).into())).unwrap();
+    let pos64 = interner.intern(Const::F64(0.0f64.into()));
+    let neg64 = interner.intern(Const::F64((-0.0f64).into()));
+    let pos32 = interner.intern(Const::F32(0.0f32.into()));
+    let neg32 = interner.intern(Const::F32((-0.0f32).into()));
 
     assert_ne!(
         pos64.raw(),
@@ -4627,9 +4629,9 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     let neg_nan = f64::from_bits(0xfff8_0000_0000_0001);
     let other_payload = f64::from_bits(0x7ff8_0000_dead_beef);
 
-    let a = interner.intern(Const::F64(nan.into())).unwrap();
-    let b = interner.intern(Const::F64(neg_nan.into())).unwrap();
-    let c = interner.intern(Const::F64(other_payload.into())).unwrap();
+    let a = interner.intern(Const::F64(nan.into()));
+    let b = interner.intern(Const::F64(neg_nan.into()));
+    let c = interner.intern(Const::F64(other_payload.into()));
 
     assert_ne!(
         a.raw(),
@@ -4644,7 +4646,7 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
     );
 
     // interning the same bits twice must still dedup, or the pool grows per use
-    let again = interner.intern(Const::F64(nan.into())).unwrap();
+    let again = interner.intern(Const::F64(nan.into()));
 
     assert_eq!(
         a.raw(),
@@ -4657,12 +4659,12 @@ fn the_pool_keeps_bit_distinct_floats_apart() {
 /// use its own slot, which would grow every frame by its constant count.
 #[test]
 fn the_pool_still_dedups_equal_constants() {
-    let mut interner = Interner::new(MAX_CONSTS);
+    let mut interner = Interner::<Const, u16>::default();
 
     for _ in 0..4 {
-        interner.intern(Const::I32(7)).unwrap();
-        interner.intern(Const::F64(2.5f64.into())).unwrap();
-        interner.intern(Const::Ref(None)).unwrap();
+        interner.intern(Const::I32(7));
+        interner.intern(Const::F64(2.5f64.into()));
+        interner.intern(Const::Ref(None));
     }
 
     assert_eq!(
@@ -4790,14 +4792,75 @@ fn too_many_constants_is_reported_not_truncated() {
     let err = compile_register(&wat).expect_err("the pool cannot name this many");
 
     // The pool is an `Interner`, so its cap is reported by the interner rather than
-    // by the end-of-body frame-width check — and the `what` is what `Const`'s
-    // `TyToString` names it.
+    // by the end-of-body frame-width check — hence `UtilsError` wrapping
+    // `TracewasmUtilsError`, not `TraceWasmError::ToManyUniqueValues`.
     assert!(
-        matches!(&err, TraceWasmError::ToManyUniqueValues { what, needed, limit }
-            if what == "constants"
-                && *needed == MAX_CONSTS as u32 + 1
-                && *limit == MAX_CONSTS as u32),
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { needed, limit })
+            if *needed == MAX_CONSTS as u32 + 1
+                && *limit == MAX_CONSTS as u64),
         "expected the constants limit, got: {err}"
+    );
+}
+
+/// More distinct memory offsets than the pool can name.
+///
+/// Reported, not panicked: the offsets come from the module being compiled, so
+/// overflowing the pool is an input this crate has to answer for. `emit_load!` and
+/// `emit_store!` both reach the pool, and a panic on either would take down a
+/// compile that is supposed to fall back to the stack machine.
+///
+/// Every address here is `i32.const 0`, so the constant pool holds one entry and
+/// cannot be what overflows — the offsets are what this is about.
+#[test]
+fn too_many_memory_offsets_is_reported_not_truncated() {
+    let mut wat = String::from("(module (memory 1) (func\n");
+
+    for i in 0..(MAX_MEMORY_OFFSETS as u32 + 10) {
+        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the pool cannot name this many");
+
+    assert!(
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { needed, limit })
+            if *needed == MAX_MEMORY_OFFSETS as u32 + 1
+                && *limit == MAX_MEMORY_OFFSETS as u64),
+        "expected the memory-offset limit, got: {err}"
+    );
+}
+
+/// The cap counts loads and stores *together*, because one pool serves both.
+///
+/// Neither half below reaches the cap alone, so two per-instruction-kind pools would
+/// compile this happily. It is the sum that overflows — which is what
+/// [`MAX_MEMORY_OFFSETS`]'s "between them" means, and the reason a test filling the
+/// pool from loads alone would not pin it.
+#[test]
+fn loads_and_stores_share_one_memory_offset_pool() {
+    let half = MAX_MEMORY_OFFSETS as u32 / 2;
+
+    let mut wat = String::from("(module (memory 1) (func\n");
+
+    // Disjoint offset ranges, so nothing here dedups: the two halves together are
+    // one more distinct offset than the pool can name.
+    for i in 0..half {
+        wat.push_str(&format!("  i32.const 0 i32.load offset={i} drop\n"));
+    }
+
+    for i in half..=(MAX_MEMORY_OFFSETS as u32) {
+        wat.push_str(&format!("  i32.const 0 i32.const 0 i32.store offset={i}\n"));
+    }
+
+    wat.push_str("))");
+
+    let err = compile_register(&wat).expect_err("the two halves together overrun the pool");
+
+    assert!(
+        matches!(&err, TraceWasmError::UtilsError(tracewasm_utils::error::TracewasmUtilsError::ToManyUniqueValues { limit, .. })
+            if *limit == MAX_MEMORY_OFFSETS as u64),
+        "expected the memory-offset limit, got: {err}"
     );
 }
 

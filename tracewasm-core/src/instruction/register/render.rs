@@ -16,10 +16,12 @@
 //!
 //! Both are conversions *out* of the executable form; nothing here runs at execution.
 
+use tracewasm_utils::interner::InternedId;
+
 use crate::{
     instruction::register::{
         DynSignature, InputRegisters, MemoryOffset, RegFrameLayout, RegInstruction,
-        RegLoweredFuncBody, Slot, interner::InternedId, mnemonic,
+        RegLoweredFuncBody, Slot, mnemonic,
     },
     module::FuncType,
 };
@@ -30,7 +32,7 @@ impl RegInstruction {
     /// `types` is needed because a `call_indirect` stores only a type index, so how
     /// many of its arena operands are arguments is recoverable only from the module's
     /// type section — the same thing executing one has to do.
-    pub fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
+    pub(crate) fn render(&self, frame: &RegFrameLayout, types: &[FuncType]) -> String {
         let sig1 = |i: &InputRegisters<1>| i.registers[0].render(frame);
         let list = |xs: &[Slot]| {
             xs.iter()
@@ -68,9 +70,9 @@ impl RegInstruction {
         // A load or a store carries an id into `memory_offsets`, not the offset itself,
         // so it is resolved and shown as its value — the id is an artifact of keeping
         // the instruction eight bytes wide.
-        let offset_of = |id: InternedId<MemoryOffset>| frame.memory_offsets.value(id).0;
+        let offset_of = |id: InternedId<MemoryOffset, u16>| frame.memory_offsets.value(id).0;
 
-        let load_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot], output: u16| {
+        let load_op = |kind, id: InternedId<MemoryOffset, u16>, inputs: &[Slot], output: u16| {
             format!(
                 "{:<12} [{}]+{} -> {}",
                 mnemonic(kind),
@@ -80,7 +82,7 @@ impl RegInstruction {
             )
         };
 
-        let store_op = |kind, id: InternedId<MemoryOffset>, inputs: &[Slot]| {
+        let store_op = |kind, id: InternedId<MemoryOffset, u16>, inputs: &[Slot]| {
             format!(
                 "{:<12} [{}]+{} <- {}",
                 mnemonic(kind),
@@ -501,7 +503,7 @@ impl RegInstruction {
     ///
     /// Assertions compare against this rather than against the enum, so a failure shows
     /// the whole program and a reader can see what changed.
-    pub fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
+    pub(crate) fn render_body(body: &RegLoweredFuncBody, types: &[FuncType]) -> String {
         let (instructions, _, frame) = body;
         let mut out = String::new();
 

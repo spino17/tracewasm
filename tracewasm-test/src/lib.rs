@@ -163,6 +163,12 @@ pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
               rustup target add wasm32-unknown-unknown"
 )]
 #[test]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "the constant is the subject: `GUESTS_AVAILABLE` resolves at compile \
+              time from `no_guest_wasm`, and this test exists to turn a `false` \
+              into a visible line in the summary"
+)]
 fn guests_were_built() {
     assert!(GUESTS_AVAILABLE);
 }
@@ -215,6 +221,7 @@ impl<V: VirtualMachine> Guest<V> {
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
         let module = Module::<V>::compile(wasm).expect("guest should compile");
+
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");
