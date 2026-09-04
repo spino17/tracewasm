@@ -6,7 +6,7 @@ use crate::{
     cfg::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
-        global::GlobalKind,
+        global::{FuncRef, GlobalKind},
     },
     error::{
         AllocaError, CallError, FArithmeticError, FCmpError, GepError, IArithmeticError, ICmpError,
@@ -760,7 +760,7 @@ impl<'a> Cursor<'a> {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_call(
         &mut self,
-        func_name: String,
+        func: FuncRef,
         params: &[(&Value, OperandTy)],
         return_ty: OperandTy,
         reg: RegName,
@@ -771,7 +771,7 @@ impl<'a> Cursor<'a> {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id: StrId = self.ctx.str_interner.intern(func_name).into();
+        let func_name_id = func.name();
 
         // The signature is read out by value before anything below borrows `ctx`
         // mutably: casting an argument interns into the type pool, which a live
@@ -858,7 +858,7 @@ impl<'a> Cursor<'a> {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
     pub fn build_void_call(
         &mut self,
-        func_name: String,
+        func: FuncRef,
         params: &[(&Value, OperandTy)],
     ) -> Result<(), InstructionError> {
         let params: Vec<(Value, OperandTy)> = params
@@ -867,7 +867,7 @@ impl<'a> Cursor<'a> {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id: StrId = self.ctx.str_interner.intern(func_name).into();
+        let func_name_id = func.name();
 
         // The signature is read out by value before anything below borrows `ctx`
         // mutably: casting an argument interns into the type pool, which a live

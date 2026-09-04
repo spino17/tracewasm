@@ -241,3 +241,30 @@ impl GlobalData {
         }
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FuncRef {
+    Defined(GlobalId<DefinedFunc>),
+    Declared(GlobalId<DeclaredFunc>),
+}
+
+impl FuncRef {
+    pub(crate) fn name(&self) -> StrId {
+        match self {
+            FuncRef::Defined(func) => func.name,
+            FuncRef::Declared(func) => func.name,
+        }
+    }
+}
+
+impl From<GlobalId<DefinedFunc>> for FuncRef {
+    fn from(value: GlobalId<DefinedFunc>) -> Self {
+        FuncRef::Defined(value)
+    }
+}
+
+impl From<GlobalId<DeclaredFunc>> for FuncRef {
+    fn from(value: GlobalId<DeclaredFunc>) -> Self {
+        FuncRef::Declared(value)
+    }
+}
