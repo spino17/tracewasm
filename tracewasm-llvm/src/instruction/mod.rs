@@ -140,6 +140,7 @@ pub enum InstructionKind {
     /// `llvm-as` refuses `fneg double %a, %b`. Integers have no counterpart; negating
     /// one is `sub 0, %x`.
     FNeg(FNegOperands),
+    Cast(CastOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -618,5 +619,71 @@ impl Display for FCond {
             FCond::True => "true",
             FCond::False => "false",
         })
+    }
+}
+
+pub struct CastOperands {
+    pub op: CastOp,
+    pub src_ty: TyId,
+    pub value: Value,
+    pub dest_ty: TyId,
+}
+
+#[derive(Clone, Copy)]
+pub enum CastOp {
+    Trunc,
+    Zext,
+    Sext,
+    Fptrunc,
+    Fpext,
+    Fptoui,
+    Fptosi,
+    Uitofp,
+    Sitofp,
+    Ptrtoint,
+    Inttoptr,
+    Bitcast,
+}
+
+impl CastOp {
+    pub fn is_cast_allowed(&self, src: TyId, dest: TyId, ctx: &Context) -> bool {
+        match self {
+            CastOp::Trunc => {
+                src.is_integer(ctx)
+                    && dest.is_integer(ctx)
+                    && (src.width(ctx).unwrap() > dest.width(ctx).unwrap())
+            }
+            CastOp::Zext | CastOp::Sext => {
+                src.is_integer(ctx)
+                    && dest.is_integer(ctx)
+                    && (src.width(ctx).unwrap() < dest.width(ctx).unwrap())
+            }
+            CastOp::Fptrunc => {
+                src.is_float(ctx)
+                    && dest.is_float(ctx)
+                    && (src.width(ctx).unwrap() > dest.width(ctx).unwrap())
+            }
+            CastOp::Fpext => {
+                src.is_float(ctx)
+                    && dest.is_float(ctx)
+                    && (src.width(ctx).unwrap() < dest.width(ctx).unwrap())
+            }
+            CastOp::Fptoui => src.is_float(ctx) && dest.is_integer(ctx),
+            CastOp::Fptosi => src.is_float(ctx) && dest.is_integer(ctx),
+            CastOp::Uitofp => src.is_integer(ctx) && dest.is_float(ctx),
+            CastOp::Sitofp => src.is_integer(ctx) && dest.is_float(ctx),
+            CastOp::Ptrtoint => src.is_ptr(ctx) && dest.is_integer(ctx),
+            CastOp::Inttoptr => src.is_integer(ctx) && dest.is_ptr(ctx),
+            CastOp::Bitcast => {
+                if let Some(src_width) = src.width(ctx)
+                    && let Some(dest_width) = dest.width(ctx)
+                    && src_width == dest_width
+                {
+                    !src.is_ptr(ctx) && !dest.is_ptr(ctx)
+                } else {
+                    false
+                }
+            }
+        }
     }
 }

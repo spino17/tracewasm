@@ -13,10 +13,11 @@ use crate::{
         InstructionError, PhiError, RetError, StoreError,
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOp, FArithmeticOperands,
-        FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IArithmeticOp,
-        IArithmeticOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
-        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FArithmeticOp,
+        FArithmeticOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands,
+        IArithmeticOp, IArithmeticOperands, ICmpOperands, ICond, Instruction, InstructionKind,
+        LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands,
+        UnconditionalBrOperands,
     },
     interner::TyId,
     value::{I1Value, Signedness, Value, ValueKind},
@@ -1286,6 +1287,44 @@ impl<'a> Cursor<'a> {
         add_instruction_to_block_and_get_value(
             InstructionKind::FNeg(FNegOperands { ty, value }),
             ty,
+            self.block,
+            reg,
+            self.ctx,
+        )
+    }
+
+    pub fn build_cast(
+        &mut self,
+        op: CastOp,
+        value: Value,
+        src: OperandTy,
+        dest: TyId,
+        reg: RegName,
+    ) -> Result<Value, InstructionError> {
+        let value = if let OperandTy::Asserted(ty) = src {
+            let Some(casted_val) = value.try_cast(ty, Signedness::Signed, self.ctx) else {
+                todo!() // RAISE ERROR
+            };
+
+            casted_val
+        } else {
+            value
+        };
+
+        let src = value.ty();
+
+        if !op.is_cast_allowed(src, dest, self.ctx) {
+            todo!() // RAISE ERROR
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::Cast(CastOperands {
+                op,
+                src_ty: src,
+                value,
+                dest_ty: dest,
+            }),
+            dest,
             self.block,
             reg,
             self.ctx,

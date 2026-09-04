@@ -9,9 +9,10 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visibility},
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
-        FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands, InstructionKind,
-        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FArithmeticOperands,
+        FCmpOperands, FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands,
+        InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands,
+        UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, Value},
 };
@@ -173,6 +174,13 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_cast(
+        &mut self,
+        operands: &CastOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -271,6 +279,7 @@ pub trait CfgVisitor {
                     self.visit_farithmetic(operands, val.unwrap(), ctx)?
                 }
                 InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
+                InstructionKind::Cast(operands) => self.visit_cast(operands, val.unwrap(), ctx)?,
             });
         }
 

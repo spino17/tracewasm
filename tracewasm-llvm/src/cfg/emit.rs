@@ -10,9 +10,9 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, CallOperands, ConditionalBrOperands, FArithmeticOperands, FCmpOperands,
-        FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands, LoadOperands,
-        PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FArithmeticOperands,
+        FCmpOperands, FNegOperands, GetElementPtrOperands, IArithmeticOperands, ICmpOperands,
+        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
 };
@@ -642,6 +642,15 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
+    fn visit_cast(
+        &mut self,
+        operands: &CastOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
+    }
+
     fn post_func_visit(
         &mut self,
         _func: crate::cfg::function::FuncId,
@@ -659,10 +668,7 @@ impl CfgVisitor for IREmitter {
 mod tests {
     use super::*;
     use crate::{
-        cfg::{
-            builder::Builder,
-            module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
-        },
+        cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
         error::ContextError,
         instruction::{
             FArithmeticOp, FCond, GetElementPtrOperands, IArithmeticOp, ICond,
