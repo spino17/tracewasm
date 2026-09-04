@@ -83,13 +83,13 @@ impl Builder {
     /// functions share one namespace, so a variable may not reuse a function's name.
     /// [`ContextError::GlobalVariableTypeNotSized`] if `ty` is `void` or a function
     /// type, neither of which a variable can hold. Plus the two above.
-    pub fn declare_global_variable(
+    pub fn declare_global_variable<T: Into<String>>(
         &mut self,
-        name: String,
+        name: T,
         ty: Option<TyId>,
         initializer: Option<ConstExpr>,
     ) -> Result<GlobalId<GlobalVar>, ContextError> {
-        let name_id: StrId = self.ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name.into()).into();
 
         if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
@@ -173,13 +173,13 @@ impl Builder {
     ///   `void` and function types are refused; aggregates are fine.
     /// - [`ContextError::FunctionResultTypeInvalid`] — a result may be `void` but not
     ///   a function type.
-    pub fn declare_function(
+    pub fn declare_function<T: Into<String>>(
         &mut self,
-        name: String,
+        name: T,
         params: &[TyId],
         result: TyId,
     ) -> Result<GlobalId<DeclaredFunc>, ContextError> {
-        let name_id: StrId = self.ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name.into()).into();
 
         if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
@@ -242,13 +242,13 @@ impl Builder {
     ///   a function type.
     /// - [`ContextError::InvalidRegisterName`] — a parameter's name hint is not a
     ///   legal LLVM local.
-    pub fn define_function(
+    pub fn define_function<T: Into<String>>(
         &mut self,
-        name: String,
+        name: T,
         params: &[(TyId, RegName)],
         result: TyId,
     ) -> Result<GlobalId<DefinedFunc>, ContextError> {
-        let name_id: StrId = self.ctx.str_interner.intern(name).into();
+        let name_id: StrId = self.ctx.str_interner.intern(name.into()).into();
 
         if self.ctx.module.globals.contains_key(&name_id) {
             return Err(ContextError::DuplicateGlobalName(
