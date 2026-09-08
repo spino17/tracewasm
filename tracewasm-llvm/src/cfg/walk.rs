@@ -197,6 +197,8 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -300,6 +302,7 @@ pub trait CfgVisitor {
                 InstructionKind::Select(operands) => {
                     self.visit_select(operands, val.unwrap(), ctx)?
                 }
+                InstructionKind::Unreachable => self.visit_unreachable(ctx)?,
             });
         }
 

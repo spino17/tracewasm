@@ -1515,6 +1515,18 @@ impl<'a> Cursor<'a> {
             self.ctx,
         )
     }
+
+    pub fn build_unreachable(self) {
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Unreachable,
+                value: None,
+            },
+            self.ctx,
+        );
+
+        self.block.set_locked(self.ctx);
+    }
 }
 
 /// Resolves a call's arguments against the callee's parameter types.

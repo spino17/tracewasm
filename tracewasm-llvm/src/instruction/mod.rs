@@ -158,6 +158,7 @@ pub enum InstructionKind {
     /// Not a terminator and not control flow: both arms are already computed, and the
     /// result is an ordinary value.
     Select(SelectOperands),
+    Unreachable,
 }
 
 /// One instruction: what it does, and the register it defines.

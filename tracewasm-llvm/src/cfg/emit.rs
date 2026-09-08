@@ -714,6 +714,10 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
+    fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
+    }
+
     fn post_func_visit(
         &mut self,
         _func: crate::cfg::function::FuncId,
