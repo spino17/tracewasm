@@ -9,7 +9,7 @@ use crate::{
     cfg::{basic_block::BasicBlockId, context::Context},
     error::PhiError,
     interner::{StrId, TyId},
-    value::{I1Value, Signedness, Value},
+    value::{ConstValue, I1Value, Signedness, Value},
 };
 use rustc_hash::FxHashSet;
 use std::fmt::Display;
@@ -148,6 +148,7 @@ pub enum InstructionKind {
     /// read — except where LLVM says otherwise, as `sitofp` and `fptosi` genuinely
     /// recompute.
     Cast(CastOperands),
+    Switch(SwitchOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -759,4 +760,11 @@ impl CastOp {
             }
         }
     }
+}
+
+pub struct SwitchOperands {
+    pub cond_ty: TyId,
+    pub cond_value: Value,
+    pub default_label: BasicBlockId,
+    pub cases: Vec<(ConstValue, BasicBlockId)>,
 }

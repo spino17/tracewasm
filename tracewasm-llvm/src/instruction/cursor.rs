@@ -14,10 +14,11 @@ use crate::{
         AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
         FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
         IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
-        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, SwitchOperands,
+        UnconditionalBrOperands,
     },
     interner::TyId,
-    value::{I1Value, Signedness, Value, ValueKind},
+    value::{ConstValue, I1Value, Signedness, Value, ValueKind},
 };
 use rustc_hash::FxHashSet;
 use std::ops::{Deref, DerefMut};
@@ -1372,6 +1373,61 @@ impl<'a> Cursor<'a> {
             reg,
             self.ctx,
         )
+    }
+
+    pub fn build_switch(
+        &mut self,
+        cond_val: &Value,
+        cond_ty: OperandTy,
+        default_label: BasicBlockId,
+        cases: &[(ConstValue, BasicBlockId)],
+    ) -> Result<(), InstructionError> {
+        let cond_val = if let OperandTy::Asserted(ty) = cond_ty {
+            let Some(casted_val) = cond_val.try_cast(ty, Signedness::Signed, self.ctx) else {
+                todo!() // RAISE ERROR
+            };
+
+            casted_val
+        } else {
+            cond_val.clone()
+        };
+
+        let cond_ty = cond_val.ty();
+
+        if !cond_ty.is_integer(self.ctx) {
+            todo!() // RAISE ERROR
+        }
+
+        let mut final_cases = vec![];
+        let mut case_vals = FxHashSet::default();
+
+        for (case_val, bb) in cases {
+            let Some(casted_val) = case_val.try_cast(cond_ty, Signedness::Signed, self.ctx) else {
+                todo!() // RAISE ERROR
+            };
+
+            if case_vals.contains(&casted_val) {
+                todo!() // RAISE ERROR
+            }
+
+            case_vals.insert(casted_val);
+            final_cases.push((casted_val, *bb));
+        }
+
+        self.block.add_instruction(
+            Instruction {
+                kind: InstructionKind::Switch(SwitchOperands {
+                    cond_ty,
+                    cond_value: cond_val,
+                    default_label,
+                    cases: final_cases,
+                }),
+                value: None,
+            },
+            self.ctx,
+        )?;
+
+        Ok(())
     }
 }
 

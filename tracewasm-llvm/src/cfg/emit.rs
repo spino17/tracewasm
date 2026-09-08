@@ -12,7 +12,8 @@ use crate::{
     instruction::{
         AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
         FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        LoadOperands, PhiInstruction, RetOperands, StoreOperands, UnconditionalBrOperands,
+        LoadOperands, PhiInstruction, RetOperands, StoreOperands, SwitchOperands,
+        UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
 };
@@ -660,6 +661,14 @@ impl CfgVisitor for IREmitter {
         ));
 
         Ok(())
+    }
+
+    fn visit_switch(
+        &mut self,
+        operands: &SwitchOperands,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        todo!()
     }
 
     fn post_func_visit(
