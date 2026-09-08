@@ -1516,16 +1516,36 @@ impl<'a> Cursor<'a> {
         )
     }
 
-    pub fn build_unreachable(self) {
+    /// Marks the end of a path that cannot be taken, ending the block.
+    ///
+    /// Emits `unreachable`, which names no successor at all. LLVM takes reaching it as
+    /// undefined behaviour, and that is what makes it useful: it tells the optimiser
+    /// the path leading here is dead. The terminator for a block that genuinely has
+    /// nowhere to go — after a call that does not return, or on an arm a frontend has
+    /// proved cannot happen.
+    ///
+    /// Takes no operands and defines nothing. Consumes the cursor, like the other
+    /// terminators.
+    ///
+    /// # Errors
+    ///
+    /// [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
+    /// already ended this block. Worth propagating rather than ignoring: LLVM's parser
+    /// does not reject an instruction after a terminator, it opens a new anonymous
+    /// block for it — so a dropped terminator becomes a silently different program
+    /// rather than a parse error.
+    pub fn build_unreachable(self) -> Result<(), InstructionError> {
         self.block.add_instruction(
             Instruction {
                 kind: InstructionKind::Unreachable,
                 value: None,
             },
             self.ctx,
-        );
+        )?;
 
         self.block.set_locked(self.ctx);
+
+        Ok(())
     }
 }
 
@@ -5341,6 +5361,46 @@ mod tests {
             .expect("an f32 literal widens into an f64 select exactly");
 
         assert_eq!(out.ty(), f64_ty);
+    }
+
+    /// `unreachable` is a terminator, so it closes its block — and the failure is
+    /// reported rather than dropped.
+    ///
+    /// That propagation matters more here than the shape suggests: LLVM's parser does
+    /// not reject an instruction following a terminator, it opens a new anonymous
+    /// block for it. A silently dropped terminator would therefore assemble into a
+    /// *different program*, not a parse error.
+    #[test]
+    fn an_unreachable_ends_its_block_and_reports_a_closed_one() {
+        let mut builder = fixture();
+        let void_ty = builder.void_ty();
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .build_unreachable()
+            .expect("the block is open");
+
+        assert!(
+            builder.get_block(entry).is_locked,
+            "`unreachable` is a terminator"
+        );
+
+        let err = builder
+            .cursor_at_block(entry)
+            .build_unreachable()
+            .expect_err("the block already ended");
+
+        assert!(
+            matches!(&err, InstructionError::BasicBlockAlreadyTerminated(b) if b == "entry"),
+            "got: {err}"
+        );
     }
 
     /// An `icmp` defines an `i1` whatever it compared, and the register it defines is

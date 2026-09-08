@@ -158,6 +158,13 @@ pub enum InstructionKind {
     /// Not a terminator and not control flow: both arms are already computed, and the
     /// result is an ordinary value.
     Select(SelectOperands),
+    /// Marks a path that cannot be taken, ending the block.
+    ///
+    /// A terminator that names no successor. LLVM treats reaching it as undefined
+    /// behaviour, which is the point: it tells the optimiser the path leading here is
+    /// dead and may be deleted, rather than merely that it does nothing.
+    ///
+    /// The only instruction with no operands at all — the keyword is the whole of it.
     Unreachable,
 }
 

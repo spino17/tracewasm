@@ -714,8 +714,11 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
-    fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+    fn visit_unreachable(&mut self, _ctx: &Context) -> Result<Self::OkType, Self::ErrType> {
+        // No operands, no result, no successor — the whole instruction is the keyword.
+        self.push_line("unreachable");
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -1128,6 +1131,38 @@ mod tests {
                 "    ret void\n",
                 "b:\n",
                 "    ret void\n",
+                "}\n",
+                "\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
+    }
+
+    /// `unreachable` is the whole instruction — no operands, no result, no successor.
+    #[test]
+    fn an_unreachable_emits_the_bare_keyword() {
+        let mut builder = fixture();
+        let void_ty = builder.void_ty();
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        builder.cursor_at_block(entry).build_unreachable().unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                "define void @f() {\n",
+                "entry:\n",
+                "    unreachable\n",
                 "}\n",
                 "\n",
             ),

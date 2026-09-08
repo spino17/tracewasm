@@ -197,6 +197,8 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an `unreachable`. A terminator with no operands, so nothing is passed
+    /// but the context.
     fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType>;
 
     /// Visits a block, before its phis and instructions.
