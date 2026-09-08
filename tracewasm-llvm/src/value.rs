@@ -456,23 +456,11 @@ impl Value {
         optional_cast: OperandTy,
         ctx: &mut Context,
     ) -> Result<Self, TypeError> {
-        let (val, ty) = if let OperandTy::Asserted(ty) = optional_cast {
-            let Some(c) = val.try_cast(ty, Signedness::Signed, ctx) else {
-                return Err(TypeError::ConstantCastToProvidedTypeFailed(
-                    C::ty(ctx).display(ctx).to_string(),
-                    ty.display(ctx).to_string(),
-                ));
-            };
-
-            (c, ty)
-        } else {
-            (val.into_const(), C::ty(ctx))
-        };
-
+        let val = ConstValue::new(val, optional_cast, ctx)?;
         let const_id = ctx.const_interner.intern(val);
 
         Ok(Value {
-            ty,
+            ty: val.ty(ctx),
             kind: ValueKind::ConstExpr(ConstExpr::Const(const_id.into())),
         })
     }
@@ -860,6 +848,43 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    /// Folds a Rust literal into an LLVM constant.
+    ///
+    /// With [`OperandTy::Inferred`] the literal keeps the type [`Const::ty`] gives it;
+    /// naming a type asserts the literal has it, which for a literal is a real
+    /// question — `43` is an `i64`, and `0.1` is not a `float`.
+    ///
+    /// This is the constant *itself*, not an operand naming it. Most callers want
+    /// [`Value::from_const`], which wraps this and interns the result. The bare form
+    /// is for the places LLVM writes a constant with no operand around it — a
+    /// `switch` case label, which is matched at compile time and so cannot be a
+    /// register.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ConstantCastToProvidedTypeFailed`] if the literal does not have
+    /// the named type and cannot be folded into it without loss.
+    pub fn new<C: Const>(
+        val: C,
+        optional_cast: OperandTy,
+        ctx: &mut Context,
+    ) -> Result<Self, TypeError> {
+        let val = if let OperandTy::Asserted(ty) = optional_cast {
+            let Some(c) = val.try_cast(ty, Signedness::Signed, ctx) else {
+                return Err(TypeError::ConstantCastToProvidedTypeFailed(
+                    C::ty(ctx).display(ctx).to_string(),
+                    ty.display(ctx).to_string(),
+                ));
+            };
+
+            c
+        } else {
+            val.into_const()
+        };
+
+        Ok(val)
+    }
+
     /// The LLVM type this constant has.
     pub fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.ty_interner

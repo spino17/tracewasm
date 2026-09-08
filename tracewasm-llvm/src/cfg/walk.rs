@@ -11,8 +11,8 @@ use crate::{
     instruction::{
         AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
         FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        InstructionKind, LoadOperands, PhiInstruction, RetOperands, StoreOperands, SwitchOperands,
-        UnconditionalBrOperands,
+        InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
+        SwitchOperands, UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, Value},
 };
@@ -189,6 +189,14 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `select`. The result has the arms' type.
+    fn visit_select(
+        &mut self,
+        operands: &SelectOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -289,6 +297,9 @@ pub trait CfgVisitor {
                 InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
                 InstructionKind::Cast(operands) => self.visit_cast(operands, val.unwrap(), ctx)?,
                 InstructionKind::Switch(operands) => self.visit_switch(operands, ctx)?,
+                InstructionKind::Select(operands) => {
+                    self.visit_select(operands, val.unwrap(), ctx)?
+                }
             });
         }
 

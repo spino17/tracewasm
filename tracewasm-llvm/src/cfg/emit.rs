@@ -12,7 +12,7 @@ use crate::{
     instruction::{
         AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
         FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        LoadOperands, PhiInstruction, RetOperands, StoreOperands, SwitchOperands,
+        LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands, SwitchOperands,
         UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
@@ -694,6 +694,26 @@ impl CfgVisitor for IREmitter {
         Ok(())
     }
 
+    fn visit_select(
+        &mut self,
+        operands: &SelectOperands,
+        value: &Value,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // The arm type is written before *each* arm, which is what LLVM reads.
+        self.push_line(&format!(
+            "{}select i1 {}, {} {}, {} {}",
+            Self::assignment(value, ctx)?,
+            Self::operand_kind(&operands.cond.kind, ctx)?,
+            ctx.display(operands.arms_ty),
+            Self::operand(&operands.true_arm, ctx)?,
+            ctx.display(operands.arms_ty),
+            Self::operand(&operands.false_arm, ctx)?
+        ));
+
+        Ok(())
+    }
+
     fn post_func_visit(
         &mut self,
         _func: crate::cfg::function::FuncId,
@@ -894,6 +914,16 @@ mod tests {
             )
             .unwrap();
 
+        let cond2 = in_body
+            .build_icmp(
+                ICond::Ult,
+                OperandTy::Inferred,
+                &counter,
+                &limit,
+                "cmp2".into(),
+            )
+            .unwrap();
+
         // An `fcmp` alongside it, so the float comparison is emitted and assembled
         // too. `ord` is the predicate with no integer analogue: it asks only whether
         // neither operand is a NaN.
@@ -928,6 +958,21 @@ mod tests {
             .unwrap();
 
         in_body.build_fneg(phi, "neg".into()).unwrap();
+
+        // A `select`, so its emitter is assembled too. The arm type is written before
+        // *each* arm, which is the part worth pinning.
+        let zero_i32 = in_body.const_value(0i32, OperandTy::Inferred).unwrap();
+        let one_i32 = in_body.const_value(1i32, OperandTy::Inferred).unwrap();
+
+        in_body
+            .build_select(
+                cond2,
+                OperandTy::Inferred,
+                &one_i32,
+                &zero_i32,
+                "pick".into(),
+            )
+            .unwrap();
 
         // A conversion, so `visit_cast` is assembled too. `sitofp` crosses the two
         // families, which is the shape a bitcast could not express.
@@ -1004,10 +1049,12 @@ mod tests {
             "body:\n",
             "    %m = phi double [ %d, %entry ], [ %m, %body ]\n",
             "    %cmp = icmp ult i32 %n, 10\n",
+            "    %cmp2 = icmp ult i32 %n, 10\n",
             "    %fcmp = fcmp ord double %m, 0x3FE0000000000000\n",
             "    %next = add i32 %n, 1\n",
             "    %scaled = fmul double %m, 0x3FE0000000000000\n",
             "    %neg = fneg double %m\n",
+            "    %pick = select i1 %cmp2, i32 1, i32 0\n",
             "    %wide = sitofp i32 %n to double\n",
             "    %narrow = fptrunc double %wide to float\n",
             "    br i1 %cmp, label %body, label %exit\n",
@@ -1043,15 +1090,12 @@ mod tests {
         let b = f.add_basic_block("b".to_string(), &mut builder).unwrap();
 
         let x = f.nth_param(0, &builder).unwrap();
+        let one = builder.const_literal(1i32, OperandTy::Inferred).unwrap();
+        let two = builder.const_literal(2i32, OperandTy::Inferred).unwrap();
 
         builder
             .cursor_at_block(entry)
-            .build_switch(
-                &x,
-                OperandTy::Inferred,
-                d,
-                &[(ConstValue::I32(1), a), (ConstValue::I32(2), b)],
-            )
+            .build_switch(&x, OperandTy::Inferred, d, &[(one, a), (two, b)])
             .unwrap();
 
         for block in [d, a, b] {

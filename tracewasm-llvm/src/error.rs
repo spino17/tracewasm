@@ -21,6 +21,7 @@
 //!     ├── FBinOpError
 //!     ├── CastError
 //!     ├── SwitchError
+//!     ├── SelectError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -222,6 +223,9 @@ pub enum InstructionError {
     /// See [`SwitchError`].
     #[error("{0}")]
     Switch(#[from] SwitchError),
+    /// See [`SelectError`].
+    #[error("{0}")]
+    Select(#[from] SelectError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -513,6 +517,32 @@ pub enum SwitchError {
     /// Fields: the case's position in the list, and the value it repeats.
     #[error("case `{0}` of a `switch` repeats the value `{1}`")]
     DuplicateCaseValue(usize, String),
+}
+
+/// A `select` could not be built.
+#[derive(Error, Debug)]
+pub enum SelectError {
+    /// The two arms have different types and could not be brought to a common one.
+    ///
+    /// `llvm-as` refuses `select i1 %c, i32 %a, i64 %b` with "both values to select
+    /// must have same type". Only a literal folds; a register must already match,
+    /// since widening one needs a real conversion this builder will not insert.
+    ///
+    /// `select` has a single opcode and so carries no signedness, which means nothing
+    /// says whether a narrower integer arm should be zero- or sign-extended — and the
+    /// two give different values. Widening is refused rather than guessed, exactly as
+    /// for `add`.
+    ///
+    /// Fields: the two arm types.
+    #[error("the arms of a `select` have types `{0}` and `{1}`, with no common type")]
+    ArmsHaveNoCommonType(String, String),
+    /// The arms have a type that carries no value.
+    ///
+    /// A `select` yields one of its arms, so the type needs a size — `void` and
+    /// function types are refused. Aggregates and pointers are fine: `llvm-as`
+    /// assembles `select i1 %c, {i32, i32} %a, {i32, i32} %b`.
+    #[error("a `select` cannot yield type `{0}`: it has no size")]
+    ArmTypeNotSized(String),
 }
 
 /// A `store` could not be built.

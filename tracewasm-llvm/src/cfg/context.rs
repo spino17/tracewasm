@@ -12,7 +12,7 @@ use crate::{
     error::{ContextError, TypeError},
     instruction::cursor::{OperandTy, RegName},
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
-    value::{Const, ConstExpr, Type, TypeDisplay, Value},
+    value::{Const, ConstExpr, ConstValue, Type, TypeDisplay, Value},
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -290,6 +290,30 @@ impl Context {
         optional_cast: OperandTy,
     ) -> Result<Value, TypeError> {
         Value::from_const(val, optional_cast, self)
+    }
+
+    /// Folds a literal into a bare [`ConstValue`].
+    ///
+    /// The counterpart to [`const_value`](Self::const_value), which wraps the same
+    /// constant in a [`Value`] so it can be an operand. This hands back the constant
+    /// on its own, for the places LLVM writes one with no operand around it — a
+    /// [`switch`](crate::instruction::cursor::Cursor::build_switch) case label, which
+    /// is matched at compile time and so cannot be a register.
+    ///
+    /// Going through here rather than naming a [`ConstValue`] variant directly is what
+    /// lets the type be stated once, as an [`OperandTy`], instead of picking the
+    /// variant to match the switch's condition by hand.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ConstantCastToProvidedTypeFailed`] if the literal does not have
+    /// the named type and cannot be folded into it without loss.
+    pub fn const_literal<C: Const>(
+        &mut self,
+        val: C,
+        optional_cast: OperandTy,
+    ) -> Result<ConstValue, TypeError> {
+        ConstValue::new(val, optional_cast, self)
     }
 
     /// Wraps a constant expression as an operand.

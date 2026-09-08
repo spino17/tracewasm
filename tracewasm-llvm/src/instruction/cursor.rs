@@ -8,14 +8,14 @@ use crate::{
     },
     error::{
         AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
-        ICmpError, InstructionError, PhiError, RetError, StoreError, SwitchError,
+        ICmpError, InstructionError, PhiError, RetError, SelectError, StoreError, SwitchError,
     },
     instruction::{
         AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
         FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
         IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
-        PhiInstrHandler, PhiInstruction, RetOperands, StoreOperands, SwitchOperands,
-        UnconditionalBrOperands,
+        PhiInstrHandler, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
+        SwitchOperands, UnconditionalBrOperands,
     },
     interner::TyId,
     value::{ConstValue, I1Value, Signedness, Value, ValueKind},
@@ -1475,6 +1475,78 @@ impl<'a> Cursor<'a> {
         self.block.set_locked(self.ctx);
 
         Ok(())
+    }
+
+    /// Picks one of two values by an `i1`, defining a register of the arms' type.
+    ///
+    /// Emits `select i1 <cond>, <ty> <true>, <ty> <false>`. Not control flow: both
+    /// arms are already computed, so this is a value, not a branch. Nothing is
+    /// short-circuited — if one arm must not be evaluated, use a branch.
+    ///
+    /// The condition is an [`I1Value`], so a condition of the wrong type is not
+    /// expressible.
+    ///
+    /// # The arms must agree
+    ///
+    /// `llvm-as` refuses `select i1 %c, i32 %a, i64 %b` with "both values to select
+    /// must have same type". A literal arm folds to `arms_ty`, or to the other arm's
+    /// type when that is [`OperandTy::Inferred`]; a register must already match.
+    ///
+    /// Widening a narrower **integer** arm is refused rather than guessed. `select`
+    /// has one opcode and so carries no signedness, which means nothing says whether
+    /// to zero- or sign-extend, and the two give different values — the same reason
+    /// `add` refuses. A narrower *float* arm still widens, since `fpext` is exact.
+    ///
+    /// # Errors
+    ///
+    /// - [`SelectError::ArmsHaveNoCommonType`] if the arms cannot be brought together.
+    /// - [`SelectError::ArmTypeNotSized`] if they are `void` or a function type.
+    ///   Aggregates and pointers are fine.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
+    pub fn build_select(
+        &mut self,
+        cond: I1Value,
+        arms_ty: OperandTy,
+        true_arm: &Value,
+        false_arm: &Value,
+        reg: RegName,
+    ) -> Result<Value, InstructionError> {
+        // Ids are `Copy`, so the arm types survive into the failing path.
+        let (given_true, given_false) = (true_arm.ty(), false_arm.ty());
+
+        let Some((true_arm, false_arm)) = Value::try_cast_two(
+            true_arm,
+            false_arm,
+            arms_ty,
+            Signedness::NotApplicable,
+            self.ctx,
+        ) else {
+            return Err(SelectError::ArmsHaveNoCommonType(
+                self.ctx.display(given_true).to_string(),
+                self.ctx.display(given_false).to_string(),
+            )
+            .into());
+        };
+
+        // Both arms share a type by here, so reading one covers both.
+        let arms_ty = true_arm.ty();
+
+        if !arms_ty.is_first_class(self.ctx) {
+            return Err(SelectError::ArmTypeNotSized(self.ctx.display(arms_ty).to_string()).into());
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::Select(SelectOperands {
+                cond,
+                arms_ty,
+                true_arm,
+                false_arm,
+            }),
+            arms_ty,
+            self.block,
+            reg,
+            self.ctx,
+        )
     }
 }
 
@@ -5085,14 +5157,13 @@ mod tests {
 
         let x = builder.const_value(1i32, OperandTy::Inferred).unwrap();
 
+        // Written as different widths, so they are distinct until folded.
+        let narrow = builder.const_literal(1i8, OperandTy::Inferred).unwrap();
+        let wide = builder.const_literal(1i32, OperandTy::Inferred).unwrap();
+
         let err = builder
             .cursor_at_block(entry)
-            .build_switch(
-                &x,
-                OperandTy::Inferred,
-                d,
-                &[(ConstValue::I8(1), a), (ConstValue::I32(1), b)],
-            )
+            .build_switch(&x, OperandTy::Inferred, d, &[(narrow, a), (wide, b)])
             .expect_err("both cases fold to `i32 1`");
 
         assert!(
@@ -5118,10 +5189,11 @@ mod tests {
         let a = f.add_basic_block("a".to_string(), &mut builder).unwrap();
 
         let x = builder.const_value(1i8, OperandTy::Inferred).unwrap();
+        let too_big = builder.const_literal(300i32, OperandTy::Inferred).unwrap();
 
         let err = builder
             .cursor_at_block(entry)
-            .build_switch(&x, i8_ty.into(), d, &[(ConstValue::I32(300), a)])
+            .build_switch(&x, i8_ty.into(), d, &[(too_big, a)])
             .expect_err("300 does not fit an i8");
 
         assert!(
@@ -5129,6 +5201,129 @@ mod tests {
                 if *i == 0 && t == "i8"),
             "got: {err}"
         );
+    }
+
+    /// `select` picks between two values without branching, so the result is an
+    /// ordinary register of the arms' type.
+    #[test]
+    fn a_select_yields_a_value_of_the_arms_type() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let t = cursor.const_value(1i32, OperandTy::Inferred).unwrap();
+        let f = cursor.const_value(2i32, OperandTy::Inferred).unwrap();
+        let c = cursor
+            .const_value(true, OperandTy::Inferred)
+            .unwrap()
+            .into_i1(&cursor)
+            .unwrap();
+
+        let out = cursor
+            .build_select(c, OperandTy::Inferred, &t, &f, "s".into())
+            .expect("two i32 arms agree");
+
+        assert_eq!(out.ty(), i32_ty, "the result has the arms' type, not i1");
+    }
+
+    /// Aggregates and pointers are fine — `llvm-as` assembles
+    /// `select i1 %c, {i32, i32} %a, {i32, i32} %b`. What is refused is a type with no
+    /// size, since a `select` yields one of its arms.
+    #[test]
+    fn a_select_takes_any_sized_arm_type() {
+        let mut builder = fixture();
+        let (i32_ty, void_ty) = (builder.i32_ty(), builder.void_ty());
+        let struct_ty = builder.struct_ty(&[i32_ty, i32_ty], false).unwrap();
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let c = cursor
+            .const_value(true, OperandTy::Inferred)
+            .unwrap()
+            .into_i1(&cursor)
+            .unwrap();
+
+        // A struct is a fine arm type.
+        let a = Value::from_register("a".to_string(), struct_ty, &mut cursor);
+        let b = Value::from_register("b".to_string(), struct_ty, &mut cursor);
+
+        assert!(
+            cursor
+                .build_select(c, OperandTy::Inferred, &a, &b, "s".into())
+                .is_ok(),
+        );
+
+        // `void` is not.
+        let c2 = cursor
+            .const_value(true, OperandTy::Inferred)
+            .unwrap()
+            .into_i1(&cursor)
+            .unwrap();
+        let v1 = Value::from_register("v1".to_string(), void_ty, &mut cursor);
+        let v2 = Value::from_register("v2".to_string(), void_ty, &mut cursor);
+
+        let err = cursor
+            .build_select(c2, OperandTy::Inferred, &v1, &v2, "v".into())
+            .expect_err("a select must yield something");
+
+        assert!(
+            matches!(&err, InstructionError::Select(SelectError::ArmTypeNotSized(t))
+                if t == "void"),
+            "got: {err}"
+        );
+    }
+
+    /// The arms must agree, and a narrower **integer** arm is not widened to make them
+    /// — `select` has one opcode and so carries no signedness, leaving nothing to say
+    /// whether to zero- or sign-extend.
+    #[test]
+    fn a_select_refuses_arms_of_different_integer_widths() {
+        let mut builder = fixture();
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let wide = cursor.const_value(1i64, OperandTy::Inferred).unwrap();
+        let narrow = cursor.const_value(-1i32, OperandTy::Inferred).unwrap();
+        let c = cursor
+            .const_value(true, OperandTy::Inferred)
+            .unwrap()
+            .into_i1(&cursor)
+            .unwrap();
+
+        let err = cursor
+            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
+            .expect_err("no reading says how to widen -1i32");
+
+        assert!(
+            matches!(&err, InstructionError::Select(SelectError::ArmsHaveNoCommonType(a, b))
+                if a == "i64" && b == "i32"),
+            "the error must name both arms as given: {err}"
+        );
+    }
+
+    /// A narrower *float* arm still widens, because `fpext` is exact and needs no
+    /// reading chosen.
+    #[test]
+    fn a_select_widens_a_narrower_float_arm() {
+        let mut builder = fixture();
+        let f64_ty = builder.f64_ty();
+        let (cursor, _) = block_for_icmp(&mut builder);
+        let mut cursor = cursor;
+
+        let wide = cursor.const_value(1.0f64, OperandTy::Inferred).unwrap();
+        let narrow = cursor.const_value(0.5f32, OperandTy::Inferred).unwrap();
+        let c = cursor
+            .const_value(true, OperandTy::Inferred)
+            .unwrap()
+            .into_i1(&cursor)
+            .unwrap();
+
+        let out = cursor
+            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
+            .expect("an f32 literal widens into an f64 select exactly");
+
+        assert_eq!(out.ty(), f64_ty);
     }
 
     /// An `icmp` defines an `i1` whatever it compared, and the register it defines is

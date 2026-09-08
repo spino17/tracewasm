@@ -153,6 +153,11 @@ pub enum InstructionKind {
     /// A terminator, like the two branches: it names every successor and nothing may
     /// follow it.
     Switch(SwitchOperands),
+    /// Picks one of two values by an `i1`, without branching.
+    ///
+    /// Not a terminator and not control flow: both arms are already computed, and the
+    /// result is an ordinary value.
+    Select(SelectOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -789,4 +794,26 @@ pub struct SwitchOperands {
     /// Every value is distinct once folded to `cond_ty`, since two cases labelling the
     /// same number would leave it ambiguous which runs.
     pub cases: Vec<(ConstValue, BasicBlockId)>,
+}
+
+/// The operands of a `select`.
+///
+/// Emitted as `select i1 <cond>, <ty> <true>, <ty> <false>` — the arm type is written
+/// twice, once before each, which is the syntax LLVM reads.
+pub struct SelectOperands {
+    /// The `i1` choosing between the arms.
+    ///
+    /// An [`I1Value`] rather than a [`Value`], so a condition of the wrong type is
+    /// unrepresentable: `llvm-as` refuses anything else with "select condition must be
+    /// i1 or `<n x i1>`".
+    pub cond: I1Value,
+    /// The type both arms have, and the type of the result.
+    ///
+    /// Always the arms' own type: it is read off them rather than supplied, so the two
+    /// cannot disagree.
+    pub arms_ty: TyId,
+    /// The value taken when the condition is true.
+    pub true_arm: Value,
+    /// The value taken when it is false.
+    pub false_arm: Value,
 }
