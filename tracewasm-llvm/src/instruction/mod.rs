@@ -353,6 +353,11 @@ impl ICond {
     /// signed — which is what decides whether a narrower constant operand is zero- or
     /// sign-extended to the common type.
     ///
+    /// Consulted only because
+    /// [`build_icmp`](crate::instruction::cursor::Cursor::build_icmp) widens *unasked*,
+    /// to make the operands match. See [`Signedness`] for why that is the one case
+    /// where the predicate gets a say.
+    ///
     /// `eq` and `ne` return `None`, and that absence is load-bearing rather than a
     /// gap. LLVM has a single `eq`, because at equal widths signedness cannot change
     /// the answer. It only matters when widening, and there the two choices genuinely
@@ -464,6 +469,11 @@ impl IBinOp {
     /// operands: `add` on the bits of `-1` and on the bits of `4294967295` gives the
     /// same result, which is why there is no `sadd`. A literal reaching one of them is
     /// just a number, so it widens by keeping its value — `-1i32` becomes `i64 -1`.
+    ///
+    /// Consulted only because
+    /// [`build_ibinop`](crate::instruction::cursor::Cursor::build_ibinop) widens
+    /// *unasked*, to make the operands match. See [`Signedness`] for why that is the
+    /// one case where the operation gets a say.
     pub fn signedness(&self) -> Signedness {
         match self {
             // Never read their operands, so a literal keeps the value it was written

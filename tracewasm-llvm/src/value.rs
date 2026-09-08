@@ -384,6 +384,65 @@ impl Display for TypeDisplay<'_> {
 /// Narrowing needs no such choice — LLVM has a single `trunc`, and dropping high bits
 /// is unambiguous — but this still selects the range a narrowing cast is *checked*
 /// against, since `255` fits a byte read unsigned and does not read signed.
+///
+/// # Which one to pass
+///
+/// Almost always [`Signed`](Self::Signed). The rule has two halves, and the first
+/// settles most cases on its own.
+///
+/// ## A literal is a number
+///
+/// [`ConstValue`]'s integer arms hold *signed* Rust integers, so the only value a
+/// caller can express is a signed one. Widening with [`Signed`](Self::Signed) keeps
+/// that number: `-1i32` becomes `i64 -1`. Widening with [`Unsigned`](Self::Unsigned)
+/// would turn it into `4294967295`, a number the caller never wrote.
+///
+/// This is why every *assertion* uses [`Signed`](Self::Signed) — `ret`, `store`, a
+/// call argument, a `switch` case, the source type of a `cast`. In each the caller
+/// named a type and the literal folds into it, and folding means keeping the value.
+///
+/// ## The exception: when the instruction reads the bits back
+///
+/// A few instructions state that they read their operands as unsigned. For those the
+/// literal will be *reinterpreted* after widening, so it has to arrive under that
+/// reading or the reinterpretation lands on the wrong number.
+///
+/// LLVM says which ones without ambiguity: it spells them as a **pair**. Where one
+/// opcode exists, nothing is read; where two exist, the name carries the reading.
+///
+/// | LLVM spells | reads as |
+/// |---|---|
+/// | `sdiv` / `udiv`, `srem` / `urem`, `ashr` / `lshr` | signed / unsigned |
+/// | `icmp s…` / `icmp u…` | signed / unsigned |
+/// | `add`, `sub`, `mul`, `shl`, `and`, `or`, `xor` — no pair | nothing |
+///
+/// That `add` has no `sadd` is not an omission: `add i32 100, -1` and
+/// `add i32 100, 4294967295` are the same instruction on the same bits and give the
+/// same result. An operation with one opcode cannot tell the two readings apart, so
+/// there is nothing for it to say.
+///
+/// # Who chose the widening
+///
+/// The exception only bites when the *builder* widens on its own initiative, which
+/// happens in one situation: an instruction requires its operands to share a type, so
+/// a narrower literal is widened to meet the other operand whether the caller asked or
+/// not. [`build_icmp`](crate::instruction::cursor::Cursor::build_icmp) and
+/// [`build_ibinop`](crate::instruction::cursor::Cursor::build_ibinop) therefore ask
+/// the operation, through
+/// [`ICond::signedness`](crate::instruction::ICond::signedness) and
+/// [`IBinOp::signedness`](crate::instruction::IBinOp::signedness).
+///
+/// Where the *caller* asked — by naming a type — [`Signed`](Self::Signed) is right
+/// even for an instruction that reads unsigned, because the two steps are separate and
+/// both were requested. `build_cast(Uitofp, …, i64_ty.into(), …)` says "make this
+/// literal an `i64`" and then "read that `i64` as unsigned"; the first keeps the
+/// number, the second is the instruction doing its own job. A caller who wanted
+/// `4294967295` could simply write it, since it fits an `i64`.
+///
+/// That last point is what makes the implicit case the only genuinely ambiguous one:
+/// there the alternative is **inexpressible**. Against an `i32` operand there is no
+/// way to write `4294967295` at all — `-1i32` is the only spelling of those bits — so
+/// the builder cannot fall back on "the caller would have written what they meant".
 #[derive(Clone, Copy)]
 pub enum Signedness {
     /// Read the bits as unsigned. Widening fills the new high bits with zeros, which
