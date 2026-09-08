@@ -1064,10 +1064,6 @@ impl<'a> Cursor<'a> {
     ///
     /// - [`IBinOpError::OperandsNotCastable`] — a signed operation whose operands
     ///   have no common type.
-    /// - [`IBinOpError::OperandTypesDiffer`] — a signedness-free operation given
-    ///   two types.
-    /// - [`IBinOpError::ProvidedTypeDoesNotMatchOperands`] — a signedness-free
-    ///   operation given a `ty` its operands do not have.
     /// - [`IBinOpError::OperandTypeNotInteger`] — floats need the `f`-prefixed
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
@@ -1079,43 +1075,17 @@ impl<'a> Cursor<'a> {
         b: &Value,
         reg: RegName,
     ) -> Result<Value, InstructionError> {
-        let (a, b) = if let Some(signedness) = op.signedness() {
-            // Ids are `Copy`, so the operand types survive the move into the cast and
-            // are rendered only on the failing path.
-            let (given_a, given_b) = (a.ty(), b.ty());
+        // Ids are `Copy`, so the operand types survive the move into the cast and
+        // are rendered only on the failing path.
+        let (given_a, given_b) = (a.ty(), b.ty());
 
-            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, self.ctx) else {
-                return Err(IBinOpError::OperandsNotCastable(
-                    op.to_string(),
-                    self.ctx.display(given_a).to_string(),
-                    self.ctx.display(given_b).to_string(),
-                )
-                .into());
-            };
-
-            (a, b)
-        } else {
-            if a.ty() != b.ty() {
-                return Err(IBinOpError::OperandTypesDiffer(
-                    op.to_string(),
-                    self.ctx.display(a.ty()).to_string(),
-                    self.ctx.display(b.ty()).to_string(),
-                )
-                .into());
-            }
-
-            if let OperandTy::Asserted(ty) = ty
-                && ty != a.ty()
-            {
-                return Err(IBinOpError::ProvidedTypeDoesNotMatchOperands(
-                    op.to_string(),
-                    self.ctx.display(ty).to_string(),
-                    self.ctx.display(a.ty()).to_string(),
-                )
-                .into());
-            }
-
-            (a.clone(), b.clone())
+        let Some((a, b)) = Value::try_cast_two(a, b, ty, op.signedness(), self.ctx) else {
+            return Err(IBinOpError::OperandsNotCastable(
+                op.to_string(),
+                self.ctx.display(given_a).to_string(),
+                self.ctx.display(given_b).to_string(),
+            )
+            .into());
         };
 
         // Both operands share a type by here, so checking one covers both.
@@ -1490,12 +1460,13 @@ impl<'a> Cursor<'a> {
     ///
     /// `llvm-as` refuses `select i1 %c, i32 %a, i64 %b` with "both values to select
     /// must have same type". A literal arm folds to `arms_ty`, or to the other arm's
-    /// type when that is [`OperandTy::Inferred`]; a register must already match.
+    /// type when that is [`OperandTy::Inferred`]; a register must already match, since
+    /// widening one needs a real conversion this builder will not insert.
     ///
-    /// Widening a narrower **integer** arm is refused rather than guessed. `select`
-    /// has one opcode and so carries no signedness, which means nothing says whether
-    /// to zero- or sign-extend, and the two give different values — the same reason
-    /// `add` refuses. A narrower *float* arm still widens, since `fpext` is exact.
+    /// A literal widens by preserving its value: `-1i32` becomes `i64 -1`. Nothing
+    /// here reinterprets the arms — a `select` returns one of them unchanged — so the
+    /// number the caller wrote is the number that comes out, and there is no reading
+    /// to choose between.
     ///
     /// # Errors
     ///
@@ -1514,13 +1485,9 @@ impl<'a> Cursor<'a> {
         // Ids are `Copy`, so the arm types survive into the failing path.
         let (given_true, given_false) = (true_arm.ty(), false_arm.ty());
 
-        let Some((true_arm, false_arm)) = Value::try_cast_two(
-            true_arm,
-            false_arm,
-            arms_ty,
-            Signedness::NotApplicable,
-            self.ctx,
-        ) else {
+        let Some((true_arm, false_arm)) =
+            Value::try_cast_two(true_arm, false_arm, arms_ty, Signedness::Signed, self.ctx)
+        else {
             return Err(SelectError::ArmsHaveNoCommonType(
                 self.ctx.display(given_true).to_string(),
                 self.ctx.display(given_false).to_string(),
@@ -4705,11 +4672,16 @@ mod tests {
     /// The seven operations with no signedness refuse to widen, because nothing says
     /// which way to fill the new bits and the two answers differ.
     ///
-    /// `add i64 100, -1` is 99; the same `i32` constant zero-extended gives
-    /// 4294967395. LLVM has one `add` precisely because the *result* bits do not
-    /// depend on the reading — but the *widening* does.
+    /// An operation that never reads its operands widens a narrower literal by
+    /// **value**, so `-1i32` arrives as `i64 -1`.
+    ///
+    /// LLVM has one `add` because the result bits do not depend on any reading — `add
+    /// i32 100, -1` and `add i32 100, 4294967295` are the same instruction on the same
+    /// bits. So a literal reaching one of these is just a number, and widening it any
+    /// other way would change the number the caller wrote. `4294967295` is not even
+    /// expressible as an `i32`, so there is no competing intent to guess at.
     #[test]
-    fn a_signedness_free_operation_refuses_to_widen() {
+    fn an_operation_that_never_reads_its_operands_widens_a_literal_by_value() {
         for op in [
             IBinOp::Add,
             IBinOp::Sub,
@@ -4720,22 +4692,35 @@ mod tests {
             IBinOp::Xor,
         ] {
             let mut builder = fixture();
-            let (mut cursor, _) = block_for_icmp(&mut builder);
+            let (mut cursor, block) = block_for_icmp(&mut builder);
 
             let wide = Value::from_const(100i64, OperandTy::Inferred, &mut cursor).unwrap();
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
-            let err = cursor
+            cursor
                 .build_ibinop(op, OperandTy::Inferred, &wide, &narrow, RegName::Unnamed)
-                .expect_err("no reading is available, so widening must be refused");
+                .expect("a literal widens to meet the other operand");
 
-            assert!(
-                matches!(
-                    &err,
-                    InstructionError::IBinOp(IBinOpError::OperandTypesDiffer(o, a, b))
-                        if o == &op.to_string() && a == "i64" && b == "i32"
-                ),
-                "got: {err}",
+            let instr = cursor
+                .blocks
+                .get(block.raw())
+                .unwrap()
+                .instructions
+                .last()
+                .unwrap();
+
+            let InstructionKind::IBinOp(operands) = &instr.kind else {
+                panic!("not an ibinop");
+            };
+
+            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind() else {
+                panic!("the right operand is not a literal");
+            };
+
+            assert_eq!(
+                *cursor.const_interner.value(id.raw()),
+                ConstValue::I64(-1),
+                "`{op}` must widen -1i32 to i64 -1, keeping the number written",
             );
         }
     }
@@ -5274,13 +5259,13 @@ mod tests {
         );
     }
 
-    /// The arms must agree, and a narrower **integer** arm is not widened to make them
-    /// — `select` has one opcode and so carries no signedness, leaving nothing to say
-    /// whether to zero- or sign-extend.
+    /// A narrower literal arm widens to meet the other, keeping its value: a `select`
+    /// returns an arm unchanged rather than computing on it, so the number written is
+    /// the number that comes out.
     #[test]
-    fn a_select_refuses_arms_of_different_integer_widths() {
+    fn a_select_widens_a_narrower_literal_arm_by_value() {
         let mut builder = fixture();
-        let (cursor, _) = block_for_icmp(&mut builder);
+        let (cursor, block) = block_for_icmp(&mut builder);
         let mut cursor = cursor;
 
         let wide = cursor.const_value(1i64, OperandTy::Inferred).unwrap();
@@ -5291,14 +5276,34 @@ mod tests {
             .into_i1(&cursor)
             .unwrap();
 
-        let err = cursor
-            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
-            .expect_err("no reading says how to widen -1i32");
+        let i64_ty = cursor.i64_ty();
 
-        assert!(
-            matches!(&err, InstructionError::Select(SelectError::ArmsHaveNoCommonType(a, b))
-                if a == "i64" && b == "i32"),
-            "the error must name both arms as given: {err}"
+        let out = cursor
+            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
+            .expect("the narrower literal widens to meet the other arm");
+
+        assert_eq!(out.ty(), i64_ty);
+
+        let instr = cursor
+            .blocks
+            .get(block.raw())
+            .unwrap()
+            .instructions
+            .last()
+            .unwrap();
+
+        let InstructionKind::Select(operands) = &instr.kind else {
+            panic!("not a select");
+        };
+
+        let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.false_arm.kind() else {
+            panic!("the false arm is not a literal");
+        };
+
+        assert_eq!(
+            *cursor.const_interner.value(id.raw()),
+            ConstValue::I64(-1),
+            "-1i32 widens to i64 -1, not to 4294967295: nothing reinterprets it",
         );
     }
 

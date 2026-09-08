@@ -453,35 +453,35 @@ impl Display for IBinOp {
 }
 
 impl IBinOp {
-    /// How to read the operands, or `None` if the operation does not say.
+    /// How to read a narrower literal operand when widening it to meet the other.
     ///
-    /// `None` for `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — LLVM has a
-    /// single opcode for each, because the *result* bits are the same either way.
-    /// That absence is load-bearing: it is what makes
-    /// [`build_ibinop`](crate::instruction::cursor::Cursor::build_ibinop)
-    /// refuse to widen a narrower constant rather than guess. The result may not
-    /// depend on the reading, but the widening does — `add i64 100, -1` is 99, while
-    /// the same `i32` constant zero-extended gives 4294967395.
+    /// Only six of these read their operands at all, and they are exactly the ones
+    /// LLVM spells as pairs — `sdiv`/`udiv`, `srem`/`urem`, `ashr`/`lshr`. A literal
+    /// widened for one of those has to arrive under the reading that operation will
+    /// apply, so an unsigned one zero-extends.
     ///
-    /// The six that do carry one are the pairs LLVM spells separately.
-    pub fn signedness(&self) -> Option<Signedness> {
-        let v = match self {
-            IBinOp::Add => return None,
-            IBinOp::Sub => return None,
-            IBinOp::Mul => return None,
-            IBinOp::And => return None,
-            IBinOp::Or => return None,
-            IBinOp::Xor => return None,
-            IBinOp::Shl => return None,
+    /// The other seven have a single opcode each *because* they never read their
+    /// operands: `add` on the bits of `-1` and on the bits of `4294967295` gives the
+    /// same result, which is why there is no `sadd`. A literal reaching one of them is
+    /// just a number, so it widens by keeping its value — `-1i32` becomes `i64 -1`.
+    pub fn signedness(&self) -> Signedness {
+        match self {
+            // Never read their operands, so a literal keeps the value it was written
+            // as. Widening it any other way would change the number the caller wrote.
+            IBinOp::Add
+            | IBinOp::Sub
+            | IBinOp::Mul
+            | IBinOp::And
+            | IBinOp::Or
+            | IBinOp::Xor
+            | IBinOp::Shl => Signedness::Signed,
             IBinOp::Udiv => Signedness::Unsigned,
             IBinOp::Sdiv => Signedness::Signed,
             IBinOp::Urem => Signedness::Unsigned,
             IBinOp::Srem => Signedness::Signed,
             IBinOp::Lshr => Signedness::Unsigned,
             IBinOp::Ashr => Signedness::Signed,
-        };
-
-        Some(v)
+        }
     }
 }
 

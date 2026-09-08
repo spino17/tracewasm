@@ -411,33 +411,14 @@ pub enum FCmpError {
 pub enum IBinOpError {
     /// The operands have different types and could not be brought to a common one.
     ///
-    /// Reached only by the six operations that carry a signedness. Either the narrower
-    /// operand is a register — widening one needs a real `zext`/`sext` — or it is a
-    /// constant that does not fit under that reading.
+    /// A literal widens to meet the other operand, under the reading
+    /// [`signedness`](crate::instruction::IBinOp::signedness) gives the operation. A
+    /// register cannot: widening one needs a real `zext`/`sext` that this builder will
+    /// not insert.
     ///
     /// Fields: the operation, and the two operand types.
     #[error("`{0}` cannot bring operands of type `{1}` and `{2}` to a common type")]
     OperandsNotCastable(String, String, String),
-    /// An operation with no signedness was given operands of two types.
-    ///
-    /// `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` have a single LLVM opcode
-    /// each, so nothing says whether a narrower operand should be zero- or
-    /// sign-extended — and the choice changes the result. `add i64 100, -1` is 99,
-    /// while the same `i32` constant zero-extended gives 4294967395. Widening is
-    /// refused rather than guessed.
-    ///
-    /// Fields: the operation, and the two operand types.
-    #[error("`{0}` needs both operands to have the same type, but got `{1}` and `{2}`")]
-    OperandTypesDiffer(String, String, String),
-    /// An explicit type was given that the operands do not have.
-    ///
-    /// For an operation with no signedness the type argument is a *check*, not a
-    /// coercion, for the same reason as
-    /// [`OperandTypesDiffer`](Self::OperandTypesDiffer).
-    ///
-    /// Fields: the operation, the type given, and the type the operands have.
-    #[error("`{0}` was given type `{1}`, but its operands have type `{2}`")]
-    ProvidedTypeDoesNotMatchOperands(String, String, String),
     /// These operations take integers. Floats use the `f`-prefixed instructions.
     #[error("`{0}` takes integer operands, but got ones of type `{1}`")]
     OperandTypeNotInteger(String, String),
@@ -528,10 +509,8 @@ pub enum SelectError {
     /// must have same type". Only a literal folds; a register must already match,
     /// since widening one needs a real conversion this builder will not insert.
     ///
-    /// `select` has a single opcode and so carries no signedness, which means nothing
-    /// says whether a narrower integer arm should be zero- or sign-extended — and the
-    /// two give different values. Widening is refused rather than guessed, exactly as
-    /// for `add`.
+    /// A literal arm widens by preserving its value, so this is reached when neither
+    /// arm is a literal that fits the other's type.
     ///
     /// Fields: the two arm types.
     #[error("the arms of a `select` have types `{0}` and `{1}`, with no common type")]
