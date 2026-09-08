@@ -1376,7 +1376,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn build_switch(
-        &mut self,
+        self,
         cond_val: &Value,
         cond_ty: OperandTy,
         default_label: BasicBlockId,
@@ -1426,6 +1426,8 @@ impl<'a> Cursor<'a> {
             },
             self.ctx,
         )?;
+
+        self.block.set_locked(self.ctx);
 
         Ok(())
     }
