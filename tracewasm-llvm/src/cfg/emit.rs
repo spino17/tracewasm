@@ -668,7 +668,30 @@ impl CfgVisitor for IREmitter {
         operands: &SwitchOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        todo!()
+        // The only instruction that spans lines, so it is the only one that writes its
+        // own inner indentation: `push_line` prefixes the first line and nothing else.
+        // The shape is what `llvm-dis` produces, cases one per line inside brackets.
+        let mut out = format!(
+            "switch {} {}, label {} [\n",
+            ctx.display(operands.cond_ty),
+            Self::operand(&operands.cond_value, ctx)?,
+            Self::label(operands.default_label, ctx)
+        );
+
+        for (case, label) in &operands.cases {
+            out.push_str(&format!(
+                "        {} {}, label {}\n",
+                ctx.display(operands.cond_ty),
+                Self::constant(case),
+                Self::label(*label, ctx)
+            ));
+        }
+
+        out.push_str("    ]");
+
+        self.push_line(&out);
+
+        Ok(())
     }
 
     fn post_func_visit(
@@ -997,6 +1020,71 @@ mod tests {
         );
 
         assert_eq!(ir, expected, "\n--- emitted ---\n{ir}");
+    }
+
+    /// A `switch` is the one instruction that spans lines, so its emission is worth
+    /// pinning on its own. The shape is what `llvm-dis` writes: the header, then one
+    /// case per line inside the brackets, then a closing bracket at the header's
+    /// indent.
+    #[test]
+    fn a_switch_emits_one_case_per_line() {
+        let mut builder = fixture();
+        let (i32_ty, void_ty) = (builder.i32_ty(), builder.void_ty());
+
+        let f = builder
+            .define_function("f".to_string(), &[(i32_ty, "x".into())], void_ty)
+            .unwrap();
+
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let d = f.add_basic_block("d".to_string(), &mut builder).unwrap();
+        let a = f.add_basic_block("a".to_string(), &mut builder).unwrap();
+        let b = f.add_basic_block("b".to_string(), &mut builder).unwrap();
+
+        let x = f.nth_param(0, &builder).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .build_switch(
+                &x,
+                OperandTy::Inferred,
+                d,
+                &[(ConstValue::I32(1), a), (ConstValue::I32(2), b)],
+            )
+            .unwrap();
+
+        for block in [d, a, b] {
+            builder
+                .cursor_at_block(block)
+                .build_ret(None, void_ty.into())
+                .unwrap();
+        }
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert_eq!(
+            ir,
+            concat!(
+                "target triple = \"arm64-apple-macosx\"\n",
+                "\n",
+                "define void @f(i32 %x) {\n",
+                "entry:\n",
+                "    switch i32 %x, label %d [\n",
+                "        i32 1, label %a\n",
+                "        i32 2, label %b\n",
+                "    ]\n",
+                "d:\n",
+                "    ret void\n",
+                "a:\n",
+                "    ret void\n",
+                "b:\n",
+                "    ret void\n",
+                "}\n",
+                "\n",
+            ),
+            "\n--- emitted ---\n{ir}"
+        );
     }
 
     /// A declared function is emitted as a `declare` line, and calling it produces

@@ -148,6 +148,10 @@ pub enum InstructionKind {
     /// read — except where LLVM says otherwise, as `sitofp` and `fptosi` genuinely
     /// recompute.
     Cast(CastOperands),
+    /// Dispatches on an integer, ending the block.
+    ///
+    /// A terminator, like the two branches: it names every successor and nothing may
+    /// follow it.
     Switch(SwitchOperands),
 }
 
@@ -762,9 +766,27 @@ impl CastOp {
     }
 }
 
+/// The operands of a `switch`.
+///
+/// Emitted as `switch <ty> <cond>, label <default> [ <case>… ]`, one case per line.
 pub struct SwitchOperands {
+    /// The type of the condition, and of every case label.
+    ///
+    /// An integer — `llvm-as` refuses anything else with "switch condition must have
+    /// integer type". Always the condition's own type: it is read off the value rather
+    /// than supplied, so the two cannot disagree.
     pub cond_ty: TyId,
+    /// The value being dispatched on.
     pub cond_value: Value,
+    /// Where control goes when no case matches. Not optional — LLVM requires it.
     pub default_label: BasicBlockId,
+    /// The cases, in the order they are written.
+    ///
+    /// A [`ConstValue`] rather than a [`Value`], because a case label has to be a
+    /// constant: LLVM matches on it at compile time. That makes a non-constant case
+    /// unrepresentable rather than something to check.
+    ///
+    /// Every value is distinct once folded to `cond_ty`, since two cases labelling the
+    /// same number would leave it ambiguous which runs.
     pub cases: Vec<(ConstValue, BasicBlockId)>,
 }

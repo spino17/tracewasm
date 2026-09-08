@@ -182,6 +182,7 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits a `switch`. A terminator, so it defines no register.
     fn visit_switch(
         &mut self,
         operands: &SwitchOperands,

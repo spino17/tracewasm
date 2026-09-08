@@ -8,7 +8,7 @@ use crate::{
     },
     error::{
         AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
-        ICmpError, InstructionError, PhiError, RetError, StoreError,
+        ICmpError, InstructionError, PhiError, RetError, StoreError, SwitchError,
     },
     instruction::{
         AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
@@ -1375,6 +1375,33 @@ impl<'a> Cursor<'a> {
         )
     }
 
+    /// Dispatches on an integer, ending the block.
+    ///
+    /// Emits `switch <ty> <cond>, label <default> [ … ]`. Consumes the cursor, like
+    /// the other terminators — a `switch` names every successor, so nothing may follow
+    /// it in the block.
+    ///
+    /// `default_label` is not optional: LLVM requires somewhere to go when no case
+    /// matches. An empty case list is fine, and is then just a jump.
+    ///
+    /// # Cases are constants
+    ///
+    /// Each case is a [`ConstValue`], not a [`Value`], because LLVM matches on it at
+    /// compile time — a register could not be a case label. Each is folded to the
+    /// condition's type, which is what LLVM requires them to have, and no two may end
+    /// up on the same value.
+    ///
+    /// # Errors
+    ///
+    /// - [`SwitchError::ConditionNotOfAssertedType`] if `cond_ty` names a type the
+    ///   condition does not have and cannot fold into.
+    /// - [`SwitchError::ConditionNotAnInteger`] — floats and pointers cannot be
+    ///   dispatched on.
+    /// - [`SwitchError::CaseDoesNotFitConditionType`] if a case does not fold into the
+    ///   condition's type.
+    /// - [`SwitchError::DuplicateCaseValue`] if two cases label the same value.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] if a *different* cursor
+    ///   already ended this block.
     pub fn build_switch(
         self,
         cond_val: &Value,
@@ -1383,8 +1410,14 @@ impl<'a> Cursor<'a> {
         cases: &[(ConstValue, BasicBlockId)],
     ) -> Result<(), InstructionError> {
         let cond_val = if let OperandTy::Asserted(ty) = cond_ty {
+            let given = self.ctx.display(cond_val.ty()).to_string();
+
             let Some(casted_val) = cond_val.try_cast(ty, Signedness::Signed, self.ctx) else {
-                todo!() // RAISE ERROR
+                return Err(SwitchError::ConditionNotOfAssertedType(
+                    given,
+                    self.ctx.display(ty).to_string(),
+                )
+                .into());
             };
 
             casted_val
@@ -1392,22 +1425,34 @@ impl<'a> Cursor<'a> {
             cond_val.clone()
         };
 
+        // Read off the operand rather than trusting the argument, so the type recorded
+        // on the instruction is the one the condition actually has.
         let cond_ty = cond_val.ty();
 
         if !cond_ty.is_integer(self.ctx) {
-            todo!() // RAISE ERROR
+            return Err(
+                SwitchError::ConditionNotAnInteger(self.ctx.display(cond_ty).to_string()).into(),
+            );
         }
 
         let mut final_cases = vec![];
         let mut case_vals = FxHashSet::default();
 
-        for (case_val, bb) in cases {
+        for (index, (case_val, bb)) in cases.iter().enumerate() {
             let Some(casted_val) = case_val.try_cast(cond_ty, Signedness::Signed, self.ctx) else {
-                todo!() // RAISE ERROR
+                return Err(SwitchError::CaseDoesNotFitConditionType(
+                    index,
+                    self.ctx.display(cond_ty).to_string(),
+                )
+                .into());
             };
 
+            // Compared after folding: two literals of different widths naming the same
+            // number are one label once written, so they collide here.
             if case_vals.contains(&casted_val) {
-                todo!() // RAISE ERROR
+                return Err(
+                    SwitchError::DuplicateCaseValue(index, format!("{casted_val:?}")).into(),
+                );
             }
 
             case_vals.insert(casted_val);
@@ -4947,6 +4992,141 @@ mod tests {
                 InstructionError::Cast(CastError::OperandNotOfSourceType(op, given, asked))
                     if op == "sext" && given == "i32" && asked == "double"
             ),
+            "got: {err}"
+        );
+    }
+
+    /// A `switch` is a terminator, so it closes its block. The cursor is consumed,
+    /// and a cursor opened at the block *afterwards* is refused too.
+    #[test]
+    fn a_switch_ends_its_block() {
+        let mut builder = fixture();
+        let (i32_ty, void_ty) = (builder.i32_ty(), builder.void_ty());
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let d = f.add_basic_block("d".to_string(), &mut builder).unwrap();
+
+        let x = builder.const_value(1i32, OperandTy::Inferred).unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .build_switch(&x, OperandTy::Inferred, d, &[])
+            .expect("an empty case list is just a jump");
+
+        assert!(
+            builder.get_block(entry).is_locked,
+            "a switch is a terminator"
+        );
+
+        let mut again = builder.cursor_at_block(entry);
+
+        assert!(
+            matches!(
+                again.build_alloca(i32_ty, None, None, RegName::Unnamed),
+                Err(InstructionError::BasicBlockAlreadyTerminated(_))
+            ),
+            "nothing may follow a terminator, whichever cursor asks"
+        );
+    }
+
+    /// A `switch` dispatches on an integer. `llvm-as` refuses anything else with
+    /// "switch condition must have integer type".
+    #[test]
+    fn a_switch_refuses_a_non_integer_condition() {
+        let mut builder = fixture();
+        let void_ty = builder.void_ty();
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let d = f.add_basic_block("d".to_string(), &mut builder).unwrap();
+
+        let x = builder.const_value(1.0f64, OperandTy::Inferred).unwrap();
+
+        let err = builder
+            .cursor_at_block(entry)
+            .build_switch(&x, OperandTy::Inferred, d, &[])
+            .expect_err("a double cannot be switched on");
+
+        assert!(
+            matches!(&err, InstructionError::Switch(SwitchError::ConditionNotAnInteger(t))
+                if t == "double"),
+            "got: {err}"
+        );
+    }
+
+    /// Two cases labelling the same value leave it ambiguous which runs, so it is
+    /// refused — as `llvm-as` does with "duplicate case value in switch".
+    ///
+    /// The comparison happens *after* folding to the condition's type, so an `i8 1`
+    /// and an `i32 1` collide in an `i32` switch: they are one label once written.
+    #[test]
+    fn a_switch_refuses_two_cases_on_the_same_value() {
+        let mut builder = fixture();
+        let void_ty = builder.void_ty();
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let d = f.add_basic_block("d".to_string(), &mut builder).unwrap();
+        let a = f.add_basic_block("a".to_string(), &mut builder).unwrap();
+        let b = f.add_basic_block("b".to_string(), &mut builder).unwrap();
+
+        let x = builder.const_value(1i32, OperandTy::Inferred).unwrap();
+
+        let err = builder
+            .cursor_at_block(entry)
+            .build_switch(
+                &x,
+                OperandTy::Inferred,
+                d,
+                &[(ConstValue::I8(1), a), (ConstValue::I32(1), b)],
+            )
+            .expect_err("both cases fold to `i32 1`");
+
+        assert!(
+            matches!(&err, InstructionError::Switch(SwitchError::DuplicateCaseValue(i, _))
+                if *i == 1),
+            "the error must name the repeating case's position: {err}"
+        );
+    }
+
+    /// A case that does not fit the condition's type has no label to be.
+    #[test]
+    fn a_switch_refuses_a_case_that_does_not_fit() {
+        let mut builder = fixture();
+        let (i8_ty, void_ty) = (builder.i8_ty(), builder.void_ty());
+
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let d = f.add_basic_block("d".to_string(), &mut builder).unwrap();
+        let a = f.add_basic_block("a".to_string(), &mut builder).unwrap();
+
+        let x = builder.const_value(1i8, OperandTy::Inferred).unwrap();
+
+        let err = builder
+            .cursor_at_block(entry)
+            .build_switch(&x, i8_ty.into(), d, &[(ConstValue::I32(300), a)])
+            .expect_err("300 does not fit an i8");
+
+        assert!(
+            matches!(&err, InstructionError::Switch(SwitchError::CaseDoesNotFitConditionType(i, t))
+                if *i == 0 && t == "i8"),
             "got: {err}"
         );
     }

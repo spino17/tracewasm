@@ -20,6 +20,7 @@
 //!     ├── IBinOpError
 //!     ├── FBinOpError
 //!     ├── CastError
+//!     ├── SwitchError
 //!     ├── PhiError ── ContextError
 //!     └── ContextError
 //! ```
@@ -218,6 +219,9 @@ pub enum InstructionError {
     /// See [`CastError`].
     #[error("{0}")]
     Cast(#[from] CastError),
+    /// See [`SwitchError`].
+    #[error("{0}")]
+    Switch(#[from] SwitchError),
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
@@ -476,6 +480,39 @@ pub enum CastError {
     /// Fields: the operation, the source type, and the destination type.
     #[error("`{0}` cannot convert `{1}` to `{2}`")]
     ConversionNotAllowed(String, String, String),
+}
+
+/// A `switch` could not be built.
+#[derive(Error, Debug)]
+pub enum SwitchError {
+    /// The condition is not of the type it was asserted to have, and is not a literal
+    /// that folds into it.
+    ///
+    /// Fields: the condition's type, and the type asserted for it.
+    #[error("a `switch` condition of type `{0}` is not `{1}`")]
+    ConditionNotOfAssertedType(String, String),
+    /// A `switch` dispatches on an integer. `llvm-as` refuses anything else with
+    /// "switch condition must have integer type" — comparing floats needs `fcmp` and
+    /// a branch, and a pointer needs `ptrtoint` first.
+    #[error("a `switch` condition must be an integer, but got one of type `{0}`")]
+    ConditionNotAnInteger(String),
+    /// A case label could not be folded into the condition's type.
+    ///
+    /// Every case must have exactly the condition's type, so a literal that does not
+    /// fit it — `300` against an `i8` — has no case to label.
+    ///
+    /// Fields: the case's position in the list, and the condition's type.
+    #[error("case `{0}` of a `switch` does not fit the condition type `{1}`")]
+    CaseDoesNotFitConditionType(usize, String),
+    /// Two cases label the same value, so which one runs would be ambiguous.
+    /// `llvm-as` refuses it with "duplicate case value in switch".
+    ///
+    /// Compared **after** folding to the condition's type, so an `i8 1` and an
+    /// `i32 1` collide in an `i32` switch — they are the same label once written.
+    ///
+    /// Fields: the case's position in the list, and the value it repeats.
+    #[error("case `{0}` of a `switch` repeats the value `{1}`")]
+    DuplicateCaseValue(usize, String),
 }
 
 /// A `store` could not be built.
