@@ -1,7 +1,8 @@
 use crate::{
     cfg::{context::Context, function::FuncId},
+    error::CallError,
     interner::{StrId, TyId},
-    value::{ConstExpr, FuncSignature, Type},
+    value::{ConstExpr, FuncSignature, Type, Value, ValueKind},
 };
 use std::{fmt::Display, hash::Hash};
 
@@ -255,21 +256,81 @@ impl GlobalData {
 /// blocks to add. They come together here because a call does not care: it needs a
 /// name and a signature, and both kinds have those. `From` is implemented for each, so
 /// a call site can write `f.into()`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub enum FuncRef {
     /// A function this module defines.
     Defined(GlobalId<DefinedFunc>),
     /// A function this module declares but does not define — a host import, or
     /// anything else resolved at link time.
     Declared(GlobalId<DeclaredFunc>),
+    Pointer {
+        ptr: Value,
+        sig: FuncSignature,
+    },
 }
 
 impl FuncRef {
-    pub(crate) fn name(&self) -> StrId {
-        match self {
-            FuncRef::Defined(func) => func.name,
-            FuncRef::Declared(func) => func.name,
-        }
+    pub fn name_and_sig<'a, 'b: 'a>(
+        &'b self,
+        ctx: &'a Context,
+    ) -> Result<(StrId, &'a FuncSignature), CallError> {
+        Ok(match self {
+            FuncRef::Declared(func) => {
+                let name = func.name;
+
+                // The signature is read out by value before anything below borrows `ctx`
+                // mutably: casting an argument interns into the type pool, which a live
+                // borrow of the function table would forbid.
+                let Some(global) = ctx.module.globals.get(&name) else {
+                    return Err(CallError::FunctionNotFound(
+                        ctx.str_interner.value(name.0).to_string(),
+                    )
+                    .into());
+                };
+
+                let GlobalKind::Func(func_sig) = &global.kind else {
+                    unreachable!(
+                        "hitting this means globals tracking logic by their name is incorrect"
+                    )
+                };
+
+                (name, func_sig)
+            }
+            FuncRef::Defined(func) => {
+                let name = func.name;
+
+                // The signature is read out by value before anything below borrows `ctx`
+                // mutably: casting an argument interns into the type pool, which a live
+                // borrow of the function table would forbid.
+                let Some(global) = ctx.module.globals.get(&name) else {
+                    return Err(CallError::FunctionNotFound(
+                        ctx.str_interner.value(name.0).to_string(),
+                    )
+                    .into());
+                };
+
+                let GlobalKind::Func(func_sig) = &global.kind else {
+                    unreachable!(
+                        "hitting this means globals tracking logic by their name is incorrect"
+                    )
+                };
+
+                (name, func_sig)
+            }
+            FuncRef::Pointer { ptr, sig } => {
+                if !ptr.is_ptr(ctx) {
+                    todo!() // RAISE ERROR
+                }
+
+                let ValueKind::Reg(reg) = ptr.kind() else {
+                    todo!() // RAISE ERROR
+                };
+
+                let name = reg.name;
+
+                (name, sig)
+            }
+        })
     }
 }
 

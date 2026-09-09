@@ -784,21 +784,7 @@ impl<'a> Cursor<'a> {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id = func.name();
-
-        // The signature is read out by value before anything below borrows `ctx`
-        // mutably: casting an argument interns into the type pool, which a live
-        // borrow of the function table would forbid.
-        let Some(global) = self.ctx.module.globals.get(&func_name_id) else {
-            return Err(CallError::FunctionNotFound(
-                self.ctx.str_interner.value(func_name_id.0).to_string(),
-            )
-            .into());
-        };
-
-        let GlobalKind::Func(func_sig) = &global.kind else {
-            unreachable!("hitting this means globals tracking logic by their name is incorrect")
-        };
+        let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
         let name = self.ctx.str_interner.value(func_name_id.0).to_string();
         let expected_return_ty = func_sig.result;
@@ -879,21 +865,7 @@ impl<'a> Cursor<'a> {
             .map(|(x, y)| (x.clone(), y))
             .collect();
 
-        let func_name_id = func.name();
-
-        // The signature is read out by value before anything below borrows `ctx`
-        // mutably: casting an argument interns into the type pool, which a live
-        // borrow of the function table would forbid.
-        let Some(global) = self.ctx.module.globals.get(&func_name_id) else {
-            return Err(CallError::FunctionNotFound(
-                self.ctx.str_interner.value(func_name_id.0).to_string(),
-            )
-            .into());
-        };
-
-        let GlobalKind::Func(func_sig) = &global.kind else {
-            unreachable!("hitting this means globals tracking logic by their name is incorrect")
-        };
+        let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
         let name = self.ctx.str_interner.value(func_name_id.0).to_string();
         let expected_return_ty = func_sig.result;
