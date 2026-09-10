@@ -6,7 +6,7 @@
 //! [`Cursor`](cursor::Cursor) — see that module for the builders.
 
 use crate::{
-    cfg::{basic_block::BasicBlockId, context::Context},
+    cfg::{basic_block::BasicBlockId, context::Context, global::FuncName},
     error::PhiError,
     interner::{StrId, TyId},
     value::{ConstValue, I1Value, Signedness, Value},
@@ -274,7 +274,7 @@ impl GetElementPtrOperands {
 pub struct CallOperands {
     /// The callee, by name. Resolved against the module's function table when the
     /// call is built, so the signature is known to match by the time it is stored.
-    pub func_name: StrId,
+    pub func_name: FuncName,
     /// What the callee returns, `void` included.
     ///
     /// LLVM writes only the return type at a call site — `call i32 @g(i32 7)` — not

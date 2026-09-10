@@ -273,7 +273,7 @@ impl FuncRef {
     pub fn name_and_sig<'a, 'b: 'a>(
         &'b self,
         ctx: &'a Context,
-    ) -> Result<(StrId, &'a FuncSignature), CallError> {
+    ) -> Result<(FuncName, &'a FuncSignature), CallError> {
         Ok(match self {
             FuncRef::Declared(func) => {
                 let name = func.name;
@@ -294,7 +294,7 @@ impl FuncRef {
                     )
                 };
 
-                (name, func_sig)
+                (FuncName::Global(name), func_sig)
             }
             FuncRef::Defined(func) => {
                 let name = func.name;
@@ -315,7 +315,7 @@ impl FuncRef {
                     )
                 };
 
-                (name, func_sig)
+                (FuncName::Global(name), func_sig)
             }
             FuncRef::Pointer { ptr, sig } => {
                 if !ptr.is_ptr(ctx) {
@@ -328,7 +328,7 @@ impl FuncRef {
 
                 let name = reg.name;
 
-                (name, sig)
+                (FuncName::Local(name), sig)
             }
         })
     }
@@ -343,5 +343,19 @@ impl From<GlobalId<DefinedFunc>> for FuncRef {
 impl From<GlobalId<DeclaredFunc>> for FuncRef {
     fn from(value: GlobalId<DeclaredFunc>) -> Self {
         FuncRef::Declared(value)
+    }
+}
+
+pub enum FuncName {
+    Local(StrId),
+    Global(StrId),
+}
+
+impl FuncName {
+    pub fn str(&self) -> StrId {
+        match self {
+            FuncName::Global(s) => *s,
+            FuncName::Local(s) => *s,
+        }
     }
 }

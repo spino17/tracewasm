@@ -786,7 +786,12 @@ impl<'a> Cursor<'a> {
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
-        let name = self.ctx.str_interner.value(func_name_id.0).to_string();
+        let name = self
+            .ctx
+            .str_interner
+            .value(func_name_id.str().0)
+            .to_string();
+
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 
@@ -867,7 +872,12 @@ impl<'a> Cursor<'a> {
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
-        let name = self.ctx.str_interner.value(func_name_id.0).to_string();
+        let name = self
+            .ctx
+            .str_interner
+            .value(func_name_id.str().0)
+            .to_string();
+
         let expected_return_ty = func_sig.result;
         let expected_param_tys = func_sig.params.clone();
 

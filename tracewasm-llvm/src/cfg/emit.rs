@@ -6,7 +6,7 @@ use crate::{
         basic_block::{BasicBlock, BasicBlockId},
         context::Context,
         function::Function,
-        global::{GlobalVariable, Linkage, Visibility},
+        global::{FuncName, GlobalVariable, Linkage, Visibility},
         walk::CfgVisitor,
     },
     instruction::{
@@ -532,11 +532,21 @@ impl CfgVisitor for IREmitter {
             None => String::new(),
         };
 
+        // The sigil is the whole difference between a direct and an indirect call:
+        // `@f` names a module-level symbol, `%f` a register holding its address. That
+        // is why the callee carries which it is rather than just a name — with opaque
+        // pointers the two are otherwise indistinguishable at the call site.
+        let sigil = match operands.func_name {
+            FuncName::Global(_) => "@",
+            FuncName::Local(_) => "%",
+        };
+
         self.push_line(&format!(
-            "{}call {} @{}({})",
+            "{}call {} {}{}({})",
             assignment,
             ctx.display(operands.return_ty),
-            ctx.str_interner.value(operands.func_name.0),
+            sigil,
+            ctx.str_interner.value(operands.func_name.str().0),
             args.join(", ")
         ));
 
