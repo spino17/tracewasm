@@ -284,8 +284,7 @@ impl FuncRef {
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),
-                    )
-                    .into());
+                    ));
                 };
 
                 let GlobalKind::Func(func_sig) = &global.kind else {
@@ -305,8 +304,7 @@ impl FuncRef {
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),
-                    )
-                    .into());
+                    ));
                 };
 
                 let GlobalKind::Func(func_sig) = &global.kind else {

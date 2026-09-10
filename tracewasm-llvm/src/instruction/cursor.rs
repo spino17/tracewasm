@@ -4,7 +4,7 @@ use crate::{
     cfg::{
         basic_block::BasicBlockId,
         context::{Context, RegisterDef},
-        global::{FuncRef, GlobalKind},
+        global::FuncRef,
     },
     error::{
         AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
