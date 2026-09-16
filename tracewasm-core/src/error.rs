@@ -219,6 +219,9 @@ pub struct FuncCallError {
     /// The module's DWARF, for resolving frames to source locations. `None` for a
     /// module built without debug info.
     dwarf: Option<ModuleDwarf>,
+    /// Where the module's code section begins, for turning a recorded
+    /// instruction offset into a DWARF code address.
+    code_sec_offset: u32,
 }
 
 impl FuncCallError {
@@ -248,6 +251,7 @@ impl FuncCallError {
             trace,
             custom_section: module.custom_section.clone(),
             dwarf: module.dwarf().clone(),
+            code_sec_offset: module.code_sec_offset,
         }
     }
 
@@ -278,6 +282,7 @@ impl FuncCallError {
             func_name: &self.func_name,
             custom_section: &self.custom_section,
             dwarf: self.dwarf.as_ref(),
+            code_sec_offset: self.code_sec_offset,
         }
     }
 }
@@ -491,6 +496,9 @@ pub struct StackTrace<'a> {
     /// debug info, in which case [`Self::to_source_trace`] yields frames with an
     /// empty inline trace rather than dropping them.
     dwarf: Option<&'a ModuleDwarf>,
+    /// Where the module's code section begins. See
+    /// [`to_source_trace`](Self::to_source_trace).
+    code_sec_offset: u32,
 }
 
 impl<'a> StackTrace<'a> {
@@ -498,8 +506,11 @@ impl<'a> StackTrace<'a> {
     /// it into its source-level frames (including any the compiler inlined).
     ///
     /// The instruction offsets recorded in the trace are byte offsets into the
-    /// module binary, which is exactly how WebAssembly DWARF encodes code
-    /// addresses, so they can be used as lookup probes directly.
+    /// module binary, but WebAssembly DWARF numbers its code addresses from the
+    /// start of the **code section** — so each offset is rebased by subtracting
+    /// [`Module::code_sec_offset`] before it is used as a lookup probe. Probing
+    /// with the unrebased offset resolves, but to whatever unrelated function
+    /// happens to sit that far further into the section.
     ///
     /// Every frame yields exactly one [`SourceTraceRecord`], even when DWARF has
     /// no coverage for it (an empty `inline_trace`), so the source trace never
@@ -530,7 +541,12 @@ impl<'a> StackTrace<'a> {
             .map_err(|err| SourceStackTraceError::ContextLoadFailed(err.to_string()))?;
 
         for (i, frame) in self.trace.iter().enumerate() {
-            let instruction_offset = frame.instr_offset;
+            // Rebase from "offset into the module" to "offset into the code
+            // section", which is the address space DWARF numbers code in. The
+            // saturating subtraction only matters for an offset recorded before
+            // the code section, which the interpreter cannot produce — it reads
+            // these from instructions it is executing.
+            let instruction_offset = frame.instr_offset.saturating_sub(self.code_sec_offset);
 
             let mut frames = match ctx.find_frames(instruction_offset as u64) {
                 // Only returned when the DWARF points at a split/supplementary

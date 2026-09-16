@@ -466,6 +466,17 @@ pub struct Module<V: VirtualMachine> {
     pub(crate) code_sec_count: u32,
     /// Byte size of the code section as declared in its header.
     pub(crate) code_sec_size: u32,
+    /// Byte offset of the code section's contents within the module binary.
+    ///
+    /// The base that turns a recorded instruction offset into a DWARF code
+    /// address: WebAssembly DWARF numbers code from the start of the code
+    /// section, while [`FuncBody::instruction_offsets`] records offsets into the
+    /// whole binary. Subtracting this is what makes the two comparable — see
+    /// [`StackTrace::to_source_trace`](crate::error::StackTrace::to_source_trace).
+    ///
+    /// Zero for a module with no code section, which then has no frames to
+    /// resolve either.
+    pub(crate) code_sec_offset: u32,
     /// Number of imported functions; the boundary between imports and
     /// definitions in [`Self::func_decls`], and the offset mapping the `i`-th
     /// `func_bodies` entry to `func_decls[imported_func_count + i]`.
@@ -1081,6 +1092,7 @@ impl<V: VirtualMachine> Module<V> {
         let mut datas = vec![];
         let mut code_sec_count = 0;
         let mut code_sec_size = 0;
+        let mut code_sec_offset = 0;
         let mut func_bodies = vec![];
         let mut tags = vec![];
         let mut unknown_sections = vec![];
@@ -1410,13 +1422,12 @@ impl<V: VirtualMachine> Module<V> {
                         });
                     }
                 }
-                CodeSectionStart {
-                    count,
-                    range: _range,
-                    size,
-                } => {
+                CodeSectionStart { count, range, size } => {
                     code_sec_count = count;
                     code_sec_size = size;
+                    // Where the section's contents begin, which is the base DWARF
+                    // numbers its code addresses from.
+                    code_sec_offset = range.start as u32;
                 }
                 CodeSectionEntry(code_sec_entry) => {
                     let locals_reader = code_sec_entry.get_locals_reader()?;
@@ -1651,6 +1662,7 @@ impl<V: VirtualMachine> Module<V> {
             datas: datas.into_boxed_slice(),
             code_sec_count,
             code_sec_size,
+            code_sec_offset,
             imported_func_count,
             imported_global_count,
             func_bodies: func_bodies.into_boxed_slice(),

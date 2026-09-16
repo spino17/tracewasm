@@ -82,7 +82,11 @@ const REPS: u64 = 5;
 const ROUNDS: usize = if cfg!(debug_assertions) { 3 } else { 7 };
 
 /// Invocations behind the per-call overhead rows.
-const CALL_REPS: u64 = if cfg!(debug_assertions) { 5_000 } else { 100_000 };
+const CALL_REPS: u64 = if cfg!(debug_assertions) {
+    5_000
+} else {
+    100_000
+};
 
 // ---------------------------------------------------------------------------
 // Comparison plumbing
@@ -231,7 +235,9 @@ fn report(title: &str, rows: &[Comparison]) {
 
     println!();
     println!("  speedup > 1.00x means the register machine is faster.");
-    println!("  read `rounds won` with the ratio: {ROUNDS}/{ROUNDS} is a result, a bare majority is noise.");
+    println!(
+        "  read `rounds won` with the ratio: {ROUNDS}/{ROUNDS} is a result, a bare majority is noise."
+    );
 }
 
 fn fmt_dur(d: Duration) -> String {

@@ -191,6 +191,17 @@ pub mod guests {
     pub const FRAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/frames.wasm"));
     /// From `guests/exotic.rs`.
     pub const EXOTIC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/exotic.wasm"));
+    /// From `guests/source_trace.rs`, and the only guest carrying DWARF — the
+    /// rest are built with `-Cdebuginfo=0`, so nothing else can be resolved back
+    /// to source.
+    pub const SOURCE_TRACE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/source_trace.wasm"));
+
+    /// The source of [`SOURCE_TRACE`], so a test can find a `// MARKER:` line
+    /// rather than hard-coding a line number that drifts.
+    pub const SOURCE_TRACE_SRC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/guests/source_trace.rs"
+    ));
 }
 
 // ---------------------------------------------------------------------------
