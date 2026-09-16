@@ -120,12 +120,18 @@ impl<M: Memory, I: ImportRegistry, V: VirtualMachine> Instance<M, I, V> {
         &self.config
     }
 
-    /// Read access to the instance's linear memory.
+    /// Read access to the instance's linear memory, as the concrete `M`.
     ///
-    /// Returned as an opaque [`MemoryView`] rather than as `&M`: that trait is the
-    /// read/write half, so an embedder gets every bounds-checked accessor and none
-    /// of [`Memory`]'s resizing.
-    pub fn memory_view(&self) -> &impl MemoryView {
+    /// Concrete rather than opaque, unlike [`memory_view_mut`](Self::memory_view_mut).
+    /// Opacity there stops a host reaching [`Memory::grow`]; here it would stop
+    /// nothing, because `grow` takes `&mut self` and `allocate_initial_memory` takes
+    /// no receiver at all. A shared borrow of `M` exposes exactly what
+    /// [`MemoryView`] already does.
+    ///
+    /// What it does buy: an embedder that supplies its own memory can read that
+    /// type's own state back — counters, a dirty-page set, whatever it instrumented
+    /// the implementation with — which an `impl MemoryView` return type erases.
+    pub fn memory_view(&self) -> &M {
         &self.memory
     }
 

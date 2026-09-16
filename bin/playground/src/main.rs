@@ -1,55 +1,39 @@
+use crate::counting::CountingMemory;
 use std::fs;
 use tracewasm_core::{Stack, memory::linear::LinearMemory, module::Module};
 use tracewasm_macros::imports;
 
-pub struct ImportedFunctions;
+mod counting;
+
+pub struct Imports {}
 
 #[imports]
-impl ImportedFunctions {
+impl Imports {
     #[module("env")]
-    fn host_call(&mut self, n: i32) {
-        println!("{}", n);
+    fn host(&mut self, n: i32) {
+        println!("number passed: {:?}", n)
     }
 }
 
-/// Where to look for the wasm when no path is given: the scratch crate's debug
-/// build, resolved from this file's location so it does not depend on whose
-/// checkout it is.
-const DEFAULT_WASM: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasm32-unknown-unknown/debug/tracewasm_scratch.wasm"
-);
-
-/// The export the playground calls, and its signature.
-const ENTRY: &str = "demo";
-
+// /Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/release/tracewasm_scratch.wasm
 fn main() -> Result<(), anyhow::Error> {
-    // The default path only exists once `tracewasm-scratch` has been built for
-    // wasm32 — a normal workspace build does not produce it. Any other module can be
-    // run by passing its path instead.
-    let path = std::env::args().nth(1).unwrap_or(DEFAULT_WASM.to_string());
+    let file = fs::read(
+        "/Users/bhavyabhatt/Desktop/bhavya/projects/tracewasm/target/wasm32-unknown-unknown/debug/tracewasm_scratch.wasm",
+    )?;
 
-    let buf = fs::read(&path).map_err(|err| {
-        anyhow::anyhow!(
-            "could not read `{path}`: {err}. Pass a path to a .wasm file, or build the \
-             scratch crate for wasm32-unknown-unknown first."
-        )
-    })?;
+    let module = Module::<Stack>::compile(&file)?;
+    let mut instance = module.instantiate::<CountingMemory, _>(Imports {}, None)?;
 
-    let module = Module::<Stack>::compile(&buf)?;
-    let registry = ImportedFunctions;
-    let func = module.get_typed_func::<(i32,), (i32,)>(ENTRY)?;
-    let mut instance = module.instantiate::<LinearMemory, _>(registry, None)?;
+    let demo = module.get_typed_func::<(i32,), (i32,)>("demo")?;
 
-    let res = func.call((-1,), &mut instance);
+    let res = demo.call((-1,), &mut instance);
+
+    println!("number of memory reads: {:?}", instance.memory_view().reads);
 
     match res {
-        Ok(val) => println!("{}", val.0),
+        Ok(res) => println!("result is: {:?}", res),
         Err(err) => {
-            let trace = err.stack_trace();
-            let source_trace = trace.to_source_trace()?;
-
-            println!("{}", source_trace.render())
+            println!("{}", err.stack_trace().render());
         }
     }
 
