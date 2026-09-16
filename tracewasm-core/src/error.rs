@@ -507,8 +507,8 @@ impl<'a> StackTrace<'a> {
     ///
     /// The instruction offsets recorded in the trace are byte offsets into the
     /// module binary, but WebAssembly DWARF numbers its code addresses from the
-    /// start of the **code section** — so each offset is rebased by subtracting
-    /// [`Module::code_sec_offset`] before it is used as a lookup probe. Probing
+    /// start of the **code section** — so each offset is rebased by subtracting the
+    /// module's code-section offset before it is used as a lookup probe. Probing
     /// with the unrebased offset resolves, but to whatever unrelated function
     /// happens to sit that far further into the section.
     ///
