@@ -15,7 +15,8 @@
 //!
 //! Note the index spaces include imports: e.g. `FuncIndex(n)` addresses the
 //! `n`-th function counting imported functions first, then locally-defined ones
-//! (see [`Module::func_decls`] and [`Module::imported_func_count`]).
+//! — the module's function-declaration table is ordered that way, and its
+//! imported-function count is the boundary between the two halves.
 
 use crate::{
     InstrOf, VirtualMachine,
@@ -288,7 +289,7 @@ impl From<u32> for FuncExactIndex {
 
 impl EntityIndex for FuncExactIndex {}
 
-/// Index into the type section ([`Module::types`]).
+/// Index into the module's type section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TyIndex(
     /// The raw index value.
@@ -433,46 +434,57 @@ impl EntityIndex for FieldIndex {}
 pub struct Module<V: VirtualMachine> {
     /// The type section. Only function types are kept — GC composite types
     /// (struct/array) are rejected during parsing.
-    pub types: Box<[FuncType]>,
+    pub(crate) types: Box<[FuncType]>,
     /// The function index space: imported functions first, then locally-defined
     /// ones. The split point is [`Self::imported_func_count`].
-    pub func_decls: Box<[FuncDecl]>,
+    pub(crate) func_decls: Box<[FuncDecl]>,
     /// The table section.
-    pub tables: Box<[Table]>,
+    pub(crate) tables: Box<[Table]>,
     /// The memory section (TraceWasm currently allows at most one memory).
-    pub memories: Box<[MemoryType]>,
+    pub(crate) memories: Box<[MemoryType]>,
     /// The tag section (exception-handling proposal).
-    pub tags: Box<[TagType]>,
+    pub(crate) tags: Box<[TagType]>,
     /// The global index space: imported globals first, then locally-defined ones.
     /// The split point is [`Self::imported_global_count`].
-    pub globals: Box<[Global]>,
+    pub(crate) globals: Box<[Global]>,
     /// The export section, keyed by export name.
-    pub exports: FxHashMap<String, Export>,
+    pub(crate) exports: FxHashMap<String, Export>,
     /// Reverse index over the function entries of [`Self::exports`]: exported
     /// function index to export name. Lets an error name the function it came from
     /// without scanning the export table.
-    pub exported_func_index_to_name: FxHashMap<FuncIndex, String>,
+    pub(crate) exported_func_index_to_name: FxHashMap<FuncIndex, String>,
     /// The `start` function, run at instantiation, if the module declares one.
-    pub start_section: Option<FuncIndex>,
+    pub(crate) start_section: Option<FuncIndex>,
     /// The element section.
-    pub elements: Box<[Element]>,
+    pub(crate) elements: Box<[Element]>,
     /// The declared data-segment count from the data-count section, if present
     /// (required by the bulk-memory proposal for validating `data.drop`, etc.).
-    pub data_count: Option<u32>,
+    pub(crate) data_count: Option<u32>,
     /// The data section.
-    pub datas: Box<[Data]>,
+    pub(crate) datas: Box<[Data]>,
     /// Declared entry count of the code section (should match `func_bodies.len()`).
-    pub code_sec_count: u32,
+    pub(crate) code_sec_count: u32,
     /// Byte size of the code section as declared in its header.
-    pub code_sec_size: u32,
+    pub(crate) code_sec_size: u32,
+    /// Byte offset of the code section's contents within the module binary.
+    ///
+    /// The base that turns a recorded instruction offset into a DWARF code
+    /// address: WebAssembly DWARF numbers code from the start of the code
+    /// section, while [`FuncBody::instruction_offsets`] records offsets into the
+    /// whole binary. Subtracting this is what makes the two comparable — see
+    /// [`StackTrace::to_source_trace`](crate::error::StackTrace::to_source_trace).
+    ///
+    /// Zero for a module with no code section, which then has no frames to
+    /// resolve either.
+    pub(crate) code_sec_offset: u32,
     /// Number of imported functions; the boundary between imports and
     /// definitions in [`Self::func_decls`], and the offset mapping the `i`-th
     /// `func_bodies` entry to `func_decls[imported_func_count + i]`.
-    pub imported_func_count: u32,
+    pub(crate) imported_func_count: u32,
     /// Number of imported globals, mirroring [`Self::imported_func_count`]: the
     /// first `imported_global_count` entries of [`Self::globals`] are imports
     /// (with [`GlobalKind::Imported`]), the rest are locally defined.
-    pub imported_global_count: u32,
+    pub(crate) imported_global_count: u32,
     /// Lowered bodies of the locally-defined functions, in definition order.
     ///
     /// Crate-private: a body holds instructions of whichever machine `V` names, and
@@ -480,9 +492,9 @@ pub struct Module<V: VirtualMachine> {
     /// sizes, which is all a consumer outside the crate has asked for.
     pub(crate) func_bodies: Box<[FuncBody<InstrOf<V>>]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
-    pub unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
+    pub(crate) unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
-    pub custom_section: Arc<CustomSection>,
+    pub(crate) custom_section: Arc<CustomSection>,
     /// The module's DWARF debug info, parsed from its `.debug_*` custom sections,
     /// or `None` if the module carries none (no `.debug_info`).
     ///
@@ -926,7 +938,7 @@ pub enum FuncKind {
 pub struct FuncDecl {
     /// Whether the function is defined locally or imported.
     pub kind: FuncKind,
-    /// Index into [`Module::types`] giving this function's signature.
+    /// Index into the module's type section, giving this function's signature.
     pub ty: TyIndex,
 }
 
@@ -1080,6 +1092,7 @@ impl<V: VirtualMachine> Module<V> {
         let mut datas = vec![];
         let mut code_sec_count = 0;
         let mut code_sec_size = 0;
+        let mut code_sec_offset = 0;
         let mut func_bodies = vec![];
         let mut tags = vec![];
         let mut unknown_sections = vec![];
@@ -1409,13 +1422,12 @@ impl<V: VirtualMachine> Module<V> {
                         });
                     }
                 }
-                CodeSectionStart {
-                    count,
-                    range: _range,
-                    size,
-                } => {
+                CodeSectionStart { count, range, size } => {
                     code_sec_count = count;
                     code_sec_size = size;
+                    // Where the section's contents begin, which is the base DWARF
+                    // numbers its code addresses from.
+                    code_sec_offset = range.start as u32;
                 }
                 CodeSectionEntry(code_sec_entry) => {
                     let locals_reader = code_sec_entry.get_locals_reader()?;
@@ -1650,6 +1662,7 @@ impl<V: VirtualMachine> Module<V> {
             datas: datas.into_boxed_slice(),
             code_sec_count,
             code_sec_size,
+            code_sec_offset,
             imported_func_count,
             imported_global_count,
             func_bodies: func_bodies.into_boxed_slice(),

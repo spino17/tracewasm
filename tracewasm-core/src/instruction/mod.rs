@@ -223,7 +223,10 @@ pub(crate) trait FrameLayout {
 /// The offsets are index-for-index with the instructions, which is what lets a trap
 /// name the operator it came from. Each machine has a concrete alias of its own —
 /// `RegLoweredFuncBody` and `StackLoweredFuncBody`.
-type LoweredFuncBody<T: Instruction> = (Vec<T>, Vec<u32>, T::FrameLayout);
+/// The bound is written into the projection rather than onto `T`, because a bound
+/// on a type-alias parameter is not enforced at the use site — it would read as a
+/// constraint while checking nothing.
+type LoweredFuncBody<T> = (Vec<T>, Vec<u32>, <T as Instruction>::FrameLayout);
 
 /// One lowering strategy: an instruction set, the frame it runs in, and how a
 /// body is produced and executed.

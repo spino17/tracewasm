@@ -100,6 +100,7 @@ pub extern "C" fn heap_strings(n: i32) -> i64 {
     let digits = s.chars().filter(char::is_ascii_digit).count() as i64;
     let upper = s.to_uppercase().len() as i64;
     let parts = s.split('-').count() as i64;
+
     let checksum = s
         .bytes()
         .fold(0i64, |a, b| a.wrapping_mul(31).wrapping_add(b as i64));
@@ -138,6 +139,7 @@ pub extern "C" fn heap_hashmap(n: i32) -> i64 {
     let keys: i64 = m.keys().map(|k| *k as i64).sum();
 
     let mut set: HashSet<i32> = HashSet::new();
+
     for i in 0..n {
         set.insert(i % 101);
     }
@@ -173,6 +175,7 @@ pub extern "C" fn heap_btreemap(n: i32) -> i64 {
     let range: i64 = m.range(100..500).map(|(_, v)| *v).sum();
 
     let set: BTreeSet<i32> = (0..n).map(|i| (i * 13) % 97).collect();
+
     let set_fold = set
         .iter()
         .fold(0i64, |a, x| a.wrapping_mul(3).wrapping_add(*x as i64));
@@ -215,12 +218,14 @@ pub extern "C" fn heap_deque_and_binheap(n: i32) -> i64 {
         .fold(0i64, |a, x| a.wrapping_mul(3).wrapping_add(*x as i64));
 
     let mut bh: BinaryHeap<i32> = BinaryHeap::new();
+
     for i in 0..n {
         bh.push((i * 7_919) % 1_013);
     }
 
     // popping a BinaryHeap is deterministic (descending)
     let mut bh_fold = 0i64;
+
     while let Some(top) = bh.pop() {
         bh_fold = bh_fold.wrapping_mul(3).wrapping_add(top as i64);
     }
@@ -240,7 +245,6 @@ pub extern "C" fn heap_smart_pointers(n: i32) -> i64 {
 
     let boxed: Vec<Box<i64>> = (0..n).map(|i| Box::new(i as i64 * 3)).collect();
     let box_sum = boxed.iter().fold(0i64, |a, b| a.wrapping_add(**b));
-
     let shared = Rc::new(RefCell::new(0i64));
     let clones: Vec<Rc<RefCell<i64>>> = (0..n.min(64)).map(|_| Rc::clone(&shared)).collect();
 
@@ -300,6 +304,7 @@ pub extern "C" fn heap_drop_order(n: i32) -> i64 {
 
         // explicit early drop, out of declaration order
         let d = Recorder { id: 99, log: &log };
+
         drop(d);
     }
 

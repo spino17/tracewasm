@@ -165,7 +165,6 @@ use crate::{
         register::{
             arena::{Arena, Id},
             backpatch::{BackPatchableSlot, BackpatchMap, InstructionSource},
-            interner::{InternedId, Interner, TyToString},
             lazy::{
                 LazyArena, LazyEntryDropResult, LazyLocation, LazySlot, Local, LocalSlot,
                 SpillArena, SpillIndex,
@@ -186,14 +185,19 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 use smallvec::{SmallVec, smallvec};
-use std::{collections::hash_map::Entry, vec};
+use std::{
+    collections::hash_map::Entry,
+    hash::{Hash, Hasher},
+    mem::discriminant,
+    vec,
+};
+use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod arena;
 pub mod backpatch;
-pub mod interner;
 pub mod lazy;
 pub mod render;
 
@@ -205,9 +209,14 @@ mod tests;
 // are, and that sum is checked once at the end of the body — three individually legal
 // regions can still add up to something no `Slot` could name.
 //
-// Nothing in wasm's own limits reaches these. `MAX_WASM_FUNCTION_LOCALS` is 50,000,
-// and a distinct constant or memory offset costs bytes of body, so a body would have
-// to be far past `MAX_WASM_FUNCTION_SIZE` to intern 65,536 of either.
+// Locals cannot reach these — `MAX_WASM_FUNCTION_LOCALS` is 50,000 — but the two
+// interned pools can, and do. A distinct constant or memory offset costs only a few
+// bytes of body, so a module that `wasmparser` validates can hold 65,536 of either;
+// `too_many_constants_is_reported_not_truncated` and
+// `too_many_memory_offsets_is_reported_not_truncated` are exactly that module. Which
+// is why both pools are reached through `Interner::try_intern` and not the panicking
+// `Interner::intern`: overflowing one is an input this crate has to answer for, and
+// the module still lowers under `Stack`.
 
 /// Distinct constants one body may intern.
 const MAX_CONSTS: u16 = u16::MAX;
@@ -216,20 +225,15 @@ const MAX_REGISTER_SLOTS: u16 = u16::MAX;
 /// Distinct memory offsets one body's loads and stores may name between them.
 pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 
-/// The static byte offset of one load or store, as its own type so that the
-/// [`Interner`] holding them names itself correctly in an error.
+/// The static byte offset of one load or store, as its own type so that the ids the
+/// pool hands out cannot be confused with another pool's.
 ///
-/// A bare `u32` would work as the interned value, but [`TyToString`] is implemented
-/// per type — so a second `Interner<u32>` for anything else would report its cap as
-/// "memory offsets".
+/// A bare `u32` would work as the interned value, but [`InternedId`] is generic over
+/// what was interned — so a second `Interner<u32, _>` for anything else would issue
+/// ids of the very same type, and one could be read against the wrong pool. The
+/// newtype makes that a compile error.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct MemoryOffset(pub u32);
-
-impl TyToString for MemoryOffset {
-    fn to_string() -> String {
-        "memory offsets".to_string()
-    }
-}
 
 /// Which kind of label a block opens, before its instruction index is known.
 ///
@@ -268,12 +272,10 @@ enum BlockVariant {
 /// Identity is by **variant and bit pattern**, not by numeric equality — see the
 /// hand-written [`PartialEq`] below for why that is not merely pedantic.
 ///
-/// The float arms hold `OrderedFloat` because `f32`/`f64` are not `Hash`, and the
-/// derived `Hash` uses its canonicalising implementation. That is sound but not
-/// exact: it hashes `-0.0` as `+0.0` and every NaN alike, so those pairs collide.
-/// They are unequal, so the map separates them on comparison; the collision costs
-/// one extra comparison and nothing else.
-#[derive(Debug, Clone, Copy, Hash)]
+/// The float arms hold `OrderedFloat` only because `f32`/`f64` are not `Ord`; its
+/// own `Hash` is not used, since it canonicalises `-0.0` to `+0.0` and every NaN
+/// alike — see the hand-written [`Hash`] below.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Const {
     /// A 32-bit integer immediate.
     I32(i32),
@@ -357,9 +359,24 @@ impl PartialEq for Const {
 
 impl Eq for Const {}
 
-impl TyToString for Const {
-    fn to_string() -> String {
-        "constants".to_string()
+/// Hashes the same thing [`PartialEq`] compares: the variant, then the bits.
+///
+/// Written out because the derive would hash the float arms through
+/// `OrderedFloat`, which canonicalises — `-0.0` would land in `+0.0`'s bucket and
+/// every NaN in one. That is *sound* against a bit-comparing `PartialEq`, since
+/// unequal values may share a hash, but it puts values the pool deliberately keeps
+/// apart into the same bucket. Hashing the bits keeps them apart there too.
+impl Hash for Const {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        discriminant(self).hash(state);
+
+        match self {
+            Const::I32(v) => v.hash(state),
+            Const::I64(v) => v.hash(state),
+            Const::F32(v) => v.into_inner().to_bits().hash(state),
+            Const::F64(v) => v.into_inner().to_bits().hash(state),
+            Const::Ref(v) => v.hash(state),
+        }
     }
 }
 
@@ -459,6 +476,7 @@ impl Default for Slot {
         Slot(0)
     }
 }
+
 /// One entry on the simulated operand stack during lowering.
 ///
 /// The internal counterpart of [`Slot`]. The difference is the lazy cases: where a
@@ -469,7 +487,7 @@ impl Default for Slot {
 #[derive(Clone, Copy)]
 enum StackSlot {
     /// An immediate. Occupies a stack position and no register.
-    Const(InternedId<Const>),
+    Const(InternedId<Const, u16>),
     /// A value an earlier instruction produced, in the register named here. The
     /// only variant [`SimulatedStack::curr_register_index`] counts.
     Register(u16),
@@ -896,14 +914,14 @@ struct SimulatedStack {
     dyn_signatures: Arena<DynSignature>,
     /// Static byte offsets of the body's loads and stores, deduped so a repeated
     /// offset costs one entry.
-    memory_offsets: Interner<MemoryOffset>,
+    memory_offsets: Interner<MemoryOffset, u16>,
     /// Every operand recorded against the instruction that will carry it, for the
     /// end-of-body pass. Lowering-time only: it is what fills the instructions in,
     /// and is dropped once it has.
     backpatch_map: BackpatchMap,
     /// The body's constant pool. Becomes [`RegFrameLayout::consts`], and its length is
     /// one of the two terms every register index is shifted by.
-    const_interner: Interner<Const>,
+    const_interner: Interner<Const, u16>,
 }
 
 impl SimulatedStack {
@@ -935,9 +953,9 @@ impl SimulatedStack {
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
             dyn_signatures: Arena::default(),
-            memory_offsets: Interner::new(MAX_MEMORY_OFFSETS),
+            memory_offsets: Interner::default(),
             backpatch_map: BackpatchMap::default(),
-            const_interner: Interner::new(MAX_CONSTS),
+            const_interner: Interner::default(),
         }
     }
 
@@ -966,7 +984,9 @@ impl SimulatedStack {
         self.curr_register_index += 1;
 
         if self.curr_register_index > self.max_registers as usize {
-            if self.max_registers >= MAX_REGISTER_SLOTS {
+            // Widened for the same reason as `SpillArena::reserve_slot`: the cap
+            // is at `u16::MAX`, so a same-width `>=` is an equality in disguise.
+            if self.max_registers as u32 >= MAX_REGISTER_SLOTS as u32 {
                 return Err(TraceWasmError::RegisterFrameTooLarge {
                     what: "locals and operand registers",
                     needed: self.max_registers as u32 + 1,
@@ -1267,7 +1287,7 @@ impl SimulatedStack {
 
     /// `i32.const` and friends: records the immediate, emitting nothing.
     fn push_const(&mut self, val: Const) -> Result<(), TraceWasmError> {
-        let id = self.const_interner.intern(val)?;
+        let id = self.const_interner.try_intern(val)?;
 
         self.stack.push(StackSlot::Const(id));
 
@@ -1470,7 +1490,7 @@ impl SimulatedStack {
         &mut self,
         base_height: u32,
         arity_to_preserve: u32,
-        instr_index: usize, // TODO: only use this when registers are not empty
+        instr_index: usize,
         source: InstructionSource,
     ) -> Result<DynSignature, TraceWasmError> {
         let arity_to_preserve = arity_to_preserve as usize;
@@ -1654,7 +1674,7 @@ pub(crate) struct RegFrameLayout {
     /// a signature, so the instruction carries an [`InternedId<MemoryOffset>`] into
     /// this pool instead. Interned, so the `0` that every bare pointer deref loads
     /// through costs one entry no matter how many loads use it.
-    pub memory_offsets: Interner<MemoryOffset>,
+    pub memory_offsets: Interner<MemoryOffset, u16>,
     /// Params plus declared locals, i.e. the width of the frame's first region.
     ///
     /// Doubles as the base of the constant region, and as the boundary that tells a
@@ -1812,7 +1832,7 @@ pub(crate) enum RegInstruction {
     /// `i32.load`.
     I32Load {
         /// Static byte offset added to the popped address.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_s`.
@@ -1820,7 +1840,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load8_u`.
@@ -1828,7 +1848,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_s`.
@@ -1836,7 +1856,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i32.load16_u`.
@@ -1844,7 +1864,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -1854,7 +1874,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i32.store8`.
@@ -1862,7 +1882,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i32.store16`.
@@ -1870,7 +1890,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -1966,7 +1986,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_s`.
@@ -1974,7 +1994,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load8_u`.
@@ -1982,7 +2002,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_s`.
@@ -1990,7 +2010,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load16_u`.
@@ -1998,7 +2018,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_s`.
@@ -2006,7 +2026,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
     /// `i64.load32_u`.
@@ -2014,7 +2034,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2024,7 +2044,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store8`.
@@ -2032,7 +2052,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store16`.
@@ -2040,7 +2060,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
     /// `i64.store32`.
@@ -2048,7 +2068,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -2148,7 +2168,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2158,7 +2178,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -2224,7 +2244,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         sig: Signature<1, 1>,
     },
 
@@ -2234,7 +2254,7 @@ pub(crate) enum RegInstruction {
         /// Static byte offset added to the popped address, held in
         /// [`RegFrameLayout::memory_offsets`] because a `u32` does not fit here
         /// beside the operands.
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         input: InputRegisters<2>,
     },
 
@@ -2729,7 +2749,7 @@ impl Instruction for RegInstruction {
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
-        globals_count: u32,
+        _globals_count: u32,
     ) -> Result<RegLoweredFuncBody, TraceWasmError> {
         let mut instructions = Instructions::default();
         let mut simulated_stack = SimulatedStack::new(locals_count);
@@ -2780,7 +2800,7 @@ impl Instruction for RegInstruction {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
-                        .intern(MemoryOffset($memarg.offset as u32))?;
+                        .try_intern(MemoryOffset($memarg.offset as u32))?;
 
                     emit!(|sig| RegInstruction::$variant { offset, sig })
                 }};
@@ -2793,7 +2813,7 @@ impl Instruction for RegInstruction {
                 ($memarg:expr, $variant:ident) => {{
                     let offset = simulated_stack
                         .memory_offsets
-                        .intern(MemoryOffset($memarg.offset as u32))?;
+                        .try_intern(MemoryOffset($memarg.offset as u32))?;
 
                     emit!(|sig: Signature<2, 0>| RegInstruction::$variant {
                         offset,
@@ -6712,7 +6732,7 @@ impl RegInstruction {
     /// a wrap.
     #[inline(always)]
     fn effective_address<M: Memory, I: ImportRegistry>(
-        offset: InternedId<MemoryOffset>,
+        offset: InternedId<MemoryOffset, u16>,
         frame_layout: &RegFrameLayout,
         slot: Slot,
         caller_base_data: &RegCallerBaseData,

@@ -56,6 +56,7 @@ pub extern "C" fn arith_shift_rotate(n: i32) -> i64 {
 
     for i in 0..(n.clamp(1, 2_000) as u32) {
         let k = i & 63;
+
         acc = acc
             .wrapping_add(x << k)
             .wrapping_add(x >> k)
@@ -75,6 +76,7 @@ pub extern "C" fn arith_bit_counting(_: i32) -> i64 {
 
     for v in [0u32, 1, 0x8000_0000, u32::MAX, 0x0f0f_0f0f] {
         let v = black_box(v);
+
         acc = acc.wrapping_mul(37).wrapping_add(v.leading_zeros() as i64);
         acc = acc.wrapping_mul(37).wrapping_add(v.trailing_zeros() as i64);
         acc = acc.wrapping_mul(37).wrapping_add(v.count_ones() as i64);
@@ -82,6 +84,7 @@ pub extern "C" fn arith_bit_counting(_: i32) -> i64 {
 
     for v in [0u64, 1, 0x8000_0000_0000_0000, u64::MAX] {
         let v = black_box(v);
+
         acc = acc.wrapping_mul(37).wrapping_add(v.leading_zeros() as i64);
         acc = acc.wrapping_mul(37).wrapping_add(v.trailing_zeros() as i64);
         acc = acc.wrapping_mul(37).wrapping_add(v.count_ones() as i64);
@@ -97,6 +100,7 @@ pub extern "C" fn arith_extend_wrap(_: i32) -> i64 {
     let mut acc = 0i64;
 
     let neg = black_box(-1i32);
+
     acc = acc.wrapping_add(neg as i64);
     acc = acc.wrapping_mul(31).wrapping_add((neg as u32) as i64);
     // i32.wrap_i64 discards the high bits rather than saturating
@@ -208,6 +212,7 @@ pub extern "C" fn arith_float_minmax(_: i32) -> f64 {
         (f64::NEG_INFINITY, f64::MIN),
     ] {
         let (a, b) = (black_box(a), black_box(b));
+
         acc = acc * 3.0 + a.min(b);
         acc = acc * 3.0 + a.max(b);
         // observe the signed-zero tie through its bit pattern, since -0.0 == 0.0
@@ -228,6 +233,7 @@ pub extern "C" fn arith_float_rounding(_: i32) -> f64 {
         -2.5f64, -1.5, -0.5, -0.0, 0.0, 0.5, 1.5, 2.5, 3.5, 1e16, -1e16,
     ] {
         let v = black_box(v);
+
         acc = acc * 3.0 + v.trunc();
         acc = acc * 3.0 + v.floor();
         acc = acc * 3.0 + v.ceil();
@@ -299,6 +305,7 @@ pub extern "C" fn arith_float_to_int_saturating(_: i32) -> i64 {
         -2147483649.0,
     ] {
         let v = black_box(v);
+
         acc = acc.wrapping_mul(7).wrapping_add(v as i32 as i64);
         acc = acc.wrapping_mul(7).wrapping_add(v as u32 as i64);
         acc = acc.wrapping_mul(7).wrapping_add(v as i64);
@@ -316,6 +323,7 @@ pub extern "C" fn arith_int_to_float(_: i32) -> f64 {
 
     for v in [0i64, 1, -1, i64::MAX, i64::MIN, 1 << 53, (1 << 53) + 1] {
         let v = black_box(v);
+
         acc = acc * 3.0 + v as f64;
         acc = acc * 3.0 + (v as u64) as f64;
         acc = acc * 3.0 + (v as f32) as f64;
@@ -323,6 +331,7 @@ pub extern "C" fn arith_int_to_float(_: i32) -> f64 {
 
     for v in [0i32, -1, i32::MAX, i32::MIN, 1 << 24, (1 << 24) + 1] {
         let v = black_box(v);
+
         acc = acc * 3.0 + v as f64;
         acc = acc * 3.0 + (v as u32) as f64;
         acc = acc * 3.0 + (v as f32) as f64;
@@ -340,6 +349,7 @@ pub extern "C" fn arith_reinterpret(_: i32) -> i64 {
     for bits in [0u32, 0x7f80_0000, 0x7fc0_0000, 0xffff_ffff, 0x3fc0_0000] {
         let bits = black_box(bits);
         let f = f32::from_bits(bits);
+
         acc = acc.wrapping_mul(31).wrapping_add(f.to_bits() as i64);
         acc = acc
             .wrapping_mul(31)
@@ -349,6 +359,7 @@ pub extern "C" fn arith_reinterpret(_: i32) -> i64 {
     for bits in [0u64, 0x7ff0_0000_0000_0000, 0x7ff8_0000_0000_0000, u64::MAX] {
         let bits = black_box(bits);
         let d = f64::from_bits(bits);
+
         acc = acc.wrapping_mul(31).wrapping_add(d.to_bits() as i64);
         acc = acc
             .wrapping_mul(31)
@@ -375,6 +386,7 @@ pub extern "C" fn arith_demote_promote(_: i32) -> i64 {
     ] {
         let v = black_box(v);
         let narrowed = v as f32;
+
         acc = acc.wrapping_mul(31).wrapping_add(narrowed.to_bits() as i64);
         // promotion back is exact, so this round-trips
         acc = acc

@@ -40,7 +40,9 @@ fn main() {
             // The guard must not be what stops this: the probe is looking for
             // the native cliff.
             cfg.set_max_call_stack_depth(depth as u32 + 1_000);
+
             let mut g = Guest::<Stack>::with_config(guests::FRAMES, Some(cfg));
+
             g.i32_i64("fr_recurse_depth", depth)
         })
         .unwrap();

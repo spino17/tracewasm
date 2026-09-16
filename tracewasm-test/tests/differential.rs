@@ -139,8 +139,8 @@ fn check_f64<V: VirtualMachine>(
 fn arithmetic_integer_edges_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| arithmetic_integer_edges_match_native_on::<Stack>());
-    with_large_stack(|| arithmetic_integer_edges_match_native_on::<Register>());
+    with_large_stack(arithmetic_integer_edges_match_native_on::<Stack>);
+    with_large_stack(arithmetic_integer_edges_match_native_on::<Register>);
 }
 
 fn arithmetic_integer_edges_match_native_on<V: VirtualMachine>() {
@@ -182,8 +182,8 @@ fn arithmetic_integer_edges_match_native_on<V: VirtualMachine>() {
 fn arithmetic_shifts_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| arithmetic_shifts_match_native_on::<Stack>());
-    with_large_stack(|| arithmetic_shifts_match_native_on::<Register>());
+    with_large_stack(arithmetic_shifts_match_native_on::<Stack>);
+    with_large_stack(arithmetic_shifts_match_native_on::<Register>);
 }
 
 fn arithmetic_shifts_match_native_on<V: VirtualMachine>() {
@@ -203,8 +203,8 @@ fn arithmetic_shifts_match_native_on<V: VirtualMachine>() {
 fn arithmetic_float_edges_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| arithmetic_float_edges_match_native_on::<Stack>());
-    with_large_stack(|| arithmetic_float_edges_match_native_on::<Register>());
+    with_large_stack(arithmetic_float_edges_match_native_on::<Stack>);
+    with_large_stack(arithmetic_float_edges_match_native_on::<Register>);
 }
 
 fn arithmetic_float_edges_match_native_on<V: VirtualMachine>() {
@@ -234,8 +234,8 @@ fn arithmetic_float_edges_match_native_on<V: VirtualMachine>() {
 fn arithmetic_float_specials_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| arithmetic_float_specials_match_native_on::<Stack>());
-    with_large_stack(|| arithmetic_float_specials_match_native_on::<Register>());
+    with_large_stack(arithmetic_float_specials_match_native_on::<Stack>);
+    with_large_stack(arithmetic_float_specials_match_native_on::<Register>);
 }
 
 fn arithmetic_float_specials_match_native_on<V: VirtualMachine>() {
@@ -275,8 +275,8 @@ fn arithmetic_float_specials_match_native_on<V: VirtualMachine>() {
 fn control_flow_loops_and_branches_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| control_flow_loops_and_branches_match_native_on::<Stack>());
-    with_large_stack(|| control_flow_loops_and_branches_match_native_on::<Register>());
+    with_large_stack(control_flow_loops_and_branches_match_native_on::<Stack>);
+    with_large_stack(control_flow_loops_and_branches_match_native_on::<Register>);
 }
 
 fn control_flow_loops_and_branches_match_native_on<V: VirtualMachine>() {
@@ -313,8 +313,8 @@ fn control_flow_loops_and_branches_match_native_on<V: VirtualMachine>() {
 fn control_flow_exits_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| control_flow_exits_match_native_on::<Stack>());
-    with_large_stack(|| control_flow_exits_match_native_on::<Register>());
+    with_large_stack(control_flow_exits_match_native_on::<Stack>);
+    with_large_stack(control_flow_exits_match_native_on::<Register>);
 }
 
 fn control_flow_exits_match_native_on<V: VirtualMachine>() {
@@ -359,8 +359,8 @@ fn control_flow_exits_match_native_on<V: VirtualMachine>() {
 fn control_flow_recursion_matches_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| control_flow_recursion_matches_native_on::<Stack>());
-    with_large_stack(|| control_flow_recursion_matches_native_on::<Register>());
+    with_large_stack(control_flow_recursion_matches_native_on::<Stack>);
+    with_large_stack(control_flow_recursion_matches_native_on::<Register>);
 }
 
 fn control_flow_recursion_matches_native_on<V: VirtualMachine>() {
@@ -386,8 +386,8 @@ fn control_flow_recursion_matches_native_on<V: VirtualMachine>() {
 fn control_flow_iterators_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| control_flow_iterators_match_native_on::<Stack>());
-    with_large_stack(|| control_flow_iterators_match_native_on::<Register>());
+    with_large_stack(control_flow_iterators_match_native_on::<Stack>);
+    with_large_stack(control_flow_iterators_match_native_on::<Register>);
 }
 
 fn control_flow_iterators_match_native_on<V: VirtualMachine>() {
@@ -415,8 +415,8 @@ fn control_flow_iterators_match_native_on<V: VirtualMachine>() {
 fn heap_collections_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| heap_collections_match_native_on::<Stack>());
-    with_large_stack(|| heap_collections_match_native_on::<Register>());
+    with_large_stack(heap_collections_match_native_on::<Stack>);
+    with_large_stack(heap_collections_match_native_on::<Register>);
 }
 
 fn heap_collections_match_native_on<V: VirtualMachine>() {
@@ -437,8 +437,8 @@ fn heap_collections_match_native_on<V: VirtualMachine>() {
 fn heap_hashmap_matches_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| heap_hashmap_matches_native_on::<Stack>());
-    with_large_stack(|| heap_hashmap_matches_native_on::<Register>());
+    with_large_stack(heap_hashmap_matches_native_on::<Stack>);
+    with_large_stack(heap_hashmap_matches_native_on::<Register>);
 }
 
 fn heap_hashmap_matches_native_on<V: VirtualMachine>() {
@@ -453,8 +453,8 @@ fn heap_hashmap_matches_native_on<V: VirtualMachine>() {
 fn heap_strings_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| heap_strings_match_native_on::<Stack>());
-    with_large_stack(|| heap_strings_match_native_on::<Register>());
+    with_large_stack(heap_strings_match_native_on::<Stack>);
+    with_large_stack(heap_strings_match_native_on::<Register>);
 }
 
 fn heap_strings_match_native_on<V: VirtualMachine>() {
@@ -473,8 +473,8 @@ fn heap_strings_match_native_on<V: VirtualMachine>() {
 fn heap_pointers_and_drops_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| heap_pointers_and_drops_match_native_on::<Stack>());
-    with_large_stack(|| heap_pointers_and_drops_match_native_on::<Register>());
+    with_large_stack(heap_pointers_and_drops_match_native_on::<Stack>);
+    with_large_stack(heap_pointers_and_drops_match_native_on::<Register>);
 }
 
 fn heap_pointers_and_drops_match_native_on<V: VirtualMachine>() {
@@ -498,8 +498,8 @@ fn heap_pointers_and_drops_match_native_on<V: VirtualMachine>() {
 fn memory_loads_and_stores_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| memory_loads_and_stores_match_native_on::<Stack>());
-    with_large_stack(|| memory_loads_and_stores_match_native_on::<Register>());
+    with_large_stack(memory_loads_and_stores_match_native_on::<Stack>);
+    with_large_stack(memory_loads_and_stores_match_native_on::<Register>);
 }
 
 fn memory_loads_and_stores_match_native_on<V: VirtualMachine>() {
@@ -519,8 +519,8 @@ fn memory_loads_and_stores_match_native_on<V: VirtualMachine>() {
 fn memory_bulk_operations_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| memory_bulk_operations_match_native_on::<Stack>());
-    with_large_stack(|| memory_bulk_operations_match_native_on::<Register>());
+    with_large_stack(memory_bulk_operations_match_native_on::<Stack>);
+    with_large_stack(memory_bulk_operations_match_native_on::<Register>);
 }
 
 fn memory_bulk_operations_match_native_on<V: VirtualMachine>() {
@@ -540,8 +540,8 @@ fn memory_bulk_operations_match_native_on<V: VirtualMachine>() {
 fn memory_large_buffers_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| memory_large_buffers_match_native_on::<Stack>());
-    with_large_stack(|| memory_large_buffers_match_native_on::<Register>());
+    with_large_stack(memory_large_buffers_match_native_on::<Stack>);
+    with_large_stack(memory_large_buffers_match_native_on::<Register>);
 }
 
 fn memory_large_buffers_match_native_on<V: VirtualMachine>() {
@@ -564,8 +564,8 @@ fn memory_large_buffers_match_native_on<V: VirtualMachine>() {
 fn frames_locals_and_calls_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| frames_locals_and_calls_match_native_on::<Stack>());
-    with_large_stack(|| frames_locals_and_calls_match_native_on::<Register>());
+    with_large_stack(frames_locals_and_calls_match_native_on::<Stack>);
+    with_large_stack(frames_locals_and_calls_match_native_on::<Register>);
 }
 
 fn frames_locals_and_calls_match_native_on<V: VirtualMachine>() {
@@ -580,8 +580,8 @@ fn frames_locals_and_calls_match_native_on<V: VirtualMachine>() {
 fn frames_recursion_matches_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| frames_recursion_matches_native_on::<Stack>());
-    with_large_stack(|| frames_recursion_matches_native_on::<Register>());
+    with_large_stack(frames_recursion_matches_native_on::<Stack>);
+    with_large_stack(frames_recursion_matches_native_on::<Register>);
 }
 
 fn frames_recursion_matches_native_on<V: VirtualMachine>() {
@@ -615,8 +615,8 @@ fn frames_recursion_matches_native_on<V: VirtualMachine>() {
 fn frames_indirect_dispatch_matches_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| frames_indirect_dispatch_matches_native_on::<Stack>());
-    with_large_stack(|| frames_indirect_dispatch_matches_native_on::<Register>());
+    with_large_stack(frames_indirect_dispatch_matches_native_on::<Stack>);
+    with_large_stack(frames_indirect_dispatch_matches_native_on::<Register>);
 }
 
 fn frames_indirect_dispatch_matches_native_on<V: VirtualMachine>() {
@@ -634,8 +634,8 @@ fn frames_indirect_dispatch_matches_native_on<V: VirtualMachine>() {
 fn exotic_enums_and_options_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| exotic_enums_and_options_match_native_on::<Stack>());
-    with_large_stack(|| exotic_enums_and_options_match_native_on::<Register>());
+    with_large_stack(exotic_enums_and_options_match_native_on::<Stack>);
+    with_large_stack(exotic_enums_and_options_match_native_on::<Register>);
 }
 
 fn exotic_enums_and_options_match_native_on<V: VirtualMachine>() {
@@ -660,8 +660,8 @@ fn exotic_enums_and_options_match_native_on<V: VirtualMachine>() {
 fn exotic_text_and_casts_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| exotic_text_and_casts_match_native_on::<Stack>());
-    with_large_stack(|| exotic_text_and_casts_match_native_on::<Register>());
+    with_large_stack(exotic_text_and_casts_match_native_on::<Stack>);
+    with_large_stack(exotic_text_and_casts_match_native_on::<Register>);
 }
 
 fn exotic_text_and_casts_match_native_on<V: VirtualMachine>() {
@@ -675,8 +675,8 @@ fn exotic_text_and_casts_match_native_on<V: VirtualMachine>() {
 fn exotic_layouts_and_consts_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| exotic_layouts_and_consts_match_native_on::<Stack>());
-    with_large_stack(|| exotic_layouts_and_consts_match_native_on::<Register>());
+    with_large_stack(exotic_layouts_and_consts_match_native_on::<Stack>);
+    with_large_stack(exotic_layouts_and_consts_match_native_on::<Register>);
 }
 
 fn exotic_layouts_and_consts_match_native_on<V: VirtualMachine>() {
@@ -701,8 +701,8 @@ fn exotic_layouts_and_consts_match_native_on<V: VirtualMachine>() {
 fn exotic_traits_and_ordering_match_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| exotic_traits_and_ordering_match_native_on::<Stack>());
-    with_large_stack(|| exotic_traits_and_ordering_match_native_on::<Register>());
+    with_large_stack(exotic_traits_and_ordering_match_native_on::<Stack>);
+    with_large_stack(exotic_traits_and_ordering_match_native_on::<Register>);
 }
 
 fn exotic_traits_and_ordering_match_native_on<V: VirtualMachine>() {
@@ -716,8 +716,8 @@ fn exotic_traits_and_ordering_match_native_on<V: VirtualMachine>() {
 fn exotic_realistic_program_matches_native() {
     // On a large stack for both machines: the register machine's debug frame
     // does not fit a default test thread, which holds only a few dozen.
-    with_large_stack(|| exotic_realistic_program_matches_native_on::<Stack>());
-    with_large_stack(|| exotic_realistic_program_matches_native_on::<Register>());
+    with_large_stack(exotic_realistic_program_matches_native_on::<Stack>);
+    with_large_stack(exotic_realistic_program_matches_native_on::<Register>);
 }
 
 fn exotic_realistic_program_matches_native_on<V: VirtualMachine>() {

@@ -23,11 +23,11 @@
 //! nothing has no move — so `apply` must ask before reaching for one.
 
 use crate::instruction::register::{
-    Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, interner::InternedId,
-    lazy::SpillIndex,
+    Const, DynSignature, RegFrameLayout, RegInstruction, Signature, Slot, lazy::SpillIndex,
 };
 use rustc_hash::FxHashMap;
 use std::slice::Iter;
+use tracewasm_utils::interner::InternedId;
 
 /// An operand as lowering knows it, before the frame layout is final.
 ///
@@ -45,7 +45,7 @@ pub(crate) enum BackPatchableSlot {
     /// A spill slot, by pool index. Resolved to `locals_count + consts + slot`.
     Spill(SpillIndex),
     /// An interned constant, by pool id. Resolved to `locals_count + id`.
-    Const(InternedId<Const>),
+    Const(InternedId<Const, u16>),
     /// An operand whose location is already final, which means a local.
     Slot(Slot),
 }
@@ -222,7 +222,7 @@ impl BackpatchMap {
     /// for one, so a key naming it means the key was wrong, and resolving against the
     /// wrong instruction would be silent.
     pub fn apply(
-        &mut self,
+        self,
         instructions: &mut [RegInstruction],
         locals: u16,
         consts: u16,

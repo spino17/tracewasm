@@ -30,6 +30,15 @@ const GUESTS: &[&str] = &[
     "exotic",
 ];
 
+/// Guests built with debug info and without optimisation, for the tests that
+/// resolve a trace back to source.
+///
+/// Separate from [`GUESTS`] because the two builds want opposite things: those
+/// are `-O -Cdebuginfo=0` so they exercise the instruction mix rustc really
+/// emits, while resolving a source location needs the `.debug_*` sections that
+/// flag strips, and needs inlining off so the frames stay distinct.
+const DWARF_GUESTS: &[&str] = &["source_trace"];
+
 const TARGET: &str = "wasm32-unknown-unknown";
 
 fn main() {
@@ -53,7 +62,11 @@ fn main() {
         return;
     }
 
-    for guest in GUESTS {
+    for (guest, with_debug_info) in GUESTS
+        .iter()
+        .map(|g| (g, false))
+        .chain(DWARF_GUESTS.iter().map(|g| (g, true)))
+    {
         let src = guests_dir.join(format!("{guest}.rs"));
 
         assert!(
@@ -62,7 +75,7 @@ fn main() {
             src.display()
         );
 
-        build_guest(&src, guest, &out_dir);
+        build_guest_with(&src, guest, &out_dir, with_debug_info);
     }
 }
 
@@ -87,8 +100,18 @@ fn target_available() -> bool {
         .unwrap_or(false)
 }
 
-fn build_guest(src: &Path, name: &str, out_dir: &Path) {
+/// Builds one guest. `with_debug_info` swaps the optimisation and debug flags for
+/// the pair the source-trace tests need — see [`DWARF_GUESTS`].
+fn build_guest_with(src: &Path, name: &str, out_dir: &Path, with_debug_info: bool) {
     let out = out_dir.join(format!("{name}.wasm"));
+
+    let (opt, debuginfo) = if with_debug_info {
+        // No inlining, so the trapping frame and its caller stay separate; full
+        // DWARF, so there is something to resolve against.
+        ("-Copt-level=0", "-Cdebuginfo=2")
+    } else {
+        ("-O", "-Cdebuginfo=0")
+    };
 
     let status = Command::new(rustc())
         .args([
@@ -105,11 +128,11 @@ fn build_guest(src: &Path, name: &str, out_dir: &Path) {
             "2024",
             // -O so the guests exercise the instruction mix rustc actually emits
             // for release builds (bulk-memory, sign-ext, trunc_sat, unrolled
-            // loops) rather than the much flabbier debug output.
-            "-O",
-            // Deterministic output: the differential tests compare against a
-            // natively compiled copy, so incidental codegen churn is noise.
-            "-Cdebuginfo=0",
+            // loops) rather than the much flabbier debug output. Deterministic
+            // output too: the differential tests compare against a natively
+            // compiled copy, so incidental codegen churn is noise.
+            opt,
+            debuginfo,
             "--crate-name",
         ])
         .arg(format!("guest_{name}"))

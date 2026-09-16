@@ -67,6 +67,7 @@ pub extern "C" fn ex_enum_payloads(n: i32) -> i64 {
 
     for i in 0..n.clamp(1, 2_000) {
         let s = shapes[(i as usize) % shapes.len()];
+
         acc = acc.wrapping_mul(31).wrapping_add(eval(s));
     }
 
@@ -155,6 +156,7 @@ pub extern "C" fn ex_slice_patterns(n: i32) -> i64 {
 
         // tuple and struct destructuring with nesting
         let ((p, q), r) = ((len as i64, len as i64 * 2), len as i64 * 3);
+
         acc = acc.wrapping_mul(31).wrapping_add(p ^ q ^ r);
     }
 
@@ -319,6 +321,7 @@ pub extern "C" fn ex_repr_layouts(_: i32) -> i64 {
     let pa = p.a;
     let pb = p.b;
     let pc = p.c;
+
     acc = acc.wrapping_mul(31).wrapping_add(pa as i64);
     acc = acc.wrapping_mul(31).wrapping_add(pb as i64);
     acc = acc.wrapping_mul(31).wrapping_add(pc as i64);
@@ -460,6 +463,7 @@ pub extern "C" fn ex_custom_ord(n: i32) -> i64 {
     }
 
     let n = n.clamp(1, 2_000);
+
     let mut keys: Vec<Key> = (0..n)
         .map(|i| Key {
             primary: (i * 7) % 13,
@@ -543,6 +547,7 @@ pub extern "C" fn ex_realistic_program(n: i32) -> i64 {
 
     // build a deterministic token stream
     let mut toks: Vec<Tok> = Vec::new();
+
     for i in 0..n {
         match i % 6 {
             0 => toks.push(Tok::Num(i as i64 % 97)),
@@ -556,6 +561,7 @@ pub extern "C" fn ex_realistic_program(n: i32) -> i64 {
 
     // symbol table with ordered iteration
     let mut syms: BTreeMap<u8, i64> = BTreeMap::new();
+
     for (i, t) in toks.iter().enumerate() {
         if let Tok::Ident(name) = t {
             *syms.entry(*name).or_insert(0) += i as i64;

@@ -30,7 +30,7 @@ pub(crate) struct Id<T>(u32, PhantomData<T>);
 
 impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
-        Id(self.0, PhantomData)
+        *self
     }
 }
 

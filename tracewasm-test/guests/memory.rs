@@ -33,20 +33,24 @@ pub extern "C" fn mem_narrow_load_store(_: i32) -> i64 {
 
     for i in 0..16usize {
         let i = black_box(i);
+
         acc = acc.wrapping_mul(31).wrapping_add(buf[i] as i64);
         acc = acc.wrapping_mul(31).wrapping_add(buf[i] as i8 as i64);
 
         let u16v = u16::from_le_bytes([buf[i], buf[i + 1]]);
+
         acc = acc.wrapping_mul(31).wrapping_add(u16v as i64);
         acc = acc.wrapping_mul(31).wrapping_add(u16v as i16 as i64);
 
         let u32v = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+
         acc = acc.wrapping_mul(31).wrapping_add(u32v as i64);
         acc = acc.wrapping_mul(31).wrapping_add(u32v as i32 as i64);
     }
 
     // narrow stores keep only the low bytes of the value
     let mut out = [0u8; 8];
+
     out[0] = black_box(0x1234u32) as u8;
     out[1..3].copy_from_slice(&(black_box(0x1234_5678u32) as u16).to_le_bytes());
     out[4..8].copy_from_slice(&(black_box(0x9abc_def0_1234_5678u64) as u32).to_le_bytes());
@@ -60,7 +64,6 @@ pub extern "C" fn mem_narrow_load_store(_: i32) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn mem_endianness(_: i32) -> i64 {
     let mut acc = 0i64;
-
     let v = black_box(0x0123_4567_89ab_cdefu64);
     let bytes = v.to_le_bytes();
 
@@ -70,6 +73,7 @@ pub extern "C" fn mem_endianness(_: i32) -> i64 {
 
     // and the other direction
     let be = v.to_be_bytes();
+
     for b in be {
         acc = acc.wrapping_mul(257).wrapping_add(b as i64);
     }
@@ -85,6 +89,7 @@ pub extern "C" fn mem_endianness(_: i32) -> i64 {
 
     // floats through their bit patterns, preserving the exact representation
     let f = black_box(-1.5f64);
+
     acc = acc
         .wrapping_mul(31)
         .wrapping_add(i64::from_le_bytes(f.to_le_bytes()));
@@ -107,7 +112,6 @@ pub extern "C" fn mem_unaligned(_: i32) -> i64 {
     // every odd offset is deliberately misaligned for the width being read
     for off in [1usize, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23] {
         let off = black_box(off);
-
         let u16v = u16::from_le_bytes(buf[off..off + 2].try_into().unwrap());
         let u32v = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
         let u64v = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
@@ -118,6 +122,7 @@ pub extern "C" fn mem_unaligned(_: i32) -> i64 {
 
         // unaligned float loads must preserve the bit pattern exactly
         let f = f64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+
         acc = acc.wrapping_mul(31).wrapping_add(f.to_bits() as i64);
     }
 
@@ -184,6 +189,7 @@ pub extern "C" fn mem_fill(_: i32) -> i64 {
     // a large heap-backed fill, which becomes a real memory.fill rather than
     // being unrolled
     let mut v = vec![0u8; 8192];
+
     v.fill(0x5a);
     v[4096..].fill(0xa5);
 
@@ -202,6 +208,7 @@ pub extern "C" fn mem_strided_walk(n: i32) -> i64 {
 
     for i in 0..n {
         let idx = (i * 7) & mask;
+
         buf[idx] = buf[idx].wrapping_add(i as u32) ^ (buf[(idx * 5) & mask] >> 3);
     }
 
@@ -218,6 +225,7 @@ pub extern "C" fn mem_growth(n: i32) -> i64 {
     // each chunk is ~1 page, so this forces repeated memory.grow
     for i in 0..n {
         let mut c = vec![0u8; 65_536];
+
         c[0] = i as u8;
         c[65_535] = (i * 3) as u8;
         chunks.push(c);
@@ -274,6 +282,7 @@ pub extern "C" fn mem_slice_ops(_: i32) -> i64 {
     let fold_a = a
         .iter()
         .fold(0i64, |acc, x| acc.wrapping_mul(31).wrapping_add(*x as i64));
+
     let fold_b = b
         .iter()
         .fold(0i64, |acc, x| acc.wrapping_mul(31).wrapping_add(*x as i64));
@@ -303,6 +312,7 @@ pub extern "C" fn mem_mixed_workload(n: i32) -> i64 {
 
     for i in 0..n {
         let k = i & mask;
+
         v[k] = v[k].wrapping_add(i as u32) ^ (v[(k * 7) & mask] >> 3);
     }
 

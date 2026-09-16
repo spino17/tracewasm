@@ -102,6 +102,8 @@ use crate::{
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
+pub mod llvm;
+
 /// A lowered TraceWasm instruction.
 ///
 /// `wasmparser` operators are translated into this owned form by the crate's

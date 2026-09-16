@@ -310,11 +310,11 @@ impl RuntimeFrame for RegFrame {
 /// chain, and slack in every frame compounds with depth.
 #[cfg(test)]
 mod tests {
+    use tracewasm_utils::interner::Interner;
+
     use super::*;
     use crate::{
-        instruction::register::{
-            MAX_MEMORY_OFFSETS, MemoryOffset, arena::Arena, interner::Interner,
-        },
+        instruction::register::{MemoryOffset, arena::Arena},
         module::ValType,
         runtime::value::Val,
     };
@@ -339,7 +339,7 @@ mod tests {
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
             dyn_signatures: Arena::default(),
-            memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
+            memory_offsets: Interner::<MemoryOffset, u16>::default(),
         }
     }
 
@@ -426,7 +426,7 @@ mod tests {
             select_arena: Arena::default(),
             memory_init_arena: Arena::default(),
             dyn_signatures: Arena::default(),
-            memory_offsets: Interner::<MemoryOffset>::new(MAX_MEMORY_OFFSETS),
+            memory_offsets: Interner::<MemoryOffset, u16>::default(),
         };
 
         frame.enter_frame(

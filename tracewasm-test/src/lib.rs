@@ -163,6 +163,12 @@ pub const GUESTS_AVAILABLE: bool = !cfg!(no_guest_wasm);
               rustup target add wasm32-unknown-unknown"
 )]
 #[test]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "the constant is the subject: `GUESTS_AVAILABLE` resolves at compile \
+              time from `no_guest_wasm`, and this test exists to turn a `false` \
+              into a visible line in the summary"
+)]
 fn guests_were_built() {
     assert!(GUESTS_AVAILABLE);
 }
@@ -185,6 +191,17 @@ pub mod guests {
     pub const FRAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/frames.wasm"));
     /// From `guests/exotic.rs`.
     pub const EXOTIC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/exotic.wasm"));
+    /// From `guests/source_trace.rs`, and the only guest carrying DWARF — the
+    /// rest are built with `-Cdebuginfo=0`, so nothing else can be resolved back
+    /// to source.
+    pub const SOURCE_TRACE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/source_trace.wasm"));
+
+    /// The source of [`SOURCE_TRACE`], so a test can find a `// MARKER:` line
+    /// rather than hard-coding a line number that drifts.
+    pub const SOURCE_TRACE_SRC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/guests/source_trace.rs"
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +232,7 @@ impl<V: VirtualMachine> Guest<V> {
     /// just reports the config value back.
     pub fn with_config(wasm: &[u8], config: Option<Config>) -> Self {
         let module = Module::<V>::compile(wasm).expect("guest should compile");
+
         let instance = module
             .instantiate::<LinearMemory, _>(NoImports, config)
             .expect("guest should instantiate");

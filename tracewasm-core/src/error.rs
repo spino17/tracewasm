@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
+use tracewasm_utils::error::TracewasmUtilsError;
 
 /// Any failure while validating, parsing, lowering, instantiating, or executing
 /// a WebAssembly module.
@@ -125,10 +126,11 @@ pub enum TraceWasmError {
     /// name between them.
     ///
     /// Distinct is the operative word — a pool holds one entry per *value*, however
-    /// many instructions use it — so reaching 65,536 takes a body far past what wasm
-    /// validation allows. Like [`Self::RegisterFrameTooLarge`] this is an
-    /// implementation limit, not a spec one, so a module rejected here may still run
-    /// under [`Stack`](crate::Stack).
+    /// many instructions use it — so a body needs 65,536 *different* constants or
+    /// offsets to get here. That is reachable: a module doing it validates fine, and
+    /// the register tests compile one. Like [`Self::RegisterFrameTooLarge`] this is
+    /// an implementation limit, not a spec one, so a module rejected here may still
+    /// run under [`Stack`](crate::Stack).
     ///
     /// Fields: which pool filled up, the count it reached, and its limit.
     #[error("too many unique {what}: reached {needed}, over the limit of {limit}")]
@@ -169,6 +171,14 @@ pub enum TraceWasmError {
     /// is its own business.
     #[error("call to imported item returned error: {0}")]
     CallToImportedItemReturnedError(anyhow::Error),
+    #[error("{0}")]
+    UtilsError(TracewasmUtilsError),
+}
+
+impl From<TracewasmUtilsError> for TraceWasmError {
+    fn from(value: TracewasmUtilsError) -> Self {
+        TraceWasmError::UtilsError(value)
+    }
 }
 
 impl From<anyhow::Error> for TraceWasmError {
@@ -209,6 +219,9 @@ pub struct FuncCallError {
     /// The module's DWARF, for resolving frames to source locations. `None` for a
     /// module built without debug info.
     dwarf: Option<ModuleDwarf>,
+    /// Where the module's code section begins, for turning a recorded
+    /// instruction offset into a DWARF code address.
+    code_sec_offset: u32,
 }
 
 impl FuncCallError {
@@ -238,6 +251,7 @@ impl FuncCallError {
             trace,
             custom_section: module.custom_section.clone(),
             dwarf: module.dwarf().clone(),
+            code_sec_offset: module.code_sec_offset,
         }
     }
 
@@ -268,6 +282,7 @@ impl FuncCallError {
             func_name: &self.func_name,
             custom_section: &self.custom_section,
             dwarf: self.dwarf.as_ref(),
+            code_sec_offset: self.code_sec_offset,
         }
     }
 }
@@ -481,6 +496,9 @@ pub struct StackTrace<'a> {
     /// debug info, in which case [`Self::to_source_trace`] yields frames with an
     /// empty inline trace rather than dropping them.
     dwarf: Option<&'a ModuleDwarf>,
+    /// Where the module's code section begins. See
+    /// [`to_source_trace`](Self::to_source_trace).
+    code_sec_offset: u32,
 }
 
 impl<'a> StackTrace<'a> {
@@ -488,8 +506,11 @@ impl<'a> StackTrace<'a> {
     /// it into its source-level frames (including any the compiler inlined).
     ///
     /// The instruction offsets recorded in the trace are byte offsets into the
-    /// module binary, which is exactly how WebAssembly DWARF encodes code
-    /// addresses, so they can be used as lookup probes directly.
+    /// module binary, but WebAssembly DWARF numbers its code addresses from the
+    /// start of the **code section** — so each offset is rebased by subtracting
+    /// [`Module::code_sec_offset`] before it is used as a lookup probe. Probing
+    /// with the unrebased offset resolves, but to whatever unrelated function
+    /// happens to sit that far further into the section.
     ///
     /// Every frame yields exactly one [`SourceTraceRecord`], even when DWARF has
     /// no coverage for it (an empty `inline_trace`), so the source trace never
@@ -520,7 +541,12 @@ impl<'a> StackTrace<'a> {
             .map_err(|err| SourceStackTraceError::ContextLoadFailed(err.to_string()))?;
 
         for (i, frame) in self.trace.iter().enumerate() {
-            let instruction_offset = frame.instr_offset;
+            // Rebase from "offset into the module" to "offset into the code
+            // section", which is the address space DWARF numbers code in. The
+            // saturating subtraction only matters for an offset recorded before
+            // the code section, which the interpreter cannot produce — it reads
+            // these from instructions it is executing.
+            let instruction_offset = frame.instr_offset.saturating_sub(self.code_sec_offset);
 
             let mut frames = match ctx.find_frames(instruction_offset as u64) {
                 // Only returned when the DWARF points at a split/supplementary
