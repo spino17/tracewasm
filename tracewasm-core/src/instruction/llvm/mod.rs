@@ -1,5 +1,6 @@
 use crate::{
     VirtualMachine,
+    instruction::Instruction,
     module::{FuncIndex, Module, ValType},
 };
 use rustc_hash::FxHashMap;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use tracewasm_llvm::{
     cfg::{
         ControlFlowGraph,
-        builder::Builder,
         context::Context,
         global::{DeclaredFunc, DefinedFunc, GlobalId},
         module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
@@ -83,7 +83,7 @@ impl WasmInstrLLVMPassManager {
                     llvm_result,
                 )?;
 
-                self.compile_func(FuncIndex(func_index as u32), func, &mut builder, module)?;
+                self.compile_func(FuncIndex(func_index as u32), func, module, &mut builder)?;
 
                 self.defined_funcs
                     .insert(FuncIndex(func_index as u32), func);
@@ -97,9 +97,27 @@ impl WasmInstrLLVMPassManager {
         &mut self,
         func_index: FuncIndex,
         func: GlobalId<DefinedFunc>,
-        builder: &mut Builder,
         module: &Arc<Module<V>>,
+        ctx: &mut Context,
     ) -> Result<(), anyhow::Error> {
+        debug_assert!(func_index.0 >= module.imported_func_count);
+
+        let func_body = &module.func_bodies[func_index.0 as usize];
+        let locals = &func_body.locals;
+        let instructions = &func_body.instructions;
+        let frame_layout = &func_body.frame_layout;
+
+        let entry = func.add_basic_block("entry", ctx)?;
+
+        let mut cursor = ctx.cursor_at_block(entry);
+
+        for (instr_index, instr) in instructions.iter().enumerate() {
+            // match on the instr!
+            // for simple instructions, map it to LLVM instruction
+            // for branching instructions like if-else
+            cursor = instr.emit_llvm_ir(instr_index, cursor, func, self)?;
+        }
+
         todo!()
     }
 

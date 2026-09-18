@@ -10,7 +10,7 @@ use crate::{
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::{ContextError, TypeError},
-    instruction::cursor::{OperandTy, RegName},
+    instruction::cursor::{Cursor, OperandTy, RegName},
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
     value::{Const, ConstExpr, ConstValue, Type, TypeDisplay, Value},
 };
@@ -88,6 +88,13 @@ pub(crate) struct RegisterDef {
 }
 
 impl Context {
+    pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor<'_> {
+        Cursor {
+            ctx: self,
+            block: id,
+        }
+    }
+
     /// Issues a unique register name within `func_id`.
     ///
     /// With a hint, the name is the hint — suffixed if it is taken. Without one, the

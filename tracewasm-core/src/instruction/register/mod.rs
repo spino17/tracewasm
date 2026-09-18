@@ -161,6 +161,7 @@ use crate::{
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        llvm::WasmInstrLLVMPassManager,
         params_and_results_from_blockty,
         register::{
             arena::{Arena, Id},
@@ -190,6 +191,10 @@ use std::{
     hash::{Hash, Hasher},
     mem::discriminant,
     vec,
+};
+use tracewasm_llvm::{
+    cfg::global::{DefinedFunc, GlobalId},
+    instruction::cursor::Cursor,
 };
 use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
@@ -6606,6 +6611,16 @@ impl Instruction for RegInstruction {
         };
 
         Ok(res)
+    }
+
+    fn emit_llvm_ir<'a>(
+        &self,
+        instr_index: usize,
+        curr_cursor: Cursor<'a>,
+        func: GlobalId<DefinedFunc>,
+        pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<Cursor<'a>, anyhow::Error> {
+        todo!()
     }
 }
 

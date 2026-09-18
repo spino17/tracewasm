@@ -28,6 +28,7 @@
 //! helpers around block types and memory indices. The passes themselves are in
 //! [`stack`] and [`register`].
 
+use crate::instruction::llvm::WasmInstrLLVMPassManager;
 use crate::sealed::Internals;
 use crate::{
     VirtualMachine,
@@ -41,6 +42,8 @@ use crate::{
     },
 };
 use smallvec::SmallVec;
+use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId};
+use tracewasm_llvm::instruction::cursor::Cursor;
 use wasmparser::{BlockType, OperatorsReader};
 
 // No outer doc comments on these: each module carries its own `//!` docs, and an
@@ -316,6 +319,14 @@ pub(crate) trait Instruction: Sized {
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<Step<Self>, Box<InstructionExecutionError>>;
+
+    fn emit_llvm_ir<'a>(
+        &self,
+        instr_index: usize,
+        curr_cursor: Cursor<'a>,
+        func: GlobalId<DefinedFunc>,
+        pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<Cursor<'a>, anyhow::Error>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to

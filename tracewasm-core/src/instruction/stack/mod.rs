@@ -87,7 +87,7 @@ use crate::{
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
-        params_and_results_from_blockty,
+        llvm::WasmInstrLLVMPassManager, params_and_results_from_blockty,
     },
     memory::Memory,
     module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
@@ -100,9 +100,11 @@ use crate::{
     },
 };
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use tracewasm_llvm::{
+    cfg::global::{DefinedFunc, GlobalId},
+    instruction::cursor::Cursor,
+};
 use wasmparser::{BlockType, Operator, OperatorsReader};
-
-pub mod llvm;
 
 /// A lowered TraceWasm instruction.
 ///
@@ -4139,6 +4141,24 @@ impl Instruction for StackInstruction {
         };
 
         Ok(res)
+    }
+
+    fn emit_llvm_ir<'a>(
+        &self,
+        instr_index: usize,
+        curr_cursor: Cursor<'a>,
+        func: GlobalId<DefinedFunc>,
+        pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<Cursor<'a>, anyhow::Error> {
+        match self {
+            StackInstruction::If {
+                else_index,
+                end_index,
+            } => todo!(),
+            _ => todo!(),
+        }
+
+        todo!()
     }
 }
 
