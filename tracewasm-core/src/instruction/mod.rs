@@ -46,6 +46,7 @@ use wasmparser::{BlockType, OperatorsReader};
 // No outer doc comments on these: each module carries its own `//!` docs, and an
 // outer `///` at the declaration site re-scopes the intra-doc links inside it to
 // this module, silently breaking every one that resolved in its own scope.
+pub mod llvm;
 pub mod register;
 pub mod stack;
 
