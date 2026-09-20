@@ -4219,6 +4219,22 @@ impl Instruction for StackInstruction {
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error> {
         Ok(match self {
+            StackInstruction::Return {
+                target_index,
+                arity,
+                recorded_height,
+            } => {
+                debug_assert!(*target_index == instructions.len() as u32);
+
+                let start_index = pass_manager.simulated_stack.height() - *arity;
+                let mut results = vec![];
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    results.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                }
+
+                todo!();
+            }
             StackInstruction::LocalGet { index } => {
                 let index = index.0 as usize;
                 let local_ptr = &locals[index];
@@ -4256,7 +4272,7 @@ impl Instruction for StackInstruction {
                 else_index,
                 end_index,
             } => {
-                let (recorded_height, _) =
+                let (recorded_height, arity) =
                     Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
 
                 // Wasm branches on "non-zero", and LLVM's `br` takes an `i1`, so the
@@ -4302,7 +4318,9 @@ impl Instruction for StackInstruction {
                 let if_end =
                     func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
 
-                pass_manager.instr_index_to_bb.add_end(*end_index, if_end);
+                pass_manager
+                    .instr_index_to_bb
+                    .add_end(*end_index, arity, if_end);
 
                 let false_label = if let Some(if_else) = if_else {
                     if_else
@@ -4317,7 +4335,8 @@ impl Instruction for StackInstruction {
                         *end_index,
                         params.into_iter().rev().collect(),
                         curr_cursor.basic_block(),
-                    );
+                        &mut curr_cursor,
+                    )?;
 
                     if_end
                 };
@@ -4346,7 +4365,8 @@ impl Instruction for StackInstruction {
                     *if_end_index,
                     results,
                     curr_basic_block,
-                );
+                    &mut curr_cursor,
+                )?;
 
                 // The then-arm leaves the construct here rather than falling into the
                 // `else`, so its block has to be closed with a jump to the `end`. Without
@@ -4387,38 +4407,16 @@ impl Instruction for StackInstruction {
                     instr_index as u32,
                     results,
                     curr_basic_block,
-                );
+                    &mut curr_cursor,
+                )?;
 
-                let end_data = pass_manager
+                let (phi_vals, end_block) = pass_manager
                     .instr_index_to_bb
-                    .take_end_data(instr_index as u32)
+                    .phi_vals_and_branch_for_end(instr_index as u32)
                     .expect("hitting this means logic for tracking `end` index is incorrect");
 
-                let end_block = end_data.basic_block;
-                let branches = end_data.branches;
-                let mut end_cursor = curr_cursor.cursor_at_block(end_block);
-
-                for i in 0..*arity {
-                    // `results` were popped top-first, so index `arity - i - 1` walks them
-                    // bottom-up — the order they have to be pushed back in.
-                    let slot = (arity - i - 1) as usize;
-
-                    // Every incoming is known by the time the `end` is reached, so the phi
-                    // is built complete rather than seeded and filled through its handler:
-                    // `build_phi` takes the phi's type from the first branch and has none
-                    // to take from an empty list.
-                    let incoming: Vec<_> = branches
-                        .iter()
-                        .map(|(values, branch_block)| {
-                            debug_assert!(values.len() == *arity as usize);
-
-                            (*branch_block, values[slot].clone())
-                        })
-                        .collect();
-
-                    let (_, reg) = end_cursor.build_phi(&incoming, RegName::Unnamed)?;
-
-                    pass_manager.simulated_stack.push(reg);
+                for val in phi_vals {
+                    pass_manager.simulated_stack.push(val.clone());
                 }
 
                 // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has

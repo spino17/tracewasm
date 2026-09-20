@@ -8,6 +8,7 @@ use rustc_hash::FxHashMap;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
+    vec,
 };
 use tracewasm_llvm::{
     cfg::{
@@ -17,14 +18,20 @@ use tracewasm_llvm::{
         global::{DeclaredFunc, DefinedFunc, GlobalId},
         module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
     },
-    instruction::cursor::{OperandTy, RegName},
+    error::PhiError,
+    instruction::{
+        PhiInstrHandler,
+        cursor::{OperandTy, RegName},
+    },
     interner::TyId,
     value::Value,
 };
 
 pub(crate) struct EndBasicBlockBranches {
     pub(crate) basic_block: BasicBlockId,
-    pub(crate) branches: Vec<(Vec<Value>, BasicBlockId)>,
+    pub(crate) arity: u32,
+    pub(crate) phi_vals: Vec<Value>,
+    pub(crate) phi_handlers: Vec<PhiInstrHandler>,
 }
 
 #[derive(Default)]
@@ -35,22 +42,65 @@ pub(crate) struct InstrIndexToBasicBlockMap {
 }
 
 impl InstrIndexToBasicBlockMap {
-    pub fn add_end(&mut self, index: u32, block: BasicBlockId) {
+    pub fn add_end(&mut self, index: u32, arity: u32, block: BasicBlockId) {
         self.end_map.insert(
             index,
             EndBasicBlockBranches {
                 basic_block: block,
-                branches: vec![],
+                arity,
+                phi_vals: vec![],
+                phi_handlers: vec![],
             },
         );
     }
 
-    pub fn add_branch_to_end(&mut self, index: u32, values: Vec<Value>, block: BasicBlockId) {
-        self.end_map
+    pub fn add_branch_to_end(
+        &mut self,
+        index: u32,
+        values: Vec<Value>,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), PhiError> {
+        let end_data = self
+            .end_map
             .get_mut(&index)
-            .expect("this method should only be called after calling `add_end`")
-            .branches
-            .push((values, block));
+            .expect("this method should only be called after calling `add_end`");
+
+        if values.len() != end_data.arity as usize {
+            panic!("values passed to `end` should match the expected arity")
+        }
+
+        let mut end_cursor = ctx.cursor_at_block(end_data.basic_block);
+
+        if end_data.phi_vals.is_empty() && end_data.arity != 0 {
+            let mut phi_vals = vec![];
+            let mut phi_handlers = vec![];
+
+            for value in &values {
+                let (phi_handler, phi_val) =
+                    end_cursor.build_phi(&[(block, value.clone())], RegName::Unnamed)?;
+
+                phi_vals.push(phi_val);
+                phi_handlers.push(phi_handler);
+            }
+
+            end_data.phi_vals = phi_vals;
+            end_data.phi_handlers = phi_handlers;
+        } else {
+            for (i, value) in values.iter().enumerate() {
+                let phi_handler = end_data.phi_handlers[i];
+
+                phi_handler.add_branch((block, value.clone()), ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[Value], BasicBlockId)> {
+        self.end_map
+            .get(&index)
+            .map(|x| (x.phi_vals.as_slice(), x.basic_block))
     }
 
     pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<Value>) {
@@ -206,6 +256,9 @@ impl WasmInstrLLVMPassManager {
         let func_body = &module.func_bodies[(func_index.0 - module.imported_func_count) as usize];
         let local_types = &func_body.locals;
         let instructions = &func_body.instructions;
+        let results_count = module.types[module.func_decls[func_index.0 as usize].ty.0 as usize]
+            .results
+            .len();
 
         let entry = func.add_basic_block("entry", ctx)?;
         let params = func.params(ctx).to_vec();
@@ -258,6 +311,14 @@ impl WasmInstrLLVMPassManager {
 
             counter += 1;
         }
+
+        let func_end = func.add_basic_block("end", ctx)?;
+
+        self.instr_index_to_bb.add_end(
+            instructions.len() as u32 - 1,
+            results_count as u32,
+            func_end,
+        );
 
         let mut cursor = ctx.cursor_at_block(entry);
 
