@@ -958,7 +958,7 @@ pub(crate) struct StackFrameLayout {
     /// run naming its own arms, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[StackBrTableTarget]>,
-    pub label_instr_index_to_arity_types: FxHashMap<u32, ()>,
+    pub label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
 }
 
 impl StackFrameLayout {
@@ -2401,7 +2401,7 @@ impl Instruction for StackInstruction {
             instruction_offsets,
             StackFrameLayout {
                 br_targets_arena: br_table_target_branches.into_boxed_slice(),
-                label_instr_index_to_arity_types: FxHashMap::default(),
+                label_instr_index_to_signature: control_stack.label_instr_index_to_signature,
             },
         ))
     }
