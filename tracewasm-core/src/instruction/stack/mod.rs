@@ -4243,6 +4243,15 @@ impl Instruction for StackInstruction {
 
                 curr_cursor.basic_block()
             }
+            StackInstruction::LocalTee { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+                let top_val = pass_manager.simulated_stack.peek_from_top(0);
+
+                curr_cursor.build_store(local_ptr, top_val, OperandTy::Inferred, None)?;
+
+                curr_cursor.basic_block()
+            }
             StackInstruction::If {
                 else_index,
                 end_index,
