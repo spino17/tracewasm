@@ -4219,6 +4219,30 @@ impl Instruction for StackInstruction {
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error> {
         Ok(match self {
+            StackInstruction::LocalGet { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+
+                let local_val = curr_cursor.build_load(
+                    local_ptr,
+                    OperandTy::Inferred,
+                    None,
+                    RegName::Unnamed,
+                )?;
+
+                pass_manager.simulated_stack.push(local_val);
+
+                curr_cursor.basic_block()
+            }
+            StackInstruction::LocalSet { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+                let val = pass_manager.simulated_stack.pop();
+
+                curr_cursor.build_store(local_ptr, &val, OperandTy::Inferred, None)?;
+
+                curr_cursor.basic_block()
+            }
             StackInstruction::If {
                 else_index,
                 end_index,
