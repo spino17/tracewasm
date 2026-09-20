@@ -4268,20 +4268,27 @@ impl Instruction for StackInstruction {
                 let branches = end_data.branches;
                 let mut end_cursor = curr_cursor.cursor_at_block(end_block);
 
-                for (values, branch_block) in branches {
-                    debug_assert!(values.len() == *arity as usize);
+                for i in 0..*arity {
+                    // `results` were popped top-first, so index `arity - i - 1` walks them
+                    // bottom-up — the order they have to be pushed back in.
+                    let slot = (arity - i - 1) as usize;
 
-                    let mut branches = vec![];
+                    // Every incoming is known by the time the `end` is reached, so the phi
+                    // is built complete rather than seeded and filled through its handler:
+                    // `build_phi` takes the phi's type from the first branch and has none
+                    // to take from an empty list.
+                    let incoming: Vec<_> = branches
+                        .iter()
+                        .map(|(values, branch_block)| {
+                            debug_assert!(values.len() == *arity as usize);
 
-                    for value in values.into_iter().rev() {
-                        branches.push((branch_block, value));
-                    }
+                            (*branch_block, values[slot].clone())
+                        })
+                        .collect();
 
-                    for _ in 0..*arity as usize {
-                        let (_, reg) = end_cursor.build_phi(&branches, RegName::Unnamed)?;
+                    let (_, reg) = end_cursor.build_phi(&incoming, RegName::Unnamed)?;
 
-                        pass_manager.simulated_stack.push(reg);
-                    }
+                    pass_manager.simulated_stack.push(reg);
                 }
 
                 end_block
