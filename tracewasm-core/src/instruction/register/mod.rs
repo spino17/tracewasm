@@ -6624,13 +6624,15 @@ impl Instruction for RegInstruction {
 
     fn emit_llvm_ir<'a>(
         &self,
-        instr_index: usize,
-        curr_cursor: Cursor<'a>,
-        instructions: &[RegInstruction],
-        func: GlobalId<DefinedFunc>,
-        pass_manager: &mut WasmInstrLLVMPassManager,
+        _instr_index: usize,
+        _curr_cursor: Cursor<'a>,
+        _instructions: &[RegInstruction],
+        _func: GlobalId<DefinedFunc>,
+        _pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error> {
-        todo!()
+        return Err(anyhow::Error::msg(
+            "currently LLVM IR cannot be emitted for register instructions",
+        ));
     }
 }
 

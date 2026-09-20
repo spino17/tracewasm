@@ -26,7 +26,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{Instruction, stack::StackInstruction},
+    instruction::{Instruction, llvm::WasmInstrLLVMPassManager, stack::StackInstruction},
     memory::Memory,
     runtime::{
         TraceVM,
@@ -38,6 +38,7 @@ use gimli::{Dwarf, EndianArcSlice, EndianReader, RunTimeEndian, SectionId};
 use phf::phf_set;
 use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
+use tracewasm_llvm::cfg::ControlFlowGraph;
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
 /// Size in bytes of one WebAssembly linear-memory page (64 KiB).
@@ -2071,6 +2072,12 @@ impl<V: VirtualMachine> Module<V> {
         }
 
         Ok(instance)
+    }
+
+    pub fn build_cfg(self: &Arc<Module<V>>) -> Result<ControlFlowGraph, anyhow::Error> {
+        let pass_manager = WasmInstrLLVMPassManager::default();
+
+        pass_manager.compile(self)
     }
 }
 

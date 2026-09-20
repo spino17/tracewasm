@@ -120,6 +120,12 @@ impl GlobalId<DefinedFunc> {
         Some(params[n].clone())
     }
 
+    pub fn params<'a>(&self, ctx: &'a Context) -> &'a [Value] {
+        let func = ctx.get_func(self.tag.raw());
+
+        &func.params
+    }
+
     /// The declared result type, `void` included.
     ///
     /// Every `ret` in this function is checked against it.

@@ -17,7 +17,7 @@ use tracewasm_llvm::{
         global::{DeclaredFunc, DefinedFunc, GlobalId},
         module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
     },
-    instruction::cursor::RegName,
+    instruction::cursor::{OperandTy, RegName},
     interner::TyId,
     value::Value,
 };
@@ -118,7 +118,7 @@ impl WasmInstrLLVMPassManager {
         module: &Arc<Module<V>>,
     ) -> Result<ControlFlowGraph, anyhow::Error> {
         // TODO: get this from the system on which this function is called!
-        let mut ctx = Context::new(
+        let ctx = Context::new(
             Triple::new(
                 "arm64".to_string(),
                 "apple".to_string(),
@@ -206,9 +206,51 @@ impl WasmInstrLLVMPassManager {
         let func_body = &module.func_bodies[(func_index.0 - module.imported_func_count) as usize];
         let locals = &func_body.locals;
         let instructions = &func_body.instructions;
-        let frame_layout = &func_body.frame_layout;
 
         let entry = func.add_basic_block("entry", ctx)?;
+        let params = func.params(ctx).to_vec();
+        let mut entry_cursor = ctx.cursor_at_block(entry);
+
+        let mut counter = 0;
+
+        for (i, local_ty) in locals.iter().enumerate() {
+            let (ptr, val, alignment) = if i < params.len() {
+                let param = &params[i];
+                let ty = param.ty();
+                let alignment = ty.alignment(&entry_cursor);
+
+                (
+                    entry_cursor.build_alloca(
+                        ty,
+                        None,
+                        alignment,
+                        RegName::Named(format!("local{}", counter)),
+                    )?,
+                    param.clone(),
+                    alignment,
+                )
+            } else {
+                let ty = Self::llvm_ty_from_wasm(local_ty, &mut entry_cursor);
+                let val = Value::zero_of_ty(ty, &mut entry_cursor)
+                    .expect("type for wasm locals are always basic type i.e. i32, i64, f32, f64");
+                let alignment = ty.alignment(&entry_cursor);
+
+                (
+                    entry_cursor.build_alloca(
+                        ty,
+                        None,
+                        alignment,
+                        RegName::Named(format!("local{}", counter)),
+                    )?,
+                    val,
+                    alignment,
+                )
+            };
+
+            entry_cursor.build_store(&ptr, &val, OperandTy::Inferred, alignment)?;
+
+            counter += 1;
+        }
 
         let mut cursor = ctx.cursor_at_block(entry);
 

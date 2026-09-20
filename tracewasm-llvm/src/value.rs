@@ -195,6 +195,27 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    pub fn alignment(&self, ctx: &Context) -> Option<u32> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let width = match ty_obj {
+            Type::I1 => 1,
+            Type::I8 => 1,
+            Type::I16 => 2,
+            Type::I32 => 4,
+            Type::I64 => 8,
+            Type::Half => 2,
+            Type::Bfloat => 2,
+            Type::Float => 4,
+            Type::Double => 8,
+            Type::Ptr | Type::Array { .. } | Type::Struct { .. } | Type::Func(_) | Type::Void => {
+                return None;
+            }
+        };
+
+        Some(width)
+    }
+
     /// How many bits this type occupies, or `None` if that is not a fixed number.
     ///
     /// `None` for `ptr` (target-dependent) and for `void` and the aggregates. Note
@@ -522,6 +543,30 @@ impl Value {
             ty: val.ty(ctx),
             kind: ValueKind::ConstExpr(ConstExpr::Const(const_id.into())),
         })
+    }
+
+    pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<Value> {
+        let ty_obj = ctx.ty_interner.value(ty.raw());
+
+        Some(
+            match ty_obj {
+                Type::I1 => Value::from_const(false, OperandTy::Inferred, ctx),
+                Type::I8 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I16 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I32 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I64 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::Float => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Double => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Ptr => Value::from_const(NullPtr, OperandTy::Inferred, ctx),
+                Type::Half
+                | Type::Bfloat
+                | Type::Array { .. }
+                | Type::Func(_)
+                | Type::Struct { .. }
+                | Type::Void => return None,
+            }
+            .expect("hitting this means the above casting is incorrect"),
+        )
     }
 
     /// Interns `name` and builds a register of the given type.
