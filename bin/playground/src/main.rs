@@ -1,6 +1,6 @@
 use crate::counting::CountingMemory;
 use std::fs;
-use tracewasm_core::{Stack, module::Module};
+use tracewasm_core::{Stack, memory::linear::LinearMemory, module::Module};
 use tracewasm_macros::imports;
 
 mod counting;

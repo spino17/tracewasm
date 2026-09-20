@@ -287,13 +287,13 @@ pub trait CfgVisitor {
                 }
                 InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
                 InstructionKind::ICmp(operands) => {
-                    self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                    self.visit_icmp(operands, &val.unwrap().clone().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::IBinOp(operands) => {
                     self.visit_ibinop(operands, val.unwrap(), ctx)?
                 }
                 InstructionKind::FCmp(operands) => {
-                    self.visit_fcmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                    self.visit_fcmp(operands, &val.unwrap().clone().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::FBinOp(operands) => {
                     self.visit_fbinop(operands, val.unwrap(), ctx)?

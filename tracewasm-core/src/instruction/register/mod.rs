@@ -193,7 +193,10 @@ use std::{
     vec,
 };
 use tracewasm_llvm::{
-    cfg::global::{DefinedFunc, GlobalId},
+    cfg::{
+        basic_block::BasicBlockId,
+        global::{DefinedFunc, GlobalId},
+    },
     instruction::cursor::Cursor,
 };
 use tracewasm_utils::interner::{InternedId, Interner};
@@ -6617,9 +6620,10 @@ impl Instruction for RegInstruction {
         &self,
         instr_index: usize,
         curr_cursor: Cursor<'a>,
+        instructions: &[RegInstruction],
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<Cursor<'a>, anyhow::Error> {
+    ) -> Result<BasicBlockId, anyhow::Error> {
         todo!()
     }
 }

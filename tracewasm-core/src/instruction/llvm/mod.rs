@@ -2,24 +2,98 @@ use crate::{
     VirtualMachine,
     instruction::Instruction,
     module::{FuncIndex, Module, ValType},
+    runtime::stack::Stack,
 };
 use rustc_hash::FxHashMap;
-use std::sync::Arc;
+use std::{
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 use tracewasm_llvm::{
     cfg::{
         ControlFlowGraph,
+        basic_block::BasicBlockId,
         context::Context,
         global::{DeclaredFunc, DefinedFunc, GlobalId},
         module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
     },
     instruction::cursor::RegName,
     interner::TyId,
+    value::Value,
 };
+
+struct EndBasicBlockBranches {
+    bb: BasicBlockId,
+    branches: Vec<(Vec<Value>, BasicBlockId)>,
+}
+
+#[derive(Default)]
+pub(crate) struct InstrIndexToBasicBlockMap {
+    end_map: FxHashMap<u32, EndBasicBlockBranches>,
+    else_map: FxHashMap<u32, (BasicBlockId, Vec<Value>)>,
+    // loop_map: FxHashMap<u32, Vec<PhiInstrHandler>>,
+}
+
+impl InstrIndexToBasicBlockMap {
+    pub fn add_end(&mut self, index: u32, block: BasicBlockId) {
+        self.end_map.insert(
+            index,
+            EndBasicBlockBranches {
+                bb: block,
+                branches: vec![],
+            },
+        );
+    }
+
+    pub fn add_branch_to_end(&mut self, index: u32, values: Vec<Value>, block: BasicBlockId) {
+        self.end_map
+            .get_mut(&index)
+            .expect("this method should only be called after calling `add_end`")
+            .branches
+            .push((values, block));
+    }
+
+    pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<Value>) {
+        self.else_map.insert(index, (block, params));
+    }
+
+    pub fn get_else_data(&self, index: u32) -> Option<(BasicBlockId, &[Value])> {
+        self.else_map.get(&index).map(|x| (x.0, x.1.as_ref()))
+    }
+}
+
+pub(crate) struct SimulatedStack {
+    stack: Stack<Value>,
+}
+
+impl Default for SimulatedStack {
+    fn default() -> Self {
+        SimulatedStack {
+            stack: Stack::new_with_capacity(0),
+        }
+    }
+}
+
+impl Deref for SimulatedStack {
+    type Target = Stack<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stack
+    }
+}
+
+impl DerefMut for SimulatedStack {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stack
+    }
+}
 
 #[derive(Default)]
 pub struct WasmInstrLLVMPassManager {
     declared_funcs: FxHashMap<FuncIndex, GlobalId<DeclaredFunc>>,
     defined_funcs: FxHashMap<FuncIndex, GlobalId<DefinedFunc>>,
+    pub(crate) instr_index_to_bb: InstrIndexToBasicBlockMap,
+    pub(crate) simulated_stack: SimulatedStack,
 }
 
 impl WasmInstrLLVMPassManager {
@@ -115,7 +189,9 @@ impl WasmInstrLLVMPassManager {
             // match on the instr!
             // for simple instructions, map it to LLVM instruction
             // for branching instructions like if-else
-            cursor = instr.emit_llvm_ir(instr_index, cursor, func, self)?;
+            let next_block = instr.emit_llvm_ir(instr_index, cursor, instructions, func, self)?;
+
+            cursor = ctx.cursor_at_block(next_block);
         }
 
         todo!()

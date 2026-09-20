@@ -604,7 +604,7 @@ impl Value {
     /// # Errors
     ///
     /// [`TypeError::ValueToI1ValueFailed`] if the value is not an `i1`.
-    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
+    pub fn try_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
         if !self.ty().is_i1(ctx) {
             return Err(TypeError::ValueToI1ValueFailed(
                 self.ty().display(ctx).to_string(),
@@ -617,6 +617,13 @@ impl Value {
             ty: self.ty,
             kind: self.kind,
         })
+    }
+
+    pub fn cast_into_i1(self, ctx: &mut Context) -> I1Value {
+        I1Value {
+            ty: ctx.i1_ty(),
+            kind: self.kind,
+        }
     }
 
     /// Whether this value's type is an integer.
@@ -2437,9 +2444,9 @@ mod tests {
         let ok = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
         let not_i1 = Value::from_const(1i32, OperandTy::Inferred, &mut ctx).unwrap();
 
-        assert!(ok.into_i1(&ctx).is_ok());
+        assert!(ok.try_i1(&ctx).is_ok());
 
-        let err = not_i1.into_i1(&ctx).expect_err("i32 is not i1");
+        let err = not_i1.try_i1(&ctx).expect_err("i32 is not i1");
 
         assert!(
             err.to_string().contains("i32"),
@@ -2455,7 +2462,7 @@ mod tests {
 
         let value = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
         let ty = value.ty();
-        let i1 = value.into_i1(&ctx).unwrap();
+        let i1 = value.try_i1(&ctx).unwrap();
         let back = Value::from(i1);
 
         assert_eq!(ty_of(&back, &ctx), Type::I1);

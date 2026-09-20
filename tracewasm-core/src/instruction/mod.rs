@@ -42,6 +42,7 @@ use crate::{
     },
 };
 use smallvec::SmallVec;
+use tracewasm_llvm::cfg::basic_block::BasicBlockId;
 use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId};
 use tracewasm_llvm::instruction::cursor::Cursor;
 use wasmparser::{BlockType, OperatorsReader};
@@ -324,9 +325,10 @@ pub(crate) trait Instruction: Sized {
         &self,
         instr_index: usize,
         curr_cursor: Cursor<'a>,
+        instructions: &[Self],
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<Cursor<'a>, anyhow::Error>;
+    ) -> Result<BasicBlockId, anyhow::Error>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to

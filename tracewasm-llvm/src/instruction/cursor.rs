@@ -188,6 +188,10 @@ impl<'a> Cursor<'a> {
         self.ctx
     }
 
+    pub fn basic_block(&self) -> BasicBlockId {
+        self.block
+    }
+
     /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///
@@ -1015,7 +1019,7 @@ impl<'a> Cursor<'a> {
         )?;
 
         let i1val = val
-            .into_i1(self.ctx)
+            .try_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1151,7 +1155,7 @@ impl<'a> Cursor<'a> {
         )?;
 
         let i1val = val
-            .into_i1(self.ctx)
+            .try_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1978,7 +1982,7 @@ mod tests {
 
         let cond = Value::from_const(true, OperandTy::Inferred, &mut builder)
             .unwrap()
-            .into_i1(&builder)
+            .try_i1(&builder)
             .unwrap();
 
         builder
@@ -5216,7 +5220,7 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let out = cursor
@@ -5240,7 +5244,7 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         // A struct is a fine arm type.
@@ -5257,7 +5261,7 @@ mod tests {
         let c2 = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
         let v1 = Value::from_register("v1".to_string(), void_ty, &mut cursor);
         let v2 = Value::from_register("v2".to_string(), void_ty, &mut cursor);
@@ -5287,7 +5291,7 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let i64_ty = cursor.i64_ty();
@@ -5335,7 +5339,7 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let out = cursor

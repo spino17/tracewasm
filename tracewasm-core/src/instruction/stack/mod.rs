@@ -101,7 +101,10 @@ use crate::{
 };
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use tracewasm_llvm::{
-    cfg::global::{DefinedFunc, GlobalId},
+    cfg::{
+        basic_block::BasicBlockId,
+        global::{DefinedFunc, GlobalId},
+    },
     instruction::cursor::Cursor,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -4146,23 +4149,122 @@ impl Instruction for StackInstruction {
     fn emit_llvm_ir<'a>(
         &self,
         instr_index: usize,
-        curr_cursor: Cursor<'a>,
+        mut curr_cursor: Cursor<'a>,
+        instructions: &[StackInstruction],
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<Cursor<'a>, anyhow::Error> {
-        match self {
+    ) -> Result<BasicBlockId, anyhow::Error> {
+        Ok(match self {
             StackInstruction::If {
                 else_index,
                 end_index,
-            } => todo!(),
-            _ => todo!(),
-        }
+            } => {
+                let (recorded_height, _) =
+                    Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
 
-        todo!()
+                let cond = pass_manager
+                    .simulated_stack
+                    .pop()
+                    .cast_into_i1(&mut curr_cursor);
+
+                let if_then =
+                    func.add_basic_block(format!("if{}_then", instr_index), &mut curr_cursor)?;
+
+                let if_else = if let Some(else_index) = else_index {
+                    let if_else =
+                        func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
+
+                    let mut params = vec![];
+
+                    for i in recorded_height..pass_manager.simulated_stack.height() {
+                        params.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                    }
+
+                    pass_manager
+                        .instr_index_to_bb
+                        .add_else(*else_index, if_else, params);
+
+                    Some(if_else)
+                } else {
+                    None
+                };
+
+                let if_end =
+                    func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
+
+                pass_manager.instr_index_to_bb.add_end(*end_index, if_end);
+
+                curr_cursor.build_conditional_br(
+                    cond,
+                    if_then,
+                    if let Some(if_else) = if_else {
+                        if_else
+                    } else {
+                        if_end
+                    },
+                )?;
+
+                if_then
+            }
+            StackInstruction::Else { if_end_index } => {
+                let curr_basic_block = curr_cursor.basic_block();
+
+                let (_, arity) = Self::recorded_height_and_arity_from_end_instruction(
+                    *if_end_index,
+                    instructions,
+                );
+
+                let mut results = vec![];
+
+                for _ in 0..arity {
+                    results.push(pass_manager.simulated_stack.pop());
+                }
+
+                pass_manager.instr_index_to_bb.add_branch_to_end(
+                    *if_end_index,
+                    results,
+                    curr_basic_block,
+                );
+
+                // restore the stack with original params
+                let (else_block, params) = pass_manager
+                    .instr_index_to_bb
+                    .get_else_data(instr_index as u32)
+                    .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                for param in params {
+                    pass_manager.simulated_stack.push(param.clone());
+                }
+
+                else_block
+            }
+            StackInstruction::End {
+                arity,
+                recorded_height,
+            } => {
+                todo!()
+            }
+            _ => todo!(),
+        })
     }
 }
 
 impl StackInstruction {
+    fn recorded_height_and_arity_from_end_instruction(
+        end_index: u32,
+        instructions: &[StackInstruction],
+    ) -> (u32, u32) {
+        let StackInstruction::End {
+            arity,
+            recorded_height,
+        } = &instructions[end_index as usize]
+        else {
+            panic!("this method should only be called for `end` instructions!")
+        };
+
+        (*recorded_height, *arity)
+    }
+
     /// Reads local slot `index` of the frame based at `caller_base_height`.
     ///
     /// A frame's locals occupy the operand stack from `caller_base_height` upward —
