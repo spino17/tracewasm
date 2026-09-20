@@ -4213,6 +4213,8 @@ impl Instruction for StackInstruction {
         instr_index: usize,
         mut curr_cursor: Cursor<'a>,
         instructions: &[StackInstruction],
+        locals: &[tracewasm_llvm::value::Value],
+        runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error> {

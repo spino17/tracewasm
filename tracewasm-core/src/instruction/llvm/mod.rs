@@ -204,17 +204,23 @@ impl WasmInstrLLVMPassManager {
         // `func_bodies` covers the defined functions only, so it is indexed by the
         // function index *shifted past the imports* — see `Module::imported_func_count`.
         let func_body = &module.func_bodies[(func_index.0 - module.imported_func_count) as usize];
-        let locals = &func_body.locals;
+        let local_types = &func_body.locals;
         let instructions = &func_body.instructions;
 
         let entry = func.add_basic_block("entry", ctx)?;
         let params = func.params(ctx).to_vec();
+        let runtime_ctx_ptr = params
+            .last()
+            .expect("the context is always a function param")
+            .clone();
         let mut entry_cursor = ctx.cursor_at_block(entry);
 
         let mut counter = 0;
+        let mut locals = vec![];
 
-        for (i, local_ty) in locals.iter().enumerate() {
-            let (ptr, val, alignment) = if i < params.len() {
+        for (i, local_ty) in local_types.iter().enumerate() {
+            // last param is runtime ctx!
+            let (ptr, val, alignment) = if i < params.len() - 1 {
                 let param = &params[i];
                 let ty = param.ty();
                 let alignment = ty.alignment(&entry_cursor);
@@ -247,6 +253,7 @@ impl WasmInstrLLVMPassManager {
                 )
             };
 
+            locals.push(ptr.clone());
             entry_cursor.build_store(&ptr, &val, OperandTy::Inferred, alignment)?;
 
             counter += 1;
@@ -258,12 +265,20 @@ impl WasmInstrLLVMPassManager {
             // match on the instr!
             // for simple instructions, map it to LLVM instruction
             // for branching instructions like if-else
-            let next_block = instr.emit_llvm_ir(instr_index, cursor, instructions, func, self)?;
+            let next_block = instr.emit_llvm_ir(
+                instr_index,
+                cursor,
+                instructions,
+                &locals,
+                &runtime_ctx_ptr,
+                func,
+                self,
+            )?;
 
             cursor = ctx.cursor_at_block(next_block);
         }
 
-        todo!()
+        Ok(())
     }
 
     fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
@@ -324,6 +339,7 @@ mod tests {
             module::{DataLayout, Triple},
         },
         instruction::cursor::OperandTy,
+        value::NullPtr,
     };
 
     /// The pass is not drivable yet — `compile_func` ends in `todo!()` and every
@@ -367,12 +383,15 @@ mod tests {
         mut between: impl FnMut(&mut WasmInstrLLVMPassManager, &mut Builder, usize),
     ) -> BasicBlockId {
         let mut block = entry;
+        let null_ptr = Value::from_const(NullPtr, OperandTy::Inferred, builder).unwrap();
 
         for (index, instr) in instructions.iter().enumerate() {
             let cursor = builder.cursor_at_block(block);
 
+            // No locals: these cases are about control flow, and none of the operators
+            // under test reads a local slot.
             block = instr
-                .emit_llvm_ir(index, cursor, instructions, func, pass)
+                .emit_llvm_ir(index, cursor, instructions, &[], &null_ptr, func, pass)
                 .unwrap();
 
             between(pass, builder, index);

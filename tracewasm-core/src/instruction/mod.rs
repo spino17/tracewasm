@@ -326,6 +326,8 @@ pub(crate) trait Instruction: Sized {
         instr_index: usize,
         curr_cursor: Cursor<'a>,
         instructions: &[Self],
+        locals: &[tracewasm_llvm::value::Value],
+        runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error>;

@@ -6627,6 +6627,8 @@ impl Instruction for RegInstruction {
         _instr_index: usize,
         _curr_cursor: Cursor<'a>,
         _instructions: &[RegInstruction],
+        _locals: &[tracewasm_llvm::value::Value],
+        _runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         _func: GlobalId<DefinedFunc>,
         _pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<BasicBlockId, anyhow::Error> {
