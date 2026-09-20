@@ -291,8 +291,8 @@ pub(crate) trait Instruction: Sized {
     /// for one operator must record an offset for each.
     fn emit_instructions_for_func(
         operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
@@ -436,14 +436,23 @@ struct Block {
 ///
 /// `BlockType::Type(_)` is the shorthand single-result form (`[] -> [t]`),
 /// hence `(0, 1)`.
-fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (u32, u32) {
+fn params_and_results_from_blockty(
+    blockty: &BlockType,
+    types: &[FuncType],
+) -> (Box<[ValType]>, Box<[ValType]>) {
     match blockty {
-        BlockType::Empty => (0, 0),
-        BlockType::Type(_) => (0, 1),
+        BlockType::Empty => (vec![].into_boxed_slice(), vec![].into_boxed_slice()),
+        BlockType::Type(ty) => (
+            vec![].into_boxed_slice(),
+            vec![ValType::from_wasmparser(ty)].into_boxed_slice(),
+        ),
         BlockType::FuncType(index) => {
             let ty = &types[*index as usize];
 
-            (ty.params.len() as u32, ty.results.len() as u32)
+            (
+                ty.params.to_vec().into_boxed_slice(),
+                ty.results.to_vec().into_boxed_slice(),
+            )
         }
     }
 }

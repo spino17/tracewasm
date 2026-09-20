@@ -173,7 +173,9 @@ use crate::{
         },
     },
     memory::Memory,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
+    module::{
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+    },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
         U64_TRUNC_HIGH,
@@ -1040,18 +1042,22 @@ impl SimulatedStack {
         instr_len: usize,
     ) -> (u32, u32) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
+        // The register machine has no use for the types themselves — only the stack
+        // machine's LLVM pass does, and it keeps them in its own signature map.
+        let params_count = params.len() as u32;
+        let results_count = results.len() as u32;
 
         let kind = match kind {
             BlockVariant::Func => BlockKind::Func,
             BlockVariant::Block => BlockKind::Block {
-                index: if params != 0 {
+                index: if params_count != 0 {
                     instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
                 } else {
                     instr_len
                 } as u32,
             },
             BlockVariant::If => BlockKind::If {
-                index: if params != 0 {
+                index: if params_count != 0 {
                     instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
                 } else {
                     instr_len
@@ -1059,7 +1065,7 @@ impl SimulatedStack {
                 else_index: None,
             },
             BlockVariant::Loop => BlockKind::Loop {
-                index: if params != 0 {
+                index: if params_count != 0 {
                     instr_len + 1 // see above.
                 } else {
                     instr_len
@@ -1069,19 +1075,19 @@ impl SimulatedStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block { .. } => self.stack.height() - params,
-            BlockKind::Loop { .. } => self.stack.height() - params,
+            BlockKind::Block { .. } => self.stack.height() - params_count,
+            BlockKind::Loop { .. } => self.stack.height() - params_count,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params
-                self.stack.height() - params - 1
+                self.stack.height() - params_count - 1
             }
         };
 
         self.control_stack.stack.push(Block {
             kind,
             recorded_height,
-            params,
-            results,
+            params: params_count,
+            results: results_count,
             attached_breaks: vec![],
 
             // below two fields are not used in register lowering!
@@ -1090,7 +1096,7 @@ impl SimulatedStack {
             has_inherited: false,
         });
 
-        (params, results)
+        (params_count, results_count)
     }
 
     /// Closes the innermost label and hands back its record, for the `end` that
@@ -2758,8 +2764,8 @@ impl Instruction for RegInstruction {
     /// [`TraceWasmError::Unsupported`].
     fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
@@ -2773,8 +2779,8 @@ impl Instruction for RegInstruction {
         simulated_stack.control_stack.stack.push(Block {
             kind: BlockKind::Func,
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
-            params,
-            results,
+            params: params.len() as u32,
+            results: results.len() as u32,
             is_unreachable_traversing: false,
             has_inherited: false,
             attached_breaks: vec![],
@@ -3531,7 +3537,7 @@ impl Instruction for RegInstruction {
                 Operator::Return => {
                     let move_registers = simulated_stack.br_truncation_registers(
                         0,
-                        results,
+                        results.len() as u32,
                         instructions.len(),
                         InstructionSource::Emit,
                     )?;

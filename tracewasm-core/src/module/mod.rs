@@ -72,7 +72,7 @@ impl GlobalType {
 
     /// The value type stored by this global.
     pub fn content_type(&self) -> ValType {
-        ValType::from_wasmparser(self.0.content_type)
+        ValType::from_wasmparser(&self.0.content_type)
     }
 
     /// Whether the global is mutable (`global.set` is allowed).
@@ -186,14 +186,14 @@ impl ValType {
     /// Total, including `V128`: rejecting SIMD is left to the callers that would
     /// have to represent a value of it, so the type itself can still be named in
     /// a signature this crate merely reads past.
-    pub(crate) fn from_wasmparser(value: wasmparser::ValType) -> Self {
+    pub(crate) fn from_wasmparser(value: &wasmparser::ValType) -> Self {
         match value {
             wasmparser::ValType::I32 => ValType::I32,
             wasmparser::ValType::I64 => ValType::I64,
             wasmparser::ValType::F32 => ValType::F32,
             wasmparser::ValType::F64 => ValType::F64,
             wasmparser::ValType::V128 => ValType::V128,
-            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r)),
+            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r.clone())),
         }
     }
 }
@@ -1141,13 +1141,10 @@ impl<V: VirtualMachine> Module<V> {
                         let results = ty.results();
 
                         types.push(FuncType {
-                            params: params
-                                .iter()
-                                .map(|v| ValType::from_wasmparser(*v))
-                                .collect(),
+                            params: params.iter().map(|v| ValType::from_wasmparser(v)).collect(),
                             results: results
                                 .iter()
-                                .map(|v| ValType::from_wasmparser(*v))
+                                .map(|v| ValType::from_wasmparser(v))
                                 .collect(),
                         });
                     }
@@ -1451,7 +1448,7 @@ impl<V: VirtualMachine> Module<V> {
 
                     for local in locals_reader {
                         let (count, ty) = local?;
-                        let ty = ValType::from_wasmparser(ty);
+                        let ty = ValType::from_wasmparser(&ty);
 
                         // Rejected here rather than when the frame is built: the
                         // local's type is static, so failing at compile time gives
@@ -1469,8 +1466,8 @@ impl<V: VirtualMachine> Module<V> {
                     let (instructions, instruction_offsets, frame_layout) =
                         InstrOf::<V>::emit_instructions_for_func(
                             code_sec_entry.get_operators_reader()?,
-                            params.len() as u32,
-                            results.len() as u32,
+                            params,
+                            results,
                             &types,
                             &func_decls,
                             locals.len() as u32,
@@ -1854,7 +1851,7 @@ impl<V: VirtualMachine> Module<V> {
                 )
             };
 
-            let expected = ValType::from_wasmparser(global.ty.0.content_type);
+            let expected = ValType::from_wasmparser(&global.ty.0.content_type);
             let val = import_registry.get_global(module_name, global_name)?;
 
             if !val.has_ty(expected)? {

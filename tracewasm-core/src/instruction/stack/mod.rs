@@ -90,7 +90,9 @@ use crate::{
         llvm::WasmInstrLLVMPassManager, params_and_results_from_blockty,
     },
     memory::Memory,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
+    module::{
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+    },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
         U64_TRUNC_HIGH, signature_mismatch,
@@ -99,6 +101,7 @@ use crate::{
         value::{DataVal, Value},
     },
 };
+use rustc_hash::FxHashMap;
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
 use tracewasm_llvm::{
     cfg::{
@@ -955,6 +958,7 @@ pub(crate) struct StackFrameLayout {
     /// run naming its own arms, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[StackBrTableTarget]>,
+    pub label_instr_index_to_arity_types: FxHashMap<u32, ()>,
 }
 
 impl StackFrameLayout {
@@ -1013,6 +1017,12 @@ struct ControlStack {
                   `note_height`'s invariant exists to keep it a true bound"
     )]
     max_height: u32,
+    label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
+}
+
+pub struct LabelSignature {
+    pub(crate) params: Box<[ValType]>,
+    pub(crate) results: Box<[ValType]>,
 }
 
 impl ControlStack {
@@ -1035,6 +1045,8 @@ impl ControlStack {
     /// the `If` arm's `PopPush` stack effect, not here.)
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
+        let params_count = params.len() as u32;
+        let results_count = results.len() as u32;
 
         let is_unreachable_traversing = self
             .inner
@@ -1045,8 +1057,8 @@ impl ControlStack {
             self.inner.push(Block {
                 kind,
                 recorded_height: 0, // this won't be used at runtime because of unreachablity
-                params,
-                results,
+                params: params_count,
+                results: results_count,
                 is_unreachable_traversing,
                 has_inherited: true,
                 attached_breaks: vec![],
@@ -1057,19 +1069,35 @@ impl ControlStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block { .. } => self.curr_height - params,
-            BlockKind::Loop { .. } => self.curr_height - params,
-            BlockKind::If { .. } => {
+            BlockKind::Block { index } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
+                self.curr_height - params_count
+            }
+            BlockKind::Loop { index } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
+                self.curr_height - params_count
+            }
+            BlockKind::If {
+                index,
+                else_index: _else_index,
+            } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
                 // top is the `if` condition and then params
-                self.curr_height - params - 1
+                self.curr_height - params_count as u32 - 1
             }
         };
 
         self.inner.push(Block {
             kind,
             recorded_height,
-            params,
-            results,
+            params: params_count,
+            results: results_count,
             is_unreachable_traversing: false,
             has_inherited: false,
             attached_breaks: vec![],
@@ -1350,8 +1378,8 @@ impl Instruction for StackInstruction {
 
     fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         _locals_count: u32,
@@ -1365,8 +1393,8 @@ impl Instruction for StackInstruction {
         control_stack.inner.push(Block {
             kind: BlockKind::Func,
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
-            params,
-            results,
+            params: params.len() as u32,
+            results: results.len() as u32,
             is_unreachable_traversing: false,
             has_inherited: false,
             attached_breaks: vec![],
@@ -2373,6 +2401,7 @@ impl Instruction for StackInstruction {
             instruction_offsets,
             StackFrameLayout {
                 br_targets_arena: br_table_target_branches.into_boxed_slice(),
+                label_instr_index_to_arity_types: FxHashMap::default(),
             },
         ))
     }
