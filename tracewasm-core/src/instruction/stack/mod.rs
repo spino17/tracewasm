@@ -811,10 +811,27 @@ pub(crate) enum StackInstruction {
     Select,
     /// Opens a block. Purely a label: entering one does nothing at runtime, but a
     /// branch targeting it jumps forward to its `End`.
-    Block,
+    Block {
+        /// Absolute index of this block's matching `End`. Backpatched.
+        ///
+        /// Execution never reads it — a `block` is a no-op, and a branch to the label
+        /// carries its own `target_index`. It is here for a consumer that walks the
+        /// body forwards and has to know where the label closes *before* reaching it,
+        /// which is what lowering to a CFG needs: the `end`'s basic block has to exist
+        /// by the time the first branch inside the block is emitted.
+        end_index: u32,
+    },
     /// Opens a loop. Branches targeting a loop jump back to this instruction
-    /// (the loop start), so no `end` index is needed.
-    Loop,
+    /// (the loop start), so the `end` index is not a branch target.
+    Loop {
+        /// Absolute index of this loop's matching `End`. Backpatched.
+        ///
+        /// Not a branch target — a branch to a `loop` label is a back-edge to this
+        /// instruction — but the same forward-walk need applies as for
+        /// [`Block::end_index`](Self::Block): the block control falls into when the
+        /// loop finishes has to exist before the loop body is emitted.
+        end_index: u32,
+    },
     /// `if`: pop a condition and fall through when it is non-zero, otherwise jump
     /// to the `else` branch (or past the `end` when there is none).
     If {
@@ -1040,7 +1057,7 @@ impl ControlStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block => self.curr_height - params,
+            BlockKind::Block { .. } => self.curr_height - params,
             BlockKind::Loop { .. } => self.curr_height - params,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params
@@ -1955,9 +1972,20 @@ impl Instruction for StackInstruction {
                 ),
                 // blocks
                 Operator::Block { blockty } => {
-                    control_stack.add_block(BlockKind::Block, &blockty, types);
+                    control_stack.add_block(
+                        BlockKind::Block {
+                            index: instructions.len() as u32,
+                        },
+                        &blockty,
+                        types,
+                    );
 
-                    (StackInstruction::Block, StackEffectResult::NoEffect)
+                    (
+                        StackInstruction::Block {
+                            end_index: u32::MAX, // dummy value! backpatched when we see this block's END
+                        },
+                        StackEffectResult::NoEffect,
+                    )
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
@@ -1968,7 +1996,12 @@ impl Instruction for StackInstruction {
                         types,
                     );
 
-                    (StackInstruction::Loop, StackEffectResult::NoEffect)
+                    (
+                        StackInstruction::Loop {
+                            end_index: u32::MAX, // dummy value! backpatched when we see this loop's END
+                        },
+                        StackEffectResult::NoEffect,
+                    )
                 }
                 Operator::If { blockty } => {
                     control_stack.add_block(
@@ -2226,11 +2259,37 @@ impl Instruction for StackInstruction {
                         }
                     }
 
-                    // Backpatch this block's own structural indices. `func`/`loop` need none: a function's
-                    // `end` is not referenced by index, and a loop's branch target is its start, not its end.
+                    // Backpatch this block's own structural indices. `func` needs none: a
+                    // function's `end` is the final instruction and nothing names it by
+                    // index.
                     match block.kind {
-                        BlockKind::Func | BlockKind::Loop { .. } => {}
-                        BlockKind::Block => {} // no backpatching require
+                        BlockKind::Func => {}
+                        // Neither a `block`'s nor a `loop`'s `end_index` is a branch
+                        // target — branches carry their own, and a loop's is its start —
+                        // but both openers name their `end` so a forward walk knows where
+                        // the label closes. See `StackInstruction::Block::end_index`.
+                        BlockKind::Block { index: block_index } => {
+                            let StackInstruction::Block { end_index } =
+                                &mut instructions[block_index as usize]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *end_index = index;
+                        }
+                        BlockKind::Loop { index: loop_index } => {
+                            let StackInstruction::Loop { end_index } =
+                                &mut instructions[loop_index as usize]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *end_index = index;
+                        }
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
@@ -4036,8 +4095,8 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::Block => Step::Next,
-            StackInstruction::Loop => Step::Next,
+            StackInstruction::Block { .. } => Step::Next,
+            StackInstruction::Loop { .. } => Step::Next,
             StackInstruction::If {
                 else_index,
                 end_index,
@@ -4474,5 +4533,83 @@ impl StackInstruction {
             .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
 
         Ok(effective_offset as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::Module;
+
+    /// Lowers `wat`'s first function body, validating it first so a wrong assertion
+    /// cannot be blamed on a typo in the module.
+    fn lower(wat: &str) -> Vec<StackInstruction> {
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+
+        wasmparser::Validator::new()
+            .validate_all(&bytes)
+            .expect("wat does not validate — the test would prove nothing");
+
+        let module = Module::<crate::Stack>::compile(&bytes).expect("compiles");
+
+        module.func_bodies[0].instructions.to_vec()
+    }
+
+    /// Both openers carry an `end_index` that execution never reads, so nothing else
+    /// would notice it being left at the `u32::MAX` sentinel.
+    #[test]
+    fn a_block_and_a_loop_are_backpatched_with_their_own_end() {
+        // `block` closing after `loop` is what distinguishes a correct backpatch from
+        // one that pairs an opener with the nearest `end`, or with the outermost one.
+        let instructions = lower(
+            r#"
+            (module
+              (func
+                (block
+                  (loop
+                    (nop)))))
+            "#,
+        );
+
+        let mut openers = vec![];
+
+        for (index, instr) in instructions.iter().enumerate() {
+            let end_index = match instr {
+                StackInstruction::Block { end_index } => *end_index,
+                StackInstruction::Loop { end_index } => *end_index,
+                _ => continue,
+            };
+
+            assert_ne!(
+                end_index,
+                u32::MAX,
+                "opener at {index} was left at the sentinel"
+            );
+            assert!(
+                matches!(
+                    instructions[end_index as usize],
+                    StackInstruction::End { .. }
+                ),
+                "opener at {index} names {end_index}, which is not an `end`: {instructions:?}"
+            );
+
+            openers.push((index as u32, end_index));
+        }
+
+        let [(block_at, block_end), (loop_at, loop_end)] = openers[..] else {
+            panic!("expected one `block` then one `loop`: {instructions:?}")
+        };
+
+        // Properly nested: the loop opens inside the block and closes before it.
+        assert!(block_at < loop_at, "{instructions:?}");
+        assert!(loop_at < loop_end, "{instructions:?}");
+        assert!(loop_end < block_end, "{instructions:?}");
+
+        // ...and neither reaches for the function's own `end`, which is the last
+        // instruction.
+        assert!(
+            block_end < instructions.len() as u32 - 1,
+            "the block took the function's `end`: {instructions:?}"
+        );
     }
 }

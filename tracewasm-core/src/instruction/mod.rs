@@ -339,10 +339,15 @@ pub(crate) enum BlockKind {
     /// `end` is the final instruction and no branch instruction stores its
     /// index directly).
     Func,
-    /// A `block`. Carries nothing: its label is its `end`, and every branch to it is
-    /// backpatched through [`Block::attached_breaks`], so there is no index worth
-    /// recording here.
-    Block,
+    /// A `block`. `index` is the position of its opening instruction, so that
+    /// instruction can be backpatched with its own `end` once that `end` is seen.
+    ///
+    /// Branches *to* the label are handled separately, through
+    /// [`Block::attached_breaks`]; this index is about the opener itself, which needs
+    /// to name its `end` for a consumer that walks the body forwards and has to know
+    /// where the label closes before it gets there — the LLVM pass, which creates the
+    /// `end`'s basic block when the label opens.
+    Block { index: u32 },
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
     Loop { index: u32 },

@@ -1043,7 +1043,13 @@ impl SimulatedStack {
 
         let kind = match kind {
             BlockVariant::Func => BlockKind::Func,
-            BlockVariant::Block => BlockKind::Block,
+            BlockVariant::Block => BlockKind::Block {
+                index: if params != 0 {
+                    instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
+                } else {
+                    instr_len
+                } as u32,
+            },
             BlockVariant::If => BlockKind::If {
                 index: if params != 0 {
                     instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
@@ -1063,7 +1069,7 @@ impl SimulatedStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block => self.stack.height() - params,
+            BlockKind::Block { .. } => self.stack.height() - params,
             BlockKind::Loop { .. } => self.stack.height() - params,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params
@@ -3702,7 +3708,7 @@ impl Instruction for RegInstruction {
                     // `end` is not referenced by index, and a loop's branch target is its start, not its end.
                     match block.kind {
                         BlockKind::Func | BlockKind::Loop { .. } => {}
-                        BlockKind::Block => {} // no backpatching require
+                        BlockKind::Block { .. } => {} // no backpatching require
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
