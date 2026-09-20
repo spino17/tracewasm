@@ -105,7 +105,7 @@ use tracewasm_llvm::{
         basic_block::BasicBlockId,
         global::{DefinedFunc, GlobalId},
     },
-    instruction::cursor::Cursor,
+    instruction::cursor::{Cursor, RegName},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -4209,12 +4209,14 @@ impl Instruction for StackInstruction {
             StackInstruction::Else { if_end_index } => {
                 let curr_basic_block = curr_cursor.basic_block();
 
-                let (_, arity) = Self::recorded_height_and_arity_from_end_instruction(
+                let (recorded_height, arity) = Self::recorded_height_and_arity_from_end_instruction(
                     *if_end_index,
                     instructions,
                 );
 
                 let mut results = vec![];
+
+                debug_assert!(pass_manager.simulated_stack.height() - recorded_height == arity);
 
                 for _ in 0..arity {
                     results.push(pass_manager.simulated_stack.pop());
@@ -4229,11 +4231,11 @@ impl Instruction for StackInstruction {
                 // restore the stack with original params
                 let (else_block, params) = pass_manager
                     .instr_index_to_bb
-                    .get_else_data(instr_index as u32)
+                    .take_else_data(instr_index as u32)
                     .expect("hitting this means logic for tracking `else` index is incorrect");
 
                 for param in params {
-                    pass_manager.simulated_stack.push(param.clone());
+                    pass_manager.simulated_stack.push(param);
                 }
 
                 else_block
@@ -4242,7 +4244,47 @@ impl Instruction for StackInstruction {
                 arity,
                 recorded_height,
             } => {
-                todo!()
+                let mut results = vec![];
+                let curr_basic_block = curr_cursor.basic_block();
+
+                debug_assert!(pass_manager.simulated_stack.height() - recorded_height == *arity);
+
+                for _ in 0..*arity {
+                    results.push(pass_manager.simulated_stack.pop());
+                }
+
+                pass_manager.instr_index_to_bb.add_branch_to_end(
+                    instr_index as u32,
+                    results,
+                    curr_basic_block,
+                );
+
+                let end_data = pass_manager
+                    .instr_index_to_bb
+                    .take_end_data(instr_index as u32)
+                    .expect("hitting this means logic for tracking `end` index is incorrect");
+
+                let end_block = end_data.basic_block;
+                let branches = end_data.branches;
+                let mut end_cursor = curr_cursor.cursor_at_block(end_block);
+
+                for (values, branch_block) in branches {
+                    debug_assert!(values.len() == *arity as usize);
+
+                    let mut branches = vec![];
+
+                    for value in values.into_iter().rev() {
+                        branches.push((branch_block, value));
+                    }
+
+                    for _ in 0..*arity as usize {
+                        let (_, reg) = end_cursor.build_phi(&branches, RegName::Unnamed)?;
+
+                        pass_manager.simulated_stack.push(reg);
+                    }
+                }
+
+                end_block
             }
             _ => todo!(),
         })

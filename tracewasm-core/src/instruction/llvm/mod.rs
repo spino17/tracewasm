@@ -22,9 +22,9 @@ use tracewasm_llvm::{
     value::Value,
 };
 
-struct EndBasicBlockBranches {
-    bb: BasicBlockId,
-    branches: Vec<(Vec<Value>, BasicBlockId)>,
+pub(crate) struct EndBasicBlockBranches {
+    pub(crate) basic_block: BasicBlockId,
+    pub(crate) branches: Vec<(Vec<Value>, BasicBlockId)>,
 }
 
 #[derive(Default)]
@@ -39,7 +39,7 @@ impl InstrIndexToBasicBlockMap {
         self.end_map.insert(
             index,
             EndBasicBlockBranches {
-                bb: block,
+                basic_block: block,
                 branches: vec![],
             },
         );
@@ -57,8 +57,12 @@ impl InstrIndexToBasicBlockMap {
         self.else_map.insert(index, (block, params));
     }
 
-    pub fn get_else_data(&self, index: u32) -> Option<(BasicBlockId, &[Value])> {
-        self.else_map.get(&index).map(|x| (x.0, x.1.as_ref()))
+    pub fn take_else_data(&mut self, index: u32) -> Option<(BasicBlockId, Vec<Value>)> {
+        self.else_map.remove(&index)
+    }
+
+    pub fn take_end_data(&mut self, index: u32) -> Option<EndBasicBlockBranches> {
+        self.end_map.remove(&index)
     }
 }
 
