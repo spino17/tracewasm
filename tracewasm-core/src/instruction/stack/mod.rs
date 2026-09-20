@@ -105,7 +105,10 @@ use tracewasm_llvm::{
         basic_block::BasicBlockId,
         global::{DefinedFunc, GlobalId},
     },
-    instruction::cursor::{Cursor, RegName},
+    instruction::{
+        ICond,
+        cursor::{Cursor, OperandTy, RegName},
+    },
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -4162,27 +4165,40 @@ impl Instruction for StackInstruction {
                 let (recorded_height, _) =
                     Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
 
-                let cond = pass_manager
-                    .simulated_stack
-                    .pop()
-                    .cast_into_i1(&mut curr_cursor);
+                // Wasm branches on "non-zero", and LLVM's `br` takes an `i1`, so the
+                // condition needs a real comparison. Retyping the i32 in place would
+                // emit `br i1 %x` against a register defined as i32 — IR that does not
+                // assemble.
+                let cond_val = pass_manager.simulated_stack.pop();
+                let zero = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                let cond = curr_cursor.build_icmp(
+                    ICond::Ne,
+                    OperandTy::Inferred,
+                    &cond_val,
+                    &zero,
+                    RegName::Unnamed,
+                )?;
 
                 let if_then =
                     func.add_basic_block(format!("if{}_then", instr_index), &mut curr_cursor)?;
+
+                // The block's params are live *before* the branch, so they dominate both
+                // arms and can be used as they are — no phi. Collected bottom-up, which
+                // is the order they are pushed back in.
+                let mut params = vec![];
+
+                for i in recorded_height..pass_manager.simulated_stack.height() {
+                    params.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                }
 
                 let if_else = if let Some(else_index) = else_index {
                     let if_else =
                         func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
 
-                    let mut params = vec![];
-
-                    for i in recorded_height..pass_manager.simulated_stack.height() {
-                        params.push(pass_manager.simulated_stack.stack[i as usize].clone());
-                    }
-
                     pass_manager
                         .instr_index_to_bb
-                        .add_else(*else_index, if_else, params);
+                        .add_else(*else_index, if_else, params.clone());
 
                     Some(if_else)
                 } else {
@@ -4194,15 +4210,25 @@ impl Instruction for StackInstruction {
 
                 pass_manager.instr_index_to_bb.add_end(*end_index, if_end);
 
-                curr_cursor.build_conditional_br(
-                    cond,
-                    if_then,
-                    if let Some(if_else) = if_else {
-                        if_else
-                    } else {
-                        if_end
-                    },
-                )?;
+                let false_label = if let Some(if_else) = if_else {
+                    if_else
+                } else {
+                    // No `else`, so the false edge jumps straight to the `end` and
+                    // carries the block's params through as its results — wasm requires
+                    // the two to match for an `if` without an else arm. Recording it here
+                    // is what keeps the phi at `if_end` from being short a predecessor.
+                    // Reversed because a branch records its values top-first, as popping
+                    // them leaves them.
+                    pass_manager.instr_index_to_bb.add_branch_to_end(
+                        *end_index,
+                        params.into_iter().rev().collect(),
+                        curr_cursor.basic_block(),
+                    );
+
+                    if_end
+                };
+
+                curr_cursor.build_conditional_br(cond, if_then, false_label)?;
 
                 if_then
             }
@@ -4227,6 +4253,16 @@ impl Instruction for StackInstruction {
                     results,
                     curr_basic_block,
                 );
+
+                // The then-arm leaves the construct here rather than falling into the
+                // `else`, so its block has to be closed with a jump to the `end`. Without
+                // it the block is emitted with no terminator, and the phi there names a
+                // predecessor that never branches to it.
+                let if_end = pass_manager
+                    .instr_index_to_bb
+                    .end_basic_block(*if_end_index);
+
+                curr_cursor.build_unconditional_br(if_end)?;
 
                 // restore the stack with original params
                 let (else_block, params) = pass_manager
@@ -4290,6 +4326,11 @@ impl Instruction for StackInstruction {
 
                     pass_manager.simulated_stack.push(reg);
                 }
+
+                // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has
+                // to come after the phis are in — which is also why the block being left
+                // is closed last rather than first.
+                curr_cursor.build_unconditional_br(end_block)?;
 
                 end_block
             }

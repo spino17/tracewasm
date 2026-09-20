@@ -619,13 +619,6 @@ impl Value {
         })
     }
 
-    pub fn cast_into_i1(self, ctx: &mut Context) -> I1Value {
-        I1Value {
-            ty: ctx.i1_ty(),
-            kind: self.kind,
-        }
-    }
-
     /// Whether this value's type is an integer.
     pub fn is_integer(&self, ctx: &Context) -> bool {
         self.ty().is_integer(ctx)
