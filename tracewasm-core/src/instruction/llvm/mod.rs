@@ -54,9 +54,20 @@ impl InstrIndexToBasicBlockMap {
         let mut phi_handlers = vec![];
         let mut phi_vals = vec![];
 
-        for res in &results {
-            let (phi_handler, phi_val) =
-                cursor.build_phi(&[], OperandTy::Asserted(*res), RegName::Unnamed)?;
+        // One phi per result, in the label's own type order — index 0 is the
+        // *deepest* value, the last index is the top of the stack. Every branch that
+        // later feeds this label hands its values in that same order, so a branch's
+        // `values[i]` and this `phi_handlers[i]` always name the same slot.
+        for (i, res) in results.iter().enumerate() {
+            // Named deliberately. These are created when the label *opens*, so an
+            // unnamed one would take a number well before the block it sits in is
+            // printed — and LLVM requires unnamed registers to run in textual order.
+            // A named register draws nothing from that counter. See `RegName`.
+            let (phi_handler, phi_val) = cursor.build_phi(
+                &[],
+                OperandTy::Asserted(*res),
+                RegName::Named(format!("end{}_res{}", index, i)),
+            )?;
 
             phi_handlers.push(phi_handler);
             phi_vals.push(phi_val);
@@ -67,8 +78,8 @@ impl InstrIndexToBasicBlockMap {
             EndBasicBlockBranches {
                 basic_block: block,
                 results,
-                phi_vals: vec![],
-                phi_handlers: vec![],
+                phi_vals,
+                phi_handlers,
             },
         );
 
@@ -87,10 +98,14 @@ impl InstrIndexToBasicBlockMap {
             .get_mut(&index)
             .expect("this method should only be called after calling `add_end`");
 
-        if values.len() != end_data.results.len() as usize {
+        if values.len() != end_data.results.len() {
             panic!("values passed to `end` should match the expected arity")
         }
 
+        // `values` is in the label's own order — deepest first — so it lines up with
+        // `phi_handlers` index for index. A caller that hands them over top-first
+        // would type-check only while every result shares a type, and silently pair
+        // the wrong values when they do.
         for (i, value) in values.iter().enumerate() {
             let phi_handler = end_data.phi_handlers[i];
 
@@ -362,13 +377,21 @@ impl WasmInstrLLVMPassManager {
         }
 
         let func_end = func.add_basic_block("end", ctx)?;
+        // The body's last instruction is the function's own `end`. It has no opening
+        // instruction to enter the label from — `block`/`loop`/`if` each push theirs
+        // when emitted — so the implicit outermost label is pushed here instead, and
+        // popped by that `end` like any other.
+        let func_end_instr_index = instructions.len() - 1;
 
         self.instr_index_to_basic_block.add_end(
-            instructions.len() as u32 - 1,
+            func_end_instr_index as u32,
             results_ty,
             func_end,
             ctx,
         )?;
+
+        self.control_stack
+            .enter_label(LabelKind::Func, 0, func_end_instr_index);
 
         let mut cursor = ctx.cursor_at_block(entry);
         let mut index = 0;
@@ -448,7 +471,7 @@ fn llvm_signature_from_wasm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instruction::stack::StackInstruction;
+    use crate::instruction::stack::{LabelSignature, StackFrameLayout, StackInstruction};
     use tracewasm_llvm::{
         cfg::{
             builder::Builder,
@@ -459,12 +482,32 @@ mod tests {
         value::NullPtr,
     };
 
-    /// The pass is not drivable yet — `compile_func` ends in `todo!()` and every
-    /// non-control operator hits the catch-all arm — so these drive `emit_llvm_ir`
-    /// over a hand-written instruction slice instead, standing in for the operand
-    /// producers by pushing onto the simulated stack between calls. That is enough to
-    /// pin the three control arms: the condition's comparison, the fall-through
-    /// terminators, and the phis at the `end`.
+    /// A body whose only label is an `if` at instruction 0, returning `results`.
+    ///
+    /// Lowering builds this from the operator stream; these tests hand-write the
+    /// instruction slice, so they have to hand-write the layout that goes with it.
+    fn layout_for_if_at_zero(results: &[ValType]) -> StackFrameLayout {
+        let mut label_instr_index_to_signature = FxHashMap::default();
+
+        label_instr_index_to_signature.insert(
+            0,
+            LabelSignature {
+                params: vec![].into_boxed_slice(),
+                results: results.to_vec().into_boxed_slice(),
+            },
+        );
+
+        StackFrameLayout {
+            br_targets_arena: vec![].into_boxed_slice(),
+            label_instr_index_to_signature,
+        }
+    }
+
+    /// These drive `emit_llvm_ir` over a hand-written instruction slice rather than
+    /// going through `compile_func`, standing in for the operand producers by pushing
+    /// onto the simulated stack between calls — most operators still hit the catch-all
+    /// `todo!()` arm. That is enough to pin the control arms: the condition's
+    /// comparison, the fall-through terminators, and the phis at the `end`.
     fn harness() -> (Builder, GlobalId<DefinedFunc>, BasicBlockId, Value) {
         let ctx = Context::new(
             Triple::new(
@@ -497,28 +540,43 @@ mod tests {
         func: GlobalId<DefinedFunc>,
         entry: BasicBlockId,
         instructions: &[StackInstruction],
+        frame_layout: &StackFrameLayout,
         mut between: impl FnMut(&mut WasmInstrLLVMPassManager, &mut Builder, usize),
     ) -> BasicBlockId {
         let mut block = entry;
         let null_ptr = Value::from_const(NullPtr, OperandTy::Inferred, builder).unwrap();
+        let mut index = 0;
 
-        for (index, instr) in instructions.iter().enumerate() {
+        // Index-driven, like `compile_func`: an arm returns where to resume, which is
+        // not always the next instruction.
+        while index < instructions.len() {
             let cursor = builder.cursor_at_block(block);
 
             // No locals: these cases are about control flow, and none of the operators
             // under test reads a local slot.
-            block = instr
-                .emit_llvm_ir(index, cursor, instructions, &[], &null_ptr, func, pass)
+            let (next_block, next_index) = instructions[index]
+                .emit_llvm_ir(
+                    index,
+                    cursor,
+                    instructions,
+                    frame_layout,
+                    &[],
+                    &null_ptr,
+                    func,
+                    pass,
+                )
                 .unwrap();
 
             between(pass, builder, index);
+
+            block = next_block;
+            index = next_index;
         }
 
         block
     }
 
     #[test]
-    #[ignore = "LLVM IR emission is mid-rewrite; re-enable once the pass settles"]
     fn an_if_else_joins_its_two_arms_with_one_phi() {
         let (mut builder, func, entry, n) = harness();
         let mut pass = WasmInstrLLVMPassManager::default();
@@ -544,6 +602,7 @@ mod tests {
             func,
             entry,
             &instructions,
+            &layout_for_if_at_zero(&[ValType::I32]),
             |pass, builder, index| {
                 // Each arm's body leaves one result behind.
                 if index == 0 || index == 1 {
@@ -565,12 +624,16 @@ mod tests {
 
         let ir = IREmitter::emit(builder.build()).unwrap();
 
-        // The condition is compared, not relabelled.
-        assert!(ir.contains("icmp ne i32 %n, 0"), "{ir}");
+        // The condition is compared, not relabelled — and the register is named, so
+        // it cannot be numbered out of textual order the way an unnamed one would be.
+        assert!(ir.contains("%if0_cond = icmp ne i32 %n, 0"), "{ir}");
         assert!(
-            ir.contains("br i1 %0, label %if0_then, label %if0_else"),
+            ir.contains("br i1 %if0_cond, label %if0_then, label %if0_else"),
             "{ir}"
         );
+
+        // Nothing the pass defines draws from LLVM's unnamed counter.
+        assert!(!ir.contains("%0"), "an unnamed register slipped in\n{ir}");
 
         // Both arms are closed rather than falling off the end of their block.
         assert_eq!(
@@ -588,7 +651,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "LLVM IR emission is mid-rewrite; re-enable once the pass settles"]
     fn an_if_without_an_else_still_reaches_the_end_from_both_edges() {
         let (mut builder, func, entry, n) = harness();
         let mut pass = WasmInstrLLVMPassManager::default();
@@ -617,6 +679,7 @@ mod tests {
             func,
             entry,
             &instructions,
+            &layout_for_if_at_zero(&[ValType::I32]),
             |pass, builder, index| {
                 if index == 0 {
                     // The then-arm replaces the param with a result of its own.
@@ -648,7 +711,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "LLVM IR emission is mid-rewrite; re-enable once the pass settles"]
     fn a_multi_value_end_keeps_its_results_in_stack_order() {
         let (mut builder, func, entry, n) = harness();
         let mut pass = WasmInstrLLVMPassManager::default();
@@ -673,6 +735,7 @@ mod tests {
             func,
             entry,
             &instructions,
+            &layout_for_if_at_zero(&[ValType::I32, ValType::I32]),
             |pass, builder, index| {
                 if index == 0 || index == 1 {
                     // Two results per arm: `1`/`2` from the then-arm, `3`/`4` from the

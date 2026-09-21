@@ -4270,11 +4270,16 @@ impl Instruction for StackInstruction {
                 let index = index.0 as usize;
                 let local_ptr = &locals[index];
 
+                // Named, like every register this pass defines: an unnamed one takes
+                // its number when it is *created*, but LLVM numbers by position in the
+                // printed function, and blocks here are created long before they are
+                // filled. See `RegName` — a named register draws nothing from that
+                // counter, so it cannot be numbered out of order.
                 let local_val = curr_cursor.build_load(
                     local_ptr,
                     OperandTy::Inferred,
                     None,
-                    RegName::Unnamed,
+                    RegName::Named(format!("local{}_val", index)),
                 )?;
 
                 pass_manager.simulated_stack.push(local_val);
@@ -4298,14 +4303,13 @@ impl Instruction for StackInstruction {
                 arity,
                 recorded_height: _recorded_height,
             } => {
+                // Deepest first, top last — the order the target's phis are in. A `br`
+                // only reads them: the stack is unwound at the label it lands in.
                 let mut results = vec![];
+                let start_index = pass_manager.simulated_stack.height() - *arity;
 
-                for i in 0..*arity {
-                    results.push(
-                        pass_manager.simulated_stack.stack
-                            [(pass_manager.simulated_stack.height() - i - 1) as usize]
-                            .clone(),
-                    );
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    results.push(pass_manager.simulated_stack.stack[i as usize].clone());
                 }
 
                 let end_block = pass_manager.instr_index_to_basic_block.add_branch_to_end(
@@ -4335,6 +4339,8 @@ impl Instruction for StackInstruction {
                 for val in phi_vals {
                     pass_manager.simulated_stack.push(val.clone());
                 }
+
+                pass_manager.control_stack.leave_label();
 
                 return Ok((end_block, curr_label_end_index + 1));
             }
@@ -4369,7 +4375,7 @@ impl Instruction for StackInstruction {
                     OperandTy::Inferred,
                     &cond_val,
                     &zero,
-                    RegName::Unnamed,
+                    RegName::Named(format!("if{}_cond", instr_index)),
                 )?;
 
                 let if_then =
@@ -4416,11 +4422,11 @@ impl Instruction for StackInstruction {
                     // carries the block's params through as its results — wasm requires
                     // the two to match for an `if` without an else arm. Recording it here
                     // is what keeps the phi at `if_end` from being short a predecessor.
-                    // Reversed because a branch records its values top-first, as popping
-                    // them leaves them.
+                    // `params` was collected deepest-first, which is already the order
+                    // the phis are in.
                     pass_manager.instr_index_to_basic_block.add_branch_to_end(
                         *end_index,
-                        params.into_iter().rev().collect(),
+                        params,
                         curr_cursor.basic_block(),
                         &mut curr_cursor,
                     )?;
@@ -4440,13 +4446,11 @@ impl Instruction for StackInstruction {
                     instructions,
                 );
 
-                let mut results = vec![];
-
                 debug_assert!(pass_manager.simulated_stack.height() - recorded_height == arity);
 
-                for _ in 0..arity {
-                    results.push(pass_manager.simulated_stack.pop());
-                }
+                // `pops_and_reverse` hands them back deepest-first, which is the order
+                // the `end`'s phis are in. Popping one at a time would give the reverse.
+                let results = pass_manager.simulated_stack.pops_and_reverse(arity);
 
                 let if_end = pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     *if_end_index,
@@ -4475,14 +4479,12 @@ impl Instruction for StackInstruction {
             } => {
                 pass_manager.control_stack.leave_label();
 
-                let mut results = vec![];
                 let curr_basic_block = curr_cursor.basic_block();
 
                 debug_assert!(pass_manager.simulated_stack.height() - recorded_height == *arity);
 
-                for _ in 0..*arity {
-                    results.push(pass_manager.simulated_stack.pop());
-                }
+                // Deepest-first, matching the phi order established by `add_end`.
+                let results = pass_manager.simulated_stack.pops_and_reverse(*arity);
 
                 pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     instr_index as u32,
