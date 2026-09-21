@@ -4308,17 +4308,12 @@ impl Instruction for StackInstruction {
                     );
                 }
 
-                pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                let end_block = pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     *target_index,
                     results,
                     curr_cursor.basic_block(),
                     &mut curr_cursor,
                 )?;
-
-                let (_, end_block) = pass_manager
-                    .instr_index_to_basic_block
-                    .phi_vals_and_branch_for_end(*target_index)
-                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                 curr_cursor.build_unconditional_br(end_block)?;
 
@@ -4453,20 +4448,12 @@ impl Instruction for StackInstruction {
                     results.push(pass_manager.simulated_stack.pop());
                 }
 
-                pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                let if_end = pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     *if_end_index,
                     results,
                     curr_basic_block,
                     &mut curr_cursor,
                 )?;
-
-                // The then-arm leaves the construct here rather than falling into the
-                // `else`, so its block has to be closed with a jump to the `end`. Without
-                // it the block is emitted with no terminator, and the phi there names a
-                // predecessor that never branches to it.
-                let if_end = pass_manager
-                    .instr_index_to_basic_block
-                    .get_end_basic_block(*if_end_index);
 
                 curr_cursor.build_unconditional_br(if_end)?;
 

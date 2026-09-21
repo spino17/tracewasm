@@ -81,7 +81,7 @@ impl InstrIndexToBasicBlockMap {
         values: Vec<Value>,
         block: BasicBlockId,
         ctx: &mut Context,
-    ) -> Result<(), PhiError> {
+    ) -> Result<BasicBlockId, PhiError> {
         let end_data = self
             .end_map
             .get_mut(&index)
@@ -97,7 +97,7 @@ impl InstrIndexToBasicBlockMap {
             phi_handler.add_branch((block, value.clone()), ctx)?;
         }
 
-        Ok(())
+        Ok(end_data.basic_block)
     }
 
     pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[Value], BasicBlockId)> {
