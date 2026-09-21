@@ -904,7 +904,9 @@ mod tests {
 
         let mut in_body = builder.cursor_at_block(body);
 
-        let (phi_handler, phi) = in_body.build_phi(&[(entry, loaded)], "m".into()).unwrap();
+        let (phi_handler, phi) = in_body
+            .build_phi(&[(entry, loaded)], OperandTy::Inferred, "m".into())
+            .unwrap();
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
         // requires one phi entry per predecessor.

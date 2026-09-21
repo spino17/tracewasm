@@ -326,11 +326,12 @@ pub(crate) trait Instruction: Sized {
         instr_index: usize,
         curr_cursor: Cursor<'a>,
         instructions: &[Self],
+        frame_layout: &Self::FrameLayout,
         locals: &[tracewasm_llvm::value::Value],
         runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<BasicBlockId, anyhow::Error>;
+    ) -> Result<(BasicBlockId, usize), anyhow::Error>;
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to

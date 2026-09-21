@@ -6633,11 +6633,12 @@ impl Instruction for RegInstruction {
         _instr_index: usize,
         _curr_cursor: Cursor<'a>,
         _instructions: &[RegInstruction],
+        _frame_layout: &RegFrameLayout,
         _locals: &[tracewasm_llvm::value::Value],
         _runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         _func: GlobalId<DefinedFunc>,
         _pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<BasicBlockId, anyhow::Error> {
+    ) -> Result<(BasicBlockId, usize), anyhow::Error> {
         return Err(anyhow::Error::msg(
             "currently LLVM IR cannot be emitted for register instructions",
         ));

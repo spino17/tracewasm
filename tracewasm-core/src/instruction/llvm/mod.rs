@@ -29,7 +29,7 @@ use tracewasm_llvm::{
 
 pub(crate) struct EndBasicBlockBranches {
     pub(crate) basic_block: BasicBlockId,
-    pub(crate) arity: u32,
+    pub(crate) results: Vec<TyId>,
     pub(crate) phi_vals: Vec<Value>,
     pub(crate) phi_handlers: Vec<PhiInstrHandler>,
 }
@@ -42,16 +42,37 @@ pub(crate) struct InstrIndexToBasicBlockMap {
 }
 
 impl InstrIndexToBasicBlockMap {
-    pub fn add_end(&mut self, index: u32, arity: u32, block: BasicBlockId) {
+    pub fn add_end(
+        &mut self,
+        index: u32,
+        results: &[ValType],
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), PhiError> {
+        let results: Vec<TyId> = results.iter().map(|x| llvm_ty_from_wasm(x, ctx)).collect();
+        let mut cursor = ctx.cursor_at_block(block);
+        let mut phi_handlers = vec![];
+        let mut phi_vals = vec![];
+
+        for res in &results {
+            let (phi_handler, phi_val) =
+                cursor.build_phi(&[], OperandTy::Asserted(*res), RegName::Unnamed)?;
+
+            phi_handlers.push(phi_handler);
+            phi_vals.push(phi_val);
+        }
+
         self.end_map.insert(
             index,
             EndBasicBlockBranches {
                 basic_block: block,
-                arity,
+                results,
                 phi_vals: vec![],
                 phi_handlers: vec![],
             },
         );
+
+        Ok(())
     }
 
     pub fn add_branch_to_end(
@@ -66,32 +87,14 @@ impl InstrIndexToBasicBlockMap {
             .get_mut(&index)
             .expect("this method should only be called after calling `add_end`");
 
-        if values.len() != end_data.arity as usize {
+        if values.len() != end_data.results.len() as usize {
             panic!("values passed to `end` should match the expected arity")
         }
 
-        let mut end_cursor = ctx.cursor_at_block(end_data.basic_block);
+        for (i, value) in values.iter().enumerate() {
+            let phi_handler = end_data.phi_handlers[i];
 
-        if end_data.phi_vals.is_empty() && end_data.arity != 0 {
-            let mut phi_vals = vec![];
-            let mut phi_handlers = vec![];
-
-            for value in &values {
-                let (phi_handler, phi_val) =
-                    end_cursor.build_phi(&[(block, value.clone())], RegName::Unnamed)?;
-
-                phi_vals.push(phi_val);
-                phi_handlers.push(phi_handler);
-            }
-
-            end_data.phi_vals = phi_vals;
-            end_data.phi_handlers = phi_handlers;
-        } else {
-            for (i, value) in values.iter().enumerate() {
-                let phi_handler = end_data.phi_handlers[i];
-
-                phi_handler.add_branch((block, value.clone()), ctx)?;
-            }
+            phi_handler.add_branch((block, value.clone()), ctx)?;
         }
 
         Ok(())
@@ -120,7 +123,7 @@ impl InstrIndexToBasicBlockMap {
     /// [`take_end_data`](Self::take_end_data) is for the `end` itself, which is done
     /// with the entry; this is for everything that has to *jump* there while the label
     /// is still open — the then-arm falling into an `else`, and every `br` inside.
-    pub fn end_basic_block(&self, index: u32) -> BasicBlockId {
+    pub fn get_end_basic_block(&self, index: u32) -> BasicBlockId {
         self.end_map
             .get(&index)
             .expect("this method should only be called after calling `add_end`")
@@ -154,12 +157,56 @@ impl DerefMut for SimulatedStack {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum LabelKind {
+    If,
+    Loop,
+    Block,
+    Func,
+}
+
+pub(crate) struct Label {
+    pub kind: LabelKind,
+    pub instr_index: usize,
+    pub end_instr_index: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct ControlStack {
+    stack: Vec<Label>,
+}
+
+impl ControlStack {
+    pub fn enter_label(&mut self, kind: LabelKind, instr_index: usize, end_instr_index: usize) {
+        self.stack.push(Label {
+            kind,
+            instr_index,
+            end_instr_index,
+        });
+    }
+
+    pub fn leave_label(&mut self) -> Label {
+        self.stack
+            .pop()
+            .expect("hitting this means the logic for control stack mutation is incorrect")
+    }
+
+    pub fn curr_label(&self) -> &Label {
+        &self.stack[self.stack.len() - 1]
+    }
+
+    pub fn enclosing_func_instr_indices(&self) -> (usize, usize) {
+        (self.stack[0].instr_index, self.stack[0].end_instr_index)
+    }
+}
+
 #[derive(Default)]
 pub struct WasmInstrLLVMPassManager {
     declared_funcs: FxHashMap<FuncIndex, GlobalId<DeclaredFunc>>,
     defined_funcs: FxHashMap<FuncIndex, GlobalId<DefinedFunc>>,
-    pub(crate) instr_index_to_bb: InstrIndexToBasicBlockMap,
+    pub(crate) instr_index_to_basic_block: InstrIndexToBasicBlockMap,
     pub(crate) simulated_stack: SimulatedStack,
+    pub(crate) control_stack: ControlStack,
 }
 
 impl WasmInstrLLVMPassManager {
@@ -199,7 +246,7 @@ impl WasmInstrLLVMPassManager {
             let results = &func_ty.results;
 
             let (llvm_params, llvm_result) =
-                Self::llvm_signature_from_wasm(params, results, &mut builder)?;
+                llvm_signature_from_wasm(params, results, &mut builder)?;
 
             if func_index < imported_func_count as usize {
                 let func = builder.declare_function(
@@ -256,18 +303,20 @@ impl WasmInstrLLVMPassManager {
         let func_body = &module.func_bodies[(func_index.0 - module.imported_func_count) as usize];
         let local_types = &func_body.locals;
         let instructions = &func_body.instructions;
-        let results_count = module.types[module.func_decls[func_index.0 as usize].ty.0 as usize]
-            .results
-            .len();
+        let frame_layout = &func_body.frame_layout;
+        let func_decl = &module.func_decls[func_index.0 as usize];
+        let func_ty = &module.types[func_decl.ty.0 as usize];
+        let results_ty = &func_ty.results;
 
         let entry = func.add_basic_block("entry", ctx)?;
         let params = func.params(ctx).to_vec();
+
         let runtime_ctx_ptr = params
             .last()
             .expect("the context is always a function param")
             .clone();
-        let mut entry_cursor = ctx.cursor_at_block(entry);
 
+        let mut entry_cursor = ctx.cursor_at_block(entry);
         let mut counter = 0;
         let mut locals = vec![];
 
@@ -289,7 +338,7 @@ impl WasmInstrLLVMPassManager {
                     alignment,
                 )
             } else {
-                let ty = Self::llvm_ty_from_wasm(local_ty, &mut entry_cursor);
+                let ty = llvm_ty_from_wasm(local_ty, &mut entry_cursor);
                 let val = Value::zero_of_ty(ty, &mut entry_cursor)
                     .expect("type for wasm locals are always basic type i.e. i32, i64, f32, f64");
                 let alignment = ty.alignment(&entry_cursor);
@@ -314,79 +363,86 @@ impl WasmInstrLLVMPassManager {
 
         let func_end = func.add_basic_block("end", ctx)?;
 
-        self.instr_index_to_bb.add_end(
+        self.instr_index_to_basic_block.add_end(
             instructions.len() as u32 - 1,
-            results_count as u32,
+            results_ty,
             func_end,
-        );
+            ctx,
+        )?;
 
         let mut cursor = ctx.cursor_at_block(entry);
+        let mut index = 0;
 
-        for (instr_index, instr) in instructions.iter().enumerate() {
-            // match on the instr!
-            // for simple instructions, map it to LLVM instruction
-            // for branching instructions like if-else
-            let next_block = instr.emit_llvm_ir(
-                instr_index,
+        loop {
+            if index >= instructions.len() {
+                break;
+            }
+
+            let instr = &instructions[index];
+
+            let (next_block, next_instr_index) = instr.emit_llvm_ir(
+                index,
                 cursor,
                 instructions,
+                frame_layout,
                 &locals,
                 &runtime_ctx_ptr,
                 func,
                 self,
             )?;
 
+            index = next_instr_index;
             cursor = ctx.cursor_at_block(next_block);
         }
 
         Ok(())
     }
+}
 
-    fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
-        match ty {
-            ValType::I32 => ctx.i32_ty(),
-            ValType::I64 => ctx.i64_ty(),
-            ValType::F32 => ctx.f32_ty(),
-            ValType::F64 => ctx.f64_ty(),
-            ValType::Ref(_) => ctx.ptr_ty(),
-            ValType::V128 => unreachable!("v128 is rejected at Module check time"),
-        }
+fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
+    match ty {
+        ValType::I32 => ctx.i32_ty(),
+        ValType::I64 => ctx.i64_ty(),
+        ValType::F32 => ctx.f32_ty(),
+        ValType::F64 => ctx.f64_ty(),
+        ValType::Ref(_) => ctx.ptr_ty(),
+        ValType::V128 => unreachable!("v128 is rejected at Module check time"),
+    }
+}
+
+fn llvm_signature_from_wasm(
+    params: &[ValType],
+    results: &[ValType],
+    ctx: &mut Context,
+) -> Result<(Vec<TyId>, TyId), anyhow::Error> {
+    let mut llvm_params = vec![];
+
+    for param_ty in params {
+        llvm_params.push(llvm_ty_from_wasm(param_ty, ctx));
     }
 
-    fn llvm_signature_from_wasm(
-        params: &[ValType],
-        results: &[ValType],
-        ctx: &mut Context,
-    ) -> Result<(Vec<TyId>, TyId), anyhow::Error> {
-        let mut llvm_params = vec![];
+    llvm_params.push(ctx.ptr_ty()); // pointer to runtime struct containing mmap memory pointers etc.
 
-        for param_ty in params {
-            llvm_params.push(Self::llvm_ty_from_wasm(param_ty, ctx));
-        }
+    // The runtime pointer goes on the *end* so a wasm local index and its LLVM
+    // parameter index stay equal.
+    let llvm_result = match results {
+        // Wasm spells "returns nothing" as an empty result list; LLVM spells it
+        // `void`, so this arm is not the degenerate case it looks like — it is
+        // every function rustc emits for a unit return.
+        [] => ctx.void_ty(),
+        [result] => llvm_ty_from_wasm(result, ctx),
+        _ => {
+            let mut fields = vec![];
 
-        llvm_params.push(ctx.ptr_ty()); // pointer to runtime struct containing mmap memory pointers etc.
-
-        // The runtime pointer goes on the *end* so a wasm local index and its LLVM
-        // parameter index stay equal.
-        let llvm_result = match results {
-            // Wasm spells "returns nothing" as an empty result list; LLVM spells it
-            // `void`, so this arm is not the degenerate case it looks like — it is
-            // every function rustc emits for a unit return.
-            [] => ctx.void_ty(),
-            [result] => Self::llvm_ty_from_wasm(result, ctx),
-            _ => {
-                let mut fields = vec![];
-
-                for result in results {
-                    fields.push(Self::llvm_ty_from_wasm(result, ctx));
-                }
-
-                ctx.struct_ty(&fields, false)?
+            for result in results {
+                fields.push(llvm_ty_from_wasm(result, ctx));
             }
-        };
 
-        Ok((llvm_params, llvm_result))
-    }
+            ctx.struct_ty(&fields, false)?
+        }
+    };
+
+    Ok((llvm_params, llvm_result))
 }
 
 #[cfg(test)]

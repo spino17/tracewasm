@@ -211,13 +211,18 @@ impl<'a> Cursor<'a> {
     pub fn build_phi(
         &mut self,
         branches: &[(BasicBlockId, Value)],
+        ty: OperandTy,
         reg: RegName,
     ) -> Result<(PhiInstrHandler, Value), PhiError> {
-        if branches.is_empty() {
-            return Err(PhiError::PhiInstructionWithNoBranches);
-        }
+        let ref_ty = if branches.is_empty() {
+            match ty {
+                OperandTy::Asserted(ty) => ty,
+                OperandTy::Inferred => return Err(PhiError::PhiInstructionWithNoBranches),
+            }
+        } else {
+            branches[0].1.ty()
+        };
 
-        let ref_ty = branches[0].1.ty();
         let func_id = self.ctx.get_block(self.block).func_id;
         let reg_name = self.ctx.name_for_reg(&reg, func_id)?;
         let val = Value::from_register(reg_name, ref_ty, self.ctx);
@@ -1722,7 +1727,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .build_phi(&[], "result".into())
+            .build_phi(&[], OperandTy::Inferred, "result".into())
             .expect_err("a phi with no branches has no value and no type");
 
         assert!(matches!(err, PhiError::PhiInstructionWithNoBranches));
@@ -1746,7 +1751,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("no predecessors to choose between");
 
         assert!(matches!(
@@ -1774,8 +1779,12 @@ mod tests {
         );
         let mut cursor = builder.cursor_at_block(body);
 
-        let (first, _) = cursor.build_phi(&[(entry, v1)], "a".into()).unwrap();
-        let (second, _) = cursor.build_phi(&[(entry, v2)], "b".into()).unwrap();
+        let (first, _) = cursor
+            .build_phi(&[(entry, v1)], OperandTy::Inferred, "a".into())
+            .unwrap();
+        let (second, _) = cursor
+            .build_phi(&[(entry, v2)], OperandTy::Inferred, "b".into())
+            .unwrap();
 
         assert_eq!((first.index, first.block), (0, body));
         assert_eq!((second.index, second.block), (1, body));
@@ -1783,7 +1792,9 @@ mod tests {
         // A different block starts its own numbering, which is why the id has to
         // carry the block to be unambiguous.
         let mut cursor = builder.cursor_at_block(tail);
-        let (elsewhere, _) = cursor.build_phi(&[(entry, v3)], "c".into()).unwrap();
+        let (elsewhere, _) = cursor
+            .build_phi(&[(entry, v3)], OperandTy::Inferred, "c".into())
+            .unwrap();
 
         assert_eq!((elsewhere.index, elsewhere.block), (0, tail));
         assert_ne!(elsewhere.block, first.block);
@@ -1802,7 +1813,9 @@ mod tests {
         let v = value(1, &mut builder);
         let mut cursor = builder.cursor_at_block(body);
 
-        let (_, result) = cursor.build_phi(&[(entry, v)], "merged".into()).unwrap();
+        let (_, result) = cursor
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "merged".into())
+            .unwrap();
 
         assert_eq!(
             builder.ty_interner.value(result.ty().raw()),
@@ -1828,7 +1841,11 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .build_phi(&[(entry, an_i32), (other, an_i64)], "merged".into())
+            .build_phi(
+                &[(entry, an_i32), (other, an_i64)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .expect_err("the second branch is an i64");
 
         assert!(
@@ -1885,7 +1902,11 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let (_, merged) = cursor
-            .build_phi(&[(entry, a), (other, b)], "merged".into())
+            .build_phi(
+                &[(entry, a), (other, b)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .expect("both branches are `[4 x i32]`");
 
         assert_eq!(
@@ -1916,7 +1937,7 @@ mod tests {
             .unwrap();
 
         let err = cursor
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("the block already has an instruction");
 
         assert!(matches!(err, PhiError::PhiInstructionAddError));
@@ -2058,7 +2079,7 @@ mod tests {
         let mut reopened = builder.cursor_at_block(body);
 
         let err = reopened
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("`body` already ends in a branch");
 
         assert!(
@@ -2220,7 +2241,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         cursor
-            .build_phi(&[(entry, v)], "m".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "m".into())
             .expect("a phi opens the block");
 
         cursor
@@ -2950,7 +2971,11 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let (phi, _) = cursor
-            .build_phi(&[(entry, v1), (other, v2)], "merged".into())
+            .build_phi(
+                &[(entry, v1), (other, v2)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .unwrap();
 
         let err = phi

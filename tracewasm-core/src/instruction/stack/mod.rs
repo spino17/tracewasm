@@ -87,7 +87,8 @@ use crate::{
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
-        llvm::WasmInstrLLVMPassManager, params_and_results_from_blockty,
+        llvm::{LabelKind, WasmInstrLLVMPassManager},
+        params_and_results_from_blockty,
     },
     memory::Memory,
     module::{
@@ -4242,12 +4243,13 @@ impl Instruction for StackInstruction {
         instr_index: usize,
         mut curr_cursor: Cursor<'a>,
         instructions: &[StackInstruction],
+        frame_layout: &StackFrameLayout,
         locals: &[tracewasm_llvm::value::Value],
         runtime_ctx_ptr: &tracewasm_llvm::value::Value,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<BasicBlockId, anyhow::Error> {
-        Ok(match self {
+    ) -> Result<(BasicBlockId, usize), anyhow::Error> {
+        match self {
             StackInstruction::Return {
                 target_index,
                 arity,
@@ -4276,8 +4278,6 @@ impl Instruction for StackInstruction {
                 )?;
 
                 pass_manager.simulated_stack.push(local_val);
-
-                curr_cursor.basic_block()
             }
             StackInstruction::LocalSet { index } => {
                 let index = index.0 as usize;
@@ -4285,8 +4285,6 @@ impl Instruction for StackInstruction {
                 let val = pass_manager.simulated_stack.pop();
 
                 curr_cursor.build_store(local_ptr, &val, OperandTy::Inferred, None)?;
-
-                curr_cursor.basic_block()
             }
             StackInstruction::LocalTee { index } => {
                 let index = index.0 as usize;
@@ -4294,15 +4292,75 @@ impl Instruction for StackInstruction {
                 let top_val = pass_manager.simulated_stack.peek_from_top(0);
 
                 curr_cursor.build_store(local_ptr, top_val, OperandTy::Inferred, None)?;
+            }
+            StackInstruction::Br {
+                target_index,
+                arity,
+                recorded_height: _recorded_height,
+            } => {
+                let mut results = vec![];
 
-                curr_cursor.basic_block()
+                for i in 0..*arity {
+                    results.push(
+                        pass_manager.simulated_stack.stack
+                            [(pass_manager.simulated_stack.height() - i - 1) as usize]
+                            .clone(),
+                    );
+                }
+
+                pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                    *target_index,
+                    results,
+                    curr_cursor.basic_block(),
+                    &mut curr_cursor,
+                )?;
+
+                let (_, end_block) = pass_manager
+                    .instr_index_to_basic_block
+                    .phi_vals_and_branch_for_end(*target_index)
+                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                curr_cursor.build_unconditional_br(end_block)?;
+
+                let curr_label_end_index = pass_manager.control_stack.curr_label().end_instr_index;
+
+                let (recorded_height, _) =
+                    StackInstruction::recorded_height_and_arity_from_end_instruction(
+                        curr_label_end_index as u32,
+                        instructions,
+                    );
+
+                let (phi_vals, end_block) = pass_manager
+                    .instr_index_to_basic_block
+                    .phi_vals_and_branch_for_end(curr_label_end_index as u32)
+                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                pass_manager.simulated_stack.truncate(recorded_height);
+
+                for val in phi_vals {
+                    pass_manager.simulated_stack.push(val.clone());
+                }
+
+                return Ok((end_block, curr_label_end_index + 1));
             }
             StackInstruction::If {
                 else_index,
                 end_index,
             } => {
-                let (recorded_height, arity) =
+                pass_manager.control_stack.enter_label(
+                    LabelKind::If,
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let (recorded_height, _) =
                     Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                let results_ty = &label_sig.results;
 
                 // Wasm branches on "non-zero", and LLVM's `br` takes an `i1`, so the
                 // condition needs a real comparison. Retyping the i32 in place would
@@ -4335,9 +4393,11 @@ impl Instruction for StackInstruction {
                     let if_else =
                         func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
 
-                    pass_manager
-                        .instr_index_to_bb
-                        .add_else(*else_index, if_else, params.clone());
+                    pass_manager.instr_index_to_basic_block.add_else(
+                        *else_index,
+                        if_else,
+                        params.clone(),
+                    );
 
                     Some(if_else)
                 } else {
@@ -4347,9 +4407,12 @@ impl Instruction for StackInstruction {
                 let if_end =
                     func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
 
-                pass_manager
-                    .instr_index_to_bb
-                    .add_end(*end_index, arity, if_end);
+                pass_manager.instr_index_to_basic_block.add_end(
+                    *end_index,
+                    results_ty,
+                    if_end,
+                    &mut curr_cursor,
+                )?;
 
                 let false_label = if let Some(if_else) = if_else {
                     if_else
@@ -4360,7 +4423,7 @@ impl Instruction for StackInstruction {
                     // is what keeps the phi at `if_end` from being short a predecessor.
                     // Reversed because a branch records its values top-first, as popping
                     // them leaves them.
-                    pass_manager.instr_index_to_bb.add_branch_to_end(
+                    pass_manager.instr_index_to_basic_block.add_branch_to_end(
                         *end_index,
                         params.into_iter().rev().collect(),
                         curr_cursor.basic_block(),
@@ -4372,7 +4435,7 @@ impl Instruction for StackInstruction {
 
                 curr_cursor.build_conditional_br(cond, if_then, false_label)?;
 
-                if_then
+                return Ok((if_then, instr_index + 1));
             }
             StackInstruction::Else { if_end_index } => {
                 let curr_basic_block = curr_cursor.basic_block();
@@ -4390,7 +4453,7 @@ impl Instruction for StackInstruction {
                     results.push(pass_manager.simulated_stack.pop());
                 }
 
-                pass_manager.instr_index_to_bb.add_branch_to_end(
+                pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     *if_end_index,
                     results,
                     curr_basic_block,
@@ -4402,14 +4465,14 @@ impl Instruction for StackInstruction {
                 // it the block is emitted with no terminator, and the phi there names a
                 // predecessor that never branches to it.
                 let if_end = pass_manager
-                    .instr_index_to_bb
-                    .end_basic_block(*if_end_index);
+                    .instr_index_to_basic_block
+                    .get_end_basic_block(*if_end_index);
 
                 curr_cursor.build_unconditional_br(if_end)?;
 
                 // restore the stack with original params
                 let (else_block, params) = pass_manager
-                    .instr_index_to_bb
+                    .instr_index_to_basic_block
                     .take_else_data(instr_index as u32)
                     .expect("hitting this means logic for tracking `else` index is incorrect");
 
@@ -4417,12 +4480,14 @@ impl Instruction for StackInstruction {
                     pass_manager.simulated_stack.push(param);
                 }
 
-                else_block
+                return Ok((else_block, instr_index + 1));
             }
             StackInstruction::End {
                 arity,
                 recorded_height,
             } => {
+                pass_manager.control_stack.leave_label();
+
                 let mut results = vec![];
                 let curr_basic_block = curr_cursor.basic_block();
 
@@ -4432,7 +4497,7 @@ impl Instruction for StackInstruction {
                     results.push(pass_manager.simulated_stack.pop());
                 }
 
-                pass_manager.instr_index_to_bb.add_branch_to_end(
+                pass_manager.instr_index_to_basic_block.add_branch_to_end(
                     instr_index as u32,
                     results,
                     curr_basic_block,
@@ -4440,7 +4505,7 @@ impl Instruction for StackInstruction {
                 )?;
 
                 let (phi_vals, end_block) = pass_manager
-                    .instr_index_to_bb
+                    .instr_index_to_basic_block
                     .phi_vals_and_branch_for_end(instr_index as u32)
                     .expect("hitting this means logic for tracking `end` index is incorrect");
 
@@ -4453,10 +4518,12 @@ impl Instruction for StackInstruction {
                 // is closed last rather than first.
                 curr_cursor.build_unconditional_br(end_block)?;
 
-                end_block
+                return Ok((end_block, instr_index + 1));
             }
             _ => todo!(),
-        })
+        };
+
+        Ok((curr_cursor.basic_block(), instr_index + 1))
     }
 }
 
