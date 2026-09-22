@@ -4284,19 +4284,21 @@ impl Instruction for StackInstruction {
                 pass_manager.simulated_stack.truncate(recorded_height);
 
                 let (next_block, next_instr_index) = if let Some(if_ctx) =
-                    pass_manager.control_stack.try_curr_label_as_if()
+                    pass_manager.control_stack.try_curr_label_as_if_mut()
                     && !if_ctx.is_else_ongoing
                     && let Some(curr_label_else_index) = if_ctx.else_instr_index
                 {
                     // restore the stack with original params
                     let (else_block, params) = pass_manager
                         .instr_index_to_basic_block
-                        .take_else_data(instr_index as u32)
+                        .take_else_data(curr_label_else_index)
                         .expect("hitting this means logic for tracking `else` index is incorrect");
 
                     for param in params {
                         pass_manager.simulated_stack.push(param);
                     }
+
+                    if_ctx.is_else_ongoing = true;
 
                     (else_block, curr_label_else_index as usize + 1)
                 } else {
@@ -4309,10 +4311,10 @@ impl Instruction for StackInstruction {
                         pass_manager.simulated_stack.push(val.clone());
                     }
 
+                    pass_manager.control_stack.leave_label();
+
                     (end_block, curr_label_end_index + 1)
                 };
-
-                pass_manager.control_stack.leave_label();
 
                 return Ok((next_block, next_instr_index));
             }
