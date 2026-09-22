@@ -8,7 +8,7 @@ use crate::{
     },
     error::ContextError,
     interner::{StrId, TyId},
-    value::Value,
+    value::ValueId,
 };
 use id_arena::Id;
 use rustc_hash::FxHashSet;
@@ -21,7 +21,7 @@ use rustc_hash::FxHashSet;
 /// them in — the first is the entry block.
 pub struct Function {
     pub(crate) name: StrId,
-    pub(crate) params: Vec<Value>,
+    pub(crate) params: Vec<ValueId>,
     pub(crate) result: TyId,
     pub(crate) blocks: Vec<BasicBlockId>,
     pub(crate) block_names: FxHashSet<StrId>,
@@ -107,9 +107,9 @@ impl GlobalId<DefinedFunc> {
     ///
     /// Parameters are registers, usable directly as operands. A pointer parameter has
     /// no defining instruction, so
-    /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
+    /// [`try_inferring_pointee_ty`](crate::value::ValueId) declines on it and any
     /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
-    pub fn nth_param(&self, n: usize, ctx: &Context) -> Option<Value> {
+    pub fn nth_param(&self, n: usize, ctx: &Context) -> Option<ValueId> {
         let func = ctx.get_func(self.tag.raw());
         let params = &func.params;
 
@@ -117,10 +117,10 @@ impl GlobalId<DefinedFunc> {
             return None;
         }
 
-        Some(params[n].clone())
+        Some(params[n])
     }
 
-    pub fn params<'a>(&self, ctx: &'a Context) -> &'a [Value] {
+    pub fn params<'a>(&self, ctx: &'a Context) -> &'a [ValueId] {
         let func = ctx.get_func(self.tag.raw());
 
         &func.params
@@ -172,12 +172,12 @@ mod tests {
             .nth_param(1, &builder)
             .expect("two parameters were declared");
 
-        assert_eq!(first.ty(), i32_ty);
-        assert_eq!(second.ty(), f64_ty);
+        assert_eq!(first.ty(&builder), i32_ty);
+        assert_eq!(second.ty(&builder), f64_ty);
 
         // A parameter is a register, which is what makes it usable as an operand.
-        let name_of = |v: &crate::value::Value| {
-            let ValueKind::Reg(reg) = v.kind() else {
+        let name_of = |v: &crate::value::ValueId| {
+            let ValueKind::Reg(reg) = v.kind(&builder) else {
                 panic!("a parameter is a register")
             };
 
@@ -236,8 +236,8 @@ mod tests {
             .define_function("g".to_string(), &[(f64_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(f.nth_param(0, &builder).unwrap().ty(), i32_ty);
-        assert_eq!(g.nth_param(0, &builder).unwrap().ty(), f64_ty);
+        assert_eq!(f.nth_param(0, &builder).unwrap().ty(&builder), i32_ty);
+        assert_eq!(g.nth_param(0, &builder).unwrap().ty(&builder), f64_ty);
     }
 
     /// The result type comes back as declared, `void` included — that is a real

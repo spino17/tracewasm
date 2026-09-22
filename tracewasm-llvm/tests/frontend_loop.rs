@@ -76,15 +76,15 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
         .unwrap();
 
     let next = in_loop
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "next".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, i, "next".into())
         .unwrap();
 
     let dec = in_loop
-        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, i, one, "dec".into())
         .unwrap();
 
     let cond = in_loop
-        .build_icmp(ICond::Sgt, OperandTy::Inferred, &dec, &zero, "cond".into())
+        .build_icmp(ICond::Sgt, OperandTy::Inferred, dec, zero, "cond".into())
         .unwrap();
 
     // Close the back edge now that the values exist.
@@ -97,7 +97,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
 
     builder
         .cursor_at_block(exit)
-        .build_ret(Some(&next), i32_ty.into())
+        .build_ret(Some(next), i32_ty.into())
         .unwrap();
 
     let ir = IREmitter::emit(builder.build()).unwrap();
@@ -211,10 +211,10 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
         .unwrap();
 
     let bit = in_loop
-        .build_ibinop(IBinOp::And, OperandTy::Inferred, &i, &one, "bit".into())
+        .build_ibinop(IBinOp::And, OperandTy::Inferred, i, one, "bit".into())
         .unwrap();
     let even = in_loop
-        .build_icmp(ICond::Eq, OperandTy::Inferred, &bit, &zero, "even".into())
+        .build_icmp(ICond::Eq, OperandTy::Inferred, bit, zero, "even".into())
         .unwrap();
 
     in_loop.build_conditional_br(even, then_b, else_b).unwrap();
@@ -222,13 +222,13 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     // --- the two arms ---
     let mut in_then = builder.cursor_at_block(then_b);
     let a = in_then
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "a".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, i, "a".into())
         .unwrap();
     in_then.build_unconditional_br(latch).unwrap();
 
     let mut in_else = builder.cursor_at_block(else_b);
     let b = in_else
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &one, "b".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, one, "b".into())
         .unwrap();
     in_else.build_unconditional_br(latch).unwrap();
 
@@ -243,10 +243,10 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
         )
         .unwrap();
     let dec = in_latch
-        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, i, one, "dec".into())
         .unwrap();
     let cont = in_latch
-        .build_icmp(ICond::Sgt, OperandTy::Inferred, &dec, &zero, "cont".into())
+        .build_icmp(ICond::Sgt, OperandTy::Inferred, dec, zero, "cont".into())
         .unwrap();
 
     in_latch.build_conditional_br(cont, loop_b, exit).unwrap();
@@ -261,7 +261,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
 
     builder
         .cursor_at_block(exit)
-        .build_ret(Some(&merged), i32_ty.into())
+        .build_ret(Some(merged), i32_ty.into())
         .unwrap();
 
     let ir = IREmitter::emit(builder.build()).unwrap();

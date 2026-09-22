@@ -14,7 +14,7 @@ use crate::{
         InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
         SwitchOperands, UnconditionalBrOperands,
     },
-    value::{FuncSignature, I1Value, Value},
+    value::{FuncSignature, I1Value, ValueId},
 };
 
 /// Walks a [`ControlFlowGraph`], visiting each construct in emission order.
@@ -85,7 +85,7 @@ pub trait CfgVisitor {
     fn visit_load(
         &mut self,
         operands: &LoadOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -100,7 +100,7 @@ pub trait CfgVisitor {
     fn visit_alloca(
         &mut self,
         operands: &AllocaOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -108,7 +108,7 @@ pub trait CfgVisitor {
     fn visit_get_element_ptr(
         &mut self,
         operands: &GetElementPtrOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -120,7 +120,7 @@ pub trait CfgVisitor {
     fn visit_call(
         &mut self,
         operands: &CallOperands,
-        value: Option<&Value>,
+        value: Option<ValueId>,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -141,7 +141,7 @@ pub trait CfgVisitor {
     fn visit_ibinop(
         &mut self,
         operands: &IBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -160,7 +160,7 @@ pub trait CfgVisitor {
     fn visit_fbinop(
         &mut self,
         operands: &FBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -170,7 +170,7 @@ pub trait CfgVisitor {
     fn visit_fneg(
         &mut self,
         operands: &FNegOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -178,7 +178,7 @@ pub trait CfgVisitor {
     fn visit_cast(
         &mut self,
         operands: &CastOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -193,7 +193,7 @@ pub trait CfgVisitor {
     fn visit_select(
         &mut self,
         operands: &SelectOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -278,31 +278,31 @@ pub trait CfgVisitor {
                     self.visit_conditional_br(operands, ctx)?
                 }
                 InstructionKind::Alloca(operands) => {
-                    self.visit_alloca(operands, val.unwrap(), ctx)?
+                    self.visit_alloca(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::Load(operands) => self.visit_load(operands, val.unwrap(), ctx)?,
+                InstructionKind::Load(operands) => self.visit_load(operands, *val.unwrap(), ctx)?,
                 InstructionKind::Store(operands) => self.visit_store(operands, ctx)?,
                 InstructionKind::GetElementPtr(operands) => {
-                    self.visit_get_element_ptr(operands, val.unwrap(), ctx)?
+                    self.visit_get_element_ptr(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
+                InstructionKind::Call(operands) => self.visit_call(operands, val.copied(), ctx)?,
                 InstructionKind::ICmp(operands) => {
-                    self.visit_icmp(operands, &val.unwrap().clone().try_i1(ctx).unwrap(), ctx)?
+                    self.visit_icmp(operands, &val.unwrap().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::IBinOp(operands) => {
-                    self.visit_ibinop(operands, val.unwrap(), ctx)?
+                    self.visit_ibinop(operands, *val.unwrap(), ctx)?
                 }
                 InstructionKind::FCmp(operands) => {
-                    self.visit_fcmp(operands, &val.unwrap().clone().try_i1(ctx).unwrap(), ctx)?
+                    self.visit_fcmp(operands, &val.unwrap().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::FBinOp(operands) => {
-                    self.visit_fbinop(operands, val.unwrap(), ctx)?
+                    self.visit_fbinop(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
-                InstructionKind::Cast(operands) => self.visit_cast(operands, val.unwrap(), ctx)?,
+                InstructionKind::FNeg(operands) => self.visit_fneg(operands, *val.unwrap(), ctx)?,
+                InstructionKind::Cast(operands) => self.visit_cast(operands, *val.unwrap(), ctx)?,
                 InstructionKind::Switch(operands) => self.visit_switch(operands, ctx)?,
                 InstructionKind::Select(operands) => {
-                    self.visit_select(operands, val.unwrap(), ctx)?
+                    self.visit_select(operands, *val.unwrap(), ctx)?
                 }
                 InstructionKind::Unreachable => self.visit_unreachable(ctx)?,
             });

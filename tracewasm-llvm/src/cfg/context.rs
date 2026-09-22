@@ -12,7 +12,7 @@ use crate::{
     error::{ContextError, TypeError},
     instruction::cursor::{Cursor, OperandTy},
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
-    value::{Const, ConstExpr, ConstValue, Type, TypeDisplay, Value},
+    value::{Const, ConstExpr, ConstValue, Type, TypeDisplay, Value, ValueId},
 };
 use id_arena::Arena;
 use regex::Regex;
@@ -35,6 +35,7 @@ use std::collections::hash_map::Entry;
 /// takes `&mut Context` rather than the individual pool it happens to need.
 pub struct Context {
     pub(crate) module: Module,
+    pub(crate) values: Arena<Value>,
     pub(crate) blocks: Arena<BasicBlock>,
     pub(crate) funcs: Arena<Function>,
     pub(crate) str_interner: StrInterner,
@@ -52,6 +53,7 @@ impl Context {
     pub fn new(triple: Triple, data_layout: DataLayout) -> Self {
         Context {
             module: Module::new(triple, data_layout),
+            values: Arena::default(),
             blocks: Arena::default(),
             funcs: Arena::default(),
             str_interner: StrInterner::default(),
@@ -119,6 +121,25 @@ impl Context {
     }
 
     /// Resolves a block id. Panics only if the id came from another context.
+    /// Allocates a value and hands back its id. The only way a [`ValueId`] is made.
+    pub(crate) fn alloc_value(&mut self, value: Value) -> ValueId {
+        ValueId::new(self.values.alloc(value))
+    }
+
+    /// Resolves a value id. Panics only if the id came from another context.
+    pub(crate) fn get_value(&self, id: ValueId) -> &Value {
+        self.values
+            .get(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
+    /// Resolves a value id mutably — the write a rename is made of.
+    pub(crate) fn get_value_mut(&mut self, id: ValueId) -> &mut Value {
+        self.values
+            .get_mut(id.raw())
+            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+    }
+
     pub(crate) fn get_block(&self, id: BasicBlockId) -> &BasicBlock {
         self.blocks
             .get(id.raw())
@@ -295,7 +316,7 @@ impl Context {
         &mut self,
         val: C,
         optional_cast: OperandTy,
-    ) -> Result<Value, TypeError> {
+    ) -> Result<ValueId, TypeError> {
         Value::from_const(val, optional_cast, self)
     }
 
@@ -327,7 +348,7 @@ impl Context {
     ///
     /// Unlike an instruction, a constant expression is written inline wherever a
     /// constant may appear, so it defines no register and cannot fail.
-    pub fn const_expr(&mut self, expr: ConstExpr) -> Value {
+    pub fn const_expr(&mut self, expr: ConstExpr) -> ValueId {
         Value::from_const_expr(expr, self)
     }
 
@@ -337,7 +358,7 @@ impl Context {
     /// function's address is as much a `ptr` as a variable's. What it points *at* is
     /// recorded separately, which is how a `load` or `store` through it can have its
     /// type inferred.
-    pub fn global_value<T: GlobalEntity>(&mut self, global: GlobalId<T>) -> Value {
+    pub fn global_value<T: GlobalEntity>(&mut self, global: GlobalId<T>) -> ValueId {
         Value::from_global(global, self)
     }
 }
@@ -527,25 +548,15 @@ mod tests {
             RegName::Unnamed => "<unnamed>".to_string(),
         };
 
-        ctx.name_for_reg(&hint, func.tag.raw())
+        // Only a *named* hint reaches the assigner. An unnamed register is numbered
+        // in `Builder::build()`, by position in the printed function — see the
+        // numbering tests in `cfg::builder`.
+        let RegName::Named(hint) = &hint else {
+            panic!("`name_for_reg` issues names for named hints only")
+        };
+
+        ctx.name_for_reg(hint, func.tag.raw())
             .unwrap_or_else(|e| panic!("hint `{spelled}` should be accepted: {e}"))
-    }
-
-    /// LLVM numbers unnamed temporaries from 0, in order, and the numbering is per
-    /// function — `%0` is the first unnamed value in *that* function's body.
-    #[test]
-    fn unnamed_values_are_numbered_from_zero_per_function() {
-        let (mut ctx, f, g) = two_functions();
-
-        let in_f: Vec<String> = (0..3)
-            .map(|_| name(&mut ctx, RegName::Unnamed, f))
-            .collect();
-        let in_g: Vec<String> = (0..2)
-            .map(|_| name(&mut ctx, RegName::Unnamed, g))
-            .collect();
-
-        assert_eq!(in_f, ["0", "1", "2"]);
-        assert_eq!(in_g, ["0", "1"], "a second function restarts at 0");
     }
 
     /// Local names are scoped to their function, so the same hint in two functions
@@ -584,14 +595,18 @@ mod tests {
         let mut issued = FxHashSet::default();
 
         // A hint, the same hint again, and a hint that looks like the suffixed form
-        // of the first — plus unnamed values interleaved.
+        // of the first.
+        //
+        // Unnamed values are not in the list because they no longer come from here —
+        // and they cannot collide with what does: `build()` names them `0`, `1`, …,
+        // while a hint beginning with a digit is refused outright (see
+        // `a_numeric_hint_is_refused`), so the two name spaces are disjoint by
+        // construction.
         let requests = [
             RegName::Named("x".to_string()),
             RegName::Named("x".to_string()),
             RegName::Named("x1".to_string()),
-            RegName::Unnamed,
             RegName::Named("x".to_string()),
-            RegName::Unnamed,
             RegName::Named("x2".to_string()),
         ];
 
@@ -636,14 +651,21 @@ mod tests {
         let (mut ctx, f, _) = two_functions();
 
         assert!(
-            ctx.name_for_reg(&"0".into(), f.tag.raw()).is_err(),
+            ctx.name_for_reg("0", f.tag.raw()).is_err(),
             "`%0` is the unnamed form, not a name a caller may ask for"
         );
 
+        // This is what keeps `build()`'s numbering from colliding with a hint: no
+        // name issued here can ever be purely numeric.
+        assert!(
+            ctx.name_for_reg("1x", f.tag.raw()).is_err(),
+            "a leading digit is refused however the rest of the name reads"
+        );
+
         assert_eq!(
-            name(&mut ctx, RegName::Unnamed, f),
-            "0",
-            "and the refusal leaves the unnamed counter untouched"
+            name(&mut ctx, "x".into(), f),
+            "x",
+            "and a refusal leaves the assigner usable"
         );
     }
 
@@ -655,7 +677,7 @@ mod tests {
 
         for hint in ["my reg", "a+b", "", "a\"b", "café", "x\ny"] {
             assert!(
-                ctx.name_for_reg(&hint.into(), f.tag.raw()).is_err(),
+                ctx.name_for_reg(hint, f.tag.raw()).is_err(),
                 "`{hint}` is not a legal unquoted LLVM identifier"
             );
         }

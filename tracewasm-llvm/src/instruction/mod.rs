@@ -9,7 +9,7 @@ use crate::{
     cfg::{basic_block::BasicBlockId, context::Context, global::FuncName},
     error::PhiError,
     interner::TyId,
-    value::{ConstValue, I1Value, Signedness, Value},
+    value::{ConstValue, I1Value, Signedness, ValueId},
 };
 use rustc_hash::FxHashSet;
 use std::fmt::Display;
@@ -23,14 +23,14 @@ pub mod cursor;
 /// may appear only once — `blocks` is what makes the second check cheap.
 pub struct PhiInstruction {
     /// The incoming edges, as (predecessor, value) pairs.
-    pub(crate) branches: Vec<(BasicBlockId, Value)>,
+    pub(crate) branches: Vec<(BasicBlockId, ValueId)>,
     /// The predecessors already named, so a repeat can be refused.
     pub(crate) blocks: FxHashSet<BasicBlockId>,
     /// The phi's type, taken from its first branch. Every later branch is checked
     /// against it.
     pub(crate) ref_ty: TyId,
     /// The register this phi defines.
-    pub(crate) value: Value,
+    pub(crate) value: ValueId,
 }
 
 /// A handle to a phi already placed in a block, for adding branches to it later.
@@ -60,7 +60,7 @@ impl PhiInstrHandler {
     ///   already named.
     pub fn add_branch(
         &self,
-        branch: (BasicBlockId, Value),
+        branch: (BasicBlockId, ValueId),
         ctx: &mut Context,
     ) -> Result<(), PhiError> {
         let index = self.index;
@@ -69,7 +69,7 @@ impl PhiInstrHandler {
         // needs the type pool, which cannot be reached while the block is borrowed
         // mutably. An id is `Copy`, so nothing is held across the switch.
         let ref_ty = ctx.get_block(self.block).phis[index].ref_ty;
-        let branch_ty = branch.1.ty();
+        let branch_ty = branch.1.ty(ctx);
 
         if branch_ty != ref_ty {
             return Err(PhiError::PhiInstructionBranchTypeMismatch(
@@ -173,7 +173,7 @@ pub struct Instruction {
     pub(crate) kind: InstructionKind,
     /// The register this instruction defines, for the `%x =` an emitter writes in
     /// front of it. `None` for the instructions that produce no value.
-    pub(crate) value: Option<Value>,
+    pub(crate) value: Option<ValueId>,
 }
 
 /// Operands of an unconditional branch.
@@ -184,7 +184,7 @@ pub struct UnconditionalBrOperands {
 
 /// Operands of a conditional branch.
 pub struct ConditionalBrOperands {
-    /// The condition. An [`I1Value`] rather than a [`Value`], so the `i1` requirement
+    /// The condition. An [`I1Value`] rather than a [`ValueId`], so the `i1` requirement
     /// is checked once when the value is narrowed rather than here.
     pub cond: I1Value,
     /// Taken when the condition is true.
@@ -198,7 +198,7 @@ pub struct RetOperands {
     /// The type returned. `void` when nothing is.
     pub ty: TyId,
     /// The value returned, absent for `ret void`.
-    pub value: Option<Value>,
+    pub value: Option<ValueId>,
 }
 
 /// Operands of a `load`.
@@ -207,7 +207,7 @@ pub struct LoadOperands {
     /// instruction, not from the pointer.
     pub ty: TyId,
     /// The address.
-    pub ptr: Value,
+    pub ptr: ValueId,
     /// Explicit alignment. `None` means the ABI default.
     pub align: Option<u32>,
 }
@@ -215,9 +215,9 @@ pub struct LoadOperands {
 /// Operands of a `store`.
 pub struct StoreOperands {
     /// The value written.
-    pub value: Value,
+    pub value: ValueId,
     /// The address.
-    pub ptr: Value,
+    pub ptr: ValueId,
     /// Explicit alignment. `None` means the ABI default.
     pub align: Option<u32>,
 }
@@ -227,7 +227,7 @@ pub struct AllocaOperands {
     /// The type allocated. The instruction's *result* is a `ptr` to this.
     pub ty: TyId,
     /// Element count, for allocating an array's worth. `None` allocates one.
-    pub count: Option<Value>,
+    pub count: Option<ValueId>,
     /// Explicit alignment. `None` means the ABI default.
     pub align: Option<u32>,
 }
@@ -242,10 +242,10 @@ pub struct GetElementPtrOperands {
     /// actually checked against.
     pub source_ty: TyId,
     /// The base address.
-    pub ptr: Value,
+    pub ptr: ValueId,
     /// The indices. The **first** steps over `source_ty` as pointer arithmetic; only
     /// the rest descend into it.
-    pub indices: Box<[Value]>,
+    pub indices: Box<[ValueId]>,
     /// Whether to emit `inbounds`, which makes an out-of-range result poison.
     pub inbounds: bool,
 }
@@ -282,7 +282,7 @@ pub struct CallOperands {
     /// non-variadic callee.
     pub return_ty: TyId,
     /// The arguments, already checked against the callee's parameter types.
-    pub params: Vec<Value>,
+    pub params: Vec<ValueId>,
 }
 
 /// The operands of an `icmp`.
@@ -299,9 +299,9 @@ pub struct ICmpOperands {
     /// ones included, but refuses floats with "icmp requires integer operands".
     pub ty: TyId,
     /// The left operand.
-    pub a: Value,
+    pub a: ValueId,
     /// The right operand.
-    pub b: Value,
+    pub b: ValueId,
 }
 
 /// Which comparison an [`ICmpOperands`] performs.
@@ -400,9 +400,9 @@ pub struct IBinOpOperands {
     /// The type both operands have, and the type of the result.
     pub ty: TyId,
     /// The left operand.
-    pub a: Value,
+    pub a: ValueId,
     /// The right operand. For a shift, the shift *amount*.
-    pub b: Value,
+    pub b: ValueId,
 }
 
 /// Which integer operation an [`IBinOpOperands`] performs.
@@ -513,9 +513,9 @@ pub struct FBinOpOperands {
     /// The type both operands have, and the type of the result.
     pub ty: TyId,
     /// The left operand.
-    pub a: Value,
+    pub a: ValueId,
     /// The right operand.
-    pub b: Value,
+    pub b: ValueId,
 }
 
 /// Which floating-point operation an [`FBinOpOperands`] performs.
@@ -560,7 +560,7 @@ pub struct FNegOperands {
     /// The type of the operand, and of the result.
     pub ty: TyId,
     /// The value to negate.
-    pub value: Value,
+    pub value: ValueId,
 }
 
 /// The operands of an `fcmp`.
@@ -576,9 +576,9 @@ pub struct FCmpOperands {
     /// compared with `icmp` instead.
     pub ty: TyId,
     /// The left operand.
-    pub a: Value,
+    pub a: ValueId,
     /// The right operand.
-    pub b: Value,
+    pub b: ValueId,
 }
 
 /// Which comparison an [`FCmpOperands`] performs.
@@ -668,7 +668,7 @@ pub struct CastOperands {
     /// the value rather than supplied, so the two cannot disagree.
     pub src_ty: TyId,
     /// The value being converted.
-    pub value: Value,
+    pub value: ValueId,
     /// The type being converted to, and the type of the result.
     pub dest_ty: TyId,
 }
@@ -800,12 +800,12 @@ pub struct SwitchOperands {
     /// than supplied, so the two cannot disagree.
     pub cond_ty: TyId,
     /// The value being dispatched on.
-    pub cond_value: Value,
+    pub cond_value: ValueId,
     /// Where control goes when no case matches. Not optional — LLVM requires it.
     pub default_label: BasicBlockId,
     /// The cases, in the order they are written.
     ///
-    /// A [`ConstValue`] rather than a [`Value`], because a case label has to be a
+    /// A [`ConstValue`] rather than a [`ValueId`], because a case label has to be a
     /// constant: LLVM matches on it at compile time. That makes a non-constant case
     /// unrepresentable rather than something to check.
     ///
@@ -821,7 +821,7 @@ pub struct SwitchOperands {
 pub struct SelectOperands {
     /// The `i1` choosing between the arms.
     ///
-    /// An [`I1Value`] rather than a [`Value`], so a condition of the wrong type is
+    /// An [`I1Value`] rather than a [`ValueId`], so a condition of the wrong type is
     /// unrepresentable: `llvm-as` refuses anything else with "select condition must be
     /// i1 or `<n x i1>`".
     pub cond: I1Value,
@@ -831,7 +831,7 @@ pub struct SelectOperands {
     /// cannot disagree.
     pub arms_ty: TyId,
     /// The value taken when the condition is true.
-    pub true_arm: Value,
+    pub true_arm: ValueId,
     /// The value taken when it is false.
-    pub false_arm: Value,
+    pub false_arm: ValueId,
 }

@@ -4196,8 +4196,8 @@ impl Instruction for StackInstruction {
         mut curr_cursor: Cursor<'a>,
         instructions: &[StackInstruction],
         frame_layout: &StackFrameLayout,
-        locals: &[tracewasm_llvm::value::Value],
-        runtime_ctx_ptr: &tracewasm_llvm::value::Value,
+        locals: &[tracewasm_llvm::value::ValueId],
+        runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
@@ -4228,7 +4228,7 @@ impl Instruction for StackInstruction {
                 // filled. See `RegName` — a named register draws nothing from that
                 // counter, so it cannot be numbered out of order.
                 let local_val = curr_cursor.build_load(
-                    local_ptr,
+                    *local_ptr,
                     OperandTy::Inferred,
                     None,
                     RegName::Named(format!("local{}_val", index)),
@@ -4241,14 +4241,14 @@ impl Instruction for StackInstruction {
                 let local_ptr = &locals[index];
                 let val = pass_manager.simulated_stack.pop();
 
-                curr_cursor.build_store(local_ptr, &val, OperandTy::Inferred, None)?;
+                curr_cursor.build_store(*local_ptr, val, OperandTy::Inferred, None)?;
             }
             StackInstruction::LocalTee { index } => {
                 let index = index.0 as usize;
                 let local_ptr = &locals[index];
                 let top_val = pass_manager.simulated_stack.peek_from_top(0);
 
-                curr_cursor.build_store(local_ptr, top_val, OperandTy::Inferred, None)?;
+                curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
             }
             StackInstruction::Br {
                 target_index,
@@ -4350,8 +4350,8 @@ impl Instruction for StackInstruction {
                 let cond = curr_cursor.build_icmp(
                     ICond::Ne,
                     OperandTy::Inferred,
-                    &cond_val,
-                    &zero,
+                    cond_val,
+                    zero,
                     RegName::Named(format!("if{}_cond", instr_index)),
                 )?;
 

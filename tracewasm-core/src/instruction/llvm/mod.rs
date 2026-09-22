@@ -24,20 +24,20 @@ use tracewasm_llvm::{
         cursor::{OperandTy, RegName},
     },
     interner::TyId,
-    value::Value,
+    value::{Value, ValueId},
 };
 
 pub(crate) struct EndBasicBlockBranches {
     pub(crate) basic_block: BasicBlockId,
     pub(crate) results: Vec<TyId>,
-    pub(crate) phi_vals: Vec<Value>,
+    pub(crate) phi_vals: Vec<ValueId>,
     pub(crate) phi_handlers: Vec<PhiInstrHandler>,
 }
 
 #[derive(Default)]
 pub(crate) struct InstrIndexToBasicBlockMap {
     end_map: FxHashMap<u32, EndBasicBlockBranches>,
-    else_map: FxHashMap<u32, (BasicBlockId, Vec<Value>)>,
+    else_map: FxHashMap<u32, (BasicBlockId, Vec<ValueId>)>,
     // loop_map: FxHashMap<u32, Vec<PhiInstrHandler>>,
 }
 
@@ -89,7 +89,7 @@ impl InstrIndexToBasicBlockMap {
     pub fn add_branch_to_end(
         &mut self,
         index: u32,
-        values: Vec<Value>,
+        values: Vec<ValueId>,
         block: BasicBlockId,
         ctx: &mut Context,
     ) -> Result<BasicBlockId, PhiError> {
@@ -115,17 +115,17 @@ impl InstrIndexToBasicBlockMap {
         Ok(end_data.basic_block)
     }
 
-    pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[Value], BasicBlockId)> {
+    pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
         self.end_map
             .get(&index)
             .map(|x| (x.phi_vals.as_slice(), x.basic_block))
     }
 
-    pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<Value>) {
+    pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<ValueId>) {
         self.else_map.insert(index, (block, params));
     }
 
-    pub fn take_else_data(&mut self, index: u32) -> Option<(BasicBlockId, Vec<Value>)> {
+    pub fn take_else_data(&mut self, index: u32) -> Option<(BasicBlockId, Vec<ValueId>)> {
         self.else_map.remove(&index)
     }
 
@@ -147,7 +147,7 @@ impl InstrIndexToBasicBlockMap {
 }
 
 pub(crate) struct SimulatedStack {
-    stack: Stack<Value>,
+    stack: Stack<ValueId>,
 }
 
 impl Default for SimulatedStack {
@@ -159,7 +159,7 @@ impl Default for SimulatedStack {
 }
 
 impl Deref for SimulatedStack {
-    type Target = Stack<Value>;
+    type Target = Stack<ValueId>;
 
     fn deref(&self) -> &Self::Target {
         &self.stack
@@ -361,7 +361,7 @@ impl WasmInstrLLVMPassManager {
             // last param is runtime ctx!
             let (ptr, val, alignment) = if i < params.len() - 1 {
                 let param = &params[i];
-                let ty = param.ty();
+                let ty = param.ty(&entry_cursor);
                 let alignment = ty.alignment(&entry_cursor);
 
                 (
@@ -392,8 +392,8 @@ impl WasmInstrLLVMPassManager {
                 )
             };
 
-            locals.push(ptr.clone());
-            entry_cursor.build_store(&ptr, &val, OperandTy::Inferred, alignment)?;
+            locals.push(ptr);
+            entry_cursor.build_store(ptr, val, OperandTy::Inferred, alignment)?;
         }
 
         let func_end = func.add_basic_block("end", ctx)?;
@@ -528,7 +528,7 @@ mod tests {
     /// onto the simulated stack between calls — most operators still hit the catch-all
     /// `todo!()` arm. That is enough to pin the control arms: the condition's
     /// comparison, the fall-through terminators, and the phis at the `end`.
-    fn harness() -> (Builder, GlobalId<DefinedFunc>, BasicBlockId, Value) {
+    fn harness() -> (Builder, GlobalId<DefinedFunc>, BasicBlockId, ValueId) {
         let ctx = Context::new(
             Triple::new(
                 "arm64".to_string(),
@@ -639,7 +639,7 @@ mod tests {
 
         builder
             .cursor_at_block(end)
-            .build_ret(Some(&result), OperandTy::Inferred)
+            .build_ret(Some(result), OperandTy::Inferred)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build()).unwrap();
@@ -716,7 +716,7 @@ mod tests {
 
         builder
             .cursor_at_block(end)
-            .build_ret(Some(&result), OperandTy::Inferred)
+            .build_ret(Some(result), OperandTy::Inferred)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build()).unwrap();
@@ -783,7 +783,7 @@ mod tests {
 
         builder
             .cursor_at_block(end)
-            .build_ret(Some(&top), OperandTy::Inferred)
+            .build_ret(Some(top), OperandTy::Inferred)
             .unwrap();
 
         let ir = IREmitter::emit(builder.build()).unwrap();
