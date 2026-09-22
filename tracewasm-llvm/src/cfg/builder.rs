@@ -9,11 +9,13 @@ use crate::{
             Linkage, Visibility,
         },
     },
+    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::ContextError,
     instruction::cursor::{Cursor, RegName},
-    interner::{StrId, TyId},
+    interner::{StrId, StrInterner, TyId},
     value::{ConstExpr, FuncSignature, Value, ValueId, ValueKind},
 };
+use id_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::{Deref, DerefMut};
 
@@ -372,51 +374,79 @@ impl Builder {
     pub fn build(self) -> ControlFlowGraph {
         let mut ctx = self.ctx;
 
-        for func_global in ctx.module.functions.clone() {
-            // Collected first, then renamed: the walk reads `funcs`/`blocks` while the
-            // rename writes `values`, and gathering the order up front keeps those two
-            // passes from overlapping.
-            let mut lexical_order = vec![];
-
+        for func_id in &ctx.module.functions {
             let func = ctx
                 .funcs
-                .get(func_global.raw())
+                .get(func_id.raw())
                 .expect("func id is always constructed after inserting function object");
 
-            lexical_order.extend(func.params.iter().copied());
+            let mut counter = UnnamedRegNameCounter::new();
 
-            for block_id in func.blocks.clone() {
+            for param in &func.params {
+                number_if_unnamed(*param, &mut counter, &mut ctx.values, &mut ctx.str_interner);
+            }
+
+            for block_id in &func.blocks {
                 let block = ctx
                     .blocks
                     .get(block_id.raw())
                     .expect("block id is always constructed after inserting basic block object");
 
-                // Phis first, matching where they are printed — LLVM numbers by
-                // position in the function, not by when a value was created.
-                lexical_order.extend(block.phis.iter().map(|phi| phi.value));
-                lexical_order.extend(block.instructions.iter().filter_map(|i| i.value));
-            }
-
-            let mut counter = UnnamedRegNameCounter::new();
-
-            for id in lexical_order {
-                // Only the unnamed ones. A named register keeps its name and draws
-                // nothing from the counter, exactly as LLVM does.
-                if !matches!(ctx.get_value(id).kind(), ValueKind::Reg(reg) if reg.is_unnamed) {
-                    continue;
+                // Phis before instructions, matching where they are printed: LLVM
+                // numbers by position in the function, not by when a value was made.
+                for phi in &block.phis {
+                    number_if_unnamed(
+                        phi.value,
+                        &mut counter,
+                        &mut ctx.values,
+                        &mut ctx.str_interner,
+                    );
                 }
 
-                let name: StrId = ctx.str_interner.intern(counter.next().to_string()).into();
-
-                if let ValueKind::Reg(reg) = ctx.get_value_mut(id).kind_mut() {
-                    reg.name = name;
-                    reg.is_unnamed = false;
+                for instr in &block.instructions {
+                    if let Some(value) = instr.value {
+                        number_if_unnamed(
+                            value,
+                            &mut counter,
+                            &mut ctx.values,
+                            &mut ctx.str_interner,
+                        );
+                    }
                 }
             }
         }
 
         ControlFlowGraph { context: ctx }
     }
+}
+
+/// Gives an unnamed register its number; leaves a named one exactly as it is.
+///
+/// Takes the arena and the interner rather than the whole [`Context`] so the caller
+/// can keep reading `funcs` and `blocks` while this writes `values` — they are
+/// separate fields, and borrowing them apart is what lets the walk happen in one
+/// pass.
+fn number_if_unnamed(
+    id: ValueId,
+    counter: &mut UnnamedRegNameCounter,
+    values: &mut Arena<Value>,
+    str_interner: &mut StrInterner,
+) {
+    let ValueKind::Reg(reg) = values
+        .get_mut(id.raw())
+        .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+        .kind_mut()
+    else {
+        return;
+    };
+
+    // A named register draws nothing from the counter, exactly as LLVM does.
+    if !reg.is_unnamed {
+        return;
+    }
+
+    reg.name = str_interner.intern(counter.next().to_string()).into();
+    reg.is_unnamed = false;
 }
 
 struct UnnamedRegNameCounter {

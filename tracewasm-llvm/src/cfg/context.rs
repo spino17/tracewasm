@@ -141,13 +141,6 @@ impl Context {
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
-    /// Resolves a value id mutably — the write a rename is made of.
-    pub(crate) fn get_value_mut(&mut self, id: ValueId) -> &mut Value {
-        self.values
-            .get_mut(id.raw())
-            .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
-    }
-
     /// Resolves a block id. Panics only if the id came from another context.
     pub(crate) fn get_block(&self, id: BasicBlockId) -> &BasicBlock {
         self.blocks
