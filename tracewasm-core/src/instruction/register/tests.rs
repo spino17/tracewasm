@@ -310,8 +310,6 @@ fn sim(locals: u32) -> SimulatedStack {
         recorded_height: 0,
         params: 0,
         results: 0,
-        is_unreachable_traversing: false,
-        has_inherited: false,
         attached_breaks: vec![],
     });
 

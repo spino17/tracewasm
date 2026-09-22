@@ -160,7 +160,8 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
+        UnreachableTrackingControlStack, check_memory_index,
         llvm::WasmInstrLLVMPassManager,
         params_and_results_from_blockty,
         register::{
@@ -625,153 +626,6 @@ impl ControlStack {
     }
 }
 
-/// Filters out operators that cannot execute, so the lowering match never sees them.
-///
-/// After an unconditional branch, everything up to the enclosing block's `else` or
-/// `end` is dead. Dead code is stack-polymorphic — it may pop more than it pushed —
-/// so lowering it against the simulated stack is both meaningless and prone to
-/// underflow. Skipping it entirely means every arm of the match can assume its
-/// operands exist.
-///
-/// The only state needed is a flag plus a count of constructs opened *while* dead:
-///
-/// * `block`/`loop`/`if` while dead push onto [`Self::blocks`] and are skipped, so
-///   they never reach [`SimulatedStack::add_block`] and the real [`ControlStack`]
-///   never sees them.
-/// * `end` while dead pops one and stays dead, unless [`Self::blocks`] is empty — in
-///   which case it closes a construct that was opened while *reachable*, so it is the
-///   point where liveness resumes and the operator is processed normally.
-/// * `else` behaves the same way, which is what makes an `if` opened inside dead code
-///   keep both arms dead: its `else` finds a non-empty [`Self::blocks`] and does not
-///   resurrect anything.
-///
-/// Because dead constructs are only ever counted here, the real control stack stays
-/// balanced with no reconciliation: every block it holds was pushed while reachable
-/// and is popped by an `end` that is also processed.
-struct UnreachableTrackingControlStack {
-    /// Constructs opened while dead, innermost last. Only the kind is kept; nothing
-    /// about a dead block is needed beyond knowing when it closes.
-    blocks: Vec<BlockVariant>,
-    /// Whether the operators being read cannot execute, i.e. an unconditional
-    /// transfer has been lowered and the enclosing block has not closed yet.
-    unreachable: bool,
-}
-
-/// What the lowering loop should do with an operator.
-enum UnreachableCheckResult {
-    /// Skip it — it cannot execute.
-    Continue,
-    /// Lower it normally.
-    Reachable,
-}
-
-impl UnreachableTrackingControlStack {
-    /// A tracker for a body that starts out reachable, as every body does.
-    fn new() -> Self {
-        UnreachableTrackingControlStack {
-            blocks: vec![],
-            unreachable: false,
-        }
-    }
-
-    /// Marks the rest of the enclosing block dead. Called after every unconditional
-    /// transfer — `br`, `br_table`, `return`, `unreachable` — each of which pairs it
-    /// with [`SimulatedStack::reset_enclosing_block_layout`]. Not after `br_if`,
-    /// whose fall-through is reachable.
-    fn set_unreachable(&mut self) {
-        self.unreachable = true;
-    }
-
-    /// Resumes lowering. Only correct when [`Self::blocks`] is empty, i.e. the
-    /// construct being closed was opened while reachable.
-    fn unset_unreachable(&mut self) {
-        self.unreachable = false;
-    }
-
-    /// Records a construct opened while dead, so its `else`/`end` is recognised as
-    /// closing it rather than as closing the construct that died.
-    fn add_block(&mut self, block: BlockVariant) {
-        self.blocks.push(block);
-    }
-
-    /// Closes the innermost construct opened while dead.
-    ///
-    /// Panics if none is open, which would mean [`Self::check_unreachablity`] let an
-    /// `end` through the wrong arm — the real [`ControlStack`] would already be
-    /// unbalanced by then.
-    fn pop_block(&mut self) -> BlockVariant {
-        self.blocks.pop().unwrap()
-    }
-
-    /// Classifies one operator, updating the dead-code state as a side effect.
-    ///
-    /// Called for every operator before the lowering match; returns
-    /// [`UnreachableCheckResult::Reachable`] immediately when nothing is dead.
-    fn check_unreachablity(&mut self, operator: &Operator<'_>) -> UnreachableCheckResult {
-        if !self.unreachable {
-            return UnreachableCheckResult::Reachable;
-        }
-
-        if let Some(block) = Self::is_block(operator) {
-            self.add_block(block);
-
-            UnreachableCheckResult::Continue
-        } else if Self::is_else(operator) {
-            if self.is_empty() {
-                self.unset_unreachable();
-
-                UnreachableCheckResult::Reachable
-            } else {
-                debug_assert!(matches!(self.blocks.last().unwrap(), BlockVariant::If));
-
-                UnreachableCheckResult::Continue
-            }
-        } else if Self::is_end(operator) {
-            if self.is_empty() {
-                self.unset_unreachable();
-
-                UnreachableCheckResult::Reachable
-            } else {
-                self.pop_block();
-
-                UnreachableCheckResult::Continue
-            }
-        } else {
-            UnreachableCheckResult::Continue
-        }
-    }
-
-    /// The kind of label this operator opens, or `None` if it opens none.
-    ///
-    /// [`BlockVariant::Func`] is not among the answers: the function frame is opened
-    /// by the pass itself, never by an operator.
-    fn is_block(operator: &Operator<'_>) -> Option<BlockVariant> {
-        match operator {
-            Operator::Block { .. } => Some(BlockVariant::Block),
-            Operator::If { .. } => Some(BlockVariant::If),
-            Operator::Loop { .. } => Some(BlockVariant::Loop),
-            _ => None,
-        }
-    }
-
-    /// Whether this operator opens the second arm of an `if`.
-    fn is_else(operator: &Operator<'_>) -> bool {
-        matches!(operator, Operator::Else)
-    }
-
-    /// Whether this operator closes a label.
-    fn is_end(operator: &Operator<'_>) -> bool {
-        matches!(operator, Operator::End)
-    }
-
-    /// Whether every construct opened while dead has since closed — and so whether
-    /// the next `else`/`end` closes the construct that *died*, which is what makes
-    /// the code after it live again.
-    fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-}
-
 /// The arena entry behind [`RegInstruction::If`]: a condition and both of the jump
 /// targets an `if` needs.
 #[derive(Debug)]
@@ -1089,11 +943,6 @@ impl SimulatedStack {
             params: params_count,
             results: results_count,
             attached_breaks: vec![],
-
-            // below two fields are not used in register lowering!
-            // they are just placeholders
-            is_unreachable_traversing: false,
-            has_inherited: false,
         });
 
         (params_count, results_count)
@@ -2781,8 +2630,6 @@ impl Instruction for RegInstruction {
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
             params: params.len() as u32,
             results: results.len() as u32,
-            is_unreachable_traversing: false,
-            has_inherited: false,
             attached_breaks: vec![],
         });
 

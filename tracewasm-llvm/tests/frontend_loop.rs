@@ -69,9 +69,11 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     // Both phis are built knowing only the `entry` edge. The `loop` edge carries
     // values that do not exist yet, so it is added further down.
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], "acc".into())
+        .build_phi(&[(entry, zero.clone())], OperandTy::Inferred, "acc".into())
         .unwrap();
-    let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
+    let (i_phi, i) = in_loop
+        .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
+        .unwrap();
 
     let next = in_loop
         .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "next".into())
@@ -202,9 +204,11 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut in_loop = builder.cursor_at_block(loop_b);
 
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], "acc".into())
+        .build_phi(&[(entry, zero.clone())], OperandTy::Inferred, "acc".into())
         .unwrap();
-    let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
+    let (i_phi, i) = in_loop
+        .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
+        .unwrap();
 
     let bit = in_loop
         .build_ibinop(IBinOp::And, OperandTy::Inferred, &i, &one, "bit".into())
@@ -232,7 +236,11 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut in_latch = builder.cursor_at_block(latch);
 
     let (_, merged) = in_latch
-        .build_phi(&[(then_b, a), (else_b, b)], "merged".into())
+        .build_phi(
+            &[(then_b, a), (else_b, b)],
+            OperandTy::Inferred,
+            "merged".into(),
+        )
         .unwrap();
     let dec = in_latch
         .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())

@@ -86,7 +86,8 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
+        UnreachableTrackingControlStack, check_memory_index,
         llvm::{LabelKind, WasmInstrLLVMPassManager},
         params_and_results_from_blockty,
     },
@@ -1036,37 +1037,19 @@ impl ControlStack {
     /// Pushes a new label for a `block`/`loop`/`if`, capturing its
     /// `recorded_height` from the current stack state.
     ///
-    /// If the parent is already dead, the child inherits deadness
-    /// (`has_inherited = true`) and its `recorded_height` is left `0` because it
-    /// will never be consulted at runtime. Otherwise `recorded_height` is the
-    /// height *below* the label's params (the params are allowed to be consumed
-    /// by the block, so they are not part of the unwind height). An `if`
-    /// additionally has the branch condition sitting on top of the params, so it
-    /// subtracts one more for it. (The condition is popped from `curr_height` by
-    /// the `If` arm's `PopPush` stack effect, not here.)
+    /// `recorded_height` is the height *below* the label's params (the params are
+    /// allowed to be consumed by the block, so they are not part of the unwind
+    /// height). An `if` additionally has the branch condition sitting on top of the
+    /// params, so it subtracts one more for it. (The condition is popped from
+    /// `curr_height` by the `If` arm's `PopPush` stack effect, not here.)
+    ///
+    /// Only ever called for a label opened while reachable — a `block`/`loop`/`if`
+    /// inside dead code is counted by [`UnreachableTrackingControlStack`] and never
+    /// gets here, so there is no inherited-deadness case to handle.
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
         let params_count = params.len() as u32;
         let results_count = results.len() as u32;
-
-        let is_unreachable_traversing = self
-            .inner
-            .last()
-            .is_some_and(|b| b.is_unreachable_traversing);
-
-        if is_unreachable_traversing {
-            self.inner.push(Block {
-                kind,
-                recorded_height: 0, // this won't be used at runtime because of unreachablity
-                params: params_count,
-                results: results_count,
-                is_unreachable_traversing,
-                has_inherited: true,
-                attached_breaks: vec![],
-            });
-
-            return;
-        }
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
@@ -1099,36 +1082,8 @@ impl ControlStack {
             recorded_height,
             params: params_count,
             results: results_count,
-            is_unreachable_traversing: false,
-            has_inherited: false,
             attached_breaks: vec![],
         });
-    }
-
-    /// Marks the current (innermost) block's remaining body as dead code. Called
-    /// after unconditional control transfers (`unreachable`, `br`, `br_table`,
-    /// `return`).
-    fn set_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-        curr_block.is_unreachable_traversing = true;
-    }
-
-    /// Clears the current block's dead-code flag — but only if the block became
-    /// dead *locally*.
-    ///
-    /// A block that was born dead (`has_inherited`) stays dead: both arms of an
-    /// `if` opened inside unreachable code are unreachable, so an intervening
-    /// `else` must not mark the else-arm live. Skipping the clear here keeps
-    /// `curr_height` frozen through the whole dead subtree, so it is restored
-    /// correctly only when a genuinely-live ancestor's `end` runs.
-    fn end_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-
-        if curr_block.has_inherited {
-            return;
-        }
-
-        curr_block.is_unreachable_traversing = false;
     }
 
     /// The block at an absolute index into the control stack, for recording a
@@ -1203,12 +1158,6 @@ impl ControlStack {
             return;
         }
 
-        // height is not changed by the instructions which are unreachable.
-        // These instructions typically occur after unconditional br instructions.
-        if self.get_curr_block().is_unreachable_traversing {
-            return;
-        }
-
         self.note_height(height);
     }
 
@@ -1216,18 +1165,12 @@ impl ControlStack {
     /// `curr_height = curr_height - pops + pushes`.
     /// This is the default for ordinary operators described by their pop/push counts.
     ///
-    /// NOTE: the dead-code guard is load-bearing, not just an optimization. The
-    /// arithmetic is skipped entirely while the current block is traversing dead
-    /// code, where `curr_height` is frozen (and may be below `pops`, since dead
-    /// code is stack-polymorphic) — evaluating `curr_height - pops` there would
-    /// underflow the `u32`. Guarding before the subtraction is why callers like
-    /// `br_if`/`call` can invoke this unconditionally.
+    /// The subtraction is safe without a guard because dead code never gets here:
+    /// it is stack-polymorphic and may pop more than it pushed, so evaluating
+    /// `curr_height - pops` against it would underflow — but
+    /// [`UnreachableTrackingControlStack`] drops those operators before the match.
     fn apply_stack_effects_to_height(&mut self, pops: u32, pushes: u32) {
         if self.inner.is_empty() {
-            return;
-        }
-
-        if self.get_curr_block().is_unreachable_traversing {
             return;
         }
 
@@ -1389,6 +1332,7 @@ impl Instruction for StackInstruction {
         let mut instructions: Vec<StackInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
+        let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
         let mut br_table_target_branches = vec![];
 
         control_stack.inner.push(Block {
@@ -1396,19 +1340,29 @@ impl Instruction for StackInstruction {
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
             params: params.len() as u32,
             results: results.len() as u32,
-            is_unreachable_traversing: false,
-            has_inherited: false,
             attached_breaks: vec![],
         });
 
         while !operator_reader.eof() {
             let (operator, offset) = operator_reader.read_with_offset()?;
 
+            // Dead code never reaches the match: it is stack-polymorphic, so lowering
+            // it against `curr_height` is meaningless and prone to underflow. Skipping
+            // it here also keeps it out of the instruction stream entirely — nothing
+            // unreachable is ever emitted, so a consumer walking the stream (the LLVM
+            // pass) never has to recognise a region it must not enter.
+            if !matches!(
+                unreachable_tracking_stack.check_unreachablity(&operator),
+                UnreachableCheckResult::Reachable
+            ) {
+                continue;
+            }
+
             let (instruction, stack_effect): (StackInstruction, StackEffectResult) = match operator
             {
                 Operator::Unreachable => {
                     // all instructions after this is unreachable until the end of the current block
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (StackInstruction::Unreachable, StackEffectResult::NoEffect)
                 }
@@ -2068,14 +2022,12 @@ impl Instruction for StackInstruction {
 
                     *else_index = Some(index); // backpatching the `else` index in the `if` block
 
-                    // `else` instruction ends the unreachable traversing because those instructions
-                    // at runtime can execute if the `if` branch is not taken! The else block first instruction
-                    // would see the height to be `recorded_heigh (at the if) + params` (condition is already popped).
-                    //
-                    // `end_unreachable_traversing` is a no-op when the `if` was born in dead code
-                    // (`has_inherited`), so a dead `if` correctly keeps both arms dead; and `set_height`'s
-                    // own guard then leaves `curr_height` frozen in that case.
-                    control_stack.end_unreachable_traversing();
+                    // Reaching this arm at all means the else-arm is live: an `if` opened
+                    // inside dead code never gets here, and a `br` in the then-arm that
+                    // killed the rest of it is revived by this very `else` —
+                    // `check_unreachablity` does that before the match. The else-arm's
+                    // first instruction sees `recorded_height (at the if) + params`, the
+                    // condition having already been popped.
 
                     (
                         StackInstruction::Else {
@@ -2121,7 +2073,7 @@ impl Instruction for StackInstruction {
                     // Any write we made now would land in dead code and be discarded — this is also why
                     // `br_table` (equally unconditional) omits it while `br_if` (conditional) does not.
                     // all the instructions after this till the `end` of the current block are unreachable!
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (instr, StackEffectResult::Unreachable)
                 }
@@ -2203,7 +2155,7 @@ impl Instruction for StackInstruction {
                         br_targets_len += 1;
                     }
 
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (
                         StackInstruction::BrTable {
@@ -2224,7 +2176,7 @@ impl Instruction for StackInstruction {
                     let index = instructions.len() as u32;
 
                     func_block.attached_breaks.push((index, u32::MAX));
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (
                         StackInstruction::Return {
