@@ -174,7 +174,7 @@ impl DerefMut for SimulatedStack {
 
 #[derive(Clone, Copy)]
 pub(crate) enum LabelKind {
-    If,
+    If { else_instr_index: Option<u32> },
     Loop,
     Block,
     Func,
@@ -274,12 +274,9 @@ impl WasmInstrLLVMPassManager {
                     .insert(FuncIndex(func_index as u32), func);
             } else {
                 let mut llvm_param_decls = vec![];
-                let mut counter = 0;
 
-                for param in llvm_params {
+                for (counter, param) in llvm_params.into_iter().enumerate() {
                     llvm_param_decls.push((param, RegName::Named(format!("param{}", counter))));
-
-                    counter += 1;
                 }
 
                 let func = builder.define_function(
@@ -332,10 +329,9 @@ impl WasmInstrLLVMPassManager {
             .clone();
 
         let mut entry_cursor = ctx.cursor_at_block(entry);
-        let mut counter = 0;
         let mut locals = vec![];
 
-        for (i, local_ty) in local_types.iter().enumerate() {
+        for (counter, (i, local_ty)) in local_types.iter().enumerate().enumerate() {
             // last param is runtime ctx!
             let (ptr, val, alignment) = if i < params.len() - 1 {
                 let param = &params[i];
@@ -372,8 +368,6 @@ impl WasmInstrLLVMPassManager {
 
             locals.push(ptr.clone());
             entry_cursor.build_store(&ptr, &val, OperandTy::Inferred, alignment)?;
-
-            counter += 1;
         }
 
         let func_end = func.add_basic_block("end", ctx)?;

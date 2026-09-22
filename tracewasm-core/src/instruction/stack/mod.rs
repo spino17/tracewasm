@@ -1073,7 +1073,7 @@ impl ControlStack {
                     .insert(index, LabelSignature { params, results });
 
                 // top is the `if` condition and then params
-                self.curr_height - params_count as u32 - 1
+                self.curr_height - params_count - 1
             }
         };
 
@@ -4301,7 +4301,9 @@ impl Instruction for StackInstruction {
                 end_index,
             } => {
                 pass_manager.control_stack.enter_label(
-                    LabelKind::If,
+                    LabelKind::If {
+                        else_instr_index: *else_index,
+                    },
                     instr_index,
                     *end_index as usize,
                 );

@@ -193,7 +193,7 @@ impl ValType {
             wasmparser::ValType::F32 => ValType::F32,
             wasmparser::ValType::F64 => ValType::F64,
             wasmparser::ValType::V128 => ValType::V128,
-            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r.clone())),
+            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(*r)),
         }
     }
 }
@@ -1141,11 +1141,8 @@ impl<V: VirtualMachine> Module<V> {
                         let results = ty.results();
 
                         types.push(FuncType {
-                            params: params.iter().map(|v| ValType::from_wasmparser(v)).collect(),
-                            results: results
-                                .iter()
-                                .map(|v| ValType::from_wasmparser(v))
-                                .collect(),
+                            params: params.iter().map(ValType::from_wasmparser).collect(),
+                            results: results.iter().map(ValType::from_wasmparser).collect(),
                         });
                     }
                 }

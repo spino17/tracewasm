@@ -6486,9 +6486,9 @@ impl Instruction for RegInstruction {
         _func: GlobalId<DefinedFunc>,
         _pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
-        return Err(anyhow::Error::msg(
+        Err(anyhow::Error::msg(
             "currently LLVM IR cannot be emitted for register instructions",
-        ));
+        ))
     }
 }
 
