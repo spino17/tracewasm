@@ -15,9 +15,10 @@ use rustc_hash::FxHashSet;
 
 /// One function definition.
 ///
-/// Parameters are stored as [`Value`]s rather than bare types, because that is what
+/// Parameters are stored as [`ValueId`]s rather than bare types, because that is what
 /// they are once the function exists: registers the caller supplied, usable directly
-/// as operands. `blocks` is in creation order, which is the order the emitter writes
+/// as operands. Holding the id rather than the value is what lets `build` number an
+/// unnamed parameter and have every use of it follow. `blocks` is in creation order, which is the order the emitter writes
 /// them in — the first is the entry block.
 pub struct Function {
     pub(crate) name: StrId,
@@ -49,6 +50,7 @@ impl FuncId {
         FuncId(id)
     }
 
+    /// The underlying arena id.
     pub(crate) fn raw(&self) -> Id<Function> {
         self.0
     }
@@ -124,6 +126,10 @@ impl GlobalId<DefinedFunc> {
         Some(params[n])
     }
 
+    /// Every parameter, in declaration order.
+    ///
+    /// [`nth_param`](Self::nth_param) for one; this for a caller that walks them —
+    /// binding a wasm function's params into its locals, for instance.
     pub fn params<'a>(&self, ctx: &'a Context) -> &'a [ValueId] {
         let func = ctx.get_func(self.tag.raw());
 

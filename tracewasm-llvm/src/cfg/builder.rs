@@ -343,14 +343,32 @@ impl Builder {
         })
     }
 
-    /// Finishes the module.
+    /// Finishes the module, numbering its unnamed registers.
     ///
     /// Consumes the builder, so nothing more can be added. The [`Context`] is still
     /// needed to read the result, since everything inside it is an id.
     ///
-    /// Nothing is verified here: whether each block ends in a terminator, and whether
-    /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
-    /// reports both.
+    /// # Why the numbering happens here
+    ///
+    /// LLVM numbers unnamed values by their **position in the printed function**, and
+    /// requires those numbers to run in order. A frontend does not build in that
+    /// order: it creates the block an `if` merges into before either arm exists, and
+    /// fills it last. Numbering at construction would therefore hand `%0` to something
+    /// printed after `%1`, and `llvm-as` refuses that outright —
+    /// *"instruction expected to be numbered '%2' or greater"*.
+    ///
+    /// So this walks each function in printed order — parameters, then every block's
+    /// phis followed by its instructions — and renames the registers marked unnamed as
+    /// it goes. Named ones are left alone and consume no number, exactly as LLVM does.
+    ///
+    /// A rename is one write because a value lives once, in the context's arena, and
+    /// every operand refers to it by [`ValueId`]. There are no
+    /// copies at the use sites to keep in step.
+    ///
+    /// # What is still not checked
+    ///
+    /// Whether each block ends in a terminator, and whether a phi has one entry per
+    /// predecessor, are not verified by this crate. `llvm-as` reports both.
     pub fn build(self) -> ControlFlowGraph {
         let mut ctx = self.ctx;
 

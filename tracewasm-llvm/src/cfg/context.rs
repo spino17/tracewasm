@@ -30,7 +30,7 @@ use std::collections::hash_map::Entry;
 ///
 /// In practice: one context per module, handed to a [`Builder`] with
 /// [`builder`](Self::builder) and owned by it from then on. Both `Builder` and an open
-/// [`Cursor`](crate::instruction::cursor::Cursor) deref here, so everything below is
+/// [`Cursor`] deref here, so everything below is
 /// reachable through whichever one is in hand — which is why so much of this crate
 /// takes `&mut Context` rather than the individual pool it happens to need.
 pub struct Context {
@@ -90,6 +90,11 @@ pub(crate) struct RegisterDef {
 }
 
 impl Context {
+    /// Opens a [`Cursor`] on `id`, for writing instructions into that block.
+    ///
+    /// The same as [`Builder::cursor_at_block`](crate::cfg::builder::Builder::cursor_at_block),
+    /// for the places that hold a context rather than a builder — a pass midway
+    /// through a body, say. Appends to the end of the block whatever is already there.
     pub fn cursor_at_block(&mut self, id: BasicBlockId) -> Cursor<'_> {
         Cursor {
             ctx: self,
@@ -97,14 +102,17 @@ impl Context {
         }
     }
 
-    /// Issues a unique register name within `func_id`.
+    /// Issues a unique register name within `func_id`: the hint, suffixed if it is
+    /// already taken.
     ///
-    /// With a hint, the name is the hint — suffixed if it is taken. Without one, the
-    /// next unnamed index, which is how LLVM's `%0`, `%1`, … numbering is produced.
+    /// **Named registers only.** An unnamed one is numbered in
+    /// [`Builder::build`](crate::cfg::builder::Builder::build) instead, by position
+    /// in the printed function, and never reaches here — see
+    /// [`RegName`](crate::instruction::cursor::RegName).
     ///
-    /// The counter is per function and **parameters draw from it first**, so a body's
-    /// first unnamed temporary continues where the parameter list stopped. A *named*
-    /// parameter consumes nothing.
+    /// The two name spaces cannot collide, which is what lets them be assigned by
+    /// different passes at different times: `build` issues purely numeric names, and
+    /// the grammar below refuses a hint that begins with a digit.
     ///
     /// # Errors
     ///
@@ -140,6 +148,7 @@ impl Context {
             .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
     }
 
+    /// Resolves a block id. Panics only if the id came from another context.
     pub(crate) fn get_block(&self, id: BasicBlockId) -> &BasicBlock {
         self.blocks
             .get(id.raw())
@@ -305,7 +314,7 @@ impl Context {
     /// a real question with a real answer: `43` is an `i64`, and `0.1` is not a
     /// `float`.
     ///
-    /// Reachable through a [`Builder`] or an open [`Cursor`](crate::instruction::cursor::Cursor),
+    /// Reachable through a [`Builder`] or an open [`Cursor`],
     /// since both deref here — which is what lets a constant be made mid-block.
     ///
     /// # Errors
@@ -363,13 +372,17 @@ impl Context {
     }
 }
 
-/// Hands out unique register names within one function.
+/// Hands out unique *named* registers within one function.
 ///
-/// Two schemes at once, matching LLVM: unnamed values get consecutive numbers from
-/// `%0`, and a hinted name is used as given unless it is taken, in which case a
-/// numeric suffix is appended. `issued_names` guards the case where a *hint* collides
-/// with a suffix this assigner would generate — asking for `x` twice yields `x` and
-/// `x1`, so a later request for `x1` must not produce a duplicate.
+/// A hint is used as given unless it is taken, in which case a numeric suffix is
+/// appended. `issued_names` guards the case where a hint collides with a suffix this
+/// assigner would generate — asking for `x` twice yields `x` and `x1`, so a later
+/// request for `x1` must not produce a duplicate.
+///
+/// Unnamed values are not its business: they are numbered in
+/// [`Builder::build`](crate::cfg::builder::Builder::build) from a counter of its own,
+/// once every definition's position is known. The two never clash because a hint may
+/// not begin with a digit, so no name issued here is ever purely numeric.
 #[derive(Default)]
 pub(crate) struct FuncRegNameIndex {
     named_index: FxHashMap<String, u32>,
@@ -397,12 +410,12 @@ impl FuncRegNameIndex {
         }
     }
 
-    /// Turns an optional hint into a name no other register in this function has.
+    /// Turns a hint into a name no other register in this function has.
     ///
     /// A hint must be a legal unquoted LLVM local — `[-a-zA-Z$._][-a-zA-Z$._0-9]*`.
     /// A leading digit is refused for a second reason beyond quoting: `%0` is the
-    /// *unnamed* form, so a numeric hint would collide with the counter rather than
-    /// merely need quotes.
+    /// *unnamed* form, so a numeric hint would collide with the numbers `build`
+    /// hands out rather than merely need quotes.
     ///
     /// The loop retries suffixes until it finds one not already issued, which is what
     /// keeps a requested `x1` distinct from the `x1` generated for a second `x`.

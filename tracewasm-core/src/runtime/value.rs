@@ -66,22 +66,27 @@ pub enum Val {
 /// live. They diverge, which lets the compiler reach them with a plain branch
 /// instead of a call.
 mod wrong_ty {
+    /// The value was not an `i32`.
     #[inline(never)]
     pub fn i32() -> ! {
         panic!("value is not i32")
     }
+    /// The value was not an `i64`.
     #[inline(never)]
     pub fn i64() -> ! {
         panic!("value is not i64")
     }
+    /// The value was not an `f32`.
     #[inline(never)]
     pub fn f32() -> ! {
         panic!("value is not f32")
     }
+    /// The value was not an `f64`.
     #[inline(never)]
     pub fn f64() -> ! {
         panic!("value is not f64")
     }
+    /// The value was not a reference.
     #[inline(never)]
     pub fn reference() -> ! {
         panic!("value is not ref")

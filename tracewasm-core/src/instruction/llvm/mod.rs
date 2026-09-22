@@ -1,3 +1,53 @@
+//! Lowering a lowered wasm body into an LLVM control-flow graph.
+//!
+//! This pass runs *after* [`stack`](crate::instruction::stack), over the
+//! [`StackInstruction`](crate::instruction::stack::StackInstruction) stream rather
+//! than over the operator stream. That is the point: by the time an instruction list
+//! exists, every structured branch has already been resolved to an absolute index —
+//! an `if` knows where its `else` and `end` are, a `br` knows the instruction it
+//! targets. A CFG builder otherwise has to discover exactly those forward references
+//! itself, so taking them from the interpreter's lowering means the two machines
+//! cannot disagree about control flow.
+//!
+//! Dead code never arrives here either. The lowering drops unreachable operators
+//! rather than marking them, so every instruction this pass sees can execute, and no
+//! arm has to recognise a region it must not enter.
+//!
+//! # The three pieces of state
+//!
+//! | | Holds |
+//! |---|---|
+//! | [`SimulatedStack`] | the wasm operand stack, as LLVM values rather than numbers |
+//! | [`InstrIndexToBasicBlockMap`] | each open label's `end` block and the phis waiting there |
+//! | [`ControlStack`] | the open labels, so a `br` can tell which one it is leaving |
+//!
+//! The simulated stack is what makes the translation direct: wasm says "add the top
+//! two operands", so the pass pops two [`ValueId`]s, emits an `add`, and pushes the
+//! result. Where the interpreter would move a number, this moves a name.
+//!
+//! # Phis are built empty and filled as branches arrive
+//!
+//! When a label opens, its `end` block is created immediately and given one empty phi
+//! per result. Every path that later reaches that label — the fall-through at `end`,
+//! the then-arm at `else`, any `br` inside — adds its values to those phis through the
+//! handles kept in [`EndBasicBlockBranches`].
+//!
+//! Building them up front rather than collecting values and emitting phis at the
+//! `end` is what lets a `br` from arbitrary depth work without a second backpatching
+//! pass: the phi it must feed already exists.
+//!
+//! **Branch values are in the label's own order — deepest first, top last** — which is
+//! the order the result types are declared in and therefore the order the phis were
+//! created in. A caller handing them over top-first would type-check only while every
+//! result shares a type, and silently pair the wrong values when they do not.
+//!
+//! # Locals are memory, not registers
+//!
+//! Every wasm local becomes an `alloca` in the entry block, written on entry and
+//! read by `local.get`. No attempt is made to build SSA here — LLVM's `mem2reg`
+//! does that job better, and giving it the obvious shape is cheaper than getting
+//! phi placement right twice.
+
 use crate::{
     VirtualMachine,
     instruction::Instruction,
@@ -27,21 +77,54 @@ use tracewasm_llvm::{
     value::{Value, ValueId},
 };
 
+/// One open label's `end`: the block control lands in, and the phis waiting there.
+///
+/// The three vectors are parallel and in the label's own result order, deepest first.
+/// `phi_handlers[i]` and `phi_vals[i]` are two ends of the same phi — the handle a
+/// branch adds itself to, and the register everything downstream reads.
 pub(crate) struct EndBasicBlockBranches {
+    /// Where control lands. Created when the label opens, because a `br` inside it
+    /// needs somewhere to jump long before the `end` is reached.
     pub(crate) basic_block: BasicBlockId,
+    /// The label's result types, which fix how many phis there are and what each one
+    /// accepts.
     pub(crate) results: Vec<TyId>,
+    /// The registers the phis define — what the label leaves on the operand stack.
     pub(crate) phi_vals: Vec<ValueId>,
+    /// The handles branches add themselves to. Separate from `phi_vals` because a phi
+    /// is written in two stages: created with the block, completed as paths arrive.
     pub(crate) phi_handlers: Vec<PhiInstrHandler>,
 }
 
+/// What each still-open label has waiting, keyed by the instruction index that
+/// closes it.
+///
+/// Both maps are keyed by an index the instruction stream already carries — an
+/// `if` stores its `else_index` and `end_index`, a `br` its `target_index` — so a
+/// jump is a lookup rather than a search back through the control stack.
 #[derive(Default)]
 pub(crate) struct InstrIndexToBasicBlockMap {
+    /// Keyed by the `end`'s index. See [`EndBasicBlockBranches`].
     end_map: FxHashMap<u32, EndBasicBlockBranches>,
+    /// Keyed by the `else`'s index: the block the false arm starts in, and the
+    /// block's params to restore onto the simulated stack when it does.
+    ///
+    /// The params need no phi. They were live *before* the branch, so they dominate
+    /// both arms and can be used exactly as they are.
     else_map: FxHashMap<u32, (BasicBlockId, Vec<ValueId>)>,
     // loop_map: FxHashMap<u32, Vec<PhiInstrHandler>>,
 }
 
 impl InstrIndexToBasicBlockMap {
+    /// Opens a label: records its `end` block and builds one empty phi per result.
+    ///
+    /// Called when the label *opens*, not when it closes — a `br` inside needs the
+    /// block and its phis to already exist. See the module docs.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`build_phi`](tracewasm_llvm::instruction::cursor::Cursor::build_phi)
+    /// reports; an empty phi is legal here only because the type is stated outright.
     pub fn add_end(
         &mut self,
         index: u32,
@@ -86,6 +169,18 @@ impl InstrIndexToBasicBlockMap {
         Ok(())
     }
 
+    /// Records one path into a label: attaches `values` to its phis, and hands back
+    /// the block to jump to.
+    ///
+    /// `values` must be in the label's own order — **deepest first** — so that
+    /// `values[i]` and `phi_handlers[i]` name the same slot. See the module docs for
+    /// why handing them over top-first is a silent bug rather than a loud one.
+    ///
+    /// # Panics
+    ///
+    /// If `values` does not match the label's arity, or if the label was never opened
+    /// with [`add_end`](Self::add_end) — both mean the caller's index bookkeeping is
+    /// wrong, not that the input was.
     pub fn add_branch_to_end(
         &mut self,
         index: u32,
@@ -115,20 +210,35 @@ impl InstrIndexToBasicBlockMap {
         Ok(end_data.basic_block)
     }
 
+    /// The registers a label leaves behind, and the block they are defined in.
+    ///
+    /// What an `end` pushes back onto the simulated stack once every path into it has
+    /// been recorded. `None` if the label was never opened.
     pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
         self.end_map
             .get(&index)
             .map(|x| (x.phi_vals.as_slice(), x.basic_block))
     }
 
+    /// Records where an `if`'s false arm begins, and the params to restore when it
+    /// does. Consumed by whichever reaches the else first — the `Else` instruction, or
+    /// a `br` out of the then-arm that skips it.
     pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<ValueId>) {
         self.else_map.insert(index, (block, params));
     }
 
+    /// Takes the else arm's block and params. Taking rather than reading is the
+    /// point: an arm is entered once, so a second call means the pass reached the
+    /// same `else` twice.
     pub fn take_else_data(&mut self, index: u32) -> Option<(BasicBlockId, Vec<ValueId>)> {
         self.else_map.remove(&index)
     }
 
+    /// Closes a label, taking its `end` block and the phis that were filled there.
+    ///
+    /// The counterpart of [`get_end_basic_block`](Self::get_end_basic_block): that one
+    /// is for the jumps taken while the label is still open, this for the `end` that
+    /// finishes with it.
     #[allow(
         dead_code,
         reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
@@ -154,6 +264,12 @@ impl InstrIndexToBasicBlockMap {
     }
 }
 
+/// Wasm's operand stack, holding LLVM values instead of numbers.
+///
+/// The interpreter's [`Stack`] with a different element type, which is what makes the
+/// translation a transcription rather than an analysis: wasm says "add the top two
+/// operands", so this pops two ids, emits an `add`, and pushes the result. Nothing is
+/// evaluated — a push records *which register* will hold the value at run time.
 pub(crate) struct SimulatedStack {
     stack: Stack<ValueId>,
 }
@@ -180,8 +296,18 @@ impl DerefMut for SimulatedStack {
     }
 }
 
+/// What an open `if` needs beyond its `end`, so a `br` inside it knows where to
+/// resume.
+///
+/// After a `br`, everything up to the label's `else` or `end` is gone from the
+/// stream, so the next instruction is one of those two. Which one depends on where
+/// the `br` was — hence both fields.
 pub(crate) struct IfCtx {
+    /// Where the false arm begins, if there is one.
     pub else_instr_index: Option<u32>,
+    /// Whether the false arm has been entered. A `br` from the then-arm resumes at
+    /// the `else`; a `br` from the else-arm has no arm left to enter and resumes at
+    /// the `end`.
     pub is_else_ongoing: bool,
 }
 
@@ -189,10 +315,18 @@ pub(crate) struct IfCtx {
     dead_code,
     reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
 )]
+/// Which construct a label came from.
+///
+/// Only `If` carries anything: it is the one label with two arms, so it is the one a
+/// `br` can leave in more than one way.
 pub(crate) enum LabelKind {
+    /// An `if`, with the state its two arms need. See [`IfCtx`].
     If(IfCtx),
+    /// A `loop`, whose branch target is its start rather than its `end`.
     Loop,
+    /// A `block`.
     Block,
+    /// The implicit label around the whole body, which `return` targets.
     Func,
 }
 
@@ -200,18 +334,33 @@ pub(crate) enum LabelKind {
     dead_code,
     reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
 )]
+/// One open label, innermost last on the [`ControlStack`].
 pub(crate) struct Label {
+    /// Which construct opened it, and whatever that construct needs. See [`LabelKind`].
     pub kind: LabelKind,
+    /// Index of the instruction that opened it.
     pub instr_index: usize,
+    /// Index of the `end` that closes it — where a `br` leaving this label resumes.
     pub end_instr_index: usize,
 }
 
+/// The labels currently open, innermost last.
+///
+/// Distinct from the `end` map, which answers "where does label *N* close?". This
+/// answers "which label am I in?" — the question a `br` asks, because after it the
+/// rest of the enclosing label is unreachable and the pass has to know which one to
+/// skip to.
+///
+/// Index 0 is the implicit function label, pushed by `compile_func`: a function body
+/// has no opening instruction to push one for it.
 #[derive(Default)]
 pub(crate) struct ControlStack {
     stack: Vec<Label>,
 }
 
 impl ControlStack {
+    /// Opens a label. Paired with [`leave_label`](Self::leave_label) at its `end`, or
+    /// at a `br` that skips the `end` entirely.
     pub fn enter_label(&mut self, kind: LabelKind, instr_index: usize, end_instr_index: usize) {
         self.stack.push(Label {
             kind,
@@ -220,6 +369,11 @@ impl ControlStack {
         });
     }
 
+    /// The innermost label's `if` state, or `None` if it is not an `if`.
+    ///
+    /// Mutable because the one caller — a `br` leaving the then-arm — both reads
+    /// `is_else_ongoing` and sets it, standing in for the `Else` instruction it
+    /// skips over.
     pub fn try_curr_label_as_if_mut(&mut self) -> Option<&mut IfCtx> {
         let LabelKind::If(ctx) = &mut self.curr_label_mut().kind else {
             return None;
@@ -228,16 +382,24 @@ impl ControlStack {
         Some(ctx)
     }
 
+    /// Closes the innermost label.
+    ///
+    /// # Panics
+    ///
+    /// If none is open, which means an `end` was reached without a matching opener —
+    /// a bug in the pass, since the instruction stream is already balanced.
     pub fn leave_label(&mut self) -> Label {
         self.stack
             .pop()
             .expect("hitting this means the logic for control stack mutation is incorrect")
     }
 
+    /// The innermost open label.
     pub fn curr_label(&self) -> &Label {
         &self.stack[self.stack.len() - 1]
     }
 
+    /// The innermost open label, mutably.
     pub fn curr_label_mut(&mut self) -> &mut Label {
         let len = self.stack.len();
 
@@ -248,14 +410,25 @@ impl ControlStack {
         dead_code,
         reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
     )]
+    /// The function label's own span, for `return` — which targets the outermost
+    /// label however deeply nested it appears.
     pub fn enclosing_func_instr_indices(&self) -> (usize, usize) {
         (self.stack[0].instr_index, self.stack[0].end_instr_index)
     }
 }
 
+/// The pass: everything one module's translation needs to carry between
+/// instructions.
+///
+/// Reached through [`Module::build_cfg`](crate::module::Module::build_cfg) rather
+/// than constructed directly. The three `pub(crate)` fields are the running state
+/// described in the module docs; the two maps below are the function index space,
+/// split the way wasm splits it.
 #[derive(Default)]
 pub struct WasmInstrLLVMPassManager {
+    /// Imported functions, which become LLVM declarations — a signature and no body.
     declared_funcs: FxHashMap<FuncIndex, GlobalId<DeclaredFunc>>,
+    /// Locally-defined functions, which become LLVM definitions.
     defined_funcs: FxHashMap<FuncIndex, GlobalId<DefinedFunc>>,
     pub(crate) instr_index_to_basic_block: InstrIndexToBasicBlockMap,
     pub(crate) simulated_stack: SimulatedStack,
@@ -263,6 +436,17 @@ pub struct WasmInstrLLVMPassManager {
 }
 
 impl WasmInstrLLVMPassManager {
+    /// Translates a whole module into one [`ControlFlowGraph`].
+    ///
+    /// Signatures first, bodies second, in two passes over the index space. A body
+    /// may call any function — one declared later, or itself — and a call needs the
+    /// callee's handle to exist, so no body is emitted until every signature is in.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the builders report. A rejection here is a bug in this pass rather
+    /// than bad input: the module has already been validated, so the IR it describes
+    /// is well-formed by the time it gets here.
     pub fn compile<V: VirtualMachine>(
         mut self,
         module: &Arc<Module<V>>,
@@ -339,6 +523,16 @@ impl WasmInstrLLVMPassManager {
         Ok(builder.build())
     }
 
+    /// Translates one function body: its locals, then its instructions.
+    ///
+    /// Sets up three things the instruction arms rely on and cannot establish
+    /// themselves — an `alloca` per local in the entry block, the function's own
+    /// `end` label, and the implicit function label on the control stack. A body has
+    /// no opening instruction to push that last one, so a `return` or a final `end`
+    /// would otherwise find the control stack empty.
+    ///
+    /// The loop is index-driven rather than a `for` over the slice: an arm returns
+    /// where to resume, which after a `br` is not the next instruction.
     fn compile_func<V: VirtualMachine>(
         &mut self,
         func_index: FuncIndex,
@@ -453,6 +647,14 @@ impl WasmInstrLLVMPassManager {
     }
 }
 
+/// The LLVM type a wasm value type becomes.
+///
+/// A reference becomes `ptr`, since that is what one is once it is an operand.
+///
+/// # Panics
+///
+/// On `v128`, which [`Module::compile`](crate::module::Module::compile) rejects at
+/// section level — so reaching it here would mean the check was lost.
 fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
     match ty {
         ValType::I32 => ctx.i32_ty(),
@@ -464,6 +666,16 @@ fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
     }
 }
 
+/// The LLVM signature a wasm function type becomes.
+///
+/// Two things differ from a straight mapping:
+///
+/// * **A runtime pointer is appended** to the parameters, through which a body
+///   reaches the instance's memory and tables. It goes *last* precisely so that a
+///   wasm local index and its LLVM parameter index stay equal.
+/// * **Multiple results become a struct**, which is how LLVM returns more than one
+///   value. No results becomes `void` — wasm spells that as an empty list, and it is
+///   what most functions have.
 fn llvm_signature_from_wasm(
     params: &[ValType],
     results: &[ValType],

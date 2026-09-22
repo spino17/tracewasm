@@ -5,6 +5,10 @@ use tracewasm_macros::imports;
 
 mod counting;
 
+/// The host functions this playground exposes to the module it loads.
+///
+/// Empty of state — the `#[imports]` macro reads the `impl` block below, not the
+/// fields.
 pub struct Imports {}
 
 #[imports]

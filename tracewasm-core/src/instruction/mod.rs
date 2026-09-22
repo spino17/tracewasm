@@ -324,6 +324,21 @@ pub(crate) trait Instruction: Sized {
     // A CFG-building pass needs the cursor, the whole instruction stream, the frame
     // layout, the locals, the runtime pointer and the enclosing function — grouping
     // them into a context struct would only move the list.
+    /// Translates this one instruction into LLVM IR, returning where to carry on.
+    ///
+    /// The return is `(block, next_index)` rather than nothing, because neither is
+    /// implied by the instruction alone: an `if` leaves the cursor in its *then*
+    /// block, and a `br` resumes at the enclosing label's `else` or `end` rather than
+    /// at the following instruction. The driver in
+    /// [`compile_func`](llvm::WasmInstrLLVMPassManager) does what it is told rather
+    /// than tracking control flow a second time.
+    ///
+    /// `instructions` is the whole body, since a control instruction reads the
+    /// operand arity and unwind height off the `end` it names. `locals` is one
+    /// pointer per local, `runtime_ctx_ptr` the instance pointer threaded in as the
+    /// last parameter.
+    ///
+    /// Only the stack machine implements this; the register machine returns an error.
     #[allow(clippy::too_many_arguments)]
     fn emit_llvm_ir<'a>(
         &self,

@@ -2088,6 +2088,19 @@ impl<V: VirtualMachine> Module<V> {
         Ok(instance)
     }
 
+    /// Translates this module into an LLVM control-flow graph.
+    ///
+    /// The pass lowers the *already-lowered* instruction stream rather than the
+    /// operators, so every structured branch has been resolved to an absolute index
+    /// before it starts. The result is rendered by
+    /// [`IREmitter`](tracewasm_llvm::cfg::emit::IREmitter).
+    ///
+    /// Only the stack machine is translated. A module compiled for the register
+    /// machine comes back with an error rather than a partial graph.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the pass reports, including any operator it does not yet lower.
     pub fn build_cfg(self: &Arc<Module<V>>) -> Result<ControlFlowGraph, anyhow::Error> {
         let pass_manager = WasmInstrLLVMPassManager::default();
 

@@ -1,8 +1,25 @@
 //! Types and the values that carry them.
 //!
 //! A [`Value`] is what an instruction operates on: a type plus how the value is
-//! obtained — a register, a pooled constant, or a constant expression. Both the type
-//! and the constant are ids, so a `Value` is small and cheap to clone.
+//! obtained — a register, a pooled constant, or a constant expression.
+//!
+//! # Values live once, and are named by id
+//!
+//! Every value is allocated into an arena on the [`Context`] and referred to
+//! everywhere else by [`ValueId`] — operands, phi incomings, an instruction's own
+//! result. Nothing holds a second copy.
+//!
+//! That indirection is load-bearing rather than tidy. An unnamed register is not
+//! numbered until [`Builder::build`](crate::cfg::builder::Builder::build) knows where
+//! it sits in the printed function, and renaming it has to be visible at every use.
+//! With copies at the use sites there is no way to reach them; with one arena entry
+//! the rename is a single write.
+//!
+//! **An arena, not an interner.** Deduplicating by content would be wrong here: every
+//! function has its own `%0`, so two registers that look alike are still two
+//! registers, and merging them would let one rename corrupt both. Identity is "this
+//! definition", not "this shape". Types and constants *are* interned, because for
+//! those two equal shapes genuinely are one thing.
 //!
 //! [`Type`] describes one node of a type; its children are [`TyId`]s, so the whole
 //! type graph lives in the pool rather than in nested boxes. Nearly everything a
@@ -208,6 +225,13 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    /// The ABI alignment of this type in bytes, or `None` where it is not a fixed
+    /// number this crate decides.
+    ///
+    /// Only the scalars answer. For them alignment equals width, which is why this
+    /// reads as a width table; a pointer's and an aggregate's come from the target's
+    /// data layout, so `None` here means "let the ABI default apply" rather than
+    /// "unaligned" — which is exactly how the builders read a `None` `align`.
     pub fn alignment(&self, ctx: &Context) -> Option<u32> {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -511,8 +535,9 @@ pub enum ValueKind {
 
 /// An operand: a type, and where the value comes from.
 ///
-/// Both halves are ids, so a `Value` is cheap to clone and cheap to compare. The type
-/// is the value's *own* type — for a pointer that means `ptr`, not what it points at.
+/// Held in the [`Context`]'s arena and reached through a [`ValueId`]; see the module
+/// docs for why the indirection exists. The type is the value's *own* type — for a
+/// pointer that means `ptr`, not what it points at.
 #[derive(Debug, Clone)]
 pub struct Value {
     ty: TyId,
@@ -587,8 +612,20 @@ impl ValueId {
         Ok(I1Value(self))
     }
 
-    /// Gives this value the type `ty`, if it can have it. See
-    /// [`Value::try_cast_inner`] for what "can" means.
+    /// Gives this value the type `ty`, if it can have it.
+    ///
+    /// A **constant** is folded into the new type and re-interned, so the result is a
+    /// genuinely different value — `i32 7` cast to `i64` becomes `i64 7`, with its own
+    /// id. A **register** or constant expression is only *checked*: nothing converts
+    /// it, because widening a register needs a real `zext`/`sext` that this cannot
+    /// emit, so the same id comes back unchanged.
+    ///
+    /// That the unchanged case returns the *same* id matters. Handing back a fresh
+    /// copy would mint a second identity for one register, and a later rename would
+    /// reach only one of them.
+    ///
+    /// `None` covers all of: an unsized target type, a constant that does not fold,
+    /// and a register whose type does not already match.
     pub fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ValueId> {
         Value::try_cast_inner(*self, ty, signedness, ctx)
     }
@@ -691,6 +728,11 @@ impl Value {
         Ok(ctx.alloc_value(value))
     }
 
+    /// The zero of `ty`: `0`, `0.0`, or `null`.
+    ///
+    /// What a wasm local is initialised to, so it answers for the types
+    /// [`ValType`](crate::value::Type) maps onto and `None` for the rest. A
+    /// reference's zero is the null pointer, which is what `ref.null` means.
     pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<ValueId> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
 
@@ -790,6 +832,11 @@ impl Value {
         &self.kind
     }
 
+    /// Where the value comes from, mutably.
+    ///
+    /// The one mutation a built value undergoes: renaming an unnamed register in
+    /// [`Builder::build`](crate::cfg::builder::Builder::build). Reached through the
+    /// context's arena, so the write lands on the single entry every use shares.
     pub fn kind_mut(&mut self) -> &mut ValueKind {
         &mut self.kind
     }
@@ -1643,7 +1690,7 @@ impl Const for NullPtr {
 /// anything else.
 ///
 /// It keeps the pool id it was narrowed from rather than re-deriving `i1` on the way
-/// back: [`Value::into_i1`] has already resolved and checked that id, so converting
+/// back: [`ValueId::try_i1`] has already resolved and checked that id, so converting
 /// back needs neither the interner nor a second chance to fail.
 #[derive(Debug)]
 pub struct I1Value(pub(crate) ValueId);

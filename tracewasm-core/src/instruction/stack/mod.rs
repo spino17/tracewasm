@@ -960,6 +960,11 @@ pub(crate) struct StackFrameLayout {
     /// run naming its own arms, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[StackBrTableTarget]>,
+    /// Each label's type, keyed by the index of the instruction that opens it.
+    ///
+    /// Execution never reads this — arities are already on the instructions. It is
+    /// for the LLVM pass, which needs the result *types* to build an `end`'s phis and
+    /// cannot recover them from a count.
     pub label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
 }
 
@@ -1026,6 +1031,11 @@ struct ControlStack {
     dead_code,
     reason = "the `end` phis need only the results; params are for `loop` headers"
 )]
+/// One label's type: what it consumes and what it leaves.
+///
+/// The block type a `block`/`loop`/`if` was written with, kept whole rather than
+/// reduced to two counts. See
+/// [`StackFrameLayout::label_instr_index_to_signature`](StackFrameLayout).
 pub struct LabelSignature {
     pub(crate) params: Box<[ValType]>,
     pub(crate) results: Box<[ValType]>,
@@ -1143,13 +1153,11 @@ impl ControlStack {
         }
     }
 
-    /// Sets `curr_height`, unless the current block is traversing dead code.
+    /// Sets `curr_height` outright.
     ///
-    /// The dead-code guard is what makes it safe for branch/`end` handlers to
-    /// compute heights unconditionally: once a block goes unreachable, its
-    /// height is frozen until the block's `else`/`end` recomputes it from
-    /// `recorded_height`, so any writes attempted by dead instructions are
-    /// dropped here rather than corrupting the model (or underflowing).
+    /// No dead-code guard is needed: an operator that cannot execute never reaches
+    /// the lowering match, so nothing frozen or stack-polymorphic is ever written
+    /// here — [`UnreachableTrackingControlStack`] drops those operators first.
     ///
     /// NOTE: use this when the exact resulting height is already known — e.g. at
     /// `else`/`end`, which reset to `recorded_height + arity`. For an operator

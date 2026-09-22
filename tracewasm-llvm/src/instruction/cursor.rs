@@ -25,10 +25,16 @@ use std::ops::{Deref, DerefMut};
 
 /// What to call the register an instruction defines.
 ///
-/// LLVM has two forms and **they draw from the same per-function counter**: a named
-/// local like `%sum`, and an unnamed one like `%3`. That shared counter is why this is
-/// an enum rather than an `Option`: [`Unnamed`](Self::Unnamed) is not the absence of a
-/// name, it is a request for the next number.
+/// LLVM has two forms: a named local like `%sum`, and an unnamed one like `%3`. This
+/// is an enum rather than an `Option` because [`Unnamed`](Self::Unnamed) is not the
+/// absence of a name — it is a request to be numbered, and the two forms are named at
+/// different *times*.
+///
+/// A named register is named here, at construction. An unnamed one is numbered in
+/// [`Builder::build`](crate::cfg::builder::Builder::build), because LLVM numbers by
+/// position in the printed function and a frontend routinely creates a block long
+/// before it fills it — numbering at construction would hand out `%0` to something
+/// printed after `%1`, which `llvm-as` refuses.
 ///
 /// [`From`] is implemented for the string types, so a call site can write
 /// `"sum".into()` rather than naming the variant.
@@ -43,12 +49,17 @@ pub enum RegName {
     /// *unnamed* form, so a numeric name would collide with the numbering rather than
     /// merely need quoting.
     Named(String),
-    /// Take the next unnamed index, which is how LLVM's `%0`, `%1`, … numbering is
-    /// produced.
+    /// Be numbered `%0`, `%1`, … when the graph is built.
     ///
-    /// The counter is per function, and **parameters draw from it first** — so a
-    /// body's first unnamed temporary continues where the parameter list stopped. A
-    /// *named* parameter consumes nothing.
+    /// The number is **not** assigned here. Until
+    /// [`Builder::build`](crate::cfg::builder::Builder::build) runs, the register
+    /// carries a placeholder; `build` then walks every definition in printed order —
+    /// parameters, then each block's phis and instructions — and numbers the unnamed
+    /// ones as it goes.
+    ///
+    /// The counter is per function, and **parameters come first**, so a body's first
+    /// unnamed temporary continues where the parameter list stopped. A *named*
+    /// parameter consumes nothing.
     Unnamed,
 }
 
@@ -148,9 +159,10 @@ impl From<TyId> for OperandTy {
 ///
 /// # Naming
 ///
-/// Builders that define a register take a [`RegName`]. [`RegName::Unnamed`] takes
-/// LLVM's next unnamed number; a [`Named`](RegName::Named) one is used as given,
-/// suffixed if it is already taken. `"x".into()` is the short way to write one.
+/// Builders that define a register take a [`RegName`]. A [`Named`](RegName::Named)
+/// one is used as given, suffixed if it is already taken;
+/// [`Unnamed`](RegName::Unnamed) is numbered later, when the graph is built — see
+/// [`RegName`]. `"x".into()` is the short way to write one.
 ///
 /// # Reaching the context
 ///
@@ -188,6 +200,10 @@ impl<'a> Cursor<'a> {
         self.ctx
     }
 
+    /// Which block this cursor is writing into.
+    ///
+    /// What a phi needs in order to name the predecessor a value arrives from: the
+    /// block a branch leaves is the block the cursor is in when it is emitted.
     pub fn basic_block(&self) -> BasicBlockId {
         self.block
     }
@@ -268,7 +284,7 @@ impl<'a> Cursor<'a> {
     /// Builds `br i1 %c, label %t, label %f`, ending the block.
     ///
     /// Consumes the cursor. The condition is an [`I1Value`], so the `i1` requirement
-    /// was already checked by [`Value::into_i1`](crate::value::Value::into_i1).
+    /// was already checked by [`ValueId::try_i1`](crate::value::ValueId::try_i1).
     ///
     /// # Errors
     ///

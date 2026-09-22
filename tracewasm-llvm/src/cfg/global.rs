@@ -167,7 +167,7 @@ impl GlobalEntity for GlobalVar {
 
 /// Anything a module names with an `@`, with its tag erased.
 ///
-/// This is what a [`Value`](crate::value::Value) holds once a global is used as an
+/// This is what a [`Value`] holds once a global is used as an
 /// operand — by then the distinction no longer matters, since all three are addresses
 /// and all three render as `@name`.
 #[derive(Debug, Clone, Copy)]
@@ -225,7 +225,7 @@ pub enum GlobalKind {
 /// Everything the module records about one global, under its name.
 ///
 /// One shape for all three kinds, which is what lets a
-/// [`Value`](crate::value::Value) built from any global resolve its pointee the same
+/// [`Value`] built from any global resolve its pointee the same
 /// way — see [`pointee_ty`](Self::pointee_ty).
 pub struct GlobalData {
     pub(crate) linkage: Linkage,
@@ -276,6 +276,16 @@ pub enum FuncRef {
 }
 
 impl FuncRef {
+    /// The callee's name and signature, for a `call` to check itself against.
+    ///
+    /// Read out together because a call needs both and the borrow rules make taking
+    /// them separately awkward — see the note in the body about interning while the
+    /// function table is borrowed.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::FunctionNotFound`] if the handle names a function this module
+    /// does not have, which can only happen across contexts.
     pub fn name_and_sig<'a, 'b: 'a>(
         &'b self,
         ctx: &'a Context,
@@ -350,12 +360,20 @@ impl From<GlobalId<DeclaredFunc>> for FuncRef {
     }
 }
 
+/// A callee's name, and which sigil it is written with.
+///
+/// LLVM spells a module-level function `@f` and a local `%f`, so the two cannot be
+/// one string — the emitter has to know which prefix to put back.
 pub enum FuncName {
+    /// A function-local name, written `%f`.
     Local(StrId),
+    /// A module-level name, written `@f`.
     Global(StrId),
 }
 
 impl FuncName {
+    /// The interned name, without its sigil — for a caller that wants the text and
+    /// not the spelling.
     pub fn str(&self) -> StrId {
         match self {
             FuncName::Global(s) => *s,
