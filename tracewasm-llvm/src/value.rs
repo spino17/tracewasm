@@ -13,10 +13,14 @@ use crate::{
     cfg::{
         basic_block::BasicBlockId,
         context::Context,
+        function::FuncId,
         global::{Global, GlobalEntity, GlobalId},
     },
-    error::{GepError, TypeError},
-    instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind, cursor::OperandTy},
+    error::{ContextError, GepError, TypeError},
+    instruction::{
+        AllocaOperands, GetElementPtrOperands, InstructionKind,
+        cursor::{OperandTy, RegName},
+    },
     interner::{ConstId, StrId, TyId},
 };
 use ordered_float::OrderedFloat;
@@ -575,13 +579,27 @@ impl Value {
     /// builders call this after `name_for_reg` has issued a unique name, and record
     /// the definition so the pointee of a pointer can later be traced back.
     /// Constructing one freely would produce a `%name` that no instruction defines.
-    pub(crate) fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
-        let reg_id: StrId = ctx.str_interner.intern(name).into();
+    pub(crate) fn from_register(
+        name: &RegName,
+        ty: TyId,
+        func: FuncId,
+        ctx: &mut Context,
+    ) -> Result<Self, ContextError> {
+        let (name, is_unnamed) = match name {
+            RegName::Named(name) => (name.as_ref(), false),
+            RegName::Unnamed => ("<UNNAMED>", true),
+        };
 
-        Value {
+        let reg_name = ctx.name_for_reg(name, func)?;
+        let reg_id: StrId = ctx.str_interner.intern(reg_name).into();
+
+        Ok(Value {
             ty,
-            kind: ValueKind::Reg(Register { name: reg_id }),
-        }
+            kind: ValueKind::Reg(Register {
+                name: reg_id,
+                is_unnamed,
+            }),
+        })
     }
 
     /// Wraps a constant expression as an operand, taking its type from the
@@ -619,6 +637,10 @@ impl Value {
     /// Where the value comes from.
     pub fn kind(&self) -> &ValueKind {
         &self.kind
+    }
+
+    pub fn kind_mut(&self) -> &mut ValueKind {
+        &mut self.kind
     }
 
     /// Whether this value is a pointer.
@@ -920,6 +942,7 @@ impl ConstExpr {
 pub struct Register {
     /// The interned name, without the leading `%`.
     pub(crate) name: StrId,
+    pub(crate) is_unnamed: bool,
 }
 
 /// A constant the module uses, interned into a per-context pool.

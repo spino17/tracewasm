@@ -11,8 +11,8 @@ use crate::{
     },
     error::ContextError,
     instruction::cursor::{Cursor, RegName},
-    interner::{StrId, TyId},
-    value::{ConstExpr, FuncSignature, Value},
+    interner::{StrId, StrInterner, TyId},
+    value::{ConstExpr, FuncSignature, Value, ValueKind},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::{Deref, DerefMut};
@@ -307,10 +307,14 @@ impl Builder {
         let mut param_tys = vec![];
 
         for (param_ty, param_name) in params {
-            let name = self.ctx.name_for_reg(param_name, id)?;
-
             param_tys.push(*param_ty);
-            final_params.push(Value::from_register(name, *param_ty, &mut self.ctx));
+
+            final_params.push(Value::from_register(
+                param_name,
+                *param_ty,
+                id,
+                &mut self.ctx,
+            )?);
         }
 
         let func = self.ctx.get_func_mut(id);
@@ -348,7 +352,81 @@ impl Builder {
     /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
     /// reports both.
     pub fn build(self) -> ControlFlowGraph {
-        ControlFlowGraph { context: self.ctx }
+        let mut ctx = self.ctx;
+
+        for func in &mut ctx.module.functions {
+            let func = ctx
+                .funcs
+                .get_mut(func.raw())
+                .expect("func id is always constructed after inserting function object");
+
+            let mut counter = UnnamedRegNameCounter::new();
+            let params = &mut func.params;
+
+            for param in params {
+                convert_unnmaed_to_named_register(param, &mut counter, &mut ctx.str_interner);
+            }
+
+            let blocks = &mut func.blocks;
+
+            for block_id in blocks {
+                let block = ctx
+                    .blocks
+                    .get_mut(block_id.raw())
+                    .expect("block id is always constructed after inserting basic block object");
+
+                let phi_instructions = &mut block.phis;
+
+                for phi in phi_instructions {
+                    convert_unnmaed_to_named_register(
+                        &mut phi.value,
+                        &mut counter,
+                        &mut ctx.str_interner,
+                    );
+                }
+
+                let instructions = &mut block.instructions;
+
+                for instr in instructions {
+                    if let Some(val) = &mut instr.value {
+                        convert_unnmaed_to_named_register(val, &mut counter, &mut ctx.str_interner);
+                    }
+                }
+            }
+        }
+
+        ControlFlowGraph { context: ctx }
+    }
+}
+
+fn convert_unnmaed_to_named_register(
+    val: &mut Value,
+    counter: &mut UnnamedRegNameCounter,
+    str_interner: &mut StrInterner,
+) {
+    if let ValueKind::Reg(reg) = val.kind_mut() {
+        let id: StrId = str_interner.intern(format!("{}", counter.next())).into();
+
+        reg.name = id;
+        reg.is_unnamed = false;
+    }
+}
+
+struct UnnamedRegNameCounter {
+    counter: u32,
+}
+
+impl UnnamedRegNameCounter {
+    fn new() -> Self {
+        UnnamedRegNameCounter { counter: 0 }
+    }
+
+    fn next(&mut self) -> u32 {
+        let counter = self.counter;
+
+        self.counter += 1;
+
+        counter
     }
 }
 

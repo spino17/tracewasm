@@ -10,7 +10,7 @@ use crate::{
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::{ContextError, TypeError},
-    instruction::cursor::{Cursor, OperandTy, RegName},
+    instruction::cursor::{Cursor, OperandTy},
     interner::{ConstInterner, StrId, StrInterner, TyId, TyInterner},
     value::{Const, ConstExpr, ConstValue, Type, TypeDisplay, Value},
 };
@@ -109,7 +109,7 @@ impl Context {
     /// [`ContextError::InvalidRegisterName`] if the hint is not a legal LLVM local.
     pub(crate) fn name_for_reg(
         &mut self,
-        name: &RegName,
+        name: &str,
         func_id: FuncId,
     ) -> Result<String, ContextError> {
         let assigner = self.reg_name_assigner.entry(func_id).or_default();
@@ -351,21 +351,11 @@ impl Context {
 /// `x1`, so a later request for `x1` must not produce a duplicate.
 #[derive(Default)]
 pub(crate) struct FuncRegNameIndex {
-    unnamed_index: u32,
     named_index: FxHashMap<String, u32>,
     issued_names: FxHashSet<String>,
 }
 
 impl FuncRegNameIndex {
-    /// The next `%N` for an unnamed value.
-    fn next_unnamed_index(&mut self) -> u32 {
-        let index = self.unnamed_index;
-
-        self.unnamed_index += 1;
-
-        index
-    }
-
     /// How many times `name` has been asked for. `0` the first time, so the first
     /// request keeps the hint unsuffixed.
     fn next_named_index(&mut self, name: &str) -> u32 {
@@ -395,11 +385,7 @@ impl FuncRegNameIndex {
     ///
     /// The loop retries suffixes until it finds one not already issued, which is what
     /// keeps a requested `x1` distinct from the `x1` generated for a second `x`.
-    fn name_from_hint(&mut self, hint: &RegName) -> Result<String, ContextError> {
-        let RegName::Named(hint) = hint else {
-            return Ok(self.next_unnamed_index().to_string());
-        };
-
+    fn name_from_hint(&mut self, hint: &str) -> Result<String, ContextError> {
         let re = Regex::new(r"^[-a-zA-Z$._][-a-zA-Z$._0-9]*$").unwrap();
 
         if !re.is_match(hint) {
@@ -434,6 +420,7 @@ mod tests {
             builder::Builder,
             global::{DefinedFunc, GlobalId},
         },
+        instruction::cursor::RegName,
         test_support::{add_fn, fixture},
         value::Type,
     };

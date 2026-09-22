@@ -224,8 +224,7 @@ impl<'a> Cursor<'a> {
         };
 
         let func_id = self.ctx.get_block(self.block).func_id;
-        let reg_name = self.ctx.name_for_reg(&reg, func_id)?;
-        let val = Value::from_register(reg_name, ref_ty, self.ctx);
+        let val = Value::from_register(&reg, ref_ty, func_id, self.ctx)?;
 
         let phi_id = self.block.add_phi(
             PhiInstruction {
@@ -1614,8 +1613,7 @@ fn add_instruction_to_block_and_get_value(
     ctx: &mut Context,
 ) -> Result<Value, InstructionError> {
     let func_id = ctx.get_block(block).func_id;
-    let reg_name = ctx.name_for_reg(&reg, func_id)?;
-    let val = Value::from_register(reg_name, result_ty, ctx);
+    let val = Value::from_register(&reg, result_ty, func_id, ctx)?;
 
     let ValueKind::Reg(reg) = val.kind() else {
         unreachable!("value is made out of register name just above")
