@@ -172,9 +172,13 @@ impl DerefMut for SimulatedStack {
     }
 }
 
-#[derive(Clone, Copy)]
+pub(crate) struct IfCtx {
+    pub else_instr_index: Option<u32>,
+    pub is_else_ongoing: bool,
+}
+
 pub(crate) enum LabelKind {
-    If { else_instr_index: Option<u32> },
+    If(IfCtx),
     Loop,
     Block,
     Func,
@@ -200,6 +204,22 @@ impl ControlStack {
         });
     }
 
+    pub fn try_curr_label_as_if(&self) -> Option<&IfCtx> {
+        let LabelKind::If(ctx) = &self.curr_label().kind else {
+            return None;
+        };
+
+        Some(ctx)
+    }
+
+    pub fn try_curr_label_as_if_mut(&mut self) -> Option<&mut IfCtx> {
+        let LabelKind::If(ctx) = &mut self.curr_label_mut().kind else {
+            return None;
+        };
+
+        Some(ctx)
+    }
+
     pub fn leave_label(&mut self) -> Label {
         self.stack
             .pop()
@@ -208,6 +228,12 @@ impl ControlStack {
 
     pub fn curr_label(&self) -> &Label {
         &self.stack[self.stack.len() - 1]
+    }
+
+    pub fn curr_label_mut(&mut self) -> &mut Label {
+        let len = self.stack.len();
+
+        &mut self.stack[len - 1]
     }
 
     pub fn enclosing_func_instr_indices(&self) -> (usize, usize) {

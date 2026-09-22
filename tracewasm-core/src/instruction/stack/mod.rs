@@ -88,7 +88,7 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
         UnreachableTrackingControlStack, check_memory_index,
-        llvm::{LabelKind, WasmInstrLLVMPassManager},
+        llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager},
         params_and_results_from_blockty,
     },
     memory::Memory,
@@ -4281,29 +4281,50 @@ impl Instruction for StackInstruction {
                         instructions,
                     );
 
-                let (phi_vals, end_block) = pass_manager
-                    .instr_index_to_basic_block
-                    .phi_vals_and_branch_for_end(curr_label_end_index as u32)
-                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
-
                 pass_manager.simulated_stack.truncate(recorded_height);
 
-                for val in phi_vals {
-                    pass_manager.simulated_stack.push(val.clone());
-                }
+                let (next_block, next_instr_index) = if let Some(if_ctx) =
+                    pass_manager.control_stack.try_curr_label_as_if()
+                    && !if_ctx.is_else_ongoing
+                    && let Some(curr_label_else_index) = if_ctx.else_instr_index
+                {
+                    // restore the stack with original params
+                    let (else_block, params) = pass_manager
+                        .instr_index_to_basic_block
+                        .take_else_data(instr_index as u32)
+                        .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                    for param in params {
+                        pass_manager.simulated_stack.push(param);
+                    }
+
+                    (else_block, curr_label_else_index as usize + 1)
+                } else {
+                    let (phi_vals, end_block) = pass_manager
+                        .instr_index_to_basic_block
+                        .phi_vals_and_branch_for_end(curr_label_end_index as u32)
+                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                    for val in phi_vals {
+                        pass_manager.simulated_stack.push(val.clone());
+                    }
+
+                    (end_block, curr_label_end_index + 1)
+                };
 
                 pass_manager.control_stack.leave_label();
 
-                return Ok((end_block, curr_label_end_index + 1));
+                return Ok((next_block, next_instr_index));
             }
             StackInstruction::If {
                 else_index,
                 end_index,
             } => {
                 pass_manager.control_stack.enter_label(
-                    LabelKind::If {
+                    LabelKind::If(IfCtx {
                         else_instr_index: *else_index,
-                    },
+                        is_else_ongoing: false,
+                    }),
                     instr_index,
                     *end_index as usize,
                 );
@@ -4393,6 +4414,13 @@ impl Instruction for StackInstruction {
                 return Ok((if_then, instr_index + 1));
             }
             StackInstruction::Else { if_end_index } => {
+                let if_ctx = pass_manager
+                    .control_stack
+                    .try_curr_label_as_if_mut()
+                    .expect("if-else not balanced!");
+
+                if_ctx.is_else_ongoing = true;
+
                 let curr_basic_block = curr_cursor.basic_block();
 
                 let (recorded_height, arity) = Self::recorded_height_and_arity_from_end_instruction(
