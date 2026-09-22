@@ -444,6 +444,10 @@ pub struct Module<V: VirtualMachine> {
     /// The memory section (TraceWasm currently allows at most one memory).
     pub(crate) memories: Box<[MemoryType]>,
     /// The tag section (exception-handling proposal).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) tags: Box<[TagType]>,
     /// The global index space: imported globals first, then locally-defined ones.
     /// The split point is [`Self::imported_global_count`].
@@ -460,12 +464,24 @@ pub struct Module<V: VirtualMachine> {
     pub(crate) elements: Box<[Element]>,
     /// The declared data-segment count from the data-count section, if present
     /// (required by the bulk-memory proposal for validating `data.drop`, etc.).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) data_count: Option<u32>,
     /// The data section.
     pub(crate) datas: Box<[Data]>,
     /// Declared entry count of the code section (should match `func_bodies.len()`).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) code_sec_count: u32,
     /// Byte size of the code section as declared in its header.
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) code_sec_size: u32,
     /// Byte offset of the code section's contents within the module binary.
     ///
@@ -493,6 +509,10 @@ pub struct Module<V: VirtualMachine> {
     /// sizes, which is all a consumer outside the crate has asked for.
     pub(crate) func_bodies: Box<[FuncBody<InstrOf<V>>]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
     pub(crate) custom_section: Arc<CustomSection>,

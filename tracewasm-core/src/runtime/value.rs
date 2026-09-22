@@ -391,6 +391,10 @@ pub(crate) struct TableVal {
     /// The table's slots, each a nullable function reference.
     pub table: Vec<Option<FuncIndex>>,
     /// The maximum element count the table may grow to.
+    #[allow(
+        dead_code,
+        reason = "recorded at instantiation; `table.grow` is not implemented yet"
+    )]
     pub maximum: u32,
 }
 
@@ -400,6 +404,10 @@ pub(crate) enum ElementVal {
     /// The segment has been dropped (via `elem.drop` or an active init).
     Dropped,
     /// A still-live passive segment holding nullable function references.
+    #[allow(
+        dead_code,
+        reason = "held for `table.init`, which does not read it yet"
+    )]
     Passive(Box<[Option<FuncIndex>]>),
 }
 

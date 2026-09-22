@@ -806,8 +806,7 @@ mod tests {
 
         let passed = helper
             .nth_param(0, &builder)
-            .expect("helper takes one parameter")
-            .clone();
+            .expect("helper takes one parameter");
 
         builder
             .cursor_at_block(helper_entry)
@@ -910,9 +909,7 @@ mod tests {
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
         // requires one phi entry per predecessor.
-        phi_handler
-            .add_branch((body, phi.clone()), &mut in_body)
-            .unwrap();
+        phi_handler.add_branch((body, phi), &mut in_body).unwrap();
 
         // The branch condition comes from a real comparison rather than a literal, so
         // the `icmp` line and the `i1` it feeds are both covered here.
@@ -920,8 +917,7 @@ mod tests {
 
         let counter = f
             .nth_param(0, &in_body)
-            .expect("main takes an i32 first parameter")
-            .clone();
+            .expect("main takes an i32 first parameter");
 
         let cond = in_body
             .build_icmp(

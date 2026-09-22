@@ -56,6 +56,10 @@ impl FuncId {
 
 impl GlobalId<DefinedFunc> {
     /// The underlying arena id.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     pub(crate) fn raw(&self) -> Id<Function> {
         self.tag.raw().0
     }

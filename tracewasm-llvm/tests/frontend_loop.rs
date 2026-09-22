@@ -53,7 +53,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     let loop_b = f.add_basic_block("loop".to_string(), &mut builder).unwrap();
     let exit = f.add_basic_block("exit".to_string(), &mut builder).unwrap();
 
-    let n = f.nth_param(0, &builder).unwrap().clone();
+    let n = f.nth_param(0, &builder).unwrap();
 
     builder
         .cursor_at_block(entry)
@@ -69,7 +69,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     // Both phis are built knowing only the `entry` edge. The `loop` edge carries
     // values that do not exist yet, so it is added further down.
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], OperandTy::Inferred, "acc".into())
+        .build_phi(&[(entry, zero)], OperandTy::Inferred, "acc".into())
         .unwrap();
     let (i_phi, i) = in_loop
         .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
@@ -88,9 +88,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
         .unwrap();
 
     // Close the back edge now that the values exist.
-    acc_phi
-        .add_branch((loop_b, next.clone()), &mut in_loop)
-        .unwrap();
+    acc_phi.add_branch((loop_b, next), &mut in_loop).unwrap();
     i_phi.add_branch((loop_b, dec), &mut in_loop).unwrap();
 
     in_loop.build_conditional_br(cond, loop_b, exit).unwrap();
@@ -189,7 +187,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
         .unwrap();
     let exit = f.add_basic_block("exit".to_string(), &mut builder).unwrap();
 
-    let n = f.nth_param(0, &builder).unwrap().clone();
+    let n = f.nth_param(0, &builder).unwrap();
 
     // Constants made before any cursor exists, then reused across blocks.
     let zero = builder.const_value(0i32, OperandTy::Inferred).unwrap();
@@ -204,7 +202,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut in_loop = builder.cursor_at_block(loop_b);
 
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], OperandTy::Inferred, "acc".into())
+        .build_phi(&[(entry, zero)], OperandTy::Inferred, "acc".into())
         .unwrap();
     let (i_phi, i) = in_loop
         .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
@@ -254,9 +252,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     // --- close the header's back edge, now that `latch` has been written ---
     // The handles outlived their cursor, and `add_branch` wants a context rather than
     // a position, so this works with the builder alone.
-    acc_phi
-        .add_branch((latch, merged.clone()), &mut builder)
-        .unwrap();
+    acc_phi.add_branch((latch, merged), &mut builder).unwrap();
     i_phi.add_branch((latch, dec), &mut builder).unwrap();
 
     builder

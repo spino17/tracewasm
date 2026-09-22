@@ -547,7 +547,7 @@ impl<'a> Cursor<'a> {
         add_instruction_to_block_and_get_value(
             InstructionKind::Load(LoadOperands {
                 ty: final_ty,
-                ptr: ptr,
+                ptr,
                 align,
             }),
             final_ty,
@@ -621,7 +621,7 @@ impl<'a> Cursor<'a> {
             Instruction {
                 kind: InstructionKind::Store(StoreOperands {
                     value: final_val,
-                    ptr: ptr,
+                    ptr,
                     align,
                 }),
                 value: None,
@@ -726,7 +726,7 @@ impl<'a> Cursor<'a> {
                 // from the pointer, that is the type the instruction has to be emitted
                 // with, and it is the one the walk above validated.
                 source_ty: final_source_ty,
-                ptr: ptr,
+                ptr,
                 indices: indices.to_vec().into_boxed_slice(),
                 inbounds,
             }),
@@ -787,8 +787,7 @@ impl<'a> Cursor<'a> {
         return_ty: OperandTy,
         reg: RegName,
     ) -> Result<ValueId, InstructionError> {
-        let params: Vec<(ValueId, OperandTy)> =
-            params.iter().copied().map(|(x, y)| (x, y)).collect();
+        let params: Vec<(ValueId, OperandTy)> = params.to_vec();
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
@@ -870,8 +869,7 @@ impl<'a> Cursor<'a> {
         func: FuncRef,
         params: &[(ValueId, OperandTy)],
     ) -> Result<(), InstructionError> {
-        let params: Vec<(ValueId, OperandTy)> =
-            params.iter().copied().map(|(x, y)| (x, y)).collect();
+        let params: Vec<(ValueId, OperandTy)> = params.to_vec();
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
@@ -2490,8 +2488,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
         let base = f
             .nth_param(0, &cursor)
-            .expect("the function has one parameter")
-            .clone();
+            .expect("the function has one parameter");
 
         assert!(
             base.try_inferring_pointee_ty(entry, &mut cursor).is_none(),
@@ -2529,8 +2526,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
         let base = f
             .nth_param(0, &cursor)
-            .expect("the function has one parameter")
-            .clone();
+            .expect("the function has one parameter");
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
@@ -3078,13 +3074,7 @@ mod tests {
 
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
-            .build_get_element_ptr(
-                slot,
-                OperandTy::Inferred,
-                &[zero.clone(), one],
-                None,
-                "f".into(),
-            )
+            .build_get_element_ptr(slot, OperandTy::Inferred, &[zero, one], None, "f".into())
             .expect("the alloca says what it points to");
 
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
@@ -3629,7 +3619,7 @@ mod tests {
             .build_get_element_ptr(
                 slot,
                 OperandTy::Inferred,
-                &[zero.clone(), wide],
+                &[zero, wide],
                 None,
                 RegName::Unnamed,
             )
@@ -3678,7 +3668,7 @@ mod tests {
             .build_get_element_ptr(
                 slot,
                 OperandTy::Inferred,
-                &[zero.clone(), past_end],
+                &[zero, past_end],
                 None,
                 RegName::Unnamed,
             )

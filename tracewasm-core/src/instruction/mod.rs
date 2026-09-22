@@ -321,6 +321,10 @@ pub(crate) trait Instruction: Sized {
         imported_func_count: u32,
     ) -> Result<Step<Self>, Box<InstructionExecutionError>>;
 
+    // A CFG-building pass needs the cursor, the whole instruction stream, the frame
+    // layout, the locals, the runtime pointer and the enclosing function — grouping
+    // them into a context struct would only move the list.
+    #[allow(clippy::too_many_arguments)]
     fn emit_llvm_ir<'a>(
         &self,
         instr_index: usize,

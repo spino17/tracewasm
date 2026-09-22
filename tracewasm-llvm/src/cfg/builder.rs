@@ -657,9 +657,8 @@ mod tests {
         let cfg = builder.build();
         let ctx = &cfg.context;
 
-        let names = |ids: &[ValueId]| -> Vec<String> {
-            ids.iter().map(|id| reg_name(id, ctx)).collect()
-        };
+        let names =
+            |ids: &[ValueId]| -> Vec<String> { ids.iter().map(|id| reg_name(id, ctx)).collect() };
 
         assert_eq!(names(&in_f), ["0", "1", "2"]);
         assert_eq!(names(&in_g), ["0", "1"], "a second function restarts at 0");

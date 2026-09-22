@@ -219,6 +219,10 @@ impl<T: Clone> Stack<T> {
     /// `v[0]` is the former top, `v[num - 1]` the deepest popped value.
     ///
     /// Precondition: at least `num` values are present.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     pub fn pops(&mut self, num: u32) -> Vec<T> {
         let mut v = Vec::with_capacity(num as usize);
 

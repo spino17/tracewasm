@@ -177,6 +177,10 @@ pub enum Step<Instr: Instruction> {
 ///
 /// Built only by [`TraceVM::_execute_on_frame_stack`], which [`TraceVM::run`] does
 /// not currently use — so nothing constructs one.
+#[allow(
+    dead_code,
+    reason = "part of `_execute_on_frame_stack`, the alternative driver `run` does not use"
+)]
 struct Frame<'a, Instr: Instruction> {
     /// Which function this frame is executing, for the trace.
     func_index: FuncIndex,
@@ -985,6 +989,10 @@ fn func_call_err_from_unwind<V: VirtualMachine>(
 ///
 /// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
+#[allow(
+    dead_code,
+    reason = "part of `_execute_on_frame_stack`, the alternative driver `run` does not use"
+)]
 fn func_call_err<V: VirtualMachine>(
     entry_func_index: FuncIndex,
     frames: Vec<Frame<InstrOf<V>>>,

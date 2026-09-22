@@ -42,7 +42,12 @@ pub enum Linkage {
 }
 
 impl Linkage {
+    // Neither predicate has a caller yet. They are the two linkage rules `llvm-as`
+    // enforces, written down here ready for `declare_global_variable` to check —
+    // until it does, this crate is *looser* than LLVM on both, which its own docs
+    // call a bug rather than a choice.
     /// Whether this linkage means "defined elsewhere", so no initializer is allowed.
+    #[allow(dead_code, reason = "no caller yet — see the note above")]
     pub(crate) fn is_declaration(&self) -> bool {
         matches!(self, Linkage::External | Linkage::ExternWeak)
     }
@@ -52,6 +57,7 @@ impl Linkage {
     /// LLVM requires a local symbol to have default visibility — `llvm-as` refuses
     /// `@g = internal hidden global i32 0` with "symbol with local linkage must have
     /// default visibility".
+    #[allow(dead_code, reason = "no caller yet — see the note above")]
     pub(crate) fn is_local(&self) -> bool {
         matches!(self, Linkage::Internal | Linkage::Private)
     }

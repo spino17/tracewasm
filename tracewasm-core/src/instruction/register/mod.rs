@@ -230,10 +230,18 @@ mod tests;
 // the module still lowers under `Stack`.
 
 /// Distinct constants one body may intern.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 const MAX_CONSTS: u16 = u16::MAX;
 /// Locals plus operand registers one frame may name, counted from the frame base.
 const MAX_REGISTER_SLOTS: u16 = u16::MAX;
 /// Distinct memory offsets one body's loads and stores may name between them.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 
 /// The static byte offset of one load or store, as its own type so that the ids the
@@ -567,6 +575,10 @@ pub(crate) struct DynSignature {
 
 impl DynSignature {
     /// A move of `input` into the run based at `output_start`.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
         DynSignature {
             input,
@@ -2576,6 +2588,10 @@ impl Instructions {
     }
 
     /// Whether anything has been emitted yet.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -6644,6 +6660,10 @@ impl RegInstruction {
 /// `.wat` from this, and that `.wat` has to assemble, validate, and contain the
 /// operator the kind is named after. A wrong mnemonic fails those rather than
 /// quietly rendering an instruction under a name that does not exist.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 pub(crate) fn mnemonic(kind: RegInstructionKind) -> String {
     let mut words: Vec<String> = vec![];
 

@@ -1022,6 +1022,10 @@ struct ControlStack {
     label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
 }
 
+#[allow(
+    dead_code,
+    reason = "the `end` phis need only the results; params are for `loop` headers"
+)]
 pub struct LabelSignature {
     pub(crate) params: Box<[ValType]>,
     pub(crate) results: Box<[ValType]>,
@@ -1103,6 +1107,7 @@ impl ControlStack {
     /// Precondition: at least one block is open. The `Func` block makes that true for
     /// the whole of a body's traversal, so this is only reachable empty after the
     /// final `end` has popped it.
+    #[allow(dead_code, reason = "the mutable form is what every caller wants")]
     fn get_curr_block(&self) -> &Block {
         debug_assert!(!self.inner.is_empty());
         &self.inner[self.inner.len() - 1]
@@ -4197,7 +4202,7 @@ impl Instruction for StackInstruction {
         instructions: &[StackInstruction],
         frame_layout: &StackFrameLayout,
         locals: &[tracewasm_llvm::value::ValueId],
-        runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        _runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
         func: GlobalId<DefinedFunc>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
@@ -4205,7 +4210,7 @@ impl Instruction for StackInstruction {
             StackInstruction::Return {
                 target_index,
                 arity,
-                recorded_height,
+                recorded_height: _,
             } => {
                 debug_assert!(*target_index == instructions.len() as u32);
 
@@ -4213,7 +4218,7 @@ impl Instruction for StackInstruction {
                 let mut results = vec![];
 
                 for i in start_index..pass_manager.simulated_stack.height() {
-                    results.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                    results.push(pass_manager.simulated_stack.stack[i as usize]);
                 }
 
                 todo!();
@@ -4261,7 +4266,7 @@ impl Instruction for StackInstruction {
                 let start_index = pass_manager.simulated_stack.height() - *arity;
 
                 for i in start_index..pass_manager.simulated_stack.height() {
-                    results.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                    results.push(pass_manager.simulated_stack.stack[i as usize]);
                 }
 
                 let end_block = pass_manager.instr_index_to_basic_block.add_branch_to_end(
@@ -4308,7 +4313,7 @@ impl Instruction for StackInstruction {
                         .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                     for val in phi_vals {
-                        pass_manager.simulated_stack.push(val.clone());
+                        pass_manager.simulated_stack.push(*val);
                     }
 
                     pass_manager.control_stack.leave_label();
@@ -4364,7 +4369,7 @@ impl Instruction for StackInstruction {
                 let mut params = vec![];
 
                 for i in recorded_height..pass_manager.simulated_stack.height() {
-                    params.push(pass_manager.simulated_stack.stack[i as usize].clone());
+                    params.push(pass_manager.simulated_stack.stack[i as usize]);
                 }
 
                 let if_else = if let Some(else_index) = else_index {
@@ -4483,7 +4488,7 @@ impl Instruction for StackInstruction {
                     .expect("hitting this means logic for tracking `end` index is incorrect");
 
                 for val in phi_vals {
-                    pass_manager.simulated_stack.push(val.clone());
+                    pass_manager.simulated_stack.push(*val);
                 }
 
                 // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has

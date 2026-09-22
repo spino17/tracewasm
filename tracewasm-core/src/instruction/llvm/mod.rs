@@ -109,7 +109,7 @@ impl InstrIndexToBasicBlockMap {
         for (i, value) in values.iter().enumerate() {
             let phi_handler = end_data.phi_handlers[i];
 
-            phi_handler.add_branch((block, value.clone()), ctx)?;
+            phi_handler.add_branch((block, *value), ctx)?;
         }
 
         Ok(end_data.basic_block)
@@ -129,6 +129,10 @@ impl InstrIndexToBasicBlockMap {
         self.else_map.remove(&index)
     }
 
+    #[allow(
+        dead_code,
+        reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
+    )]
     pub fn take_end_data(&mut self, index: u32) -> Option<EndBasicBlockBranches> {
         self.end_map.remove(&index)
     }
@@ -138,6 +142,10 @@ impl InstrIndexToBasicBlockMap {
     /// [`take_end_data`](Self::take_end_data) is for the `end` itself, which is done
     /// with the entry; this is for everything that has to *jump* there while the label
     /// is still open — the then-arm falling into an `else`, and every `br` inside.
+    #[allow(
+        dead_code,
+        reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
+    )]
     pub fn get_end_basic_block(&self, index: u32) -> BasicBlockId {
         self.end_map
             .get(&index)
@@ -177,6 +185,10 @@ pub(crate) struct IfCtx {
     pub is_else_ongoing: bool,
 }
 
+#[allow(
+    dead_code,
+    reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
+)]
 pub(crate) enum LabelKind {
     If(IfCtx),
     Loop,
@@ -184,6 +196,10 @@ pub(crate) enum LabelKind {
     Func,
 }
 
+#[allow(
+    dead_code,
+    reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
+)]
 pub(crate) struct Label {
     pub kind: LabelKind,
     pub instr_index: usize,
@@ -202,14 +218,6 @@ impl ControlStack {
             instr_index,
             end_instr_index,
         });
-    }
-
-    pub fn try_curr_label_as_if(&self) -> Option<&IfCtx> {
-        let LabelKind::If(ctx) = &self.curr_label().kind else {
-            return None;
-        };
-
-        Some(ctx)
     }
 
     pub fn try_curr_label_as_if_mut(&mut self) -> Option<&mut IfCtx> {
@@ -236,6 +244,10 @@ impl ControlStack {
         &mut self.stack[len - 1]
     }
 
+    #[allow(
+        dead_code,
+        reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
+    )]
     pub fn enclosing_func_instr_indices(&self) -> (usize, usize) {
         (self.stack[0].instr_index, self.stack[0].end_instr_index)
     }
@@ -349,10 +361,9 @@ impl WasmInstrLLVMPassManager {
         let entry = func.add_basic_block("entry", ctx)?;
         let params = func.params(ctx).to_vec();
 
-        let runtime_ctx_ptr = params
+        let runtime_ctx_ptr = *params
             .last()
-            .expect("the context is always a function param")
-            .clone();
+            .expect("the context is always a function param");
 
         let mut entry_cursor = ctx.cursor_at_block(entry);
         let mut locals = vec![];
@@ -371,7 +382,7 @@ impl WasmInstrLLVMPassManager {
                         alignment,
                         RegName::Named(format!("local{}", counter)),
                     )?,
-                    param.clone(),
+                    *param,
                     alignment,
                 )
             } else {
@@ -805,7 +816,6 @@ mod tests {
             .find(|line| line.contains("[ 2, %if0_then ]"))
             .expect("the phi joining the two arms' top values");
         let reg = top_phi
-            .trim()
             .split_whitespace()
             .next()
             .expect("a phi line starts with the register it defines");

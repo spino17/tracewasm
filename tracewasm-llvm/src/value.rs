@@ -814,15 +814,6 @@ impl Value {
         }
     }
 
-    /// Narrows to an [`I1Value`], the operand a conditional branch takes.
-    ///
-    /// Checking once here means [`Cursor::build_conditional_br`](crate::instruction::cursor::Cursor::build_conditional_br)
-    /// cannot be handed anything else.
-    ///
-    /// # Errors
-    ///
-    /// [`TypeError::ValueToI1ValueFailed`] if the value is not an `i1`.
-
     /// Whether this value's type is an integer.
     pub fn is_integer(&self, ctx: &Context) -> bool {
         self.ty().is_integer(ctx)
@@ -874,23 +865,6 @@ impl Value {
         }
     }
 
-    /// Brings two values to one type, so an instruction that needs matching operands
-    /// can have them.
-    ///
-    /// With `ty`, both are cast to it. Without, the wider of the two wins and the
-    /// narrower is widened to meet it — which only works if the narrower is a
-    /// constant, since widening a register needs a real `zext`/`sext` instruction that
-    /// this cannot emit.
-    ///
-    /// `signedness` decides how that widening fills the high bits, and picking it
-    /// wrongly produces valid IR that computes the wrong answer — see
-    /// [`Signedness`]. A caller with no basis for choosing should not call this;
-    /// [`ICond::signedness`](crate::instruction::ICond::signedness) returning `None`
-    /// is what makes `icmp eq` refuse rather than guess.
-    ///
-    /// `None` if no common type works. On success the two returned values are
-    /// guaranteed to have equal types, so callers may check just one.
-
     /// Works out what this pointer points at, by walking back to the instruction
     /// that produced it.
     ///
@@ -931,7 +905,7 @@ impl Value {
                         align: _,
                     }) => PointeeTy {
                         ty: *ty,
-                        count: count.clone(),
+                        count: *count,
                     },
                     InstructionKind::GetElementPtr(operands) => PointeeTy {
                         ty: operands.result_pointee_ty(ctx)?,
@@ -974,6 +948,13 @@ pub(crate) struct PointeeTy {
     pub ty: TyId,
     /// How many of them, when the pointer came from an `alloca` with an element
     /// count. `None` for a single element and for pointers from other instructions.
+    ///
+    /// Recorded but not yet consulted: a `load` through an N-element `alloca` is
+    /// currently checked against the element type alone.
+    #[allow(
+        dead_code,
+        reason = "recorded for the bounds check load/store do not do yet"
+    )]
     pub count: Option<ValueId>,
 }
 
@@ -1743,7 +1724,10 @@ mod tests {
         assert_eq!(ty_of(&widened, &ctx), Type::I64);
 
         assert!(
-            matches!(widened.kind(&ctx), ValueKind::ConstExpr(ConstExpr::Const(_))),
+            matches!(
+                widened.kind(&ctx),
+                ValueKind::ConstExpr(ConstExpr::Const(_))
+            ),
             "a constant value holds a pool id"
         );
 
@@ -2173,8 +2157,9 @@ mod tests {
             "no float equals 0.1, so asserting one is false",
         );
         assert_eq!(
-            3.14159265358979f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            std::f64::consts::PI.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             None,
+            "a double carrying a full mantissa does not survive narrowing",
         );
         assert_eq!(
             1e-40f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
