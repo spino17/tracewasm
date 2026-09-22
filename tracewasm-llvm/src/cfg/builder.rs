@@ -405,10 +405,12 @@ fn convert_unnmaed_to_named_register(
     str_interner: &mut StrInterner,
 ) {
     if let ValueKind::Reg(reg) = val.kind_mut() {
-        let id: StrId = str_interner.intern(format!("{}", counter.next())).into();
+        if reg.is_unnamed {
+            let id: StrId = str_interner.intern(format!("{}", counter.next())).into();
 
-        reg.name = id;
-        reg.is_unnamed = false;
+            reg.name = id;
+            reg.is_unnamed = false;
+        }
     }
 }
 
