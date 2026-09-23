@@ -4257,12 +4257,16 @@ impl Instruction for StackInstruction {
                 let loop_block =
                     func.add_basic_block(format!("loop{}", instr_index), &mut curr_cursor)?;
 
+                let end_block =
+                    func.add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
+
                 let label_sig = frame_layout
                     .label_instr_index_to_signature
                     .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 let param_types = &label_sig.params;
                 let params_count = param_types.len() as u32;
+                let result_types = &label_sig.results;
                 let start_index = pass_manager.simulated_stack.height() - params_count;
                 let mut params = vec![];
 
@@ -4281,6 +4285,13 @@ impl Instruction for StackInstruction {
                     instr_index as u32,
                     params,
                     curr_cursor.basic_block(),
+                    &mut curr_cursor,
+                )?;
+
+                pass_manager.instr_index_to_basic_block.new_end(
+                    *end_index,
+                    result_types,
+                    end_block,
                     &mut curr_cursor,
                 )?;
 

@@ -287,7 +287,7 @@ impl InstrIndexToBasicBlockMap {
         block: BasicBlockId,
         ctx: &mut Context,
     ) -> Result<(), PhiError> {
-        self.end_map.new(index, params, block, ctx)
+        self.loop_map.new(index, params, block, ctx)
     }
 
     pub fn add_loop_branch(
@@ -297,19 +297,19 @@ impl InstrIndexToBasicBlockMap {
         block: BasicBlockId,
         ctx: &mut Context,
     ) -> Result<BasicBlockId, PhiError> {
-        self.end_map.add_branch(index, values, block, ctx)
+        self.loop_map.add_branch(index, values, block, ctx)
     }
 
     pub fn loop_phi_vals_and_block(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
-        self.end_map.phi_vals_and_block(index)
+        self.loop_map.phi_vals_and_block(index)
     }
 
     pub fn get_loop_basic_block(&self, index: u32) -> Option<BasicBlockId> {
-        self.end_map.get_basic_block(index)
+        self.loop_map.get_basic_block(index)
     }
 
     pub fn remove_loop(&mut self, index: u32) -> Option<PhiValBranches> {
-        self.end_map.remove(index)
+        self.loop_map.remove(index)
     }
 
     pub fn add_branch_to_target(
