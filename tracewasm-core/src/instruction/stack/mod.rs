@@ -4534,7 +4534,8 @@ impl Instruction for StackInstruction {
                 arity,
                 recorded_height,
             } => {
-                pass_manager.control_stack.leave_label();
+                let label = pass_manager.control_stack.leave_label();
+                let is_func = matches!(label.kind, LabelKind::Func);
 
                 let curr_basic_block = curr_cursor.basic_block();
 
@@ -4557,6 +4558,11 @@ impl Instruction for StackInstruction {
 
                 for val in phi_vals {
                     pass_manager.simulated_stack.push(*val);
+                }
+
+                if is_func {
+                    debug_assert!(instr_index == instructions.len() - 1);
+                    // let result = curr_cursor.struct_ty(, is_packed)
                 }
 
                 // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has
