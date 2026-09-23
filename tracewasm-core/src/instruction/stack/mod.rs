@@ -4247,6 +4247,56 @@ impl Instruction for StackInstruction {
 
                 curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
             }
+            StackInstruction::Loop { end_index } => {
+                pass_manager.control_stack.enter_label(
+                    LabelKind::Loop,
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let loop_block =
+                    func.add_basic_block(format!("loop{}", instr_index), &mut curr_cursor)?;
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                let param_types = &label_sig.params;
+                let params_count = param_types.len() as u32;
+                let start_index = pass_manager.simulated_stack.height() - params_count;
+                let mut params = vec![];
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    params.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                pass_manager.instr_index_to_basic_block.new_loop(
+                    instr_index as u32,
+                    param_types,
+                    loop_block,
+                    &mut curr_cursor,
+                )?;
+
+                pass_manager.instr_index_to_basic_block.add_loop_branch(
+                    instr_index as u32,
+                    params,
+                    curr_cursor.basic_block(),
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_unconditional_br(loop_block)?;
+
+                let (phi_vals, _) = pass_manager
+                    .instr_index_to_basic_block
+                    .loop_phi_vals_and_block(instr_index as u32).expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                for i in 0..params_count {
+                    pass_manager.simulated_stack.stack[(start_index + i) as usize] =
+                        phi_vals[i as usize];
+                }
+
+                return Ok((loop_block, instr_index + 1));
+            }
             StackInstruction::If {
                 else_index,
                 end_index,
@@ -4300,7 +4350,7 @@ impl Instruction for StackInstruction {
                     let if_else =
                         func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
 
-                    pass_manager.instr_index_to_basic_block.add_else(
+                    pass_manager.instr_index_to_basic_block.new_else(
                         *else_index,
                         if_else,
                         params.clone(),
@@ -4314,7 +4364,7 @@ impl Instruction for StackInstruction {
                 let if_end =
                     func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
 
-                pass_manager.instr_index_to_basic_block.add_end(
+                pass_manager.instr_index_to_basic_block.new_end(
                     *end_index,
                     results_ty,
                     if_end,
@@ -4330,7 +4380,7 @@ impl Instruction for StackInstruction {
                     // is what keeps the phi at `if_end` from being short a predecessor.
                     // `params` was collected deepest-first, which is already the order
                     // the phis are in.
-                    pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                    pass_manager.instr_index_to_basic_block.add_end_branch(
                         *end_index,
                         params,
                         curr_cursor.basic_block(),
@@ -4365,7 +4415,7 @@ impl Instruction for StackInstruction {
                 // the `end`'s phis are in. Popping one at a time would give the reverse.
                 let results = pass_manager.simulated_stack.pops_and_reverse(arity);
 
-                let if_end = pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                let if_end = pass_manager.instr_index_to_basic_block.add_end_branch(
                     *if_end_index,
                     results,
                     curr_basic_block,
@@ -4377,7 +4427,7 @@ impl Instruction for StackInstruction {
                 // restore the stack with original params
                 let (else_block, params) = pass_manager
                     .instr_index_to_basic_block
-                    .take_else_data(instr_index as u32)
+                    .remove_else(instr_index as u32)
                     .expect("hitting this means logic for tracking `else` index is incorrect");
 
                 for param in params {
@@ -4405,14 +4455,17 @@ impl Instruction for StackInstruction {
                     results.push(pass_manager.simulated_stack.stack[i as usize]);
                 }
 
-                let end_block = pass_manager.instr_index_to_basic_block.add_branch_to_end(
-                    *target_index,
-                    results,
-                    curr_cursor.basic_block(),
-                    &mut curr_cursor,
-                )?;
+                // can be loop or end
+                let target_block = pass_manager
+                    .instr_index_to_basic_block
+                    .add_branch_to_target(
+                        *target_index,
+                        results,
+                        curr_cursor.basic_block(),
+                        &mut curr_cursor,
+                    )?;
 
-                curr_cursor.build_unconditional_br(end_block)?;
+                curr_cursor.build_unconditional_br(target_block)?;
 
                 let curr_label_end_index = pass_manager.control_stack.curr_label().end_instr_index;
 
@@ -4432,7 +4485,7 @@ impl Instruction for StackInstruction {
                     // restore the stack with original params
                     let (else_block, params) = pass_manager
                         .instr_index_to_basic_block
-                        .take_else_data(curr_label_else_index)
+                        .remove_else(curr_label_else_index)
                         .expect("hitting this means logic for tracking `else` index is incorrect");
 
                     for param in params {
@@ -4445,7 +4498,7 @@ impl Instruction for StackInstruction {
                 } else {
                     let (phi_vals, end_block) = pass_manager
                         .instr_index_to_basic_block
-                        .phi_vals_and_branch_for_end(curr_label_end_index as u32)
+                        .end_phi_vals_and_block(curr_label_end_index as u32)
                         .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                     for val in phi_vals {
@@ -4479,7 +4532,7 @@ impl Instruction for StackInstruction {
                 // Deepest-first, matching the phi order established by `add_end`.
                 let results = pass_manager.simulated_stack.pops_and_reverse(*arity);
 
-                pass_manager.instr_index_to_basic_block.add_branch_to_end(
+                pass_manager.instr_index_to_basic_block.add_end_branch(
                     instr_index as u32,
                     results,
                     curr_basic_block,
@@ -4488,7 +4541,7 @@ impl Instruction for StackInstruction {
 
                 let (phi_vals, end_block) = pass_manager
                     .instr_index_to_basic_block
-                    .phi_vals_and_branch_for_end(instr_index as u32)
+                    .end_phi_vals_and_block(instr_index as u32)
                     .expect("hitting this means logic for tracking `end` index is incorrect");
 
                 for val in phi_vals {

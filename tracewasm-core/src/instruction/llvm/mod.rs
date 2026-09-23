@@ -56,6 +56,7 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use std::{
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::Arc,
     vec,
@@ -82,18 +83,135 @@ use tracewasm_llvm::{
 /// The three vectors are parallel and in the label's own result order, deepest first.
 /// `phi_handlers[i]` and `phi_vals[i]` are two ends of the same phi — the handle a
 /// branch adds itself to, and the register everything downstream reads.
-pub(crate) struct EndBasicBlockBranches {
+pub(crate) struct PhiValBranches {
     /// Where control lands. Created when the label opens, because a `br` inside it
     /// needs somewhere to jump long before the `end` is reached.
     pub(crate) basic_block: BasicBlockId,
     /// The label's result types, which fix how many phis there are and what each one
     /// accepts.
-    pub(crate) results: Vec<TyId>,
+    pub(crate) phi_val_types: Vec<TyId>,
     /// The registers the phis define — what the label leaves on the operand stack.
     pub(crate) phi_vals: Vec<ValueId>,
     /// The handles branches add themselves to. Separate from `phi_vals` because a phi
     /// is written in two stages: created with the block, completed as paths arrive.
     pub(crate) phi_handlers: Vec<PhiInstrHandler>,
+}
+
+pub(crate) trait BranchTarget {
+    fn name() -> &'static str;
+}
+
+pub(crate) struct End;
+
+impl BranchTarget for End {
+    fn name() -> &'static str {
+        "end"
+    }
+}
+
+pub(crate) struct Loop;
+
+impl BranchTarget for Loop {
+    fn name() -> &'static str {
+        "loop"
+    }
+}
+
+pub(crate) struct BranchTargetBasicBlockMap<T>(FxHashMap<u32, PhiValBranches>, PhantomData<T>);
+
+impl<T> Default for BranchTargetBasicBlockMap<T> {
+    fn default() -> Self {
+        BranchTargetBasicBlockMap(FxHashMap::default(), PhantomData)
+    }
+}
+
+impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
+    pub fn new(
+        &mut self,
+        index: u32,
+        phi_val_types: &[ValType],
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), PhiError> {
+        let phi_val_types: Vec<TyId> = phi_val_types
+            .iter()
+            .map(|x| llvm_ty_from_wasm(x, ctx))
+            .collect();
+
+        let mut cursor = ctx.cursor_at_block(block);
+        let mut phi_handlers = vec![];
+        let mut phi_vals = vec![];
+
+        for (i, res) in phi_val_types.iter().enumerate() {
+            // Named deliberately. These are created when the label *opens*, so an
+            // unnamed one would take a number well before the block it sits in is
+            // printed — and LLVM requires unnamed registers to run in textual order.
+            // A named register draws nothing from that counter. See `RegName`.
+            let (phi_handler, phi_val) = cursor.build_phi(
+                &[],
+                OperandTy::Asserted(*res),
+                RegName::Named(format!("{}{}_res{}", T::name(), index, i)),
+            )?;
+
+            phi_handlers.push(phi_handler);
+            phi_vals.push(phi_val);
+        }
+
+        self.0.insert(
+            index,
+            PhiValBranches {
+                basic_block: block,
+                phi_val_types,
+                phi_vals,
+                phi_handlers,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn add_branch(
+        &mut self,
+        index: u32,
+        values: Vec<ValueId>,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<BasicBlockId, PhiError> {
+        let data = self
+            .0
+            .get_mut(&index)
+            .expect("this method should only be called after calling `insert`");
+
+        if values.len() != data.phi_val_types.len() {
+            panic!("values passed` should match the expected arity")
+        }
+
+        // `values` is in the label's own order — deepest first — so it lines up with
+        // `phi_handlers` index for index. A caller that hands them over top-first
+        // would type-check only while every result shares a type, and silently pair
+        // the wrong values when they do.
+        for (i, value) in values.iter().enumerate() {
+            let phi_handler = data.phi_handlers[i];
+
+            phi_handler.add_branch((block, *value), ctx)?;
+        }
+
+        Ok(data.basic_block)
+    }
+
+    pub fn phi_vals_and_block(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
+        self.0
+            .get(&index)
+            .map(|x| (x.phi_vals.as_slice(), x.basic_block))
+    }
+
+    pub fn get_basic_block(&self, index: u32) -> Option<BasicBlockId> {
+        self.0.get(&index).map(|x| x.basic_block)
+    }
+
+    pub fn remove(&mut self, index: u32) -> Option<PhiValBranches> {
+        self.0.remove(&index)
+    }
 }
 
 /// What each still-open label has waiting, keyed by the instruction index that
@@ -105,162 +223,107 @@ pub(crate) struct EndBasicBlockBranches {
 #[derive(Default)]
 pub(crate) struct InstrIndexToBasicBlockMap {
     /// Keyed by the `end`'s index. See [`EndBasicBlockBranches`].
-    end_map: FxHashMap<u32, EndBasicBlockBranches>,
+    end_map: BranchTargetBasicBlockMap<End>,
+    loop_map: BranchTargetBasicBlockMap<Loop>,
     /// Keyed by the `else`'s index: the block the false arm starts in, and the
     /// block's params to restore onto the simulated stack when it does.
     ///
     /// The params need no phi. They were live *before* the branch, so they dominate
     /// both arms and can be used exactly as they are.
     else_map: FxHashMap<u32, (BasicBlockId, Vec<ValueId>)>,
-    // loop_map: FxHashMap<u32, Vec<PhiInstrHandler>>,
 }
 
 impl InstrIndexToBasicBlockMap {
-    /// Opens a label: records its `end` block and builds one empty phi per result.
-    ///
-    /// Called when the label *opens*, not when it closes — a `br` inside needs the
-    /// block and its phis to already exist. See the module docs.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`build_phi`](tracewasm_llvm::instruction::cursor::Cursor::build_phi)
-    /// reports; an empty phi is legal here only because the type is stated outright.
-    pub fn add_end(
-        &mut self,
-        index: u32,
-        results: &[ValType],
-        block: BasicBlockId,
-        ctx: &mut Context,
-    ) -> Result<(), PhiError> {
-        let results: Vec<TyId> = results.iter().map(|x| llvm_ty_from_wasm(x, ctx)).collect();
-        let mut cursor = ctx.cursor_at_block(block);
-        let mut phi_handlers = vec![];
-        let mut phi_vals = vec![];
-
-        // One phi per result, in the label's own type order — index 0 is the
-        // *deepest* value, the last index is the top of the stack. Every branch that
-        // later feeds this label hands its values in that same order, so a branch's
-        // `values[i]` and this `phi_handlers[i]` always name the same slot.
-        for (i, res) in results.iter().enumerate() {
-            // Named deliberately. These are created when the label *opens*, so an
-            // unnamed one would take a number well before the block it sits in is
-            // printed — and LLVM requires unnamed registers to run in textual order.
-            // A named register draws nothing from that counter. See `RegName`.
-            let (phi_handler, phi_val) = cursor.build_phi(
-                &[],
-                OperandTy::Asserted(*res),
-                RegName::Named(format!("end{}_res{}", index, i)),
-            )?;
-
-            phi_handlers.push(phi_handler);
-            phi_vals.push(phi_val);
-        }
-
-        self.end_map.insert(
-            index,
-            EndBasicBlockBranches {
-                basic_block: block,
-                results,
-                phi_vals,
-                phi_handlers,
-            },
-        );
-
-        Ok(())
-    }
-
-    /// Records one path into a label: attaches `values` to its phis, and hands back
-    /// the block to jump to.
-    ///
-    /// `values` must be in the label's own order — **deepest first** — so that
-    /// `values[i]` and `phi_handlers[i]` name the same slot. See the module docs for
-    /// why handing them over top-first is a silent bug rather than a loud one.
-    ///
-    /// # Panics
-    ///
-    /// If `values` does not match the label's arity, or if the label was never opened
-    /// with [`add_end`](Self::add_end) — both mean the caller's index bookkeeping is
-    /// wrong, not that the input was.
-    pub fn add_branch_to_end(
-        &mut self,
-        index: u32,
-        values: Vec<ValueId>,
-        block: BasicBlockId,
-        ctx: &mut Context,
-    ) -> Result<BasicBlockId, PhiError> {
-        let end_data = self
-            .end_map
-            .get_mut(&index)
-            .expect("this method should only be called after calling `add_end`");
-
-        if values.len() != end_data.results.len() {
-            panic!("values passed to `end` should match the expected arity")
-        }
-
-        // `values` is in the label's own order — deepest first — so it lines up with
-        // `phi_handlers` index for index. A caller that hands them over top-first
-        // would type-check only while every result shares a type, and silently pair
-        // the wrong values when they do.
-        for (i, value) in values.iter().enumerate() {
-            let phi_handler = end_data.phi_handlers[i];
-
-            phi_handler.add_branch((block, *value), ctx)?;
-        }
-
-        Ok(end_data.basic_block)
-    }
-
-    /// The registers a label leaves behind, and the block they are defined in.
-    ///
-    /// What an `end` pushes back onto the simulated stack once every path into it has
-    /// been recorded. `None` if the label was never opened.
-    pub fn phi_vals_and_branch_for_end(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
-        self.end_map
-            .get(&index)
-            .map(|x| (x.phi_vals.as_slice(), x.basic_block))
-    }
-
     /// Records where an `if`'s false arm begins, and the params to restore when it
     /// does. Consumed by whichever reaches the else first — the `Else` instruction, or
     /// a `br` out of the then-arm that skips it.
-    pub fn add_else(&mut self, index: u32, block: BasicBlockId, params: Vec<ValueId>) {
+    pub fn new_else(&mut self, index: u32, block: BasicBlockId, params: Vec<ValueId>) {
         self.else_map.insert(index, (block, params));
     }
 
     /// Takes the else arm's block and params. Taking rather than reading is the
     /// point: an arm is entered once, so a second call means the pass reached the
     /// same `else` twice.
-    pub fn take_else_data(&mut self, index: u32) -> Option<(BasicBlockId, Vec<ValueId>)> {
+    pub fn remove_else(&mut self, index: u32) -> Option<(BasicBlockId, Vec<ValueId>)> {
         self.else_map.remove(&index)
     }
 
-    /// Closes a label, taking its `end` block and the phis that were filled there.
-    ///
-    /// The counterpart of [`get_end_basic_block`](Self::get_end_basic_block): that one
-    /// is for the jumps taken while the label is still open, this for the `end` that
-    /// finishes with it.
-    #[allow(
-        dead_code,
-        reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
-    )]
-    pub fn take_end_data(&mut self, index: u32) -> Option<EndBasicBlockBranches> {
-        self.end_map.remove(&index)
+    pub fn new_end(
+        &mut self,
+        index: u32,
+        results: &[ValType],
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), PhiError> {
+        self.end_map.new(index, results, block, ctx)
     }
 
-    /// The block a label's `end` was opened with, without consuming its branches.
-    ///
-    /// [`take_end_data`](Self::take_end_data) is for the `end` itself, which is done
-    /// with the entry; this is for everything that has to *jump* there while the label
-    /// is still open — the then-arm falling into an `else`, and every `br` inside.
-    #[allow(
-        dead_code,
-        reason = "scaffolding for the `block`/`loop` arms, which are not emitted yet"
-    )]
-    pub fn get_end_basic_block(&self, index: u32) -> BasicBlockId {
-        self.end_map
-            .get(&index)
-            .expect("this method should only be called after calling `add_end`")
-            .basic_block
+    pub fn add_end_branch(
+        &mut self,
+        index: u32,
+        values: Vec<ValueId>,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<BasicBlockId, PhiError> {
+        self.end_map.add_branch(index, values, block, ctx)
+    }
+
+    pub fn end_phi_vals_and_block(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
+        self.end_map.phi_vals_and_block(index)
+    }
+
+    pub fn get_end_basic_block(&self, index: u32) -> Option<BasicBlockId> {
+        self.end_map.get_basic_block(index)
+    }
+
+    pub fn remove_end(&mut self, index: u32) -> Option<PhiValBranches> {
+        self.end_map.remove(index)
+    }
+
+    pub fn new_loop(
+        &mut self,
+        index: u32,
+        params: &[ValType],
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<(), PhiError> {
+        self.end_map.new(index, params, block, ctx)
+    }
+
+    pub fn add_loop_branch(
+        &mut self,
+        index: u32,
+        values: Vec<ValueId>,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<BasicBlockId, PhiError> {
+        self.end_map.add_branch(index, values, block, ctx)
+    }
+
+    pub fn loop_phi_vals_and_block(&self, index: u32) -> Option<(&[ValueId], BasicBlockId)> {
+        self.end_map.phi_vals_and_block(index)
+    }
+
+    pub fn get_loop_basic_block(&self, index: u32) -> Option<BasicBlockId> {
+        self.end_map.get_basic_block(index)
+    }
+
+    pub fn remove_loop(&mut self, index: u32) -> Option<PhiValBranches> {
+        self.end_map.remove(index)
+    }
+
+    pub fn add_branch_to_target(
+        &mut self,
+        index: u32,
+        values: Vec<ValueId>,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Result<BasicBlockId, PhiError> {
+        if self.end_map.0.contains_key(&index) {
+            self.add_end_branch(index, values, block, ctx)
+        } else {
+            self.add_loop_branch(index, values, block, ctx)
+        }
     }
 }
 
@@ -608,7 +671,7 @@ impl WasmInstrLLVMPassManager {
         // popped by that `end` like any other.
         let func_end_instr_index = instructions.len() - 1;
 
-        self.instr_index_to_basic_block.add_end(
+        self.instr_index_to_basic_block.new_end(
             func_end_instr_index as u32,
             results_ty,
             func_end,
