@@ -46,6 +46,7 @@ use std::{
     fmt::Display,
     hash::{Hash, Hasher},
     mem::discriminant,
+    u32,
 };
 
 /// The parameter types and result of a function type.
@@ -225,6 +226,16 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    pub fn try_struct<'a>(&self, ctx: &'a Context) -> Option<(&'a [TyId], bool)> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let Type::Struct { fields, packed } = ty_obj else {
+            return None;
+        };
+
+        Some((fields, *packed))
+    }
+
     /// The ABI alignment of this type in bytes, or `None` where it is not a fixed
     /// number this crate decides.
     ///
@@ -245,7 +256,24 @@ impl TyId {
             Type::Bfloat => 2,
             Type::Float => 4,
             Type::Double => 8,
-            Type::Ptr | Type::Array { .. } | Type::Struct { .. } | Type::Func(_) | Type::Void => {
+            Type::Struct { fields, packed } => {
+                if *packed {
+                    return Some(1);
+                }
+
+                let mut max_alignment = u32::MIN;
+
+                for field in fields {
+                    let field_alignment = field.alignment(ctx)?;
+
+                    if max_alignment < field_alignment {
+                        max_alignment = field_alignment;
+                    }
+                }
+
+                return Some(max_alignment);
+            }
+            Type::Ptr | Type::Array { .. } | Type::Func(_) | Type::Void => {
                 return None;
             }
         };

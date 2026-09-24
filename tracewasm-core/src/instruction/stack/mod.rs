@@ -114,6 +114,7 @@ use tracewasm_llvm::{
         ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
+    value::ValueId,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -4562,7 +4563,73 @@ impl Instruction for StackInstruction {
 
                 if is_func {
                     debug_assert!(instr_index == instructions.len() - 1);
-                    // let result = curr_cursor.struct_ty(, is_packed)
+
+                    let result = func.return_ty(&curr_cursor);
+                    let mut end_cursor = curr_cursor.cursor_at_block(end_block);
+
+                    // return ty of WASM function can be:
+                    // - void
+                    // - struct (for multiple return values)
+                    // - basic ty (for single return value)
+
+                    if result.is_void(&end_cursor) {
+                        let void_ty = end_cursor.void_ty();
+
+                        end_cursor.build_ret(None, OperandTy::Asserted(void_ty))?;
+                    } else if let Some((fields, ..)) = result.try_struct(&end_cursor) {
+                        let fields = fields.to_vec();
+
+                        let func_return_ptr = end_cursor.build_alloca(
+                            result,
+                            None,
+                            result.alignment(&end_cursor),
+                            RegName::Named("fn_return_ptr".into()),
+                        )?;
+
+                        let zero_index = tracewasm_llvm::value::Value::from_const(
+                            0,
+                            OperandTy::Inferred,
+                            &mut end_cursor,
+                        )?;
+
+                        for i in 0..fields.len() {
+                            let field_val = phi_vals[i];
+
+                            let field_index = tracewasm_llvm::value::Value::from_const(
+                                i as u32 as i32,
+                                OperandTy::Inferred,
+                                &mut end_cursor,
+                            )?;
+
+                            let field_ptr = end_cursor.build_get_element_ptr(
+                                func_return_ptr,
+                                OperandTy::Inferred,
+                                &[zero_index, field_index],
+                                Some(true),
+                                RegName::Named(format!("result{}_ptr", i)),
+                            )?;
+
+                            end_cursor.build_store(
+                                field_ptr,
+                                field_val,
+                                OperandTy::Inferred,
+                                None,
+                            )?;
+                        }
+
+                        let return_val = end_cursor.build_load(
+                            func_return_ptr,
+                            OperandTy::Inferred,
+                            None,
+                            RegName::Named("fn_return_val".into()),
+                        )?;
+
+                        end_cursor.build_ret(Some(return_val), OperandTy::Inferred)?
+                    } else {
+                        let return_val = phi_vals[0];
+
+                        end_cursor.build_ret(Some(return_val), OperandTy::Inferred)?;
+                    }
                 }
 
                 // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has
