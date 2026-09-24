@@ -419,7 +419,7 @@ impl UnreachableTrackingControlStack {
 
     /// Marks the rest of the enclosing block dead. Called after every unconditional
     /// transfer — `br`, `br_table`, `return`, `unreachable` — each of which pairs it
-    /// with [`SimulatedStack::reset_enclosing_block_layout`]. Not after `br_if`,
+    /// with the pass's own stack reset. Not after `br_if`,
     /// whose fall-through is reachable.
     pub(crate) fn set_unreachable(&mut self) {
         self.unreachable = true;
@@ -489,8 +489,8 @@ impl UnreachableTrackingControlStack {
 
     /// The kind of label this operator opens, or `None` if it opens none.
     ///
-    /// [`OpenedLabel::Func`] is not among the answers: the function frame is opened
-    /// by the pass itself, never by an operator.
+    /// [`OpenedLabel`] has no variant for the function frame, and that is the point:
+    /// the frame is opened by the pass itself, never by an operator.
     pub(crate) fn is_block(operator: &Operator<'_>) -> Option<OpenedLabel> {
         match operator {
             Operator::Block { .. } => Some(OpenedLabel::Block),

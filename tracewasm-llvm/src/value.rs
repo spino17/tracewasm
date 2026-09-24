@@ -46,7 +46,6 @@ use std::{
     fmt::Display,
     hash::{Hash, Hasher},
     mem::discriminant,
-    u32,
 };
 
 /// The parameter types and result of a function type.
@@ -133,7 +132,8 @@ pub enum Type {
     Void,
 }
 
-/// Stands in for an unnamed register's name until [`Builder::build`] assigns the
+/// Stands in for an unnamed register's name until
+/// [`Builder::build`](crate::cfg::builder::Builder::build) assigns the
 /// real `%N`.
 ///
 /// Deliberately not a legal LLVM local: if one of these ever reaches the emitter it

@@ -258,7 +258,8 @@ impl GetElementPtrOperands {
     /// unchanged; only `indices[1..]` walk inwards.
     ///
     /// `None` when the walk does not typecheck, which a `getelementptr` built through
-    /// [`Cursor::build_get_element_ptr`] cannot be — it is validated there.
+    /// [`build_get_element_ptr`](cursor::Cursor::build_get_element_ptr) cannot be —
+    /// it is validated there.
     pub(crate) fn result_pointee_ty(&self, ctx: &Context) -> Option<TyId> {
         if self.indices.len() <= 1 {
             return Some(self.source_ty);

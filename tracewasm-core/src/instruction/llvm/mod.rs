@@ -30,7 +30,7 @@
 //! When a label opens, its `end` block is created immediately and given one empty phi
 //! per result. Every path that later reaches that label — the fall-through at `end`,
 //! the then-arm at `else`, any `br` inside — adds its values to those phis through the
-//! handles kept in [`EndBasicBlockBranches`].
+//! handles kept in [`PhiValBranches`].
 //!
 //! Building them up front rather than collecting values and emitting phis at the
 //! `end` is what lets a `br` from arbitrary depth work without a second backpatching
@@ -126,7 +126,18 @@ impl<T> Default for BranchTargetBasicBlockMap<T> {
 }
 
 impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
-    pub fn new(
+    /// Opens a label: records the block branches land in, and builds one empty phi
+    /// per value it carries.
+    ///
+    /// Called when the label *opens*, not when it closes — a branch inside it needs
+    /// the block and its phis to already exist. For an `end` the values are the
+    /// label's results; for a `loop` header they are its params.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`build_phi`](tracewasm_llvm::instruction::cursor::Cursor::build_phi)
+    /// reports; an empty phi is legal here only because the type is stated outright.
+    pub fn open(
         &mut self,
         index: u32,
         phi_val_types: &[ValType],
@@ -205,10 +216,21 @@ impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
             .map(|x| (x.phi_vals.as_slice(), x.basic_block))
     }
 
+    /// The block branches to this label land in, without touching its phis.
+    ///
+    /// [`add_branch`](Self::add_branch) hands the same block back, so this is for a
+    /// caller that needs the destination without having a value to contribute.
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn get_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.0.get(&index).map(|x| x.basic_block)
     }
 
+    /// Closes a label, taking its block and the phis that were filled there.
+    ///
+    /// Nothing calls this yet, so an entry outlives the label it describes and the
+    /// map grows for the length of a function. Harmless while a body is one pass, and
+    /// the place to start if it stops being.
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn remove(&mut self, index: u32) -> Option<PhiValBranches> {
         self.0.remove(&index)
     }
@@ -222,7 +244,7 @@ impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
 /// jump is a lookup rather than a search back through the control stack.
 #[derive(Default)]
 pub(crate) struct InstrIndexToBasicBlockMap {
-    /// Keyed by the `end`'s index. See [`EndBasicBlockBranches`].
+    /// Keyed by the `end`'s index. See [`PhiValBranches`].
     end_map: BranchTargetBasicBlockMap<End>,
     loop_map: BranchTargetBasicBlockMap<Loop>,
     /// Keyed by the `else`'s index: the block the false arm starts in, and the
@@ -255,7 +277,7 @@ impl InstrIndexToBasicBlockMap {
         block: BasicBlockId,
         ctx: &mut Context,
     ) -> Result<(), PhiError> {
-        self.end_map.new(index, results, block, ctx)
+        self.end_map.open(index, results, block, ctx)
     }
 
     pub fn add_end_branch(
@@ -272,10 +294,14 @@ impl InstrIndexToBasicBlockMap {
         self.end_map.phi_vals_and_block(index)
     }
 
+    /// See [`BranchTargetBasicBlockMap::get_basic_block`].
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn get_end_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.end_map.get_basic_block(index)
     }
 
+    /// See [`BranchTargetBasicBlockMap::remove`].
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn remove_end(&mut self, index: u32) -> Option<PhiValBranches> {
         self.end_map.remove(index)
     }
@@ -287,7 +313,7 @@ impl InstrIndexToBasicBlockMap {
         block: BasicBlockId,
         ctx: &mut Context,
     ) -> Result<(), PhiError> {
-        self.loop_map.new(index, params, block, ctx)
+        self.loop_map.open(index, params, block, ctx)
     }
 
     pub fn add_loop_branch(
@@ -304,10 +330,14 @@ impl InstrIndexToBasicBlockMap {
         self.loop_map.phi_vals_and_block(index)
     }
 
+    /// See [`BranchTargetBasicBlockMap::get_basic_block`].
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn get_loop_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.loop_map.get_basic_block(index)
     }
 
+    /// See [`BranchTargetBasicBlockMap::remove`].
+    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
     pub fn remove_loop(&mut self, index: u32) -> Option<PhiValBranches> {
         self.loop_map.remove(index)
     }

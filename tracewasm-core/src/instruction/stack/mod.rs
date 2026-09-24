@@ -4523,13 +4523,7 @@ impl Instruction for StackInstruction {
 
                 return Ok((next_block, next_instr_index));
             }
-            StackInstruction::BrIf {
-                target_index,
-                arity,
-                recorded_height,
-            } => {
-                todo!()
-            }
+            StackInstruction::BrIf { .. } => todo!(),
             StackInstruction::End {
                 arity,
                 recorded_height,
