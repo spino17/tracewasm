@@ -706,6 +706,108 @@ impl WasmInstrLLVMPassManager {
             cursor = ctx.cursor_at_block(next_block);
         }
 
+        self.build_func_return(func, func_end_instr_index as u32, ctx)?;
+
+        Ok(())
+    }
+
+    /// Emits the function's `ret` into its `end` block.
+    ///
+    /// Here rather than in the `End` arm, for the same reason the locals are set up
+    /// here: this is the one place that runs once per function, whatever shape the
+    /// body took. Parameters are moved into memory on the way in at a single point;
+    /// results are assembled on the way out at a single point.
+    ///
+    /// The `End` arm is not that place. A body whose last instruction is `return`
+    /// *skips* its own `end` — the branch arm resumes past it — so a `ret` emitted
+    /// there would be missed exactly when the function always returns early. Every
+    /// path out of the body still lands in this block, because `return` targets it
+    /// too.
+    ///
+    /// # Panics
+    ///
+    /// If the function's `end` was never registered, which `compile_func` does
+    /// before emitting a single instruction.
+    fn build_func_return(
+        &mut self,
+        func: GlobalId<DefinedFunc>,
+        func_end_instr_index: u32,
+        ctx: &mut Context,
+    ) -> Result<(), anyhow::Error> {
+        let result_ty = func.return_ty(ctx);
+
+        let (phi_vals, end_block) = self
+            .instr_index_to_basic_block
+            .end_phi_vals_and_block(func_end_instr_index)
+            .expect("the function's `end` is registered before its body is emitted");
+
+        // Copied out so the cursor below can borrow the context mutably. The results
+        // are the `end`'s phis, deepest first — the order wasm declares them in.
+        let phi_vals = phi_vals.to_vec();
+        let mut end_cursor = ctx.cursor_at_block(end_block);
+
+        // Wasm returns nothing, one value, or several. LLVM spells the last of those
+        // as a struct, so these are three different instructions rather than one with
+        // a varying operand.
+        if result_ty.is_void(&end_cursor) {
+            let void_ty = end_cursor.void_ty();
+
+            end_cursor.build_ret(None, OperandTy::Asserted(void_ty))?;
+
+            return Ok(());
+        }
+
+        // Only the field count is needed, so the borrow on the type pool ends here.
+        let field_count = match result_ty.try_struct(&end_cursor) {
+            Some((fields, _)) => fields.len(),
+            None => {
+                end_cursor.build_ret(Some(phi_vals[0]), OperandTy::Inferred)?;
+
+                return Ok(());
+            }
+        };
+
+        // Several results, assembled in memory: this crate has no `insertvalue`, so
+        // each field is stored through a `getelementptr` and the whole struct loaded
+        // back. LLVM folds that into the `insertvalue` chain it would have been — but
+        // it takes `sroa` to do it, not `mem2reg` alone, because this `alloca` is not
+        // in the entry block.
+        let func_return_ptr = end_cursor.build_alloca(
+            result_ty,
+            None,
+            result_ty.alignment(&end_cursor),
+            RegName::Named("fn_return_ptr".to_string()),
+        )?;
+
+        // A `getelementptr` into a struct steps over the pointee first and descends
+        // second, so every field index is preceded by this 0. See `build_get_element_ptr`.
+        let zero_index = end_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+        for (i, field_val) in phi_vals.iter().take(field_count).enumerate() {
+            // Field `i` and phi `i` are the same slot: wasm declares its results
+            // deepest-first, and `add_end` builds the phis in that same order.
+            let field_index = end_cursor.const_value(i as i32, OperandTy::Inferred)?;
+
+            let field_ptr = end_cursor.build_get_element_ptr(
+                func_return_ptr,
+                OperandTy::Inferred,
+                &[zero_index, field_index],
+                Some(true),
+                RegName::Named(format!("result{}_ptr", i)),
+            )?;
+
+            end_cursor.build_store(field_ptr, *field_val, OperandTy::Inferred, None)?;
+        }
+
+        let return_val = end_cursor.build_load(
+            func_return_ptr,
+            OperandTy::Inferred,
+            None,
+            RegName::Named("fn_return_val".to_string()),
+        )?;
+
+        end_cursor.build_ret(Some(return_val), OperandTy::Inferred)?;
+
         Ok(())
     }
 }
