@@ -4257,6 +4257,20 @@ impl Instruction for StackInstruction {
                 let block =
                     func.add_basic_block(format!("block{}", instr_index), &mut curr_cursor)?;
 
+                let end =
+                    func.add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                pass_manager.instr_index_to_basic_block.new_end(
+                    *end_index,
+                    &label_sig.results,
+                    end,
+                    &mut curr_cursor,
+                )?;
+
                 curr_cursor.build_unconditional_br(block)?;
 
                 return Ok((block, instr_index + 1));
@@ -4537,7 +4551,45 @@ impl Instruction for StackInstruction {
 
                 return Ok((next_block, next_instr_index));
             }
-            StackInstruction::BrIf { .. } => todo!(),
+            StackInstruction::BrIf {
+                target_index,
+                arity,
+                recorded_height: _recorded_height,
+            } => {
+                let cond_val = pass_manager.simulated_stack.pop();
+                let zero = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                let cond = curr_cursor.build_icmp(
+                    ICond::Ne,
+                    OperandTy::Inferred,
+                    cond_val,
+                    zero,
+                    RegName::Named(format!("br_if{}_cond", instr_index)),
+                )?;
+
+                let br_if_false =
+                    func.add_basic_block(format!("br_if{}_then", instr_index), &mut curr_cursor)?;
+
+                let start_index = pass_manager.simulated_stack.height() - *arity;
+                let mut results = vec![];
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    results.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                let target_block = pass_manager
+                    .instr_index_to_basic_block
+                    .add_branch_to_target(
+                        *target_index,
+                        results,
+                        curr_cursor.basic_block(),
+                        &mut curr_cursor,
+                    )?;
+
+                curr_cursor.build_conditional_br(cond, target_block, br_if_false)?;
+
+                return Ok((br_if_false, instr_index + 1));
+            }
             StackInstruction::End {
                 arity,
                 recorded_height,

@@ -220,7 +220,10 @@ impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
     ///
     /// [`add_branch`](Self::add_branch) hands the same block back, so this is for a
     /// caller that needs the destination without having a value to contribute.
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn get_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.0.get(&index).map(|x| x.basic_block)
     }
@@ -230,7 +233,10 @@ impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
     /// Nothing calls this yet, so an entry outlives the label it describes and the
     /// map grows for the length of a function. Harmless while a body is one pass, and
     /// the place to start if it stops being.
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn remove(&mut self, index: u32) -> Option<PhiValBranches> {
         self.0.remove(&index)
     }
@@ -295,13 +301,19 @@ impl InstrIndexToBasicBlockMap {
     }
 
     /// See [`BranchTargetBasicBlockMap::get_basic_block`].
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn get_end_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.end_map.get_basic_block(index)
     }
 
     /// See [`BranchTargetBasicBlockMap::remove`].
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn remove_end(&mut self, index: u32) -> Option<PhiValBranches> {
         self.end_map.remove(index)
     }
@@ -331,13 +343,19 @@ impl InstrIndexToBasicBlockMap {
     }
 
     /// See [`BranchTargetBasicBlockMap::get_basic_block`].
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn get_loop_basic_block(&self, index: u32) -> Option<BasicBlockId> {
         self.loop_map.get_basic_block(index)
     }
 
     /// See [`BranchTargetBasicBlockMap::remove`].
-    #[allow(dead_code, reason = "no caller yet; the read/remove half of the map, for the arms still to come")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the read/remove half of the map, for the arms still to come"
+    )]
     pub fn remove_loop(&mut self, index: u32) -> Option<PhiValBranches> {
         self.loop_map.remove(index)
     }

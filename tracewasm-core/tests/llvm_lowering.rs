@@ -290,11 +290,15 @@ fn a_loop_has_a_separate_header_and_end() {
         .collect();
 
     assert!(
-        labels.iter().any(|l| l.starts_with("loop") && !l.ends_with("_end")),
+        labels
+            .iter()
+            .any(|l| l.starts_with("loop") && !l.ends_with("_end")),
         "the loop has a header block\n{ir}"
     );
     assert!(
-        labels.iter().any(|l| l.starts_with("loop") && l.ends_with("_end")),
+        labels
+            .iter()
+            .any(|l| l.starts_with("loop") && l.ends_with("_end")),
         "and a separate end block\n{ir}"
     );
 
@@ -329,7 +333,10 @@ fn multi_value_results_pair_field_with_phi() {
     let field0 = body.find("result0_ptr").expect("field 0 is stored");
     let field1 = body.find("result1_ptr").expect("field 1 is stored");
 
-    assert!(field0 < field1, "fields are stored in declaration order\n{ir}");
+    assert!(
+        field0 < field1,
+        "fields are stored in declaration order\n{ir}"
+    );
 
     // Field 0 takes the *deepest* result, which is the first phi.
     assert!(
@@ -363,7 +370,8 @@ fn multi_value_results_pair_field_with_phi() {
 /// finished.
 #[test]
 fn regression_a_body_ending_in_return_still_returns() {
-    let ir = lower(r#"(module (func (export "f") (param i32) (result i32) (local.get 0) (return)))"#);
+    let ir =
+        lower(r#"(module (func (export "f") (param i32) (result i32) (local.get 0) (return)))"#);
 
     assert!(ir.contains("ret i32"), "the function returns\n{ir}");
     assert_verifies("return_at_end", &ir);
@@ -436,9 +444,8 @@ fn regression_if_without_else_records_the_false_edge() {
 /// to hand the first declared local a `ptr` holding the instance.
 #[test]
 fn regression_the_first_declared_local_is_not_the_runtime_pointer() {
-    let ir = lower(
-        r#"(module (func (export "f") (param i32) (result i32) (local i32) (local.get 1)))"#,
-    );
+    let ir =
+        lower(r#"(module (func (export "f") (param i32) (result i32) (local i32) (local.get 1)))"#);
 
     assert_verifies("declared_local", &ir);
 
@@ -450,4 +457,64 @@ fn regression_the_first_declared_local_is_not_the_runtime_pointer() {
         ir.contains("store i32 0"),
         "the declared local is zeroed, not seeded from a parameter\n{ir}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `block`
+//
+// The plainest label there is: entering one does nothing at runtime, so the only
+// thing it needs is somewhere for a branch to land. It still has to register that
+// `end` — the arm that forgot to was how `loop` and `block` each failed first.
+
+/// Every shape of `block` lowers, verifies, and agrees with the interpreter.
+#[test]
+fn blocks_lower_and_match_the_interpreter() {
+    const BLOCK_CASES: &[Case] = &[
+        Case {
+            name: "block_falls_out",
+            wat: r#"(module (func (export "f") (param i32) (result i32)
+                (block (result i32) (local.get 0))))"#,
+            calls: &[&[0], &[7]],
+            interpret: i32_to_i32,
+        },
+        Case {
+            name: "br_out_of_a_block",
+            wat: r#"(module (func (export "f") (param i32) (result i32)
+                (block (result i32) (local.get 0) (br 0))))"#,
+            calls: &[&[0], &[7]],
+            interpret: i32_to_i32,
+        },
+        Case {
+            name: "br_to_an_outer_block",
+            wat: r#"(module (func (export "f") (param i32) (result i32)
+                (block (result i32)
+                  (block (result i32) (local.get 0) (br 1)))))"#,
+            calls: &[&[0], &[-3]],
+            interpret: i32_to_i32,
+        },
+        Case {
+            name: "block_wrapping_an_if",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block (result i32)
+                  (if (result i32) (local.get 0)
+                    (then (local.get 1) (br 1))
+                    (else (local.get 0))))))"#,
+            calls: &[&[1, 42], &[0, 42]],
+            interpret: i32x2_to_i32,
+        },
+    ];
+
+    for case in BLOCK_CASES {
+        let result = std::panic::catch_unwind(|| check(case));
+
+        if let Err(payload) = result {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+
+            panic!("case `{}` failed: {msg}", case.name);
+        }
+    }
 }

@@ -321,9 +321,7 @@ fn widen_and_print(ty: &str, reg: &str, call: usize, field: usize) -> String {
         _ => format!("  {widened} = sext {ty} {reg} to i64\n"),
     };
 
-    format!(
-        "{widen}  call i32 (ptr, ...) @printf(ptr @.tracewasm_fmt, i64 {widened})\n"
-    )
+    format!("{widen}  call i32 (ptr, ...) @printf(ptr @.tracewasm_fmt, i64 {widened})\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +409,9 @@ interpreter_call!(i32x2_to_i32i64, (a: i32, b: i32), (i32, i64), |r| vec![
 pub fn i32_to_void(wat: &str, args: &[i32]) -> Vec<i64> {
     let bytes = wat::parse_str(wat).expect("invalid wat");
     let module = Module::<Stack>::compile(&bytes).expect("module compiles");
-    let func = module.get_typed_func::<(i32,), ()>("f").expect("export `f`");
+    let func = module
+        .get_typed_func::<(i32,), ()>("f")
+        .expect("export `f`");
     let mut instance = module
         .instantiate::<LinearMemory, _>(NoImports, None)
         .expect("module instantiates");
@@ -467,7 +467,11 @@ pub fn check(case: &Case) -> String {
 /// test that hangs is worse than one that fails: CI waits on it instead of reporting
 /// it. The limit is generous — `lli` interprets, so a few seconds is a long time.
 fn run_with_timeout(cmd: &mut Command, name: &str) -> std::process::Output {
-    use std::{io::Read, process::Stdio, time::{Duration, Instant}};
+    use std::{
+        io::Read,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
 
     const LIMIT: Duration = Duration::from_secs(10);
 
@@ -486,7 +490,9 @@ fn run_with_timeout(cmd: &mut Command, name: &str) -> std::process::Output {
                 let _ = child.kill();
                 let _ = child.wait();
 
-                panic!("`{name}` did not finish within {LIMIT:?} — the lowered code most likely loops forever");
+                panic!(
+                    "`{name}` did not finish within {LIMIT:?} — the lowered code most likely loops forever"
+                );
             }
             None => std::thread::sleep(Duration::from_millis(10)),
         }
@@ -503,7 +509,11 @@ fn run_with_timeout(cmd: &mut Command, name: &str) -> std::process::Output {
         err.read_to_end(&mut stderr).expect("read stderr");
     }
 
-    std::process::Output { status, stdout, stderr }
+    std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }
 }
 
 // ---------------------------------------------------------------------------

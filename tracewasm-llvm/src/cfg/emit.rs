@@ -90,7 +90,7 @@ impl IREmitter {
     /// [`operand`](Self::operand) for a bare [`ValueKind`].
     ///
     /// Split out for [`I1Value`], which narrows a [`ValueId`] rather than being
-     /// one — so a branch
+    /// one — so a branch
     /// condition renders through exactly the same arms as every other operand rather
     /// than a parallel copy of them.
     fn operand_kind(kind: &ValueKind, ctx: &Context) -> Result<String, anyhow::Error> {
