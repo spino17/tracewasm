@@ -4247,6 +4247,20 @@ impl Instruction for StackInstruction {
 
                 curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
             }
+            StackInstruction::Block { end_index } => {
+                pass_manager.control_stack.enter_label(
+                    LabelKind::Block,
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let block =
+                    func.add_basic_block(format!("block{}", instr_index), &mut curr_cursor)?;
+
+                curr_cursor.build_unconditional_br(block)?;
+
+                return Ok((block, instr_index + 1));
+            }
             StackInstruction::Loop { end_index } => {
                 pass_manager.control_stack.enter_label(
                     LabelKind::Loop,
