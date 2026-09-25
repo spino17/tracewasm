@@ -4568,7 +4568,7 @@ impl Instruction for StackInstruction {
                 )?;
 
                 let br_if_false =
-                    func.add_basic_block(format!("br_if{}_then", instr_index), &mut curr_cursor)?;
+                    func.add_basic_block(format!("br_if{}_false", instr_index), &mut curr_cursor)?;
 
                 let start_index = pass_manager.simulated_stack.height() - *arity;
                 let mut results = vec![];

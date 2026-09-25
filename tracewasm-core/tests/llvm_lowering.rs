@@ -518,3 +518,92 @@ fn blocks_lower_and_match_the_interpreter() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `br_if`
+//
+// The only branch with a *reachable* fall-through, which is what makes it
+// different from `br`: nothing is skipped, no label is left, and the values it
+// carries stay on the stack for the path that does not take it.
+//
+// It is also how every real loop is written. A `loop` whose back-edge is
+// unconditional is an infinite loop; `br_if` is what gives one an exit.
+
+/// Every shape of `br_if` lowers, verifies, and agrees with the interpreter.
+///
+/// Arguments always reach both sides — a `br_if` only ever taken, or only ever
+/// skipped, would pass with the other edge miscompiled.
+#[test]
+fn br_if_lowers_and_matches_the_interpreter() {
+    const BR_IF_CASES: &[Case] = &[
+        Case {
+            name: "br_if_out_of_a_block",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block
+                  (br_if 0 (local.get 0))
+                  (local.set 0 (local.get 1)))
+                (local.get 0)))"#,
+            calls: &[&[1, 5], &[0, 5]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_if_carrying_a_value",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block (result i32)
+                  (local.get 1)
+                  (br_if 0 (local.get 0))
+                  (local.set 1)
+                  (local.get 0))))"#,
+            calls: &[&[1, 42], &[0, 42]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_if_to_an_outer_label",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block (result i32)
+                  (block
+                    (local.get 1)
+                    (br_if 1 (local.get 0))
+                    (local.set 1))
+                  (local.get 0))))"#,
+            calls: &[&[1, 42], &[0, 42]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_if_conditional_back_edge",
+            // Two iterations when taken: the back-edge condition reads the *previous*
+            // value of local 0, so the second pass sees the overwritten one and exits.
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32) (local i32)
+                (loop
+                  (local.set 2 (local.get 0))
+                  (local.set 0 (local.get 1))
+                  (br_if 0 (local.get 2)))
+                (local.get 0)))"#,
+            calls: &[&[1, 0], &[0, 0], &[0, 9]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_if_back_edge_carrying_a_loop_param",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (local.get 0)
+                (loop (param i32) (result i32)
+                  (br_if 0 (local.get 1)))))"#,
+            calls: &[&[7, 0], &[-2, 0]],
+            interpret: i32x2_to_i32,
+        },
+    ];
+
+    for case in BR_IF_CASES {
+        let result = std::panic::catch_unwind(|| check(case));
+
+        if let Err(payload) = result {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+
+            panic!("case `{}` failed: {msg}", case.name);
+        }
+    }
+}
