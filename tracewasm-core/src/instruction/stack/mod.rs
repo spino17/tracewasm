@@ -86,11 +86,15 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
+        UnreachableTrackingControlStack, check_memory_index,
+        llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager},
         params_and_results_from_blockty,
     },
     memory::Memory,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
+    module::{
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+    },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
         U64_TRUNC_HIGH, signature_mismatch,
@@ -99,10 +103,20 @@ use crate::{
         value::{DataVal, Value},
     },
 };
+use rustc_hash::FxHashMap;
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use tracewasm_llvm::{
+    cfg::{
+        basic_block::BasicBlockId,
+        global::{DefinedFunc, GlobalId},
+    },
+    instruction::{
+        ICond,
+        cursor::{Cursor, OperandTy, RegName},
+    },
+    value::{Const, ConstValue},
+};
 use wasmparser::{BlockType, Operator, OperatorsReader};
-
-pub mod llvm;
 
 /// A lowered TraceWasm instruction.
 ///
@@ -803,10 +817,27 @@ pub(crate) enum StackInstruction {
     Select,
     /// Opens a block. Purely a label: entering one does nothing at runtime, but a
     /// branch targeting it jumps forward to its `End`.
-    Block,
+    Block {
+        /// Absolute index of this block's matching `End`. Backpatched.
+        ///
+        /// Execution never reads it — a `block` is a no-op, and a branch to the label
+        /// carries its own `target_index`. It is here for a consumer that walks the
+        /// body forwards and has to know where the label closes *before* reaching it,
+        /// which is what lowering to a CFG needs: the `end`'s basic block has to exist
+        /// by the time the first branch inside the block is emitted.
+        end_index: u32,
+    },
     /// Opens a loop. Branches targeting a loop jump back to this instruction
-    /// (the loop start), so no `end` index is needed.
-    Loop,
+    /// (the loop start), so the `end` index is not a branch target.
+    Loop {
+        /// Absolute index of this loop's matching `End`. Backpatched.
+        ///
+        /// Not a branch target — a branch to a `loop` label is a back-edge to this
+        /// instruction — but the same forward-walk need applies as for
+        /// [`Block::end_index`](Self::Block): the block control falls into when the
+        /// loop finishes has to exist before the loop body is emitted.
+        end_index: u32,
+    },
     /// `if`: pop a condition and fall through when it is non-zero, otherwise jump
     /// to the `else` branch (or past the `end` when there is none).
     If {
@@ -930,6 +961,12 @@ pub(crate) struct StackFrameLayout {
     /// run naming its own arms, with the default arm last. Empty, and
     /// unallocated, for the common case of a body with no `br_table`.
     pub br_targets_arena: Box<[StackBrTableTarget]>,
+    /// Each label's type, keyed by the index of the instruction that opens it.
+    ///
+    /// Execution never reads this — arities are already on the instructions. It is
+    /// for the LLVM pass, which needs the result *types* to build an `end`'s phis and
+    /// cannot recover them from a count.
+    pub label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
 }
 
 impl StackFrameLayout {
@@ -988,6 +1025,21 @@ struct ControlStack {
                   `note_height`'s invariant exists to keep it a true bound"
     )]
     max_height: u32,
+    label_instr_index_to_signature: FxHashMap<u32, LabelSignature>,
+}
+
+#[allow(
+    dead_code,
+    reason = "the `end` phis need only the results; params are for `loop` headers"
+)]
+/// One label's type: what it consumes and what it leaves.
+///
+/// The block type a `block`/`loop`/`if` was written with, kept whole rather than
+/// reduced to two counts. See
+/// [`StackFrameLayout::label_instr_index_to_signature`](StackFrameLayout).
+pub struct LabelSignature {
+    pub(crate) params: Box<[ValType]>,
+    pub(crate) results: Box<[ValType]>,
 }
 
 impl ControlStack {
@@ -1000,81 +1052,53 @@ impl ControlStack {
     /// Pushes a new label for a `block`/`loop`/`if`, capturing its
     /// `recorded_height` from the current stack state.
     ///
-    /// If the parent is already dead, the child inherits deadness
-    /// (`has_inherited = true`) and its `recorded_height` is left `0` because it
-    /// will never be consulted at runtime. Otherwise `recorded_height` is the
-    /// height *below* the label's params (the params are allowed to be consumed
-    /// by the block, so they are not part of the unwind height). An `if`
-    /// additionally has the branch condition sitting on top of the params, so it
-    /// subtracts one more for it. (The condition is popped from `curr_height` by
-    /// the `If` arm's `PopPush` stack effect, not here.)
+    /// `recorded_height` is the height *below* the label's params (the params are
+    /// allowed to be consumed by the block, so they are not part of the unwind
+    /// height). An `if` additionally has the branch condition sitting on top of the
+    /// params, so it subtracts one more for it. (The condition is popped from
+    /// `curr_height` by the `If` arm's `PopPush` stack effect, not here.)
+    ///
+    /// Only ever called for a label opened while reachable — a `block`/`loop`/`if`
+    /// inside dead code is counted by [`UnreachableTrackingControlStack`] and never
+    /// gets here, so there is no inherited-deadness case to handle.
     fn add_block(&mut self, kind: BlockKind, blockty: &BlockType, types: &[FuncType]) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
-
-        let is_unreachable_traversing = self
-            .inner
-            .last()
-            .is_some_and(|b| b.is_unreachable_traversing);
-
-        if is_unreachable_traversing {
-            self.inner.push(Block {
-                kind,
-                recorded_height: 0, // this won't be used at runtime because of unreachablity
-                params,
-                results,
-                is_unreachable_traversing,
-                has_inherited: true,
-                attached_breaks: vec![],
-            });
-
-            return;
-        }
+        let params_count = params.len() as u32;
+        let results_count = results.len() as u32;
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block => self.curr_height - params,
-            BlockKind::Loop { .. } => self.curr_height - params,
-            BlockKind::If { .. } => {
+            BlockKind::Block { index } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
+                self.curr_height - params_count
+            }
+            BlockKind::Loop { index } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
+                self.curr_height - params_count
+            }
+            BlockKind::If {
+                index,
+                else_index: _else_index,
+            } => {
+                self.label_instr_index_to_signature
+                    .insert(index, LabelSignature { params, results });
+
                 // top is the `if` condition and then params
-                self.curr_height - params - 1
+                self.curr_height - params_count - 1
             }
         };
 
         self.inner.push(Block {
             kind,
             recorded_height,
-            params,
-            results,
-            is_unreachable_traversing: false,
-            has_inherited: false,
+            params: params_count,
+            results: results_count,
             attached_breaks: vec![],
         });
-    }
-
-    /// Marks the current (innermost) block's remaining body as dead code. Called
-    /// after unconditional control transfers (`unreachable`, `br`, `br_table`,
-    /// `return`).
-    fn set_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-        curr_block.is_unreachable_traversing = true;
-    }
-
-    /// Clears the current block's dead-code flag — but only if the block became
-    /// dead *locally*.
-    ///
-    /// A block that was born dead (`has_inherited`) stays dead: both arms of an
-    /// `if` opened inside unreachable code are unreachable, so an intervening
-    /// `else` must not mark the else-arm live. Skipping the clear here keeps
-    /// `curr_height` frozen through the whole dead subtree, so it is restored
-    /// correctly only when a genuinely-live ancestor's `end` runs.
-    fn end_unreachable_traversing(&mut self) {
-        let curr_block = self.get_curr_block_mut();
-
-        if curr_block.has_inherited {
-            return;
-        }
-
-        curr_block.is_unreachable_traversing = false;
     }
 
     /// The block at an absolute index into the control stack, for recording a
@@ -1094,6 +1118,7 @@ impl ControlStack {
     /// Precondition: at least one block is open. The `Func` block makes that true for
     /// the whole of a body's traversal, so this is only reachable empty after the
     /// final `end` has popped it.
+    #[allow(dead_code, reason = "the mutable form is what every caller wants")]
     fn get_curr_block(&self) -> &Block {
         debug_assert!(!self.inner.is_empty());
         &self.inner[self.inner.len() - 1]
@@ -1129,13 +1154,11 @@ impl ControlStack {
         }
     }
 
-    /// Sets `curr_height`, unless the current block is traversing dead code.
+    /// Sets `curr_height` outright.
     ///
-    /// The dead-code guard is what makes it safe for branch/`end` handlers to
-    /// compute heights unconditionally: once a block goes unreachable, its
-    /// height is frozen until the block's `else`/`end` recomputes it from
-    /// `recorded_height`, so any writes attempted by dead instructions are
-    /// dropped here rather than corrupting the model (or underflowing).
+    /// No dead-code guard is needed: an operator that cannot execute never reaches
+    /// the lowering match, so nothing frozen or stack-polymorphic is ever written
+    /// here — [`UnreachableTrackingControlStack`] drops those operators first.
     ///
     /// NOTE: use this when the exact resulting height is already known — e.g. at
     /// `else`/`end`, which reset to `recorded_height + arity`. For an operator
@@ -1149,12 +1172,6 @@ impl ControlStack {
             return;
         }
 
-        // height is not changed by the instructions which are unreachable.
-        // These instructions typically occur after unconditional br instructions.
-        if self.get_curr_block().is_unreachable_traversing {
-            return;
-        }
-
         self.note_height(height);
     }
 
@@ -1162,18 +1179,12 @@ impl ControlStack {
     /// `curr_height = curr_height - pops + pushes`.
     /// This is the default for ordinary operators described by their pop/push counts.
     ///
-    /// NOTE: the dead-code guard is load-bearing, not just an optimization. The
-    /// arithmetic is skipped entirely while the current block is traversing dead
-    /// code, where `curr_height` is frozen (and may be below `pops`, since dead
-    /// code is stack-polymorphic) — evaluating `curr_height - pops` there would
-    /// underflow the `u32`. Guarding before the subtraction is why callers like
-    /// `br_if`/`call` can invoke this unconditionally.
+    /// The subtraction is safe without a guard because dead code never gets here:
+    /// it is stack-polymorphic and may pop more than it pushed, so evaluating
+    /// `curr_height - pops` against it would underflow — but
+    /// [`UnreachableTrackingControlStack`] drops those operators before the match.
     fn apply_stack_effects_to_height(&mut self, pops: u32, pushes: u32) {
         if self.inner.is_empty() {
-            return;
-        }
-
-        if self.get_curr_block().is_unreachable_traversing {
             return;
         }
 
@@ -1325,8 +1336,8 @@ impl Instruction for StackInstruction {
 
     fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         _locals_count: u32,
@@ -1335,26 +1346,37 @@ impl Instruction for StackInstruction {
         let mut instructions: Vec<StackInstruction> = vec![];
         let mut instruction_offsets: Vec<u32> = vec![];
         let mut control_stack: ControlStack = ControlStack::default();
+        let mut unreachable_tracking_stack = UnreachableTrackingControlStack::new();
         let mut br_table_target_branches = vec![];
 
         control_stack.inner.push(Block {
             kind: BlockKind::Func,
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
-            params,
-            results,
-            is_unreachable_traversing: false,
-            has_inherited: false,
+            params: params.len() as u32,
+            results: results.len() as u32,
             attached_breaks: vec![],
         });
 
         while !operator_reader.eof() {
             let (operator, offset) = operator_reader.read_with_offset()?;
 
+            // Dead code never reaches the match: it is stack-polymorphic, so lowering
+            // it against `curr_height` is meaningless and prone to underflow. Skipping
+            // it here also keeps it out of the instruction stream entirely — nothing
+            // unreachable is ever emitted, so a consumer walking the stream (the LLVM
+            // pass) never has to recognise a region it must not enter.
+            if !matches!(
+                unreachable_tracking_stack.check_unreachablity(&operator),
+                UnreachableCheckResult::Reachable
+            ) {
+                continue;
+            }
+
             let (instruction, stack_effect): (StackInstruction, StackEffectResult) = match operator
             {
                 Operator::Unreachable => {
                     // all instructions after this is unreachable until the end of the current block
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (StackInstruction::Unreachable, StackEffectResult::NoEffect)
                 }
@@ -1947,9 +1969,20 @@ impl Instruction for StackInstruction {
                 ),
                 // blocks
                 Operator::Block { blockty } => {
-                    control_stack.add_block(BlockKind::Block, &blockty, types);
+                    control_stack.add_block(
+                        BlockKind::Block {
+                            index: instructions.len() as u32,
+                        },
+                        &blockty,
+                        types,
+                    );
 
-                    (StackInstruction::Block, StackEffectResult::NoEffect)
+                    (
+                        StackInstruction::Block {
+                            end_index: u32::MAX, // dummy value! backpatched when we see this block's END
+                        },
+                        StackEffectResult::NoEffect,
+                    )
                 }
                 Operator::Loop { blockty } => {
                     control_stack.add_block(
@@ -1960,7 +1993,12 @@ impl Instruction for StackInstruction {
                         types,
                     );
 
-                    (StackInstruction::Loop, StackEffectResult::NoEffect)
+                    (
+                        StackInstruction::Loop {
+                            end_index: u32::MAX, // dummy value! backpatched when we see this loop's END
+                        },
+                        StackEffectResult::NoEffect,
+                    )
                 }
                 Operator::If { blockty } => {
                     control_stack.add_block(
@@ -1998,14 +2036,12 @@ impl Instruction for StackInstruction {
 
                     *else_index = Some(index); // backpatching the `else` index in the `if` block
 
-                    // `else` instruction ends the unreachable traversing because those instructions
-                    // at runtime can execute if the `if` branch is not taken! The else block first instruction
-                    // would see the height to be `recorded_heigh (at the if) + params` (condition is already popped).
-                    //
-                    // `end_unreachable_traversing` is a no-op when the `if` was born in dead code
-                    // (`has_inherited`), so a dead `if` correctly keeps both arms dead; and `set_height`'s
-                    // own guard then leaves `curr_height` frozen in that case.
-                    control_stack.end_unreachable_traversing();
+                    // Reaching this arm at all means the else-arm is live: an `if` opened
+                    // inside dead code never gets here, and a `br` in the then-arm that
+                    // killed the rest of it is revived by this very `else` —
+                    // `check_unreachablity` does that before the match. The else-arm's
+                    // first instruction sees `recorded_height (at the if) + params`, the
+                    // condition having already been popped.
 
                     (
                         StackInstruction::Else {
@@ -2051,7 +2087,7 @@ impl Instruction for StackInstruction {
                     // Any write we made now would land in dead code and be discarded — this is also why
                     // `br_table` (equally unconditional) omits it while `br_if` (conditional) does not.
                     // all the instructions after this till the `end` of the current block are unreachable!
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (instr, StackEffectResult::Unreachable)
                 }
@@ -2133,7 +2169,7 @@ impl Instruction for StackInstruction {
                         br_targets_len += 1;
                     }
 
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (
                         StackInstruction::BrTable {
@@ -2154,7 +2190,7 @@ impl Instruction for StackInstruction {
                     let index = instructions.len() as u32;
 
                     func_block.attached_breaks.push((index, u32::MAX));
-                    control_stack.set_unreachable_traversing();
+                    unreachable_tracking_stack.set_unreachable();
 
                     (
                         StackInstruction::Return {
@@ -2218,11 +2254,37 @@ impl Instruction for StackInstruction {
                         }
                     }
 
-                    // Backpatch this block's own structural indices. `func`/`loop` need none: a function's
-                    // `end` is not referenced by index, and a loop's branch target is its start, not its end.
+                    // Backpatch this block's own structural indices. `func` needs none: a
+                    // function's `end` is the final instruction and nothing names it by
+                    // index.
                     match block.kind {
-                        BlockKind::Func | BlockKind::Loop { .. } => {}
-                        BlockKind::Block => {} // no backpatching require
+                        BlockKind::Func => {}
+                        // Neither a `block`'s nor a `loop`'s `end_index` is a branch
+                        // target — branches carry their own, and a loop's is its start —
+                        // but both openers name their `end` so a forward walk knows where
+                        // the label closes. See `StackInstruction::Block::end_index`.
+                        BlockKind::Block { index: block_index } => {
+                            let StackInstruction::Block { end_index } =
+                                &mut instructions[block_index as usize]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *end_index = index;
+                        }
+                        BlockKind::Loop { index: loop_index } => {
+                            let StackInstruction::Loop { end_index } =
+                                &mut instructions[loop_index as usize]
+                            else {
+                                unreachable!(
+                                    "hitting this means TraceWasm has a bug recording the instructions"
+                                )
+                            };
+
+                            *end_index = index;
+                        }
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
@@ -2306,6 +2368,7 @@ impl Instruction for StackInstruction {
             instruction_offsets,
             StackFrameLayout {
                 br_targets_arena: br_table_target_branches.into_boxed_slice(),
+                label_instr_index_to_signature: control_stack.label_instr_index_to_signature,
             },
         ))
     }
@@ -4028,8 +4091,8 @@ impl Instruction for StackInstruction {
 
                 Step::Next
             }
-            StackInstruction::Block => Step::Next,
-            StackInstruction::Loop => Step::Next,
+            StackInstruction::Block { .. } => Step::Next,
+            StackInstruction::Loop { .. } => Step::Next,
             StackInstruction::If {
                 else_index,
                 end_index,
@@ -4140,9 +4203,543 @@ impl Instruction for StackInstruction {
 
         Ok(res)
     }
+
+    fn emit_llvm_ir<'a>(
+        &self,
+        instr_index: usize,
+        mut curr_cursor: Cursor<'a>,
+        instructions: &[StackInstruction],
+        frame_layout: &StackFrameLayout,
+        locals: &[tracewasm_llvm::value::ValueId],
+        _runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        func: GlobalId<DefinedFunc>,
+        pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<(BasicBlockId, usize), anyhow::Error> {
+        match self {
+            StackInstruction::LocalGet { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+
+                // Named, like every register this pass defines: an unnamed one takes
+                // its number when it is *created*, but LLVM numbers by position in the
+                // printed function, and blocks here are created long before they are
+                // filled. See `RegName` — a named register draws nothing from that
+                // counter, so it cannot be numbered out of order.
+                let local_val = curr_cursor.build_load(
+                    *local_ptr,
+                    OperandTy::Inferred,
+                    None,
+                    RegName::Named(format!("local{}_val", index)),
+                )?;
+
+                pass_manager.simulated_stack.push(local_val);
+            }
+            StackInstruction::LocalSet { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+                let val = pass_manager.simulated_stack.pop();
+
+                curr_cursor.build_store(*local_ptr, val, OperandTy::Inferred, None)?;
+            }
+            StackInstruction::LocalTee { index } => {
+                let index = index.0 as usize;
+                let local_ptr = &locals[index];
+                let top_val = pass_manager.simulated_stack.peek_from_top(0);
+
+                curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
+            }
+            StackInstruction::Block { end_index } => {
+                pass_manager.control_stack.enter_label(
+                    LabelKind::Block,
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let block =
+                    func.add_basic_block(format!("block{}", instr_index), &mut curr_cursor)?;
+
+                let end =
+                    func.add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                pass_manager.instr_index_to_basic_block.new_end(
+                    *end_index,
+                    &label_sig.results,
+                    end,
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_unconditional_br(block)?;
+
+                return Ok((block, instr_index + 1));
+            }
+            StackInstruction::Loop { end_index } => {
+                pass_manager.control_stack.enter_label(
+                    LabelKind::Loop,
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let loop_block =
+                    func.add_basic_block(format!("loop{}", instr_index), &mut curr_cursor)?;
+
+                let end_block =
+                    func.add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                let param_types = &label_sig.params;
+                let params_count = param_types.len() as u32;
+                let result_types = &label_sig.results;
+                let start_index = pass_manager.simulated_stack.height() - params_count;
+                let mut params = vec![];
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    params.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                pass_manager.instr_index_to_basic_block.new_loop(
+                    instr_index as u32,
+                    param_types,
+                    loop_block,
+                    &mut curr_cursor,
+                )?;
+
+                pass_manager.instr_index_to_basic_block.add_loop_branch(
+                    instr_index as u32,
+                    params,
+                    curr_cursor.basic_block(),
+                    &mut curr_cursor,
+                )?;
+
+                pass_manager.instr_index_to_basic_block.new_end(
+                    *end_index,
+                    result_types,
+                    end_block,
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_unconditional_br(loop_block)?;
+
+                let (phi_vals, _) = pass_manager
+                    .instr_index_to_basic_block
+                    .loop_phi_vals_and_block(instr_index as u32).expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                for i in 0..params_count {
+                    pass_manager.simulated_stack.stack[(start_index + i) as usize] =
+                        phi_vals[i as usize];
+                }
+
+                return Ok((loop_block, instr_index + 1));
+            }
+            StackInstruction::If {
+                else_index,
+                end_index,
+            } => {
+                pass_manager.control_stack.enter_label(
+                    LabelKind::If(IfCtx {
+                        else_instr_index: *else_index,
+                        is_else_ongoing: false,
+                    }),
+                    instr_index,
+                    *end_index as usize,
+                );
+
+                let (recorded_height, _) =
+                    Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
+
+                let label_sig = frame_layout
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+
+                let results_ty = &label_sig.results;
+
+                // Wasm branches on "non-zero", and LLVM's `br` takes an `i1`, so the
+                // condition needs a real comparison. Retyping the i32 in place would
+                // emit `br i1 %x` against a register defined as i32 — IR that does not
+                // assemble.
+                let cond_val = pass_manager.simulated_stack.pop();
+                let zero = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                let cond = curr_cursor.build_icmp(
+                    ICond::Ne,
+                    OperandTy::Inferred,
+                    cond_val,
+                    zero,
+                    RegName::Named(format!("if{}_cond", instr_index)),
+                )?;
+
+                let if_then =
+                    func.add_basic_block(format!("if{}_then", instr_index), &mut curr_cursor)?;
+
+                // The block's params are live *before* the branch, so they dominate both
+                // arms and can be used as they are — no phi. Collected bottom-up, which
+                // is the order they are pushed back in.
+                let mut params = vec![];
+
+                for i in recorded_height..pass_manager.simulated_stack.height() {
+                    params.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                let if_else = if let Some(else_index) = else_index {
+                    let if_else =
+                        func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
+
+                    pass_manager.instr_index_to_basic_block.new_else(
+                        *else_index,
+                        if_else,
+                        params.clone(),
+                    );
+
+                    Some(if_else)
+                } else {
+                    None
+                };
+
+                let if_end =
+                    func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
+
+                pass_manager.instr_index_to_basic_block.new_end(
+                    *end_index,
+                    results_ty,
+                    if_end,
+                    &mut curr_cursor,
+                )?;
+
+                let false_label = if let Some(if_else) = if_else {
+                    if_else
+                } else {
+                    // No `else`, so the false edge jumps straight to the `end` and
+                    // carries the block's params through as its results — wasm requires
+                    // the two to match for an `if` without an else arm. Recording it here
+                    // is what keeps the phi at `if_end` from being short a predecessor.
+                    // `params` was collected deepest-first, which is already the order
+                    // the phis are in.
+                    pass_manager.instr_index_to_basic_block.add_end_branch(
+                        *end_index,
+                        params,
+                        curr_cursor.basic_block(),
+                        &mut curr_cursor,
+                    )?;
+
+                    if_end
+                };
+
+                curr_cursor.build_conditional_br(cond, if_then, false_label)?;
+
+                return Ok((if_then, instr_index + 1));
+            }
+            StackInstruction::Else { if_end_index } => {
+                let if_ctx = pass_manager
+                    .control_stack
+                    .try_curr_label_as_if_mut()
+                    .expect("if-else not balanced!");
+
+                if_ctx.is_else_ongoing = true;
+
+                let curr_basic_block = curr_cursor.basic_block();
+
+                let (recorded_height, arity) = Self::recorded_height_and_arity_from_end_instruction(
+                    *if_end_index,
+                    instructions,
+                );
+
+                debug_assert!(pass_manager.simulated_stack.height() - recorded_height == arity);
+
+                // `pops_and_reverse` hands them back deepest-first, which is the order
+                // the `end`'s phis are in. Popping one at a time would give the reverse.
+                let results = pass_manager.simulated_stack.pops_and_reverse(arity);
+
+                let if_end = pass_manager.instr_index_to_basic_block.add_end_branch(
+                    *if_end_index,
+                    results,
+                    curr_basic_block,
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_unconditional_br(if_end)?;
+
+                // restore the stack with original params
+                let (else_block, params) = pass_manager
+                    .instr_index_to_basic_block
+                    .remove_else(instr_index as u32)
+                    .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                for param in params {
+                    pass_manager.simulated_stack.push(param);
+                }
+
+                return Ok((else_block, instr_index + 1));
+            }
+            StackInstruction::Return {
+                target_index,
+                arity,
+                recorded_height: _,
+            }
+            | StackInstruction::Br {
+                target_index,
+                arity,
+                recorded_height: _,
+            } => {
+                // Deepest first, top last — the order the target's phis are in. A `br`
+                // only reads them: the stack is unwound at the label it lands in.
+                let mut results = vec![];
+                let start_index = pass_manager.simulated_stack.height() - *arity;
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    results.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                // can be loop or end
+                let target_block = pass_manager
+                    .instr_index_to_basic_block
+                    .add_branch_to_target(
+                        *target_index,
+                        results,
+                        curr_cursor.basic_block(),
+                        &mut curr_cursor,
+                    )?;
+
+                curr_cursor.build_unconditional_br(target_block)?;
+
+                let curr_label_end_index = pass_manager.control_stack.curr_label().end_instr_index;
+
+                let (recorded_height, _) =
+                    StackInstruction::recorded_height_and_arity_from_end_instruction(
+                        curr_label_end_index as u32,
+                        instructions,
+                    );
+
+                pass_manager.simulated_stack.truncate(recorded_height);
+
+                let (next_block, next_instr_index) = if let Some(if_ctx) =
+                    pass_manager.control_stack.try_curr_label_as_if_mut()
+                    && !if_ctx.is_else_ongoing
+                    && let Some(curr_label_else_index) = if_ctx.else_instr_index
+                {
+                    // restore the stack with original params
+                    let (else_block, params) = pass_manager
+                        .instr_index_to_basic_block
+                        .remove_else(curr_label_else_index)
+                        .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                    for param in params {
+                        pass_manager.simulated_stack.push(param);
+                    }
+
+                    if_ctx.is_else_ongoing = true;
+
+                    (else_block, curr_label_else_index as usize + 1)
+                } else {
+                    let (phi_vals, end_block) = pass_manager
+                        .instr_index_to_basic_block
+                        .end_phi_vals_and_block(curr_label_end_index as u32)
+                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                    for val in phi_vals {
+                        pass_manager.simulated_stack.push(*val);
+                    }
+
+                    pass_manager.control_stack.leave_label();
+
+                    (end_block, curr_label_end_index + 1)
+                };
+
+                return Ok((next_block, next_instr_index));
+            }
+            StackInstruction::BrIf {
+                target_index,
+                arity,
+                recorded_height: _recorded_height,
+            } => {
+                let cond_val = pass_manager.simulated_stack.pop();
+                let zero = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                let cond = curr_cursor.build_icmp(
+                    ICond::Ne,
+                    OperandTy::Inferred,
+                    cond_val,
+                    zero,
+                    RegName::Named(format!("br_if{}_cond", instr_index)),
+                )?;
+
+                let br_if_false =
+                    func.add_basic_block(format!("br_if{}_false", instr_index), &mut curr_cursor)?;
+
+                let start_index = pass_manager.simulated_stack.height() - *arity;
+                let mut results = vec![];
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    results.push(pass_manager.simulated_stack.stack[i as usize]);
+                }
+
+                let target_block = pass_manager
+                    .instr_index_to_basic_block
+                    .add_branch_to_target(
+                        *target_index,
+                        results,
+                        curr_cursor.basic_block(),
+                        &mut curr_cursor,
+                    )?;
+
+                curr_cursor.build_conditional_br(cond, target_block, br_if_false)?;
+
+                return Ok((br_if_false, instr_index + 1));
+            }
+            StackInstruction::BrTable { start_index, len } => {
+                let targets = &frame_layout.br_table_targets()
+                    [*start_index as usize..(*start_index + *len) as usize];
+
+                let index = pass_manager.simulated_stack.pop();
+                let index_ty = index.ty(&curr_cursor);
+                let mut cases = vec![];
+                let target_count = targets.len() - 1;
+                let mut default_block = None;
+
+                for (i, target) in targets.iter().enumerate() {
+                    let arity = target.arity;
+                    let target_index = target.target_index;
+
+                    let start_index = pass_manager.simulated_stack.height() - arity;
+                    let mut results = vec![];
+
+                    for j in start_index..pass_manager.simulated_stack.height() {
+                        results.push(pass_manager.simulated_stack.stack[j as usize]);
+                    }
+
+                    let block = pass_manager
+                        .instr_index_to_basic_block
+                        .add_branch_to_target(
+                            target_index,
+                            results,
+                            curr_cursor.basic_block(),
+                            &mut curr_cursor,
+                        )?;
+
+                    if i == target_count {
+                        default_block = Some(block);
+                    } else {
+                        cases.push((
+                            curr_cursor
+                                .const_literal(i as u32 as i32, OperandTy::Asserted(index_ty))?,
+                            block,
+                        ));
+                    }
+                }
+
+                let default_block = default_block.unwrap();
+
+                curr_cursor.build_switch(index, OperandTy::Inferred, default_block, &cases)?;
+
+                let curr_label_end_index = pass_manager.control_stack.curr_label().end_instr_index;
+
+                let (recorded_height, _) =
+                    StackInstruction::recorded_height_and_arity_from_end_instruction(
+                        curr_label_end_index as u32,
+                        instructions,
+                    );
+
+                pass_manager.simulated_stack.truncate(recorded_height);
+
+                let (next_block, next_instr_index) = if let Some(if_ctx) =
+                    pass_manager.control_stack.try_curr_label_as_if_mut()
+                    && !if_ctx.is_else_ongoing
+                    && let Some(curr_label_else_index) = if_ctx.else_instr_index
+                {
+                    // restore the stack with original params
+                    let (else_block, params) = pass_manager
+                        .instr_index_to_basic_block
+                        .remove_else(curr_label_else_index)
+                        .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                    for param in params {
+                        pass_manager.simulated_stack.push(param);
+                    }
+
+                    if_ctx.is_else_ongoing = true;
+
+                    (else_block, curr_label_else_index as usize + 1)
+                } else {
+                    let (phi_vals, end_block) = pass_manager
+                        .instr_index_to_basic_block
+                        .end_phi_vals_and_block(curr_label_end_index as u32)
+                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                    for val in phi_vals {
+                        pass_manager.simulated_stack.push(*val);
+                    }
+
+                    pass_manager.control_stack.leave_label();
+
+                    (end_block, curr_label_end_index + 1)
+                };
+
+                return Ok((next_block, next_instr_index));
+            }
+            StackInstruction::End {
+                arity,
+                recorded_height,
+            } => {
+                pass_manager.control_stack.leave_label();
+
+                let curr_basic_block = curr_cursor.basic_block();
+
+                debug_assert!(pass_manager.simulated_stack.height() - recorded_height == *arity);
+
+                // Deepest-first, matching the phi order established by `add_end`.
+                let results = pass_manager.simulated_stack.pops_and_reverse(*arity);
+
+                pass_manager.instr_index_to_basic_block.add_end_branch(
+                    instr_index as u32,
+                    results,
+                    curr_basic_block,
+                    &mut curr_cursor,
+                )?;
+
+                let (phi_vals, end_block) = pass_manager
+                    .instr_index_to_basic_block
+                    .end_phi_vals_and_block(instr_index as u32)
+                    .expect("hitting this means logic for tracking `end` index is incorrect");
+
+                for val in phi_vals {
+                    pass_manager.simulated_stack.push(*val);
+                }
+
+                // `end_cursor` borrows from `curr_cursor`, so the fall-through jump has
+                // to come after the phis are in — which is also why the block being left
+                // is closed last rather than first.
+                curr_cursor.build_unconditional_br(end_block)?;
+
+                return Ok((end_block, instr_index + 1));
+            }
+            _ => todo!(),
+        };
+
+        Ok((curr_cursor.basic_block(), instr_index + 1))
+    }
 }
 
 impl StackInstruction {
+    fn recorded_height_and_arity_from_end_instruction(
+        end_index: u32,
+        instructions: &[StackInstruction],
+    ) -> (u32, u32) {
+        let StackInstruction::End {
+            arity,
+            recorded_height,
+        } = &instructions[end_index as usize]
+        else {
+            panic!("this method should only be called for `end` instructions!")
+        };
+
+        (*recorded_height, *arity)
+    }
+
     /// Reads local slot `index` of the frame based at `caller_base_height`.
     ///
     /// A frame's locals occupy the operand stack from `caller_base_height` upward —
@@ -4262,5 +4859,83 @@ impl StackInstruction {
             .ok_or(MemoryError::EffectiveAddressOverflow(addr, memarg_offset))?;
 
         Ok(effective_offset as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::Module;
+
+    /// Lowers `wat`'s first function body, validating it first so a wrong assertion
+    /// cannot be blamed on a typo in the module.
+    fn lower(wat: &str) -> Vec<StackInstruction> {
+        let bytes = wat::parse_str(wat).expect("invalid wat");
+
+        wasmparser::Validator::new()
+            .validate_all(&bytes)
+            .expect("wat does not validate — the test would prove nothing");
+
+        let module = Module::<crate::Stack>::compile(&bytes).expect("compiles");
+
+        module.func_bodies[0].instructions.to_vec()
+    }
+
+    /// Both openers carry an `end_index` that execution never reads, so nothing else
+    /// would notice it being left at the `u32::MAX` sentinel.
+    #[test]
+    fn a_block_and_a_loop_are_backpatched_with_their_own_end() {
+        // `block` closing after `loop` is what distinguishes a correct backpatch from
+        // one that pairs an opener with the nearest `end`, or with the outermost one.
+        let instructions = lower(
+            r#"
+            (module
+              (func
+                (block
+                  (loop
+                    (nop)))))
+            "#,
+        );
+
+        let mut openers = vec![];
+
+        for (index, instr) in instructions.iter().enumerate() {
+            let end_index = match instr {
+                StackInstruction::Block { end_index } => *end_index,
+                StackInstruction::Loop { end_index } => *end_index,
+                _ => continue,
+            };
+
+            assert_ne!(
+                end_index,
+                u32::MAX,
+                "opener at {index} was left at the sentinel"
+            );
+            assert!(
+                matches!(
+                    instructions[end_index as usize],
+                    StackInstruction::End { .. }
+                ),
+                "opener at {index} names {end_index}, which is not an `end`: {instructions:?}"
+            );
+
+            openers.push((index as u32, end_index));
+        }
+
+        let [(block_at, block_end), (loop_at, loop_end)] = openers[..] else {
+            panic!("expected one `block` then one `loop`: {instructions:?}")
+        };
+
+        // Properly nested: the loop opens inside the block and closes before it.
+        assert!(block_at < loop_at, "{instructions:?}");
+        assert!(loop_at < loop_end, "{instructions:?}");
+        assert!(loop_end < block_end, "{instructions:?}");
+
+        // ...and neither reaches for the function's own `end`, which is the last
+        // instruction.
+        assert!(
+            block_end < instructions.len() as u32 - 1,
+            "the block took the function's `end`: {instructions:?}"
+        );
     }
 }

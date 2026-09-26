@@ -134,11 +134,17 @@ pub mod value;
 // *inclusive* maximum, and the exclusive test would then reject `i32::MAX`
 // itself. The 64-bit lines need no such step because `i64::MAX`/`u64::MAX` are
 // already unrepresentable in `f64`.
+/// Exclusive lower bound for `i32.trunc_f*`.
 pub(crate) const I32_TRUNC_LOW: f64 = i32::MIN as f32 as f64; // -2^31 = -2147483648
+/// Exclusive upper bound for `i32.trunc_f*_s`.
 pub(crate) const I32_TRUNC_HIGH: f64 = i32::MAX as f32 as f64; // 2^31 = 2147483648
+/// Exclusive upper bound for `i32.trunc_f*_u`.
 pub(crate) const U32_TRUNC_HIGH: f64 = u32::MAX as f32 as f64; // 2^32 = 4294967296
+/// Exclusive lower bound for `i64.trunc_f*`.
 pub(crate) const I64_TRUNC_LOW: f64 = i64::MIN as f64; // -2^63 = -9223372036854775808
+/// Exclusive upper bound for `i64.trunc_f*_s`.
 pub(crate) const I64_TRUNC_HIGH: f64 = i64::MAX as f64; // 2^63 = 9223372036854775808
+/// Exclusive upper bound for `i64.trunc_f*_u`.
 pub(crate) const U64_TRUNC_HIGH: f64 = u64::MAX as f64; // 2^64 = 18446744073709551616
 
 /// What [`Instruction::execute`] tells
@@ -177,6 +183,10 @@ pub enum Step<Instr: Instruction> {
 ///
 /// Built only by [`TraceVM::_execute_on_frame_stack`], which [`TraceVM::run`] does
 /// not currently use — so nothing constructs one.
+#[allow(
+    dead_code,
+    reason = "part of `_execute_on_frame_stack`, the alternative driver `run` does not use"
+)]
 struct Frame<'a, Instr: Instruction> {
     /// Which function this frame is executing, for the trace.
     func_index: FuncIndex,
@@ -985,6 +995,10 @@ fn func_call_err_from_unwind<V: VirtualMachine>(
 ///
 /// Outlined so none of this sits in the dispatch loop's frame.
 #[inline(never)]
+#[allow(
+    dead_code,
+    reason = "part of `_execute_on_frame_stack`, the alternative driver `run` does not use"
+)]
 fn func_call_err<V: VirtualMachine>(
     entry_func_index: FuncIndex,
     frames: Vec<Frame<InstrOf<V>>>,

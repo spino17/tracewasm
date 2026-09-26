@@ -213,16 +213,8 @@ fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncTy
                     let ty = ty.expect("func type");
 
                     types.push(FuncType {
-                        params: ty
-                            .params()
-                            .iter()
-                            .map(|v| ValType::from_wasmparser(*v))
-                            .collect(),
-                        results: ty
-                            .results()
-                            .iter()
-                            .map(|v| ValType::from_wasmparser(*v))
-                            .collect(),
+                        params: ty.params().iter().map(ValType::from_wasmparser).collect(),
+                        results: ty.results().iter().map(ValType::from_wasmparser).collect(),
                     });
                 }
             }
@@ -243,11 +235,11 @@ fn lower_func_with_types(wat: &str, n: usize) -> (RegLoweredFuncBody, Vec<FuncTy
 
     let body = bodies.into_iter().nth(n).expect("no such function body");
     let ty = &types[func_tys[n].0 as usize];
-    let (params, results) = (ty.params.len() as u32, ty.results.len() as u32);
+    let (params, results) = (&ty.params, &ty.results);
 
     // Locals are run-length encoded in the body header; the pass needs the flat
     // count, params included, because it indexes the lazy origin table unchecked.
-    let mut locals_count = params;
+    let mut locals_count = params.len() as u32;
 
     for local in body.get_locals_reader().expect("locals") {
         let (count, _ty) = local.expect("local");
@@ -318,8 +310,6 @@ fn sim(locals: u32) -> SimulatedStack {
         recorded_height: 0,
         params: 0,
         results: 0,
-        is_unreachable_traversing: false,
-        has_inherited: false,
         attached_breaks: vec![],
     });
 
@@ -705,7 +695,7 @@ fn block_entry_layouts_hold_for_every_block_type() {
             s.push_local(0).unwrap();
 
             let _ = s.registers_for_at::<1, 1>().unwrap(); // a live register underneath
-            let np = params_and_results_from_blockty(&blockty, &types).0;
+            let np = params_and_results_from_blockty(&blockty, &types).0.len();
 
             for _ in 0..np {
                 s.push_const(Const::I32(9)).unwrap();

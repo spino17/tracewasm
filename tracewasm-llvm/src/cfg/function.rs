@@ -8,20 +8,21 @@ use crate::{
     },
     error::ContextError,
     interner::{StrId, TyId},
-    value::Value,
+    value::ValueId,
 };
 use id_arena::Id;
 use rustc_hash::FxHashSet;
 
 /// One function definition.
 ///
-/// Parameters are stored as [`Value`]s rather than bare types, because that is what
+/// Parameters are stored as [`ValueId`]s rather than bare types, because that is what
 /// they are once the function exists: registers the caller supplied, usable directly
-/// as operands. `blocks` is in creation order, which is the order the emitter writes
+/// as operands. Holding the id rather than the value is what lets `build` number an
+/// unnamed parameter and have every use of it follow. `blocks` is in creation order, which is the order the emitter writes
 /// them in — the first is the entry block.
 pub struct Function {
     pub(crate) name: StrId,
-    pub(crate) params: Vec<Value>,
+    pub(crate) params: Vec<ValueId>,
     pub(crate) result: TyId,
     pub(crate) blocks: Vec<BasicBlockId>,
     pub(crate) block_names: FxHashSet<StrId>,
@@ -49,6 +50,7 @@ impl FuncId {
         FuncId(id)
     }
 
+    /// The underlying arena id.
     pub(crate) fn raw(&self) -> Id<Function> {
         self.0
     }
@@ -56,6 +58,10 @@ impl FuncId {
 
 impl GlobalId<DefinedFunc> {
     /// The underlying arena id.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     pub(crate) fn raw(&self) -> Id<Function> {
         self.tag.raw().0
     }
@@ -107,9 +113,9 @@ impl GlobalId<DefinedFunc> {
     ///
     /// Parameters are registers, usable directly as operands. A pointer parameter has
     /// no defining instruction, so
-    /// [`try_inferring_pointee_ty`](crate::value::Value) declines on it and any
+    /// [`try_inferring_pointee_ty`](crate::value::ValueId) declines on it and any
     /// `load`, `store` or `getelementptr` through it needs its type given explicitly.
-    pub fn nth_param(&self, n: usize, ctx: &Context) -> Option<Value> {
+    pub fn nth_param(&self, n: usize, ctx: &Context) -> Option<ValueId> {
         let func = ctx.get_func(self.tag.raw());
         let params = &func.params;
 
@@ -117,7 +123,17 @@ impl GlobalId<DefinedFunc> {
             return None;
         }
 
-        Some(params[n].clone())
+        Some(params[n])
+    }
+
+    /// Every parameter, in declaration order.
+    ///
+    /// [`nth_param`](Self::nth_param) for one; this for a caller that walks them —
+    /// binding a wasm function's params into its locals, for instance.
+    pub fn params<'a>(&self, ctx: &'a Context) -> &'a [ValueId] {
+        let func = ctx.get_func(self.tag.raw());
+
+        &func.params
     }
 
     /// The declared result type, `void` included.
@@ -166,12 +182,12 @@ mod tests {
             .nth_param(1, &builder)
             .expect("two parameters were declared");
 
-        assert_eq!(first.ty(), i32_ty);
-        assert_eq!(second.ty(), f64_ty);
+        assert_eq!(first.ty(&builder), i32_ty);
+        assert_eq!(second.ty(&builder), f64_ty);
 
         // A parameter is a register, which is what makes it usable as an operand.
-        let name_of = |v: &crate::value::Value| {
-            let ValueKind::Reg(reg) = v.kind() else {
+        let name_of = |v: &crate::value::ValueId| {
+            let ValueKind::Reg(reg) = v.kind(&builder) else {
                 panic!("a parameter is a register")
             };
 
@@ -230,8 +246,8 @@ mod tests {
             .define_function("g".to_string(), &[(f64_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(f.nth_param(0, &builder).unwrap().ty(), i32_ty);
-        assert_eq!(g.nth_param(0, &builder).unwrap().ty(), f64_ty);
+        assert_eq!(f.nth_param(0, &builder).unwrap().ty(&builder), i32_ty);
+        assert_eq!(g.nth_param(0, &builder).unwrap().ty(&builder), f64_ty);
     }
 
     /// The result type comes back as declared, `void` included — that is a real

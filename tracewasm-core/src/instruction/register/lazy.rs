@@ -331,6 +331,7 @@ impl SpillArena {
 pub(crate) struct SpillIndex(u16);
 
 impl SpillIndex {
+    /// The underlying slot number, for encoding into an instruction.
     #[inline(always)]
     pub fn raw_value(&self) -> u16 {
         self.0

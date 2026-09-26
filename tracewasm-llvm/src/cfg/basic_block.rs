@@ -31,7 +31,8 @@ pub struct BasicBlock {
 pub struct BasicBlockId(Id<BasicBlock>);
 
 impl BasicBlockId {
-    /// Wraps an arena id. Only [`FuncId::add_basic_block`](crate::cfg::function::FuncId::add_basic_block)
+    /// Wraps an arena id. Only
+    /// [`add_basic_block`](crate::cfg::global::GlobalId::add_basic_block)
     /// calls this.
     pub(crate) fn new(id: Id<BasicBlock>) -> Self {
         BasicBlockId(id)

@@ -9,11 +9,13 @@ use crate::{
             Linkage, Visibility,
         },
     },
+    constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::ContextError,
     instruction::cursor::{Cursor, RegName},
-    interner::{StrId, TyId},
-    value::{ConstExpr, FuncSignature, Value},
+    interner::{StrId, StrInterner, TyId},
+    value::{ConstExpr, FuncSignature, Value, ValueId, ValueKind},
 };
+use id_arena::Arena;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::{Deref, DerefMut};
 
@@ -303,14 +305,18 @@ impl Builder {
             block_names: FxHashSet::default(),
         }));
 
-        let mut final_params: Vec<Value> = vec![];
+        let mut final_params: Vec<ValueId> = vec![];
         let mut param_tys = vec![];
 
         for (param_ty, param_name) in params {
-            let name = self.ctx.name_for_reg(param_name, id)?;
-
             param_tys.push(*param_ty);
-            final_params.push(Value::from_register(name, *param_ty, &mut self.ctx));
+
+            final_params.push(Value::from_register(
+                param_name,
+                *param_ty,
+                id,
+                &mut self.ctx,
+            )?);
         }
 
         let func = self.ctx.get_func_mut(id);
@@ -339,16 +345,125 @@ impl Builder {
         })
     }
 
-    /// Finishes the module.
+    /// Finishes the module, numbering its unnamed registers.
     ///
     /// Consumes the builder, so nothing more can be added. The [`Context`] is still
     /// needed to read the result, since everything inside it is an id.
     ///
-    /// Nothing is verified here: whether each block ends in a terminator, and whether
-    /// a phi has one entry per predecessor, are not checked by this crate. `llvm-as`
-    /// reports both.
+    /// # Why the numbering happens here
+    ///
+    /// LLVM numbers unnamed values by their **position in the printed function**, and
+    /// requires those numbers to run in order. A frontend does not build in that
+    /// order: it creates the block an `if` merges into before either arm exists, and
+    /// fills it last. Numbering at construction would therefore hand `%0` to something
+    /// printed after `%1`, and `llvm-as` refuses that outright —
+    /// *"instruction expected to be numbered '%2' or greater"*.
+    ///
+    /// So this walks each function in printed order — parameters, then every block's
+    /// phis followed by its instructions — and renames the registers marked unnamed as
+    /// it goes. Named ones are left alone and consume no number, exactly as LLVM does.
+    ///
+    /// A rename is one write because a value lives once, in the context's arena, and
+    /// every operand refers to it by [`ValueId`]. There are no
+    /// copies at the use sites to keep in step.
+    ///
+    /// # What is still not checked
+    ///
+    /// Whether each block ends in a terminator, and whether a phi has one entry per
+    /// predecessor, are not verified by this crate. `llvm-as` reports both.
     pub fn build(self) -> ControlFlowGraph {
-        ControlFlowGraph { context: self.ctx }
+        let mut ctx = self.ctx;
+
+        for func_id in &ctx.module.functions {
+            let func = ctx
+                .funcs
+                .get(func_id.raw())
+                .expect("func id is always constructed after inserting function object");
+
+            let mut counter = UnnamedRegNameCounter::new();
+
+            for param in &func.params {
+                number_if_unnamed(*param, &mut counter, &mut ctx.values, &mut ctx.str_interner);
+            }
+
+            for block_id in &func.blocks {
+                let block = ctx
+                    .blocks
+                    .get(block_id.raw())
+                    .expect("block id is always constructed after inserting basic block object");
+
+                // Phis before instructions, matching where they are printed: LLVM
+                // numbers by position in the function, not by when a value was made.
+                for phi in &block.phis {
+                    number_if_unnamed(
+                        phi.value,
+                        &mut counter,
+                        &mut ctx.values,
+                        &mut ctx.str_interner,
+                    );
+                }
+
+                for instr in &block.instructions {
+                    if let Some(value) = instr.value {
+                        number_if_unnamed(
+                            value,
+                            &mut counter,
+                            &mut ctx.values,
+                            &mut ctx.str_interner,
+                        );
+                    }
+                }
+            }
+        }
+
+        ControlFlowGraph { context: ctx }
+    }
+}
+
+/// Gives an unnamed register its number; leaves a named one exactly as it is.
+///
+/// Takes the arena and the interner rather than the whole [`Context`] so the caller
+/// can keep reading `funcs` and `blocks` while this writes `values` — they are
+/// separate fields, and borrowing them apart is what lets the walk happen in one
+/// pass.
+fn number_if_unnamed(
+    id: ValueId,
+    counter: &mut UnnamedRegNameCounter,
+    values: &mut Arena<Value>,
+    str_interner: &mut StrInterner,
+) {
+    let ValueKind::Reg(reg) = values
+        .get_mut(id.raw())
+        .expect(ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID)
+        .kind_mut()
+    else {
+        return;
+    };
+
+    // A named register draws nothing from the counter, exactly as LLVM does.
+    if !reg.is_unnamed {
+        return;
+    }
+
+    reg.name = str_interner.intern(counter.next().to_string()).into();
+    reg.is_unnamed = false;
+}
+
+struct UnnamedRegNameCounter {
+    counter: u32,
+}
+
+impl UnnamedRegNameCounter {
+    fn new() -> Self {
+        UnnamedRegNameCounter { counter: 0 }
+    }
+
+    fn next(&mut self) -> u32 {
+        let counter = self.counter;
+
+        self.counter += 1;
+
+        counter
     }
 }
 
@@ -362,8 +477,8 @@ mod tests {
     };
 
     /// The name a value's register was issued.
-    fn reg_name(value: &Value, ctx: &Context) -> String {
-        let ValueKind::Reg(reg) = value.kind() else {
+    fn reg_name(value: &ValueId, ctx: &Context) -> String {
+        let ValueKind::Reg(reg) = value.kind(ctx) else {
             panic!("expected a register")
         };
 
@@ -380,14 +495,16 @@ mod tests {
     }
 
     /// An unnamed temporary in `f`'s body, which is what advances the counter.
-    fn unnamed_temp(cursor: &mut Cursor) -> String {
+    ///
+    /// Hands back the id rather than the name: an unnamed register has no number
+    /// until [`Builder::build`] assigns one, so every test below constructs first and
+    /// reads names afterwards.
+    fn unnamed_temp(cursor: &mut Cursor) -> ValueId {
         let i32_ty = cursor.i32_ty();
 
-        let val = cursor
+        cursor
             .build_alloca(i32_ty, None, None, RegName::Unnamed)
-            .expect("an i32 is allocatable");
-
-        reg_name(&val, cursor)
+            .expect("an i32 is allocatable")
     }
 
     /// LLVM numbers unnamed values per function starting at `%0`, and **parameters
@@ -411,24 +528,23 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            param_names(f, &builder),
-            ["0", "1"],
-            "parameters number first"
-        );
-
         let entry = f
             .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
         let mut cursor = builder.cursor_at_block(entry);
+        let first = unnamed_temp(&mut cursor);
+        let second = unnamed_temp(&mut cursor);
 
+        let cfg = builder.build();
+        let ctx = &cfg.context;
+
+        assert_eq!(param_names(f, ctx), ["0", "1"], "parameters number first");
         assert_eq!(
-            unnamed_temp(&mut cursor),
+            reg_name(&first, ctx),
             "2",
             "the body continues the parameters' numbering, it does not restart"
         );
-
-        assert_eq!(unnamed_temp(&mut cursor), "3");
+        assert_eq!(reg_name(&second, ctx), "3");
     }
 
     /// A *named* parameter takes no number. `llvm-as` is explicit: in
@@ -449,19 +565,22 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            param_names(f, &builder),
-            ["n", "0"],
-            "only the unnamed parameter draws from the counter"
-        );
-
         let entry = f
             .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
         let mut cursor = builder.cursor_at_block(entry);
+        let temp = unnamed_temp(&mut cursor);
+
+        let cfg = builder.build();
+        let ctx = &cfg.context;
 
         assert_eq!(
-            unnamed_temp(&mut cursor),
+            param_names(f, ctx),
+            ["n", "0"],
+            "only the unnamed parameter draws from the counter"
+        );
+        assert_eq!(
+            reg_name(&temp, ctx),
             "1",
             "one number was taken, so the body starts at 1"
         );
@@ -488,18 +607,26 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(param_names(f, &builder), ["a", "b"]);
-
         let entry = f
             .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
         let mut cursor = builder.cursor_at_block(entry);
+        let temp = unnamed_temp(&mut cursor);
 
-        assert_eq!(unnamed_temp(&mut cursor), "0");
+        let cfg = builder.build();
+        let ctx = &cfg.context;
+
+        assert_eq!(param_names(f, ctx), ["a", "b"]);
+        assert_eq!(reg_name(&temp, ctx), "0");
     }
 
-    /// The counter is per *function*, not per block: it runs on across a branch, which
-    /// is what `llvm-as` accepts for `%1` in `entry` and `%2` in `next`.
+    /// The counter is per *function*, not per block: it runs on across a branch.
+    ///
+    /// It runs in **textual** order, which is the order blocks were added — not the
+    /// order the temporaries were created. Going back to fill in an earlier block
+    /// therefore yields a *lower* number than a later block already built, because
+    /// that is how LLVM reads the printed function: `llvm-as` refuses an unnamed
+    /// value whose number is out of sequence with its position.
     #[test]
     fn the_counter_continues_across_blocks() {
         let mut builder = fixture();
@@ -511,36 +638,81 @@ mod tests {
             .define_function("f".to_string(), &[(i32_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(param_names(f, &builder), ["0"]);
-
         let entry = f
             .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
         let next = f.add_basic_block("next".to_string(), &mut builder).unwrap();
 
         let mut in_entry = builder.cursor_at_block(entry);
-
-        assert_eq!(unnamed_temp(&mut in_entry), "1");
+        let first_in_entry = unnamed_temp(&mut in_entry);
 
         let mut in_next = builder.cursor_at_block(next);
+        let in_next_temp = unnamed_temp(&mut in_next);
 
-        assert_eq!(
-            unnamed_temp(&mut in_next),
-            "2",
-            "a new block does not restart the numbering"
-        );
-
+        // Back to the first block, after `next` already has an instruction.
         let mut in_entry = builder.cursor_at_block(entry);
+        let second_in_entry = unnamed_temp(&mut in_entry);
 
+        let cfg = builder.build();
+        let ctx = &cfg.context;
+
+        assert_eq!(param_names(f, ctx), ["0"]);
+        assert_eq!(reg_name(&first_in_entry, ctx), "1");
         assert_eq!(
-            unnamed_temp(&mut in_entry),
+            reg_name(&second_in_entry, ctx),
+            "2",
+            "both of `entry`'s temporaries number before `next`'s, because `entry` is \
+             printed first — creation order does not come into it"
+        );
+        assert_eq!(
+            reg_name(&in_next_temp, ctx),
             "3",
-            "and going back to the first block does not either"
+            "a new block does not restart the numbering"
         );
     }
 
-    /// Two functions each number from zero, parameters included — `%0` in one is a
-    /// different value from `%0` in the other.
+    /// LLVM numbers unnamed temporaries from 0, in order, and the numbering is per
+    /// function — `%0` is the first unnamed value in *that* function's body.
+    ///
+    /// Relocated from `cfg::context`: it used to exercise the per-function assigner,
+    /// which no longer numbers anything. The invariant is unchanged, only the moment
+    /// it becomes observable.
+    #[test]
+    fn unnamed_values_are_numbered_from_zero_per_function() {
+        let mut builder = fixture();
+
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let g = builder
+            .define_function("g".to_string(), &[], void_ty)
+            .unwrap();
+
+        let f_entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let g_entry = g
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        let mut in_f = builder.cursor_at_block(f_entry);
+        let in_f: Vec<ValueId> = (0..3).map(|_| unnamed_temp(&mut in_f)).collect();
+
+        let mut in_g = builder.cursor_at_block(g_entry);
+        let in_g: Vec<ValueId> = (0..2).map(|_| unnamed_temp(&mut in_g)).collect();
+
+        let cfg = builder.build();
+        let ctx = &cfg.context;
+
+        let names =
+            |ids: &[ValueId]| -> Vec<String> { ids.iter().map(|id| reg_name(id, ctx)).collect() };
+
+        assert_eq!(names(&in_f), ["0", "1", "2"]);
+        assert_eq!(names(&in_g), ["0", "1"], "a second function restarts at 0");
+    }
+
+    /// Numbering is per function: `g` starts over at `%0` however much `f` used.
     #[test]
     fn each_function_restarts_the_counter_including_its_params() {
         let mut builder = fixture();
@@ -560,9 +732,6 @@ mod tests {
             .define_function("g".to_string(), &[(i32_ty, RegName::Unnamed)], void_ty)
             .unwrap();
 
-        assert_eq!(param_names(f, &builder), ["0", "1"]);
-        assert_eq!(param_names(g, &builder), ["0"], "`g` starts over");
-
         let in_f = f
             .add_basic_block("entry".to_string(), &mut builder)
             .unwrap();
@@ -571,20 +740,24 @@ mod tests {
             .unwrap();
 
         let mut f_cursor = builder.cursor_at_block(in_f);
-
-        assert_eq!(unnamed_temp(&mut f_cursor), "2");
+        let f_temp = unnamed_temp(&mut f_cursor);
 
         let mut g_cursor = builder.cursor_at_block(in_g);
+        let g_temp = unnamed_temp(&mut g_cursor);
 
+        let cfg = builder.build();
+        let ctx = &cfg.context;
+
+        assert_eq!(param_names(f, ctx), ["0", "1"]);
+        assert_eq!(param_names(g, ctx), ["0"], "`g` starts over");
+        assert_eq!(reg_name(&f_temp, ctx), "2");
         assert_eq!(
-            unnamed_temp(&mut g_cursor),
+            reg_name(&g_temp, ctx),
             "1",
             "`g` has one parameter, so its body starts at 1"
         );
     }
 
-    /// A declaration records its signature so a call resolves against it, exactly as
-    /// a definition does — but adds no function to the arena, since there is no body.
     #[test]
     fn a_declaration_records_a_signature_without_a_definition() {
         let mut builder = fixture();
@@ -763,31 +936,26 @@ mod tests {
         let spelled: Vec<String> = func
             .params
             .iter()
-            .map(|p| builder.display(p.ty()).to_string())
+            .map(|p| builder.display(p.ty(&builder)).to_string())
             .collect();
 
         assert_eq!(spelled, ["i32", "double", "ptr"], "in declaration order");
 
         for param in &func.params {
             assert!(
-                matches!(param.kind(), ValueKind::Reg(_)),
+                matches!(param.kind(&builder), ValueKind::Reg(_)),
                 "a parameter is a register, not a constant"
             );
         }
 
-        // The unnamed one falls back to LLVM's `%0` numbering, and the named ones
-        // keep their hints — `name_for_reg` is the same path a temporary goes through.
-        let names: Vec<String> = func
-            .params
-            .iter()
-            .map(|p| {
-                let ValueKind::Reg(reg) = p.kind() else {
-                    panic!("a parameter is a register")
-                };
+        // The named ones keep their hints; the unnamed one falls back to LLVM's `%0`
+        // numbering, which is only assigned once the function is built — so the names
+        // are read from the built graph rather than from the builder.
+        let params: Vec<ValueId> = func.params.clone();
+        let cfg = builder.build();
+        let ctx = &cfg.context;
 
-                builder.str_interner.value(reg.name.0).to_string()
-            })
-            .collect();
+        let names: Vec<String> = params.iter().map(|p| reg_name(p, ctx)).collect();
 
         assert_eq!(names, ["n", "x", "0"]);
     }

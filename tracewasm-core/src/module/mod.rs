@@ -26,7 +26,7 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{Instruction, stack::StackInstruction},
+    instruction::{Instruction, llvm::WasmInstrLLVMPassManager, stack::StackInstruction},
     memory::Memory,
     runtime::{
         TraceVM,
@@ -38,6 +38,7 @@ use gimli::{Dwarf, EndianArcSlice, EndianReader, RunTimeEndian, SectionId};
 use phf::phf_set;
 use rustc_hash::FxHashMap;
 use std::{hash::Hash, sync::Arc};
+use tracewasm_llvm::cfg::ControlFlowGraph;
 use wasmparser::{Encoding, ExternalKind, Parser, Payload::*, TypeRef, Validator};
 
 /// Size in bytes of one WebAssembly linear-memory page (64 KiB).
@@ -71,7 +72,7 @@ impl GlobalType {
 
     /// The value type stored by this global.
     pub fn content_type(&self) -> ValType {
-        ValType::from_wasmparser(self.0.content_type)
+        ValType::from_wasmparser(&self.0.content_type)
     }
 
     /// Whether the global is mutable (`global.set` is allowed).
@@ -185,14 +186,14 @@ impl ValType {
     /// Total, including `V128`: rejecting SIMD is left to the callers that would
     /// have to represent a value of it, so the type itself can still be named in
     /// a signature this crate merely reads past.
-    pub(crate) fn from_wasmparser(value: wasmparser::ValType) -> Self {
+    pub(crate) fn from_wasmparser(value: &wasmparser::ValType) -> Self {
         match value {
             wasmparser::ValType::I32 => ValType::I32,
             wasmparser::ValType::I64 => ValType::I64,
             wasmparser::ValType::F32 => ValType::F32,
             wasmparser::ValType::F64 => ValType::F64,
             wasmparser::ValType::V128 => ValType::V128,
-            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(r)),
+            wasmparser::ValType::Ref(r) => ValType::Ref(RefType(*r)),
         }
     }
 }
@@ -443,6 +444,10 @@ pub struct Module<V: VirtualMachine> {
     /// The memory section (TraceWasm currently allows at most one memory).
     pub(crate) memories: Box<[MemoryType]>,
     /// The tag section (exception-handling proposal).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) tags: Box<[TagType]>,
     /// The global index space: imported globals first, then locally-defined ones.
     /// The split point is [`Self::imported_global_count`].
@@ -459,12 +464,24 @@ pub struct Module<V: VirtualMachine> {
     pub(crate) elements: Box<[Element]>,
     /// The declared data-segment count from the data-count section, if present
     /// (required by the bulk-memory proposal for validating `data.drop`, etc.).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) data_count: Option<u32>,
     /// The data section.
     pub(crate) datas: Box<[Data]>,
     /// Declared entry count of the code section (should match `func_bodies.len()`).
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) code_sec_count: u32,
     /// Byte size of the code section as declared in its header.
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) code_sec_size: u32,
     /// Byte offset of the code section's contents within the module binary.
     ///
@@ -492,6 +509,10 @@ pub struct Module<V: VirtualMachine> {
     /// sizes, which is all a consumer outside the crate has asked for.
     pub(crate) func_bodies: Box<[FuncBody<InstrOf<V>>]>,
     /// Sections with an unrecognized id, preserved verbatim as `(id, contents)`.
+    #[allow(
+        dead_code,
+        reason = "parsed and retained so the section survives a round trip; nothing reads it yet"
+    )]
     pub(crate) unknown_sections: Box<[(u8, Box<[u8]>)]>, // (id, content)
     /// Decoded `name`-section maps plus the raw bytes of other custom sections.
     pub(crate) custom_section: Arc<CustomSection>,
@@ -1140,14 +1161,8 @@ impl<V: VirtualMachine> Module<V> {
                         let results = ty.results();
 
                         types.push(FuncType {
-                            params: params
-                                .iter()
-                                .map(|v| ValType::from_wasmparser(*v))
-                                .collect(),
-                            results: results
-                                .iter()
-                                .map(|v| ValType::from_wasmparser(*v))
-                                .collect(),
+                            params: params.iter().map(ValType::from_wasmparser).collect(),
+                            results: results.iter().map(ValType::from_wasmparser).collect(),
                         });
                     }
                 }
@@ -1450,7 +1465,7 @@ impl<V: VirtualMachine> Module<V> {
 
                     for local in locals_reader {
                         let (count, ty) = local?;
-                        let ty = ValType::from_wasmparser(ty);
+                        let ty = ValType::from_wasmparser(&ty);
 
                         // Rejected here rather than when the frame is built: the
                         // local's type is static, so failing at compile time gives
@@ -1468,8 +1483,8 @@ impl<V: VirtualMachine> Module<V> {
                     let (instructions, instruction_offsets, frame_layout) =
                         InstrOf::<V>::emit_instructions_for_func(
                             code_sec_entry.get_operators_reader()?,
-                            params.len() as u32,
-                            results.len() as u32,
+                            params,
+                            results,
                             &types,
                             &func_decls,
                             locals.len() as u32,
@@ -1853,7 +1868,7 @@ impl<V: VirtualMachine> Module<V> {
                 )
             };
 
-            let expected = ValType::from_wasmparser(global.ty.0.content_type);
+            let expected = ValType::from_wasmparser(&global.ty.0.content_type);
             let val = import_registry.get_global(module_name, global_name)?;
 
             if !val.has_ty(expected)? {
@@ -2071,6 +2086,25 @@ impl<V: VirtualMachine> Module<V> {
         }
 
         Ok(instance)
+    }
+
+    /// Translates this module into an LLVM control-flow graph.
+    ///
+    /// The pass lowers the *already-lowered* instruction stream rather than the
+    /// operators, so every structured branch has been resolved to an absolute index
+    /// before it starts. The result is rendered by
+    /// [`IREmitter`](tracewasm_llvm::cfg::emit::IREmitter).
+    ///
+    /// Only the stack machine is translated. A module compiled for the register
+    /// machine comes back with an error rather than a partial graph.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the pass reports, including any operator it does not yet lower.
+    pub fn build_cfg(self: &Arc<Module<V>>) -> Result<ControlFlowGraph, anyhow::Error> {
+        let pass_manager = WasmInstrLLVMPassManager::default();
+
+        pass_manager.compile(self)
     }
 }
 

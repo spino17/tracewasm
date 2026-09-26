@@ -1,8 +1,25 @@
 //! Types and the values that carry them.
 //!
 //! A [`Value`] is what an instruction operates on: a type plus how the value is
-//! obtained — a register, a pooled constant, or a constant expression. Both the type
-//! and the constant are ids, so a `Value` is small and cheap to clone.
+//! obtained — a register, a pooled constant, or a constant expression.
+//!
+//! # Values live once, and are named by id
+//!
+//! Every value is allocated into an arena on the [`Context`] and referred to
+//! everywhere else by [`ValueId`] — operands, phi incomings, an instruction's own
+//! result. Nothing holds a second copy.
+//!
+//! That indirection is load-bearing rather than tidy. An unnamed register is not
+//! numbered until [`Builder::build`](crate::cfg::builder::Builder::build) knows where
+//! it sits in the printed function, and renaming it has to be visible at every use.
+//! With copies at the use sites there is no way to reach them; with one arena entry
+//! the rename is a single write.
+//!
+//! **An arena, not an interner.** Deduplicating by content would be wrong here: every
+//! function has its own `%0`, so two registers that look alike are still two
+//! registers, and merging them would let one rename corrupt both. Identity is "this
+//! definition", not "this shape". Types and constants *are* interned, because for
+//! those two equal shapes genuinely are one thing.
 //!
 //! [`Type`] describes one node of a type; its children are [`TyId`]s, so the whole
 //! type graph lives in the pool rather than in nested boxes. Nearly everything a
@@ -13,12 +30,17 @@ use crate::{
     cfg::{
         basic_block::BasicBlockId,
         context::Context,
+        function::FuncId,
         global::{Global, GlobalEntity, GlobalId},
     },
-    error::{GepError, TypeError},
-    instruction::{AllocaOperands, GetElementPtrOperands, InstructionKind, cursor::OperandTy},
+    error::{ContextError, GepError, TypeError},
+    instruction::{
+        AllocaOperands, GetElementPtrOperands, InstructionKind,
+        cursor::{OperandTy, RegName},
+    },
     interner::{ConstId, StrId, TyId},
 };
+use id_arena::Id;
 use ordered_float::OrderedFloat;
 use std::{
     fmt::Display,
@@ -110,6 +132,15 @@ pub enum Type {
     Void,
 }
 
+/// Stands in for an unnamed register's name until
+/// [`Builder::build`](crate::cfg::builder::Builder::build) assigns the
+/// real `%N`.
+///
+/// Deliberately not a legal LLVM local: if one of these ever reaches the emitter it
+/// means a definition was missed by the numbering pass, and `llvm-as` rejecting
+/// `%<unnamed>` is a better failure than a plausible-looking wrong name.
+pub(crate) const UNNAMED_REG_PLACEHOLDER: &str = "<unnamed>";
+
 impl TyId {
     /// Borrows this type together with `ctx` so it can be printed.
     ///
@@ -195,6 +226,61 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    pub fn try_struct<'a>(&self, ctx: &'a Context) -> Option<(&'a [TyId], bool)> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let Type::Struct { fields, packed } = ty_obj else {
+            return None;
+        };
+
+        Some((fields, *packed))
+    }
+
+    /// The ABI alignment of this type in bytes, or `None` where it is not a fixed
+    /// number this crate decides.
+    ///
+    /// Only the scalars answer. For them alignment equals width, which is why this
+    /// reads as a width table; a pointer's and an aggregate's come from the target's
+    /// data layout, so `None` here means "let the ABI default apply" rather than
+    /// "unaligned" — which is exactly how the builders read a `None` `align`.
+    pub fn alignment(&self, ctx: &Context) -> Option<u32> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let width = match ty_obj {
+            Type::I1 => 1,
+            Type::I8 => 1,
+            Type::I16 => 2,
+            Type::I32 => 4,
+            Type::I64 => 8,
+            Type::Half => 2,
+            Type::Bfloat => 2,
+            Type::Float => 4,
+            Type::Double => 8,
+            Type::Struct { fields, packed } => {
+                if *packed {
+                    return Some(1);
+                }
+
+                let mut max_alignment = u32::MIN;
+
+                for field in fields {
+                    let field_alignment = field.alignment(ctx)?;
+
+                    if max_alignment < field_alignment {
+                        max_alignment = field_alignment;
+                    }
+                }
+
+                return Some(max_alignment);
+            }
+            Type::Ptr | Type::Array { .. } | Type::Func(_) | Type::Void => {
+                return None;
+            }
+        };
+
+        Some(width)
+    }
+
     /// How many bits this type occupies, or `None` if that is not a fixed number.
     ///
     /// `None` for `ptr` (target-dependent) and for `void` and the aggregates. Note
@@ -230,7 +316,7 @@ impl TyId {
     /// `getelementptr` with one index or none points at its source type unchanged.
     pub(crate) fn walk_pointee_ty_in_gep(
         &self,
-        indices: &[Value],
+        indices: &[ValueId],
         ctx: &Context,
     ) -> Result<TyId, GepError> {
         if indices.is_empty() {
@@ -248,21 +334,21 @@ impl TyId {
                 // integer. `llvm-as` refuses an `i64` one with "invalid getelementptr
                 // indices", even though array indices may be any width, because the
                 // index names a field rather than scaling an offset.
-                if !index.ty().is_i32(ctx) {
+                if !index.ty(ctx).is_i32(ctx) {
                     return Err(GepError::StructIndexNotAConstantI32(
-                        ctx.display(index.ty()).to_string(),
+                        ctx.display(index.ty(ctx)).to_string(),
                     ));
                 }
 
                 let Some(const_val) = index.try_const(ctx) else {
                     return Err(GepError::StructIndexNotAConstantI32(
-                        ctx.display(index.ty()).to_string(),
+                        ctx.display(index.ty(ctx)).to_string(),
                     ));
                 };
 
                 let Some(field_index) = const_val.try_integer() else {
                     return Err(GepError::StructIndexNotAConstantI32(
-                        ctx.display(index.ty()).to_string(),
+                        ctx.display(index.ty(ctx)).to_string(),
                     ));
                 };
 
@@ -477,13 +563,158 @@ pub enum ValueKind {
 
 /// An operand: a type, and where the value comes from.
 ///
-/// Both halves are ids, so a `Value` is cheap to clone and cheap to compare. The type
-/// is the value's *own* type — for a pointer that means `ptr`, not what it points at.
+/// Held in the [`Context`]'s arena and reached through a [`ValueId`]; see the module
+/// docs for why the indirection exists. The type is the value's *own* type — for a
+/// pointer that means `ptr`, not what it points at.
 #[derive(Debug, Clone)]
 pub struct Value {
     ty: TyId,
     kind: ValueKind,
 }
+
+/// A handle to a [`Value`] in a [`Context`]'s arena.
+///
+/// Every operand, phi incoming, and instruction result names a value by id rather
+/// than holding a copy of it. That is what makes renaming a register a single write:
+/// the name lives in the one arena entry, and every use resolves through it.
+///
+/// **An arena, not an interner.** Deduplicating by content would merge two registers
+/// that merely look alike — every function has its own `%0` — and a rename would then
+/// corrupt both. Identity here is "this definition", not "this shape".
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ValueId(Id<Value>);
+
+impl ValueId {
+    /// Wraps an arena id. Only [`Context::alloc_value`] calls this.
+    pub(crate) fn new(id: Id<Value>) -> Self {
+        ValueId(id)
+    }
+
+    /// The underlying arena id.
+    pub(crate) fn raw(&self) -> Id<Value> {
+        self.0
+    }
+
+    /// The value's own type. For a pointer this is `ptr`, not the pointee.
+    pub fn ty(&self, ctx: &Context) -> TyId {
+        ctx.get_value(*self).ty
+    }
+
+    /// Where the value comes from.
+    pub fn kind<'a>(&self, ctx: &'a Context) -> &'a ValueKind {
+        &ctx.get_value(*self).kind
+    }
+
+    /// Whether this value is a pointer.
+    pub fn is_ptr(&self, ctx: &Context) -> bool {
+        self.ty(ctx).is_ptr(ctx)
+    }
+
+    /// Whether this value's type is an integer.
+    pub fn is_integer(&self, ctx: &Context) -> bool {
+        self.ty(ctx).is_integer(ctx)
+    }
+
+    /// The pooled constant behind this value, or `None` if it is a register or a
+    /// constant expression.
+    pub fn try_const<'a>(&self, ctx: &'a Context) -> Option<&'a ConstValue> {
+        if let ValueKind::ConstExpr(ConstExpr::Const(const_val)) = self.kind(ctx) {
+            Some(ctx.const_interner.value(const_val.raw()))
+        } else {
+            None
+        }
+    }
+
+    /// Narrows to an [`I1Value`], the operand a conditional branch takes.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ValueToI1ValueFailed`] if the value is not an `i1`.
+    pub fn try_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
+        if !self.ty(ctx).is_i1(ctx) {
+            return Err(TypeError::ValueToI1ValueFailed(
+                self.ty(ctx).display(ctx).to_string(),
+            ));
+        }
+
+        Ok(I1Value(self))
+    }
+
+    /// Gives this value the type `ty`, if it can have it.
+    ///
+    /// A **constant** is folded into the new type and re-interned, so the result is a
+    /// genuinely different value — `i32 7` cast to `i64` becomes `i64 7`, with its own
+    /// id. A **register** or constant expression is only *checked*: nothing converts
+    /// it, because widening a register needs a real `zext`/`sext` that this cannot
+    /// emit, so the same id comes back unchanged.
+    ///
+    /// That the unchanged case returns the *same* id matters. Handing back a fresh
+    /// copy would mint a second identity for one register, and a later rename would
+    /// reach only one of them.
+    ///
+    /// `None` covers all of: an unsized target type, a constant that does not fold,
+    /// and a register whose type does not already match.
+    pub fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ValueId> {
+        Value::try_cast_inner(*self, ty, signedness, ctx)
+    }
+
+    /// Brings two values to one type, so an instruction that needs matching operands
+    /// can have them.
+    pub fn try_cast_two(
+        a: ValueId,
+        b: ValueId,
+        ty: OperandTy,
+        signedness: Signedness,
+        ctx: &mut Context,
+    ) -> Option<(ValueId, ValueId)> {
+        if let OperandTy::Asserted(ty) = ty {
+            return Some((
+                a.try_cast(ty, signedness, ctx)?,
+                b.try_cast(ty, signedness, ctx)?,
+            ));
+        }
+
+        if a.ty(ctx) == b.ty(ctx) {
+            return Some((a, b));
+        }
+
+        // An unsized type has no width, so there is nothing to widen towards. Two
+        // `ptr`s already left through the equality above; anything reaching here with
+        // a `ptr` is a genuine mismatch.
+        let a_width = a.ty(ctx).width(ctx)?;
+        let b_width = b.ty(ctx).width(ctx)?;
+
+        if a_width >= b_width {
+            let ref_ty = a.ty(ctx);
+
+            Some((a, b.try_cast(ref_ty, signedness, ctx)?))
+        } else {
+            let ref_ty = b.ty(ctx);
+
+            Some((a.try_cast(ref_ty, signedness, ctx)?, b))
+        }
+    }
+
+    /// What this pointer was traced back to, for the builders that can infer a type
+    /// rather than being told one.
+    pub(crate) fn try_inferring_pointee_ty(
+        &self,
+        block: BasicBlockId,
+        ctx: &mut Context,
+    ) -> Option<PointeeTy> {
+        let value = ctx.get_value(*self).clone();
+
+        value.try_inferring_pointee_ty(block, ctx)
+    }
+}
+
+impl Clone for ValueId {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for ValueId {}
 
 impl Value {
     /// Builds a value from an already-interned type and a kind.
@@ -514,14 +745,44 @@ impl Value {
         val: C,
         optional_cast: OperandTy,
         ctx: &mut Context,
-    ) -> Result<Self, TypeError> {
+    ) -> Result<ValueId, TypeError> {
         let val = ConstValue::new(val, optional_cast, ctx)?;
         let const_id = ctx.const_interner.intern(val);
-
-        Ok(Value {
+        let value = Value {
             ty: val.ty(ctx),
             kind: ValueKind::ConstExpr(ConstExpr::Const(const_id.into())),
-        })
+        };
+
+        Ok(ctx.alloc_value(value))
+    }
+
+    /// The zero of `ty`: `0`, `0.0`, or `null`.
+    ///
+    /// What a wasm local is initialised to, so it answers for the types
+    /// [`ValType`](crate::value::Type) maps onto and `None` for the rest. A
+    /// reference's zero is the null pointer, which is what `ref.null` means.
+    pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<ValueId> {
+        let ty_obj = ctx.ty_interner.value(ty.raw());
+
+        Some(
+            match ty_obj {
+                Type::I1 => Value::from_const(false, OperandTy::Inferred, ctx),
+                Type::I8 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I16 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I32 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I64 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::Float => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Double => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Ptr => Value::from_const(NullPtr, OperandTy::Inferred, ctx),
+                Type::Half
+                | Type::Bfloat
+                | Type::Array { .. }
+                | Type::Func(_)
+                | Type::Struct { .. }
+                | Type::Void => return None,
+            }
+            .expect("hitting this means the above casting is incorrect"),
+        )
     }
 
     /// Interns `name` and builds a register of the given type.
@@ -530,22 +791,44 @@ impl Value {
     /// builders call this after `name_for_reg` has issued a unique name, and record
     /// the definition so the pointee of a pointer can later be traced back.
     /// Constructing one freely would produce a `%name` that no instruction defines.
-    pub(crate) fn from_register(name: String, ty: TyId, ctx: &mut Context) -> Self {
-        let reg_id: StrId = ctx.str_interner.intern(name).into();
+    pub(crate) fn from_register(
+        name: &RegName,
+        ty: TyId,
+        func: FuncId,
+        ctx: &mut Context,
+    ) -> Result<ValueId, ContextError> {
+        let (reg_name, is_unnamed) = match name {
+            RegName::Named(name) => (ctx.name_for_reg(name, func)?, false),
+            // No name is issued here. The real one is `%N`, and which `N` is only
+            // known in `Builder::build()`, once every definition's position in the
+            // printed function is settled — LLVM numbers by position, not by when a
+            // value was created. Going through the per-function assigner would both
+            // throw the issued name away and force this placeholder to satisfy the
+            // register grammar, which it is not meant to.
+            RegName::Unnamed => (UNNAMED_REG_PLACEHOLDER.to_string(), true),
+        };
 
-        Value {
+        let reg_id: StrId = ctx.str_interner.intern(reg_name).into();
+        let value = Value {
             ty,
-            kind: ValueKind::Reg(Register { name: reg_id }),
-        }
+            kind: ValueKind::Reg(Register {
+                name: reg_id,
+                is_unnamed,
+            }),
+        };
+
+        Ok(ctx.alloc_value(value))
     }
 
     /// Wraps a constant expression as an operand, taking its type from the
     /// expression.
-    pub fn from_const_expr(expr: ConstExpr, ctx: &mut Context) -> Self {
-        Value {
+    pub fn from_const_expr(expr: ConstExpr, ctx: &mut Context) -> ValueId {
+        let value = Value {
             ty: expr.ty(ctx),
             kind: ValueKind::ConstExpr(expr),
-        }
+        };
+
+        ctx.alloc_value(value)
     }
 
     /// Takes a global's address as an operand.
@@ -557,13 +840,14 @@ impl Value {
     ///
     /// The tag is erased here: by the time a global is an operand, all three kinds
     /// behave alike.
-    pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> Self {
+    pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> ValueId {
         let global = GlobalEntity::to_global(global);
-
-        Value {
+        let value = Value {
             ty: ctx.ptr_ty(),
             kind: ValueKind::Global(global),
-        }
+        };
+
+        ctx.alloc_value(value)
     }
 
     /// The value's own type. For a pointer this is `ptr`, not the pointee.
@@ -574,6 +858,15 @@ impl Value {
     /// Where the value comes from.
     pub fn kind(&self) -> &ValueKind {
         &self.kind
+    }
+
+    /// Where the value comes from, mutably.
+    ///
+    /// The one mutation a built value undergoes: renaming an unnamed register in
+    /// [`Builder::build`](crate::cfg::builder::Builder::build). Reached through the
+    /// context's arena, so the write lands on the single entry every use shares.
+    pub fn kind_mut(&mut self) -> &mut ValueKind {
+        &mut self.kind
     }
 
     /// Whether this value is a pointer.
@@ -587,36 +880,13 @@ impl Value {
     /// Used where a value has to be known *now* rather than at run time — a
     /// `getelementptr` struct index, for instance.
     pub fn try_const<'a>(&self, ctx: &'a Context) -> Option<&'a ConstValue> {
-        if let ValueKind::ConstExpr(ConstExpr::Const(const_val)) = self.kind() {
+        if let ValueKind::ConstExpr(ConstExpr::Const(const_val)) = &self.kind {
             let const_val = ctx.const_interner.value(const_val.raw());
 
             Some(const_val)
         } else {
             None
         }
-    }
-
-    /// Narrows to an [`I1Value`], the operand a conditional branch takes.
-    ///
-    /// Checking once here means [`Cursor::build_conditional_br`](crate::instruction::cursor::Cursor::build_conditional_br)
-    /// cannot be handed anything else.
-    ///
-    /// # Errors
-    ///
-    /// [`TypeError::ValueToI1ValueFailed`] if the value is not an `i1`.
-    pub fn into_i1(self, ctx: &Context) -> Result<I1Value, TypeError> {
-        if !self.ty().is_i1(ctx) {
-            return Err(TypeError::ValueToI1ValueFailed(
-                self.ty().display(ctx).to_string(),
-            ));
-        }
-
-        // The check above is what makes carrying the id sound: it is the pool's `i1`,
-        // so converting back needs no interner and cannot fail.
-        Ok(I1Value {
-            ty: self.ty,
-            kind: self.kind,
-        })
     }
 
     /// Whether this value's type is an integer.
@@ -636,81 +906,37 @@ impl Value {
     ///
     /// `None` covers all of: an unsized target type, a constant that does not fold,
     /// and a register whose type does not already match.
-    pub fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<Self> {
+    pub(crate) fn try_cast_inner(
+        id: ValueId,
+        ty: TyId,
+        signedness: Signedness,
+        ctx: &mut Context,
+    ) -> Option<ValueId> {
         if !ty.is_first_class(ctx) {
             return None;
         }
 
-        let val_ty = self.ty();
+        let val_ty = id.ty(ctx);
 
-        let final_value = match self.kind() {
+        match id.kind(ctx).clone() {
             ValueKind::ConstExpr(ConstExpr::Const(const_id)) => {
                 let const_val = *ctx.const_interner.value(const_id.raw());
                 let casted_const_val = const_val.try_cast(ty, signedness, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
+                let value = Value::new(ty, ValueKind::ConstExpr(ConstExpr::Const(casted_const_id)));
 
-                Value::new(ty, ValueKind::ConstExpr(ConstExpr::Const(casted_const_id)))
+                Some(ctx.alloc_value(value))
             }
+            // Nothing is converted, so nothing is allocated: the *same* id comes back
+            // and the value keeps its identity — which is what lets a later rename
+            // reach every use of it.
             ValueKind::ConstExpr(_) | ValueKind::Reg(_) | ValueKind::Global(_) => {
                 if val_ty != ty {
                     return None;
                 }
 
-                self.clone()
+                Some(id)
             }
-        };
-
-        Some(final_value)
-    }
-
-    /// Brings two values to one type, so an instruction that needs matching operands
-    /// can have them.
-    ///
-    /// With `ty`, both are cast to it. Without, the wider of the two wins and the
-    /// narrower is widened to meet it — which only works if the narrower is a
-    /// constant, since widening a register needs a real `zext`/`sext` instruction that
-    /// this cannot emit.
-    ///
-    /// `signedness` decides how that widening fills the high bits, and picking it
-    /// wrongly produces valid IR that computes the wrong answer — see
-    /// [`Signedness`]. A caller with no basis for choosing should not call this;
-    /// [`ICond::signedness`](crate::instruction::ICond::signedness) returning `None`
-    /// is what makes `icmp eq` refuse rather than guess.
-    ///
-    /// `None` if no common type works. On success the two returned values are
-    /// guaranteed to have equal types, so callers may check just one.
-    pub fn try_cast_two(
-        a: &Value,
-        b: &Value,
-        ty: OperandTy,
-        signedness: Signedness,
-        ctx: &mut Context,
-    ) -> Option<(Value, Value)> {
-        if let OperandTy::Asserted(ty) = ty {
-            return Some((
-                a.try_cast(ty, signedness, ctx)?,
-                b.try_cast(ty, signedness, ctx)?,
-            ));
-        }
-
-        if a.ty() == b.ty() {
-            return Some((a.clone(), b.clone()));
-        }
-
-        // An unsized type has no width, so there is nothing to widen towards. Two
-        // `ptr`s already left through the equality above; anything reaching here with
-        // a `ptr` is a genuine mismatch.
-        let a_width = a.ty().width(ctx)?;
-        let b_width = b.ty().width(ctx)?;
-
-        if a_width >= b_width {
-            let ref_ty = a.ty();
-
-            Some((a.clone(), b.try_cast(ref_ty, signedness, ctx)?))
-        } else {
-            let ref_ty = b.ty();
-
-            Some((a.try_cast(ref_ty, signedness, ctx)?, b.clone()))
         }
     }
 
@@ -754,7 +980,7 @@ impl Value {
                         align: _,
                     }) => PointeeTy {
                         ty: *ty,
-                        count: count.clone(),
+                        count: *count,
                     },
                     InstructionKind::GetElementPtr(operands) => PointeeTy {
                         ty: operands.result_pointee_ty(ctx)?,
@@ -797,7 +1023,14 @@ pub(crate) struct PointeeTy {
     pub ty: TyId,
     /// How many of them, when the pointer came from an `alloca` with an element
     /// count. `None` for a single element and for pointers from other instructions.
-    pub count: Option<Value>,
+    ///
+    /// Recorded but not yet consulted: a `load` through an N-element `alloca` is
+    /// currently checked against the element type alone.
+    #[allow(
+        dead_code,
+        reason = "recorded for the bounds check load/store do not do yet"
+    )]
+    pub count: Option<ValueId>,
 }
 
 #[derive(Debug, Clone)]
@@ -875,6 +1108,7 @@ impl ConstExpr {
 pub struct Register {
     /// The interned name, without the leading `%`.
     pub(crate) name: StrId,
+    pub(crate) is_unnamed: bool,
 }
 
 /// A constant the module uses, interned into a per-context pool.
@@ -1484,20 +1718,22 @@ impl Const for NullPtr {
 /// anything else.
 ///
 /// It keeps the pool id it was narrowed from rather than re-deriving `i1` on the way
-/// back: [`Value::into_i1`] has already resolved and checked that id, so converting
+/// back: [`ValueId::try_i1`] has already resolved and checked that id, so converting
 /// back needs neither the interner nor a second chance to fail.
 #[derive(Debug)]
-pub struct I1Value {
-    pub(crate) ty: TyId,
-    pub(crate) kind: ValueKind,
+pub struct I1Value(pub(crate) ValueId);
+
+impl I1Value {
+    /// The value behind the proof. Narrowing is one-way: anything can be widened
+    /// back to a plain id, but only [`ValueId::try_i1`] makes an `I1Value`.
+    pub fn id(&self) -> ValueId {
+        self.0
+    }
 }
 
-impl From<I1Value> for Value {
+impl From<I1Value> for ValueId {
     fn from(value: I1Value) -> Self {
-        Value {
-            ty: value.ty,
-            kind: value.kind,
-        }
+        value.0
     }
 }
 
@@ -1514,8 +1750,8 @@ mod tests {
 
     /// The type a value reports, resolved back out of the pool. A value holds an id,
     /// so every assertion about "what type is this" goes through here.
-    fn ty_of(value: &Value, ctx: &Context) -> Type {
-        ctx.ty_interner.value(value.ty().raw()).clone()
+    fn ty_of(value: &ValueId, ctx: &Context) -> Type {
+        ctx.ty_interner.value(value.ty(ctx).raw()).clone()
     }
 
     /// How an interned type spells itself against `ctx`'s pool.
@@ -1563,7 +1799,10 @@ mod tests {
         assert_eq!(ty_of(&widened, &ctx), Type::I64);
 
         assert!(
-            matches!(widened.kind, ValueKind::ConstExpr(ConstExpr::Const(_))),
+            matches!(
+                widened.kind(&ctx),
+                ValueKind::ConstExpr(ConstExpr::Const(_))
+            ),
             "a constant value holds a pool id"
         );
 
@@ -1845,43 +2084,43 @@ mod tests {
         let a = Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx).unwrap();
         let b = Value::from_const(2.0f64, OperandTy::Inferred, &mut ctx).unwrap();
 
-        let (a, b) = Value::try_cast_two(
-            &a,
-            &b,
+        let (a, b) = ValueId::try_cast_two(
+            a,
+            b,
             OperandTy::Inferred,
             Signedness::NotApplicable,
             &mut ctx,
         )
         .expect("two doubles already agree");
 
-        assert_eq!(a.ty(), f64_ty);
-        assert_eq!(b.ty(), f64_ty);
+        assert_eq!(a.ty(&ctx), f64_ty);
+        assert_eq!(b.ty(&ctx), f64_ty);
 
         // And a narrower float constant still widens, because `fpext` is exact and
         // needs no reading to be chosen.
         let narrow = Value::from_const(0.5f32, OperandTy::Inferred, &mut ctx).unwrap();
         let wide = Value::from_const(1.0f64, OperandTy::Inferred, &mut ctx).unwrap();
 
-        let (x, y) = Value::try_cast_two(
-            &wide,
-            &narrow,
+        let (x, y) = ValueId::try_cast_two(
+            wide,
+            narrow,
             OperandTy::Inferred,
             Signedness::NotApplicable,
             &mut ctx,
         )
         .expect("f32 widens into f64 exactly");
 
-        assert_eq!(x.ty(), f64_ty);
-        assert_eq!(y.ty(), f64_ty);
+        assert_eq!(x.ty(&ctx), f64_ty);
+        assert_eq!(y.ty(&ctx), f64_ty);
 
         // An integer paired with a float has no common type under any reading.
         let int = Value::from_const(1i32, OperandTy::Inferred, &mut ctx).unwrap();
         let float = Value::from_const(1.0f32, OperandTy::Inferred, &mut ctx).unwrap();
 
         assert!(
-            Value::try_cast_two(
-                &int,
-                &float,
+            ValueId::try_cast_two(
+                int,
+                float,
                 OperandTy::Inferred,
                 Signedness::NotApplicable,
                 &mut ctx
@@ -1993,8 +2232,9 @@ mod tests {
             "no float equals 0.1, so asserting one is false",
         );
         assert_eq!(
-            3.14159265358979f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
+            std::f64::consts::PI.try_cast(f32_ty, Signedness::Signed, &mut ctx),
             None,
+            "a double carrying a full mantissa does not survive narrowing",
         );
         assert_eq!(
             1e-40f64.try_cast(f32_ty, Signedness::Signed, &mut ctx),
@@ -2105,8 +2345,8 @@ mod tests {
             before,
             "the same NaN must reuse its pool entry rather than add another",
         );
-        assert_eq!(first.ty(), f64_ty);
-        assert_eq!(second.ty(), f64_ty);
+        assert_eq!(first.ty(&ctx), f64_ty);
+        assert_eq!(second.ty(&ctx), f64_ty);
 
         assert_eq!(
             ConstValue::Double(OrderedFloat(f64::NAN)),
@@ -2308,8 +2548,8 @@ mod tests {
         assert_eq!(ty_of(&again, &ctx), Type::Ptr);
 
         assert_eq!(
-            first.ty(),
-            again.ty(),
+            first.ty(&ctx),
+            again.ty(&ctx),
             "and one `ptr` entry in the type pool, so the two ids are the same id"
         );
 
@@ -2437,9 +2677,9 @@ mod tests {
         let ok = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
         let not_i1 = Value::from_const(1i32, OperandTy::Inferred, &mut ctx).unwrap();
 
-        assert!(ok.into_i1(&ctx).is_ok());
+        assert!(ok.try_i1(&ctx).is_ok());
 
-        let err = not_i1.into_i1(&ctx).expect_err("i32 is not i1");
+        let err = not_i1.try_i1(&ctx).expect_err("i32 is not i1");
 
         assert!(
             err.to_string().contains("i32"),
@@ -2454,12 +2694,12 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
 
         let value = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
-        let ty = value.ty();
-        let i1 = value.into_i1(&ctx).unwrap();
-        let back = Value::from(i1);
+        let ty = value.ty(&ctx);
+        let i1 = value.try_i1(&ctx).unwrap();
+        let back = ValueId::from(i1);
 
         assert_eq!(ty_of(&back, &ctx), Type::I1);
-        assert_eq!(back.ty(), ty, "the pool id survives the round trip");
+        assert_eq!(back.ty(&ctx), ty, "the pool id survives the round trip");
     }
 
     /// Equal constants share a pool entry; constants that differ in *type* do not,

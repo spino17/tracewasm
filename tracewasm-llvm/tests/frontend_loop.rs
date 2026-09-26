@@ -53,7 +53,7 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     let loop_b = f.add_basic_block("loop".to_string(), &mut builder).unwrap();
     let exit = f.add_basic_block("exit".to_string(), &mut builder).unwrap();
 
-    let n = f.nth_param(0, &builder).unwrap().clone();
+    let n = f.nth_param(0, &builder).unwrap();
 
     builder
         .cursor_at_block(entry)
@@ -69,33 +69,33 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
     // Both phis are built knowing only the `entry` edge. The `loop` edge carries
     // values that do not exist yet, so it is added further down.
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], "acc".into())
+        .build_phi(&[(entry, zero)], OperandTy::Inferred, "acc".into())
         .unwrap();
-    let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
+    let (i_phi, i) = in_loop
+        .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
+        .unwrap();
 
     let next = in_loop
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "next".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, i, "next".into())
         .unwrap();
 
     let dec = in_loop
-        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, i, one, "dec".into())
         .unwrap();
 
     let cond = in_loop
-        .build_icmp(ICond::Sgt, OperandTy::Inferred, &dec, &zero, "cond".into())
+        .build_icmp(ICond::Sgt, OperandTy::Inferred, dec, zero, "cond".into())
         .unwrap();
 
     // Close the back edge now that the values exist.
-    acc_phi
-        .add_branch((loop_b, next.clone()), &mut in_loop)
-        .unwrap();
+    acc_phi.add_branch((loop_b, next), &mut in_loop).unwrap();
     i_phi.add_branch((loop_b, dec), &mut in_loop).unwrap();
 
     in_loop.build_conditional_br(cond, loop_b, exit).unwrap();
 
     builder
         .cursor_at_block(exit)
-        .build_ret(Some(&next), i32_ty.into())
+        .build_ret(Some(next), i32_ty.into())
         .unwrap();
 
     let ir = IREmitter::emit(builder.build()).unwrap();
@@ -187,7 +187,7 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
         .unwrap();
     let exit = f.add_basic_block("exit".to_string(), &mut builder).unwrap();
 
-    let n = f.nth_param(0, &builder).unwrap().clone();
+    let n = f.nth_param(0, &builder).unwrap();
 
     // Constants made before any cursor exists, then reused across blocks.
     let zero = builder.const_value(0i32, OperandTy::Inferred).unwrap();
@@ -202,15 +202,17 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut in_loop = builder.cursor_at_block(loop_b);
 
     let (acc_phi, acc) = in_loop
-        .build_phi(&[(entry, zero.clone())], "acc".into())
+        .build_phi(&[(entry, zero)], OperandTy::Inferred, "acc".into())
         .unwrap();
-    let (i_phi, i) = in_loop.build_phi(&[(entry, n)], "i".into()).unwrap();
+    let (i_phi, i) = in_loop
+        .build_phi(&[(entry, n)], OperandTy::Inferred, "i".into())
+        .unwrap();
 
     let bit = in_loop
-        .build_ibinop(IBinOp::And, OperandTy::Inferred, &i, &one, "bit".into())
+        .build_ibinop(IBinOp::And, OperandTy::Inferred, i, one, "bit".into())
         .unwrap();
     let even = in_loop
-        .build_icmp(ICond::Eq, OperandTy::Inferred, &bit, &zero, "even".into())
+        .build_icmp(ICond::Eq, OperandTy::Inferred, bit, zero, "even".into())
         .unwrap();
 
     in_loop.build_conditional_br(even, then_b, else_b).unwrap();
@@ -218,13 +220,13 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     // --- the two arms ---
     let mut in_then = builder.cursor_at_block(then_b);
     let a = in_then
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &i, "a".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, i, "a".into())
         .unwrap();
     in_then.build_unconditional_br(latch).unwrap();
 
     let mut in_else = builder.cursor_at_block(else_b);
     let b = in_else
-        .build_ibinop(IBinOp::Add, OperandTy::Inferred, &acc, &one, "b".into())
+        .build_ibinop(IBinOp::Add, OperandTy::Inferred, acc, one, "b".into())
         .unwrap();
     in_else.build_unconditional_br(latch).unwrap();
 
@@ -232,13 +234,17 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     let mut in_latch = builder.cursor_at_block(latch);
 
     let (_, merged) = in_latch
-        .build_phi(&[(then_b, a), (else_b, b)], "merged".into())
+        .build_phi(
+            &[(then_b, a), (else_b, b)],
+            OperandTy::Inferred,
+            "merged".into(),
+        )
         .unwrap();
     let dec = in_latch
-        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, &i, &one, "dec".into())
+        .build_ibinop(IBinOp::Sub, OperandTy::Inferred, i, one, "dec".into())
         .unwrap();
     let cont = in_latch
-        .build_icmp(ICond::Sgt, OperandTy::Inferred, &dec, &zero, "cont".into())
+        .build_icmp(ICond::Sgt, OperandTy::Inferred, dec, zero, "cont".into())
         .unwrap();
 
     in_latch.build_conditional_br(cont, loop_b, exit).unwrap();
@@ -246,14 +252,12 @@ fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
     // --- close the header's back edge, now that `latch` has been written ---
     // The handles outlived their cursor, and `add_branch` wants a context rather than
     // a position, so this works with the builder alone.
-    acc_phi
-        .add_branch((latch, merged.clone()), &mut builder)
-        .unwrap();
+    acc_phi.add_branch((latch, merged), &mut builder).unwrap();
     i_phi.add_branch((latch, dec), &mut builder).unwrap();
 
     builder
         .cursor_at_block(exit)
-        .build_ret(Some(&merged), i32_ty.into())
+        .build_ret(Some(merged), i32_ty.into())
         .unwrap();
 
     let ir = IREmitter::emit(builder.build()).unwrap();

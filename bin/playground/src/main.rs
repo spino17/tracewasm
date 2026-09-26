@@ -1,10 +1,14 @@
 use crate::counting::CountingMemory;
 use std::fs;
-use tracewasm_core::{Stack, memory::linear::LinearMemory, module::Module};
+use tracewasm_core::{Stack, module::Module};
 use tracewasm_macros::imports;
 
 mod counting;
 
+/// The host functions this playground exposes to the module it loads.
+///
+/// Empty of state — the `#[imports]` macro reads the `impl` block below, not the
+/// fields.
 pub struct Imports {}
 
 #[imports]

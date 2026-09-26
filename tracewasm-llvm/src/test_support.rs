@@ -13,7 +13,8 @@ use crate::{
     },
     error::ContextError,
     instruction::cursor::OperandTy,
-    value::Value,
+    interner::{StrId, TyId},
+    value::{Register, Value, ValueId, ValueKind},
 };
 
 /// A builder over a context targeting `arm64-apple-macosx`, with no data layout.
@@ -54,7 +55,26 @@ pub(crate) fn add_fn(
 
 /// A distinct `i32` constant per call, for tests whose subject is the graph rather
 /// than the value flowing through it.
-pub(crate) fn value(n: i32, ctx: &mut Context) -> Value {
+pub(crate) fn value(n: i32, ctx: &mut Context) -> ValueId {
     ctx.const_value(n, OperandTy::Inferred)
         .expect("constant interns")
+}
+
+/// A named register operand, for a test that needs one to hand rather than one
+/// defined by an instruction.
+///
+/// Goes straight to the arena instead of through
+/// [`Value::from_register`](crate::value::Value::from_register), which would want the
+/// enclosing function in order to issue a unique name. These stand-ins are only ever
+/// read as operands, so the name is taken as given.
+pub(crate) fn reg_val(name: &str, ty: TyId, ctx: &mut Context) -> ValueId {
+    let name: StrId = ctx.str_interner.intern(name.to_string()).into();
+
+    ctx.alloc_value(Value::new(
+        ty,
+        ValueKind::Reg(Register {
+            name,
+            is_unnamed: false,
+        }),
+    ))
 }

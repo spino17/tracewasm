@@ -26,6 +26,10 @@ use crate::{
     module::FuncType,
 };
 
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 impl RegInstruction {
     /// Renders one instruction, with its operands resolved through `frame`.
     ///

@@ -160,7 +160,9 @@ use crate::{
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
-        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, check_memory_index,
+        Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
+        UnreachableTrackingControlStack, check_memory_index,
+        llvm::WasmInstrLLVMPassManager,
         params_and_results_from_blockty,
         register::{
             arena::{Arena, Id},
@@ -172,7 +174,9 @@ use crate::{
         },
     },
     memory::Memory,
-    module::{FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex},
+    module::{
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+    },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
         U64_TRUNC_HIGH,
@@ -190,6 +194,13 @@ use std::{
     hash::{Hash, Hasher},
     mem::discriminant,
     vec,
+};
+use tracewasm_llvm::{
+    cfg::{
+        basic_block::BasicBlockId,
+        global::{DefinedFunc, GlobalId},
+    },
+    instruction::cursor::Cursor,
 };
 use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.
@@ -219,10 +230,18 @@ mod tests;
 // the module still lowers under `Stack`.
 
 /// Distinct constants one body may intern.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 const MAX_CONSTS: u16 = u16::MAX;
 /// Locals plus operand registers one frame may name, counted from the frame base.
 const MAX_REGISTER_SLOTS: u16 = u16::MAX;
 /// Distinct memory offsets one body's loads and stores may name between them.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 pub(crate) const MAX_MEMORY_OFFSETS: u16 = u16::MAX;
 
 /// The static byte offset of one load or store, as its own type so that the ids the
@@ -556,6 +575,10 @@ pub(crate) struct DynSignature {
 
 impl DynSignature {
     /// A move of `input` into the run based at `output_start`.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     pub fn new(input: Vec<Slot>, output_start: u16) -> Self {
         DynSignature {
             input,
@@ -612,153 +635,6 @@ impl ControlStack {
     /// relative depth against this.
     fn len(&self) -> usize {
         self.stack.len()
-    }
-}
-
-/// Filters out operators that cannot execute, so the lowering match never sees them.
-///
-/// After an unconditional branch, everything up to the enclosing block's `else` or
-/// `end` is dead. Dead code is stack-polymorphic — it may pop more than it pushed —
-/// so lowering it against the simulated stack is both meaningless and prone to
-/// underflow. Skipping it entirely means every arm of the match can assume its
-/// operands exist.
-///
-/// The only state needed is a flag plus a count of constructs opened *while* dead:
-///
-/// * `block`/`loop`/`if` while dead push onto [`Self::blocks`] and are skipped, so
-///   they never reach [`SimulatedStack::add_block`] and the real [`ControlStack`]
-///   never sees them.
-/// * `end` while dead pops one and stays dead, unless [`Self::blocks`] is empty — in
-///   which case it closes a construct that was opened while *reachable*, so it is the
-///   point where liveness resumes and the operator is processed normally.
-/// * `else` behaves the same way, which is what makes an `if` opened inside dead code
-///   keep both arms dead: its `else` finds a non-empty [`Self::blocks`] and does not
-///   resurrect anything.
-///
-/// Because dead constructs are only ever counted here, the real control stack stays
-/// balanced with no reconciliation: every block it holds was pushed while reachable
-/// and is popped by an `end` that is also processed.
-struct UnreachableTrackingControlStack {
-    /// Constructs opened while dead, innermost last. Only the kind is kept; nothing
-    /// about a dead block is needed beyond knowing when it closes.
-    blocks: Vec<BlockVariant>,
-    /// Whether the operators being read cannot execute, i.e. an unconditional
-    /// transfer has been lowered and the enclosing block has not closed yet.
-    unreachable: bool,
-}
-
-/// What the lowering loop should do with an operator.
-enum UnreachableCheckResult {
-    /// Skip it — it cannot execute.
-    Continue,
-    /// Lower it normally.
-    Reachable,
-}
-
-impl UnreachableTrackingControlStack {
-    /// A tracker for a body that starts out reachable, as every body does.
-    fn new() -> Self {
-        UnreachableTrackingControlStack {
-            blocks: vec![],
-            unreachable: false,
-        }
-    }
-
-    /// Marks the rest of the enclosing block dead. Called after every unconditional
-    /// transfer — `br`, `br_table`, `return`, `unreachable` — each of which pairs it
-    /// with [`SimulatedStack::reset_enclosing_block_layout`]. Not after `br_if`,
-    /// whose fall-through is reachable.
-    fn set_unreachable(&mut self) {
-        self.unreachable = true;
-    }
-
-    /// Resumes lowering. Only correct when [`Self::blocks`] is empty, i.e. the
-    /// construct being closed was opened while reachable.
-    fn unset_unreachable(&mut self) {
-        self.unreachable = false;
-    }
-
-    /// Records a construct opened while dead, so its `else`/`end` is recognised as
-    /// closing it rather than as closing the construct that died.
-    fn add_block(&mut self, block: BlockVariant) {
-        self.blocks.push(block);
-    }
-
-    /// Closes the innermost construct opened while dead.
-    ///
-    /// Panics if none is open, which would mean [`Self::check_unreachablity`] let an
-    /// `end` through the wrong arm — the real [`ControlStack`] would already be
-    /// unbalanced by then.
-    fn pop_block(&mut self) -> BlockVariant {
-        self.blocks.pop().unwrap()
-    }
-
-    /// Classifies one operator, updating the dead-code state as a side effect.
-    ///
-    /// Called for every operator before the lowering match; returns
-    /// [`UnreachableCheckResult::Reachable`] immediately when nothing is dead.
-    fn check_unreachablity(&mut self, operator: &Operator<'_>) -> UnreachableCheckResult {
-        if !self.unreachable {
-            return UnreachableCheckResult::Reachable;
-        }
-
-        if let Some(block) = Self::is_block(operator) {
-            self.add_block(block);
-
-            UnreachableCheckResult::Continue
-        } else if Self::is_else(operator) {
-            if self.is_empty() {
-                self.unset_unreachable();
-
-                UnreachableCheckResult::Reachable
-            } else {
-                debug_assert!(matches!(self.blocks.last().unwrap(), BlockVariant::If));
-
-                UnreachableCheckResult::Continue
-            }
-        } else if Self::is_end(operator) {
-            if self.is_empty() {
-                self.unset_unreachable();
-
-                UnreachableCheckResult::Reachable
-            } else {
-                self.pop_block();
-
-                UnreachableCheckResult::Continue
-            }
-        } else {
-            UnreachableCheckResult::Continue
-        }
-    }
-
-    /// The kind of label this operator opens, or `None` if it opens none.
-    ///
-    /// [`BlockVariant::Func`] is not among the answers: the function frame is opened
-    /// by the pass itself, never by an operator.
-    fn is_block(operator: &Operator<'_>) -> Option<BlockVariant> {
-        match operator {
-            Operator::Block { .. } => Some(BlockVariant::Block),
-            Operator::If { .. } => Some(BlockVariant::If),
-            Operator::Loop { .. } => Some(BlockVariant::Loop),
-            _ => None,
-        }
-    }
-
-    /// Whether this operator opens the second arm of an `if`.
-    fn is_else(operator: &Operator<'_>) -> bool {
-        matches!(operator, Operator::Else)
-    }
-
-    /// Whether this operator closes a label.
-    fn is_end(operator: &Operator<'_>) -> bool {
-        matches!(operator, Operator::End)
-    }
-
-    /// Whether every construct opened while dead has since closed — and so whether
-    /// the next `else`/`end` closes the construct that *died*, which is what makes
-    /// the code after it live again.
-    fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
     }
 }
 
@@ -1032,12 +908,22 @@ impl SimulatedStack {
         instr_len: usize,
     ) -> (u32, u32) {
         let (params, results) = params_and_results_from_blockty(blockty, types);
+        // The register machine has no use for the types themselves — only the stack
+        // machine's LLVM pass does, and it keeps them in its own signature map.
+        let params_count = params.len() as u32;
+        let results_count = results.len() as u32;
 
         let kind = match kind {
             BlockVariant::Func => BlockKind::Func,
-            BlockVariant::Block => BlockKind::Block,
+            BlockVariant::Block => BlockKind::Block {
+                index: if params_count != 0 {
+                    instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
+                } else {
+                    instr_len
+                } as u32,
+            },
             BlockVariant::If => BlockKind::If {
-                index: if params != 0 {
+                index: if params_count != 0 {
                     instr_len + 1 // a move is emitted when params != 0, so the actual instruction lands at `len + 1`
                 } else {
                     instr_len
@@ -1045,7 +931,7 @@ impl SimulatedStack {
                 else_index: None,
             },
             BlockVariant::Loop => BlockKind::Loop {
-                index: if params != 0 {
+                index: if params_count != 0 {
                     instr_len + 1 // see above.
                 } else {
                     instr_len
@@ -1055,28 +941,23 @@ impl SimulatedStack {
 
         let recorded_height = match kind {
             BlockKind::Func => 0,
-            BlockKind::Block => self.stack.height() - params,
-            BlockKind::Loop { .. } => self.stack.height() - params,
+            BlockKind::Block { .. } => self.stack.height() - params_count,
+            BlockKind::Loop { .. } => self.stack.height() - params_count,
             BlockKind::If { .. } => {
                 // top is the `if` condition and then params
-                self.stack.height() - params - 1
+                self.stack.height() - params_count - 1
             }
         };
 
         self.control_stack.stack.push(Block {
             kind,
             recorded_height,
-            params,
-            results,
+            params: params_count,
+            results: results_count,
             attached_breaks: vec![],
-
-            // below two fields are not used in register lowering!
-            // they are just placeholders
-            is_unreachable_traversing: false,
-            has_inherited: false,
         });
 
-        (params, results)
+        (params_count, results_count)
     }
 
     /// Closes the innermost label and hands back its record, for the `end` that
@@ -2707,6 +2588,10 @@ impl Instructions {
     }
 
     /// Whether anything has been emitted yet.
+    #[allow(
+        dead_code,
+        reason = "used by the crate's tests, not by the library itself"
+    )]
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -2744,8 +2629,8 @@ impl Instruction for RegInstruction {
     /// [`TraceWasmError::Unsupported`].
     fn emit_instructions_for_func(
         mut operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
@@ -2759,10 +2644,8 @@ impl Instruction for RegInstruction {
         simulated_stack.control_stack.stack.push(Block {
             kind: BlockKind::Func,
             recorded_height: 0, // functions always have recorded height to be 0, so they leave stack with just its results
-            params,
-            results,
-            is_unreachable_traversing: false,
-            has_inherited: false,
+            params: params.len() as u32,
+            results: results.len() as u32,
             attached_breaks: vec![],
         });
 
@@ -3517,7 +3400,7 @@ impl Instruction for RegInstruction {
                 Operator::Return => {
                     let move_registers = simulated_stack.br_truncation_registers(
                         0,
-                        results,
+                        results.len() as u32,
                         instructions.len(),
                         InstructionSource::Emit,
                     )?;
@@ -3694,7 +3577,7 @@ impl Instruction for RegInstruction {
                     // `end` is not referenced by index, and a loop's branch target is its start, not its end.
                     match block.kind {
                         BlockKind::Func | BlockKind::Loop { .. } => {}
-                        BlockKind::Block => {} // no backpatching require
+                        BlockKind::Block { .. } => {} // no backpatching require
                         BlockKind::If {
                             index: if_index,
                             else_index: ei,
@@ -6607,6 +6490,22 @@ impl Instruction for RegInstruction {
 
         Ok(res)
     }
+
+    fn emit_llvm_ir<'a>(
+        &self,
+        _instr_index: usize,
+        _curr_cursor: Cursor<'a>,
+        _instructions: &[RegInstruction],
+        _frame_layout: &RegFrameLayout,
+        _locals: &[tracewasm_llvm::value::ValueId],
+        _runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        _func: GlobalId<DefinedFunc>,
+        _pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<(BasicBlockId, usize), anyhow::Error> {
+        Err(anyhow::Error::msg(
+            "currently LLVM IR cannot be emitted for register instructions",
+        ))
+    }
 }
 
 /// Frame and memory accessors shared by the `execute` arms.
@@ -6761,6 +6660,10 @@ impl RegInstruction {
 /// `.wat` from this, and that `.wat` has to assemble, validate, and contain the
 /// operator the kind is named after. A wrong mnemonic fails those rather than
 /// quietly rendering an instruction under a name that does not exist.
+#[allow(
+    dead_code,
+    reason = "used by the crate's tests, not by the library itself"
+)]
 pub(crate) fn mnemonic(kind: RegInstructionKind) -> String {
     let mut words: Vec<String> = vec![];
 

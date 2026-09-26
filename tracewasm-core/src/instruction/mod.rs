@@ -28,6 +28,7 @@
 //! helpers around block types and memory indices. The passes themselves are in
 //! [`stack`] and [`register`].
 
+use crate::instruction::llvm::WasmInstrLLVMPassManager;
 use crate::sealed::Internals;
 use crate::{
     VirtualMachine,
@@ -41,11 +42,15 @@ use crate::{
     },
 };
 use smallvec::SmallVec;
-use wasmparser::{BlockType, OperatorsReader};
+use tracewasm_llvm::cfg::basic_block::BasicBlockId;
+use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId};
+use tracewasm_llvm::instruction::cursor::Cursor;
+use wasmparser::{BlockType, Operator, OperatorsReader};
 
 // No outer doc comments on these: each module carries its own `//!` docs, and an
 // outer `///` at the declaration site re-scopes the intra-doc links inside it to
 // this module, silently breaking every one that resolved in its own scope.
+pub mod llvm;
 pub mod register;
 pub mod stack;
 
@@ -286,8 +291,8 @@ pub(crate) trait Instruction: Sized {
     /// for one operator must record an offset for each.
     fn emit_instructions_for_func(
         operator_reader: OperatorsReader<'_>,
-        params: u32,
-        results: u32,
+        params: &[ValType],
+        results: &[ValType],
         types: &[FuncType],
         func_decls: &[FuncDecl],
         locals_count: u32,
@@ -315,6 +320,202 @@ pub(crate) trait Instruction: Sized {
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<Step<Self>, Box<InstructionExecutionError>>;
+
+    // A CFG-building pass needs the cursor, the whole instruction stream, the frame
+    // layout, the locals, the runtime pointer and the enclosing function — grouping
+    // them into a context struct would only move the list.
+    /// Translates this one instruction into LLVM IR, returning where to carry on.
+    ///
+    /// The return is `(block, next_index)` rather than nothing, because neither is
+    /// implied by the instruction alone: an `if` leaves the cursor in its *then*
+    /// block, and a `br` resumes at the enclosing label's `else` or `end` rather than
+    /// at the following instruction. The driver in
+    /// [`compile_func`](llvm::WasmInstrLLVMPassManager) does what it is told rather
+    /// than tracking control flow a second time.
+    ///
+    /// `instructions` is the whole body, since a control instruction reads the
+    /// operand arity and unwind height off the `end` it names. `locals` is one
+    /// pointer per local, `runtime_ctx_ptr` the instance pointer threaded in as the
+    /// last parameter.
+    ///
+    /// Only the stack machine implements this; the register machine returns an error.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_llvm_ir<'a>(
+        &self,
+        instr_index: usize,
+        curr_cursor: Cursor<'a>,
+        instructions: &[Self],
+        frame_layout: &Self::FrameLayout,
+        locals: &[tracewasm_llvm::value::ValueId],
+        runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        func: GlobalId<DefinedFunc>,
+        pass_manager: &mut WasmInstrLLVMPassManager,
+    ) -> Result<(BasicBlockId, usize), anyhow::Error>;
+}
+
+/// The kind of label an operator opens, tracked only while skipping dead code.
+///
+/// Deliberately not either pass's own block enum: nothing about a dead label
+/// survives past its `end`, so all this records is enough to recognise the `else`
+/// or `end` that closes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenedLabel {
+    /// A `block`.
+    Block,
+    /// A `loop`.
+    Loop,
+    /// An `if`, whose `else` closes the first arm without ending the label.
+    If,
+}
+
+/// Filters out operators that cannot execute, so the lowering match never sees them.
+///
+/// After an unconditional branch, everything up to the enclosing block's `else` or
+/// `end` is dead. Dead code is stack-polymorphic — it may pop more than it pushed —
+/// so lowering it against the simulated stack is both meaningless and prone to
+/// underflow. Skipping it entirely means every arm of the match can assume its
+/// operands exist.
+///
+/// The only state needed is a flag plus a count of constructs opened *while* dead:
+///
+/// * `block`/`loop`/`if` while dead push onto [`Self::blocks`] and are skipped, so
+///   they never reach a pass's own `add_block` and the pass's real control stack
+///   never sees them.
+/// * `end` while dead pops one and stays dead, unless [`Self::blocks`] is empty — in
+///   which case it closes a construct that was opened while *reachable*, so it is the
+///   point where liveness resumes and the operator is processed normally.
+/// * `else` behaves the same way, which is what makes an `if` opened inside dead code
+///   keep both arms dead: its `else` finds a non-empty [`Self::blocks`] and does not
+///   resurrect anything.
+///
+/// Because dead constructs are only ever counted here, the real control stack stays
+/// balanced with no reconciliation: every block it holds was pushed while reachable
+/// and is popped by an `end` that is also processed.
+pub(crate) struct UnreachableTrackingControlStack {
+    /// Constructs opened while dead, innermost last. Only the kind is kept; nothing
+    /// about a dead block is needed beyond knowing when it closes.
+    blocks: Vec<OpenedLabel>,
+    /// Whether the operators being read cannot execute, i.e. an unconditional
+    /// transfer has been lowered and the enclosing block has not closed yet.
+    unreachable: bool,
+}
+
+/// What the lowering loop should do with an operator.
+pub(crate) enum UnreachableCheckResult {
+    /// Skip it — it cannot execute.
+    Continue,
+    /// Lower it normally.
+    Reachable,
+}
+
+impl UnreachableTrackingControlStack {
+    /// A tracker for a body that starts out reachable, as every body does.
+    pub(crate) fn new() -> Self {
+        UnreachableTrackingControlStack {
+            blocks: vec![],
+            unreachable: false,
+        }
+    }
+
+    /// Marks the rest of the enclosing block dead. Called after every unconditional
+    /// transfer — `br`, `br_table`, `return`, `unreachable` — each of which pairs it
+    /// with the pass's own stack reset. Not after `br_if`,
+    /// whose fall-through is reachable.
+    pub(crate) fn set_unreachable(&mut self) {
+        self.unreachable = true;
+    }
+
+    /// Resumes lowering. Only correct when [`Self::blocks`] is empty, i.e. the
+    /// construct being closed was opened while reachable.
+    pub(crate) fn unset_unreachable(&mut self) {
+        self.unreachable = false;
+    }
+
+    /// Records a construct opened while dead, so its `else`/`end` is recognised as
+    /// closing it rather than as closing the construct that died.
+    pub(crate) fn add_block(&mut self, block: OpenedLabel) {
+        self.blocks.push(block);
+    }
+
+    /// Closes the innermost construct opened while dead.
+    ///
+    /// Panics if none is open, which would mean [`Self::check_unreachablity`] let an
+    /// `end` through the wrong arm — the pass's real control stack would already be
+    /// unbalanced by then.
+    pub(crate) fn pop_block(&mut self) -> OpenedLabel {
+        self.blocks.pop().unwrap()
+    }
+
+    /// Classifies one operator, updating the dead-code state as a side effect.
+    ///
+    /// Called for every operator before the lowering match; returns
+    /// [`UnreachableCheckResult::Reachable`] immediately when nothing is dead.
+    pub(crate) fn check_unreachablity(
+        &mut self,
+        operator: &Operator<'_>,
+    ) -> UnreachableCheckResult {
+        if !self.unreachable {
+            return UnreachableCheckResult::Reachable;
+        }
+
+        if let Some(block) = Self::is_block(operator) {
+            self.add_block(block);
+
+            UnreachableCheckResult::Continue
+        } else if Self::is_else(operator) {
+            if self.is_empty() {
+                self.unset_unreachable();
+
+                UnreachableCheckResult::Reachable
+            } else {
+                debug_assert!(matches!(self.blocks.last().unwrap(), OpenedLabel::If));
+
+                UnreachableCheckResult::Continue
+            }
+        } else if Self::is_end(operator) {
+            if self.is_empty() {
+                self.unset_unreachable();
+
+                UnreachableCheckResult::Reachable
+            } else {
+                self.pop_block();
+
+                UnreachableCheckResult::Continue
+            }
+        } else {
+            UnreachableCheckResult::Continue
+        }
+    }
+
+    /// The kind of label this operator opens, or `None` if it opens none.
+    ///
+    /// [`OpenedLabel`] has no variant for the function frame, and that is the point:
+    /// the frame is opened by the pass itself, never by an operator.
+    pub(crate) fn is_block(operator: &Operator<'_>) -> Option<OpenedLabel> {
+        match operator {
+            Operator::Block { .. } => Some(OpenedLabel::Block),
+            Operator::If { .. } => Some(OpenedLabel::If),
+            Operator::Loop { .. } => Some(OpenedLabel::Loop),
+            _ => None,
+        }
+    }
+
+    /// Whether this operator opens the second arm of an `if`.
+    pub(crate) fn is_else(operator: &Operator<'_>) -> bool {
+        matches!(operator, Operator::Else)
+    }
+
+    /// Whether this operator closes a label.
+    pub(crate) fn is_end(operator: &Operator<'_>) -> bool {
+        matches!(operator, Operator::End)
+    }
+
+    /// Whether every construct opened while dead has since closed — and so whether
+    /// the next `else`/`end` closes the construct that *died*, which is what makes
+    /// the code after it live again.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
 }
 
 /// What kind of label a control-stack entry represents, plus the data needed to
@@ -325,10 +526,15 @@ pub(crate) enum BlockKind {
     /// `end` is the final instruction and no branch instruction stores its
     /// index directly).
     Func,
-    /// A `block`. Carries nothing: its label is its `end`, and every branch to it is
-    /// backpatched through [`Block::attached_breaks`], so there is no index worth
-    /// recording here.
-    Block,
+    /// A `block`. `index` is the position of its opening instruction, so that
+    /// instruction can be backpatched with its own `end` once that `end` is seen.
+    ///
+    /// Branches *to* the label are handled separately, through
+    /// [`Block::attached_breaks`]; this index is about the opener itself, which needs
+    /// to name its `end` for a consumer that walks the body forwards and has to know
+    /// where the label closes before it gets there — the LLVM pass, which creates the
+    /// `end`'s basic block when the label opens.
+    Block { index: u32 },
     /// A `loop`. `index` is the position of its `Instruction::Loop`; this is the
     /// back-edge target used directly by branches (no backpatching needed).
     Loop { index: u32 },
@@ -357,8 +563,13 @@ impl BlockKind {
 /// A live control-flow label on a lowering pass's control stack.
 ///
 /// Shared by both passes: each keeps its own `ControlStack` of these, since the
-/// bookkeeping a label needs — entry height, arity, dead-code state, the branches
-/// waiting to be backpatched — is the same whichever machine is being emitted.
+/// bookkeeping a label needs — entry height, arity, the branches waiting to be
+/// backpatched — is the same whichever machine is being emitted.
+///
+/// **Every block here was opened while reachable.** Dead code never reaches a
+/// lowering pass at all — [`UnreachableTrackingControlStack`] filters it out before
+/// the match, counting the labels it opens on the side — so there is no dead-code
+/// state to carry, and no reconciliation to do when liveness resumes.
 struct Block {
     /// Which label this is, carrying the instruction index its opener sits at so
     /// that index can be backpatched at the matching `end`. See [`BlockKind`].
@@ -371,8 +582,7 @@ struct Block {
     /// `recorded_height` and then exactly `arity` values remain on top — results
     /// for block/if/func, params for a loop. It is captured at label entry as
     /// "height below the params" (`curr_height - params`, and additionally minus
-    /// the condition for `if`). Meaningless while [`Self::has_inherited`] is set
-    /// (dead code), where it is stored as `0`.
+    /// the condition for `if`).
     recorded_height: u32,
     /// Arity of the label's input type (block params). For a loop this is also
     /// the branch arity.
@@ -380,22 +590,6 @@ struct Block {
     /// Arity of the label's result type. For block/if/func this is the branch
     /// arity and the height delta applied at `end`.
     results: u32,
-    /// True while the remainder of this block's body is unreachable (dead code),
-    /// e.g. after `unreachable`, `br`, or `br_table`. While set, height tracking
-    /// is frozen (the pass's `set_height` ignores writes) because dead code has a
-    /// stack-polymorphic type and tracking it is both meaningless and prone to
-    /// underflow.
-    is_unreachable_traversing: bool,
-    /// True iff this block was *opened while its parent was already dead*, i.e.
-    /// it is unreachable for its entire lifetime.
-    ///
-    /// This distinguishes two reasons `is_unreachable_traversing` can be set:
-    /// - locally dead (a `br`/`unreachable` inside a live block) — recoverable
-    ///   at the block's `else`;
-    /// - inherited dead (born inside dead code) — must NEVER be cleared, because
-    ///   *both* arms of such an `if` are dead. The pass consults this flag when an
-    ///   `else` would otherwise resurrect genuinely dead code.
-    has_inherited: bool,
     /// Branches (`br`/`br_if`/`br_table` arms, and `return` targeting the
     /// function frame) that target this block's `end` and therefore need their
     /// `target_index` backpatched once that `end` is reached.
@@ -415,14 +609,23 @@ struct Block {
 ///
 /// `BlockType::Type(_)` is the shorthand single-result form (`[] -> [t]`),
 /// hence `(0, 1)`.
-fn params_and_results_from_blockty(blockty: &BlockType, types: &[FuncType]) -> (u32, u32) {
+fn params_and_results_from_blockty(
+    blockty: &BlockType,
+    types: &[FuncType],
+) -> (Box<[ValType]>, Box<[ValType]>) {
     match blockty {
-        BlockType::Empty => (0, 0),
-        BlockType::Type(_) => (0, 1),
+        BlockType::Empty => (vec![].into_boxed_slice(), vec![].into_boxed_slice()),
+        BlockType::Type(ty) => (
+            vec![].into_boxed_slice(),
+            vec![ValType::from_wasmparser(ty)].into_boxed_slice(),
+        ),
         BlockType::FuncType(index) => {
             let ty = &types[*index as usize];
 
-            (ty.params.len() as u32, ty.results.len() as u32)
+            (
+                ty.params.to_vec().into_boxed_slice(),
+                ty.results.to_vec().into_boxed_slice(),
+            )
         }
     }
 }

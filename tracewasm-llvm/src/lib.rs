@@ -35,7 +35,7 @@
 //! let entry = f.add_basic_block("entry", &mut builder)?;
 //!
 //! let zero = builder.const_value(0i32, tracewasm_llvm::instruction::cursor::OperandTy::Inferred)?;
-//! builder.cursor_at_block(entry).build_ret(Some(&zero), i32_ty.into())?;
+//! builder.cursor_at_block(entry).build_ret(Some(zero), i32_ty.into())?;
 //!
 //! let ir = IREmitter::emit(builder.build())?;
 //!
@@ -62,7 +62,6 @@
 
 pub mod cfg;
 pub mod constants;
-pub mod emit;
 pub mod error;
 pub mod instruction;
 pub mod interner;
