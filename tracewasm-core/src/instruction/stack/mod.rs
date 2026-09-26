@@ -114,6 +114,7 @@ use tracewasm_llvm::{
         ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
+    value::{Const, ConstValue},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -4589,6 +4590,96 @@ impl Instruction for StackInstruction {
                 curr_cursor.build_conditional_br(cond, target_block, br_if_false)?;
 
                 return Ok((br_if_false, instr_index + 1));
+            }
+            StackInstruction::BrTable { start_index, len } => {
+                let targets = &frame_layout.br_table_targets()
+                    [*start_index as usize..(*start_index + *len) as usize];
+
+                let index = pass_manager.simulated_stack.pop();
+                let index_ty = index.ty(&curr_cursor);
+                let mut cases = vec![];
+                let target_count = targets.len() - 1;
+                let mut default_block = None;
+
+                for (i, target) in targets.iter().enumerate() {
+                    let arity = target.arity;
+                    let target_index = target.target_index;
+
+                    let start_index = pass_manager.simulated_stack.height() - arity;
+                    let mut results = vec![];
+
+                    for j in start_index..pass_manager.simulated_stack.height() {
+                        results.push(pass_manager.simulated_stack.stack[j as usize]);
+                    }
+
+                    let block = pass_manager
+                        .instr_index_to_basic_block
+                        .add_branch_to_target(
+                            target_index,
+                            results,
+                            curr_cursor.basic_block(),
+                            &mut curr_cursor,
+                        )?;
+
+                    if i == target_count {
+                        default_block = Some(block);
+                    } else {
+                        cases.push((
+                            curr_cursor
+                                .const_literal(i as u32 as i32, OperandTy::Asserted(index_ty))?,
+                            block,
+                        ));
+                    }
+                }
+
+                let default_block = default_block.unwrap();
+
+                curr_cursor.build_switch(index, OperandTy::Inferred, default_block, &cases)?;
+
+                let curr_label_end_index = pass_manager.control_stack.curr_label().end_instr_index;
+
+                let (recorded_height, _) =
+                    StackInstruction::recorded_height_and_arity_from_end_instruction(
+                        curr_label_end_index as u32,
+                        instructions,
+                    );
+
+                pass_manager.simulated_stack.truncate(recorded_height);
+
+                let (next_block, next_instr_index) = if let Some(if_ctx) =
+                    pass_manager.control_stack.try_curr_label_as_if_mut()
+                    && !if_ctx.is_else_ongoing
+                    && let Some(curr_label_else_index) = if_ctx.else_instr_index
+                {
+                    // restore the stack with original params
+                    let (else_block, params) = pass_manager
+                        .instr_index_to_basic_block
+                        .remove_else(curr_label_else_index)
+                        .expect("hitting this means logic for tracking `else` index is incorrect");
+
+                    for param in params {
+                        pass_manager.simulated_stack.push(param);
+                    }
+
+                    if_ctx.is_else_ongoing = true;
+
+                    (else_block, curr_label_else_index as usize + 1)
+                } else {
+                    let (phi_vals, end_block) = pass_manager
+                        .instr_index_to_basic_block
+                        .end_phi_vals_and_block(curr_label_end_index as u32)
+                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+
+                    for val in phi_vals {
+                        pass_manager.simulated_stack.push(*val);
+                    }
+
+                    pass_manager.control_stack.leave_label();
+
+                    (end_block, curr_label_end_index + 1)
+                };
+
+                return Ok((next_block, next_instr_index));
             }
             StackInstruction::End {
                 arity,
