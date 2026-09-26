@@ -607,3 +607,122 @@ fn br_if_lowers_and_matches_the_interpreter() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `br_table`
+//
+// The first branch with many targets, and the first where the arms are not all
+// alike: a single table may legally mix loop and non-loop labels, so each arm
+// carries its own unwind height even though validation makes the value counts
+// agree. It lowers to an LLVM `switch`, whose cases are constants and whose
+// default is the table's last entry.
+
+/// Every shape of `br_table` lowers, verifies, and agrees with the interpreter.
+#[test]
+fn br_table_lowers_and_matches_the_interpreter() {
+    const BR_TABLE_CASES: &[Case] = &[
+        Case {
+            name: "br_table_two_distinct_targets",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block (result i32)
+                  (block (result i32)
+                    (local.get 1)
+                    (local.get 0)
+                    (br_table 0 1))
+                  (local.set 1)
+                  (local.get 0))))"#,
+            calls: &[&[0, 42], &[5, 42]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_table_three_distinct_targets",
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block (result i32)
+                  (block (result i32)
+                    (block (result i32)
+                      (local.get 1)
+                      (local.get 0)
+                      (br_table 0 1 2))
+                    (local.set 1)
+                    (local.get 0))
+                  (local.set 1)
+                  (local.get 1))))"#,
+            calls: &[&[0, 42], &[1, 42], &[9, 42]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_table_repeated_label_carrying_nothing",
+            // Two cases to one label is legal LLVM — `switch` contributes a single
+            // predecessor edge however many values select it. It works here because
+            // an arity-0 label has no phi to double up.
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+                (block
+                  (block
+                    (local.get 0)
+                    (br_table 0 0 1))
+                  (local.set 1 (local.get 0)))
+                (local.get 1)))"#,
+            calls: &[&[0, 42], &[1, 42], &[7, 42]],
+            interpret: i32x2_to_i32,
+        },
+        Case {
+            name: "br_table_back_edge_to_a_loop",
+            // Case 0 exits, the default loops — so the first pass takes the back-edge
+            // and the second, seeing the overwritten local, leaves.
+            wat: r#"(module (func (export "f") (param i32) (param i32) (result i32) (local i32)
+                (loop
+                  (local.set 2 (local.get 0))
+                  (local.set 0 (local.get 1))
+                  (block
+                    (local.get 2)
+                    (br_table 0 1)))
+                (local.get 0)))"#,
+            calls: &[&[1, 0], &[0, 0], &[0, 5]],
+            interpret: i32x2_to_i32,
+        },
+    ];
+
+    for case in BR_TABLE_CASES {
+        let result = std::panic::catch_unwind(|| check(case));
+
+        if let Err(payload) = result {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+
+            panic!("case `{}` failed: {msg}", case.name);
+        }
+    }
+}
+
+/// A `br_table` whose repeated label *carries a value*.
+///
+/// Currently fails with `basic block branch already in phi instruction`: the arm
+/// records one branch per table entry, but a `switch` contributes a single
+/// predecessor edge per distinct block however many case values select it, so the
+/// phi at the target rightly refuses the second. The arm needs to record one branch
+/// per distinct *target* and reuse the block for the remaining case values.
+///
+/// Common shape — any `match` where several arms do the same thing — so this is
+/// worth turning on rather than working around.
+#[test]
+#[ignore = "br_table with a repeated label that carries values is not lowered yet"]
+fn br_table_repeated_label_carrying_a_value() {
+    let case = Case {
+        name: "br_table_repeated_label_with_value",
+        wat: r#"(module (func (export "f") (param i32) (param i32) (result i32)
+            (block (result i32)
+              (block (result i32)
+                (local.get 1)
+                (local.get 0)
+                (br_table 0 0 1))
+              (local.set 1)
+              (local.get 0))))"#,
+        calls: &[&[0, 42], &[1, 42], &[9, 42]],
+        interpret: i32x2_to_i32,
+    };
+
+    check(&case);
+}
