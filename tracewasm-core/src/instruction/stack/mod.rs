@@ -4261,6 +4261,9 @@ impl Instruction for StackInstruction {
                     .get_func(func_index)
                     .expect("function always exist if it has made up till this (compile) phase!");
 
+                let (_, signature) = callee_func.name_and_sig(&curr_cursor)?;
+                let is_void = signature.result.is_void(&curr_cursor);
+
                 let mut params: Vec<(ValueId, OperandTy)> = pass_manager
                     .simulated_stack
                     .pops_and_reverse(*params_count)
@@ -4269,6 +4272,12 @@ impl Instruction for StackInstruction {
                     .collect();
 
                 params.push((runtime_ctx_ptr, OperandTy::Inferred));
+
+                if is_void {
+                    curr_cursor.build_void_call(callee_func, &params)?;
+
+                    return Ok((curr_cursor.basic_block(), instr_index + 1));
+                }
 
                 let result = curr_cursor.build_call(
                     callee_func,
@@ -4282,56 +4291,58 @@ impl Instruction for StackInstruction {
 
                 let results_count = results.len();
 
-                if results_count > 1 {
-                    let result_ty = result.ty(&curr_cursor);
+                if results_count == 1 {
+                    pass_manager.simulated_stack.push(result);
 
-                    let (field_types, _) = result_ty
-                        .try_struct(&curr_cursor)
-                        .expect("more than one result values are returned as struct typed value");
+                    return Ok((curr_cursor.basic_block(), instr_index + 1));
+                }
 
-                    let field_types = field_types.to_vec();
+                let result_ty = result.ty(&curr_cursor);
 
-                    debug_assert!(field_types.len() == results_count);
+                let (field_types, _) = result_ty
+                    .try_struct(&curr_cursor)
+                    .expect("more than one result values are returned as struct typed value");
 
-                    let func_return_ptr = curr_cursor.build_alloca(
-                        result_ty,
-                        None,
-                        result_ty.alignment(&curr_cursor),
-                        RegName::Named(format!("func{}_{}_result_ptr", func_index.0, instr_index)),
+                let field_types = field_types.to_vec();
+
+                debug_assert!(field_types.len() == results_count);
+
+                let func_return_ptr = curr_cursor.build_alloca(
+                    result_ty,
+                    None,
+                    result_ty.alignment(&curr_cursor),
+                    RegName::Named(format!("func{}_{}_result_ptr", func_index.0, instr_index)),
+                )?;
+
+                curr_cursor.build_store(func_return_ptr, result, OperandTy::Inferred, None)?;
+
+                let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                for (i, field_ty) in field_types.iter().enumerate() {
+                    let field_index = curr_cursor.const_value(i as i32, OperandTy::Inferred)?;
+
+                    let field_ptr = curr_cursor.build_get_element_ptr(
+                        func_return_ptr,
+                        OperandTy::Inferred,
+                        &[zero_index, field_index],
+                        Some(true),
+                        RegName::Named(format!(
+                            "func{}_{}_result_{}_ptr",
+                            func_index.0, instr_index, i
+                        )),
                     )?;
 
-                    curr_cursor.build_store(func_return_ptr, result, OperandTy::Inferred, None)?;
+                    let field_val = curr_cursor.build_load(
+                        field_ptr,
+                        OperandTy::Asserted(*field_ty),
+                        field_ty.alignment(&curr_cursor),
+                        RegName::Named(format!(
+                            "func{}_{}_result_{}_val",
+                            func_index.0, instr_index, i
+                        )),
+                    )?;
 
-                    let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
-
-                    for (i, field_ty) in field_types.iter().enumerate() {
-                        let field_index = curr_cursor.const_value(i as i32, OperandTy::Inferred)?;
-
-                        let field_ptr = curr_cursor.build_get_element_ptr(
-                            func_return_ptr,
-                            OperandTy::Inferred,
-                            &[zero_index, field_index],
-                            Some(true),
-                            RegName::Named(format!(
-                                "func{}_{}_result_{}_ptr",
-                                func_index.0, instr_index, i
-                            )),
-                        )?;
-
-                        let field_val = curr_cursor.build_load(
-                            field_ptr,
-                            OperandTy::Asserted(*field_ty),
-                            field_ty.alignment(&curr_cursor),
-                            RegName::Named(format!(
-                                "func{}_{}_result_{}_val",
-                                func_index.0, instr_index, i
-                            )),
-                        )?;
-
-                        pass_manager.simulated_stack.push(field_val);
-                    }
-                } else if results_count == 1 {
-                    pass_manager.simulated_stack.push(result);
+                    pass_manager.simulated_stack.push(field_val);
                 }
             }
             StackInstruction::CallIndirect {

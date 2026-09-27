@@ -868,3 +868,80 @@ fn a_multi_result_call_survives_optimisation() {
         "optimising changed the results\n--- O2 ---\n{optimised}"
     );
 }
+
+/// A callee that returns nothing.
+///
+/// Wasm spells "returns nothing" as an empty result list and LLVM spells it `void`,
+/// and `%r = call void @g()` is not legal IR — so a void call is a different builder,
+/// not the same one with the register ignored. This is every `-> ()` function rustc
+/// emits, so it is the common case rather than the corner.
+#[test]
+fn a_void_call_lowers_and_matches_the_interpreter() {
+    let case = Case {
+        name: "call_void",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32)
+              (local.get 0) (call $ignore)
+              (local.get 1))
+            (func $ignore (param i32)))"#,
+        calls: &[&[2, 3], &[9, 4]],
+        interpret: i32x2_to_i32,
+    };
+
+    let ir = check(&case);
+
+    assert!(
+        ir.contains("call void @fn1("),
+        "a void callee is called without defining a register\n{ir}"
+    );
+    assert!(
+        !ir.contains("= call void"),
+        "naming the result of a void call is not legal IR\n{ir}"
+    );
+}
+
+/// A void call in the middle of a block leaves the surrounding operands alone.
+///
+/// The arm pops its arguments and pushes nothing, so anything already on the stack
+/// has to still be there — and in the same order — once the call is emitted.
+#[test]
+fn a_void_call_leaves_the_stack_around_it_untouched() {
+    let case = Case {
+        name: "call_void_mid_stack",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32 i64)
+              (local i64)
+              (local.get 0)
+              (local.get 2)
+              (local.get 1) (call $ignore))
+            (func $ignore (param i32)))"#,
+        calls: &[&[5, 6], &[0, 1]],
+        interpret: i32x2_to_i32i64,
+    };
+
+    check(&case);
+}
+
+/// An exported function that itself returns nothing.
+///
+/// The other side of the same coin: `build_func_return` takes the `void` branch, and
+/// with no results there is nothing to drain off the simulated stack either.
+#[test]
+fn a_void_function_returns_nothing() {
+    let case = Case {
+        name: "void_func",
+        wat: r#"(module
+            (func (export "f") (param i32)
+              (local.get 0) (local.set 0)))"#,
+        calls: &[&[3]],
+        interpret: i32_to_void,
+    };
+
+    let ir = check(&case);
+
+    assert!(
+        ir.contains("define void @fn0("),
+        "an empty wasm result list is LLVM's `void`\n{ir}"
+    );
+    assert!(ir.contains("ret void"), "{ir}");
+}
