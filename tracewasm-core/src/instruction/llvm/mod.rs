@@ -78,6 +78,8 @@ use tracewasm_llvm::{
     value::{Value, ValueId},
 };
 
+pub mod ctx;
+
 /// One open label's `end`: the block control lands in, and the phis waiting there.
 ///
 /// The three vectors are parallel and in the label's own result order, deepest first.
