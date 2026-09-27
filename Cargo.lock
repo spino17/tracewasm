@@ -487,6 +487,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracewasm-jit"
+version = "0.1.0"
+
+[[package]]
 name = "tracewasm-llvm"
 version = "0.1.0"
 dependencies = [
