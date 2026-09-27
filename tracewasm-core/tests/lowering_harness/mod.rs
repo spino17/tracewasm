@@ -21,7 +21,10 @@
 //! CI should set once it has one.
 
 use std::{path::PathBuf, process::Command, sync::Arc};
-use tracewasm_core::{Stack, module::Module};
+use tracewasm_core::{
+    Stack,
+    module::{Export, Module},
+};
 use tracewasm_llvm::cfg::emit::IREmitter;
 
 /// Lowers a wat module to LLVM IR through the pass under test.
@@ -141,6 +144,22 @@ pub fn assert_verifies(name: &str, ir: &str) {
 // ---------------------------------------------------------------------------
 // Check 2: the IR computes what the interpreter computes
 
+/// The LLVM name of the function a module exports as `f`.
+///
+/// The pass names functions `fn{index}` by wasm function index, so the export has to
+/// be resolved rather than guessed. Taking the *first* `define` instead would work
+/// only while the tested function is also function 0 — and would silently test a
+/// different function the moment a case defines a callee ahead of its caller.
+pub fn entry_fn_name(wat: &str) -> String {
+    let bytes = wat::parse_str(wat).expect("invalid wat");
+    let module = Module::<Stack>::compile(&bytes).expect("module compiles");
+
+    match module.export("f") {
+        Some(Export::Func(index)) => format!("fn{}", index.0),
+        _ => panic!("every case exports its function under the name `f`"),
+    }
+}
+
 /// The `define` line, parsed: the function's name, parameter types and result type.
 ///
 /// Read off the IR rather than assumed, so the driver below adapts if the pass
@@ -152,11 +171,12 @@ struct Signature {
     result: String,
 }
 
-fn signature(ir: &str) -> Signature {
+fn signature(ir: &str, entry: &str) -> Signature {
+    let wanted = format!("@{entry}(");
     let line = ir
         .lines()
-        .find(|l| l.starts_with("define "))
-        .expect("the module defines a function");
+        .find(|l| l.starts_with("define ") && l.contains(&wanted))
+        .unwrap_or_else(|| panic!("the module defines `{entry}`\n{ir}"));
 
     let rest = line.strip_prefix("define ").unwrap();
     let at = rest.find('@').expect("a function name");
@@ -189,13 +209,13 @@ fn signature(ir: &str) -> Signature {
 /// `i64` alike. A multi-value function contributes one entry per field, in
 /// declaration order. `None` means the toolchain is absent and the caller should
 /// not assert.
-pub fn run(name: &str, ir: &str, calls: &[&[i32]]) -> Option<Vec<Vec<i64>>> {
+pub fn run(name: &str, ir: &str, calls: &[&[i32]], entry: &str) -> Option<Vec<Vec<i64>>> {
     let (Some(llvm_as), Some(lli)) = (llvm_tool("llvm-as"), llvm_tool("lli")) else {
         skip("execution", "llvm-as/lli");
         return None;
     };
 
-    let sig = signature(ir);
+    let sig = signature(ir, entry);
     let mut driver = String::from(ir);
 
     driver.push_str(
@@ -444,7 +464,7 @@ pub fn check(case: &Case) -> String {
 
     assert_verifies(case.name, &ir);
 
-    let Some(actual) = run(case.name, &ir, case.calls) else {
+    let Some(actual) = run(case.name, &ir, case.calls, &entry_fn_name(case.wat)) else {
         return ir;
     };
 

@@ -118,7 +118,6 @@ use tracewasm_llvm::{
         ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
-    interner::TyId,
     value::ValueId,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
@@ -4284,15 +4283,32 @@ impl Instruction for StackInstruction {
                 let results_count = results.len();
 
                 if results_count > 1 {
-                    debug_assert!(result.is_ptr(&curr_cursor));
+                    let result_ty = result.ty(&curr_cursor);
+
+                    let (field_types, _) = result_ty
+                        .try_struct(&curr_cursor)
+                        .expect("more than one result values are returned as struct typed value");
+
+                    let field_types = field_types.to_vec();
+
+                    debug_assert!(field_types.len() == results_count);
+
+                    let func_return_ptr = curr_cursor.build_alloca(
+                        result_ty,
+                        None,
+                        result_ty.alignment(&curr_cursor),
+                        RegName::Named(format!("func{}_{}_result_ptr", func_index.0, instr_index)),
+                    )?;
+
+                    curr_cursor.build_store(func_return_ptr, result, OperandTy::Inferred, None)?;
 
                     let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
 
-                    for (i, ty) in results.iter().enumerate() {
+                    for (i, field_ty) in field_types.iter().enumerate() {
                         let field_index = curr_cursor.const_value(i as i32, OperandTy::Inferred)?;
 
                         let field_ptr = curr_cursor.build_get_element_ptr(
-                            result,
+                            func_return_ptr,
                             OperandTy::Inferred,
                             &[zero_index, field_index],
                             Some(true),
@@ -4302,13 +4318,10 @@ impl Instruction for StackInstruction {
                             )),
                         )?;
 
-                        let llvm_ty =
-                            WasmInstrLLVMPassManager::llvm_ty_from_wasm(ty, &mut curr_cursor);
-
                         let field_val = curr_cursor.build_load(
                             field_ptr,
-                            OperandTy::Asserted(llvm_ty),
-                            llvm_ty.alignment(&curr_cursor),
+                            OperandTy::Asserted(*field_ty),
+                            field_ty.alignment(&curr_cursor),
                             RegName::Named(format!(
                                 "func{}_{}_result_{}_val",
                                 func_index.0, instr_index, i
@@ -4322,8 +4335,8 @@ impl Instruction for StackInstruction {
                 }
             }
             StackInstruction::CallIndirect {
-                ty_index,
-                table_index,
+                ty_index: _,
+                table_index: _,
             } => todo!(),
             StackInstruction::Block { end_index } => {
                 pass_manager.control_stack.enter_label(

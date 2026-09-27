@@ -146,7 +146,7 @@ impl<T: BranchTarget> BranchTargetBasicBlockMap<T> {
     ) -> Result<(), PhiError> {
         let phi_val_types: Vec<TyId> = phi_val_types
             .iter()
-            .map(|x| llvm_ty_from_wasm(x, ctx))
+            .map(|x| WasmInstrLLVMPassManager::llvm_ty_from_wasm(x, ctx))
             .collect();
 
         let mut cursor = ctx.cursor_at_block(block);
@@ -605,7 +605,7 @@ impl WasmInstrLLVMPassManager {
             let results = &func_ty.results;
 
             let (llvm_params, llvm_result) =
-                llvm_signature_from_wasm(params, results, &mut builder)?;
+                Self::llvm_signature_from_wasm(params, results, &mut builder)?;
 
             if func_index < imported_func_count as usize {
                 let func = builder.declare_function(
@@ -673,6 +673,7 @@ impl WasmInstrLLVMPassManager {
         let func_decl = &module.func_decls[func_index.0 as usize];
         let func_ty = &module.types[func_decl.ty.0 as usize];
         let results_ty = &func_ty.results;
+        let results_count = results_ty.len();
 
         let entry = func.add_basic_block("entry", ctx)?;
         let params = func.params(ctx).to_vec();
@@ -766,7 +767,7 @@ impl WasmInstrLLVMPassManager {
             cursor = ctx.cursor_at_block(next_block);
         }
 
-        self.build_func_return(func, func_end_instr_index as u32, ctx)?;
+        self.build_func_return(func, func_end_instr_index as u32, results_count as u32, ctx)?;
 
         Ok(())
     }
@@ -792,18 +793,17 @@ impl WasmInstrLLVMPassManager {
         &mut self,
         func: GlobalId<DefinedFunc>,
         func_end_instr_index: u32,
+        results_count: u32,
         ctx: &mut Context,
     ) -> Result<(), anyhow::Error> {
         let result_ty = func.return_ty(ctx);
 
-        let (phi_vals, end_block) = self
+        let end_block = self
             .instr_index_to_basic_block
-            .end_phi_vals_and_block(func_end_instr_index)
+            .get_end_basic_block(func_end_instr_index)
             .expect("the function's `end` is registered before its body is emitted");
 
-        // Copied out so the cursor below can borrow the context mutably. The results
-        // are the `end`'s phis, deepest first — the order wasm declares them in.
-        let phi_vals = phi_vals.to_vec();
+        let phi_vals = self.simulated_stack.pops_and_reverse(results_count);
         let mut end_cursor = ctx.cursor_at_block(end_block);
 
         // Wasm returns nothing, one value, or several. LLVM spells the last of those
@@ -859,7 +859,14 @@ impl WasmInstrLLVMPassManager {
             end_cursor.build_store(field_ptr, *field_val, OperandTy::Inferred, None)?;
         }
 
-        end_cursor.build_ret(Some(func_return_ptr), OperandTy::Inferred)?;
+        let func_return_val = end_cursor.build_load(
+            func_return_ptr,
+            OperandTy::Inferred,
+            None,
+            RegName::Named("fn_return_val".into()),
+        )?;
+
+        end_cursor.build_ret(Some(func_return_val), OperandTy::Inferred)?;
 
         Ok(())
     }
@@ -882,43 +889,50 @@ impl WasmInstrLLVMPassManager {
             ValType::V128 => unreachable!("v128 is rejected at Module check time"),
         }
     }
-}
 
-/// The LLVM signature a wasm function type becomes.
-///
-/// Two things differ from a straight mapping:
-///
-/// * **A runtime pointer is appended** to the parameters, through which a body
-///   reaches the instance's memory and tables. It goes *last* precisely so that a
-///   wasm local index and its LLVM parameter index stay equal.
-/// * **Multiple results become a struct**, which is how LLVM returns more than one
-///   value. No results becomes `void` — wasm spells that as an empty list, and it is
-///   what most functions have.
-fn llvm_signature_from_wasm(
-    params: &[ValType],
-    results: &[ValType],
-    ctx: &mut Context,
-) -> Result<(Vec<TyId>, TyId), anyhow::Error> {
-    let mut llvm_params = vec![];
+    /// The LLVM signature a wasm function type becomes.
+    ///
+    /// Two things differ from a straight mapping:
+    ///
+    /// * **A runtime pointer is appended** to the parameters, through which a body
+    ///   reaches the instance's memory and tables. It goes *last* precisely so that a
+    ///   wasm local index and its LLVM parameter index stay equal.
+    /// * **Multiple results become a struct**, which is how LLVM returns more than one
+    ///   value. No results becomes `void` — wasm spells that as an empty list, and it is
+    ///   what most functions have.
+    fn llvm_signature_from_wasm(
+        params: &[ValType],
+        results: &[ValType],
+        ctx: &mut Context,
+    ) -> Result<(Vec<TyId>, TyId), anyhow::Error> {
+        let mut llvm_params = vec![];
 
-    for param_ty in params {
-        llvm_params.push(llvm_ty_from_wasm(param_ty, ctx));
+        for param_ty in params {
+            llvm_params.push(Self::llvm_ty_from_wasm(param_ty, ctx));
+        }
+
+        llvm_params.push(ctx.ptr_ty()); // pointer to runtime struct containing mmap memory pointers etc.
+
+        // The runtime pointer goes on the *end* so a wasm local index and its LLVM
+        // parameter index stay equal.
+        let llvm_result = match results {
+            // Wasm spells "returns nothing" as an empty result list; LLVM spells it
+            // `void`, so this arm is not the degenerate case it looks like — it is
+            // every function rustc emits for a unit return.
+            [] => ctx.void_ty(),
+            [result] => Self::llvm_ty_from_wasm(result, ctx),
+            _ => {
+                let field_types: Vec<TyId> = results
+                    .iter()
+                    .map(|t| Self::llvm_ty_from_wasm(t, ctx))
+                    .collect();
+
+                ctx.struct_ty(&field_types, false)?
+            }
+        };
+
+        Ok((llvm_params, llvm_result))
     }
-
-    llvm_params.push(ctx.ptr_ty()); // pointer to runtime struct containing mmap memory pointers etc.
-
-    // The runtime pointer goes on the *end* so a wasm local index and its LLVM
-    // parameter index stay equal.
-    let llvm_result = match results {
-        // Wasm spells "returns nothing" as an empty result list; LLVM spells it
-        // `void`, so this arm is not the degenerate case it looks like — it is
-        // every function rustc emits for a unit return.
-        [] => ctx.void_ty(),
-        [result] => llvm_ty_from_wasm(result, ctx),
-        _ => ctx.ptr_ty(), // pointer to the struct containing the result values as fields
-    };
-
-    Ok((llvm_params, llvm_result))
 }
 
 #[cfg(test)]
@@ -985,6 +999,16 @@ mod tests {
         (builder, func, entry, n)
     }
 
+    /// A module for the arms that need one.
+    ///
+    /// Only the `call` arms read it, and none of these cases reaches one — but the
+    /// signature takes a module, so the cases have to hand over something real.
+    fn empty_module() -> Arc<Module<crate::Stack>> {
+        let bytes = wat::parse_str("(module)").unwrap();
+
+        Module::<crate::Stack>::compile(&bytes).unwrap()
+    }
+
     /// Runs `instructions` from `entry`, calling `between` after each one so the test
     /// can push whatever that operator's body would have left on the stack.
     fn run(
@@ -998,6 +1022,7 @@ mod tests {
     ) -> BasicBlockId {
         let mut block = entry;
         let null_ptr = Value::from_const(NullPtr, OperandTy::Inferred, builder).unwrap();
+        let module = empty_module();
         let mut index = 0;
 
         // Index-driven, like `compile_func`: an arm returns where to resume, which is
@@ -1016,6 +1041,7 @@ mod tests {
                     &[],
                     null_ptr,
                     func,
+                    &module,
                     pass,
                 )
                 .unwrap();

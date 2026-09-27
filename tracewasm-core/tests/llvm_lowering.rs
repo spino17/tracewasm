@@ -728,3 +728,143 @@ fn br_table_repeated_label_carrying_a_value() {
 
     check(&case);
 }
+
+// ---------------------------------------------------------------------------
+// Calls
+
+/// A call to a function with one result.
+///
+/// The callee is defined *after* the caller, which is the ordinary case — wasm puts
+/// every function in scope at once, and `compile` emits all signatures before any
+/// body precisely so a forward call has a handle to reach for.
+#[test]
+fn a_call_lowers_and_matches_the_interpreter() {
+    let case = Case {
+        name: "call_single_result",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32)
+              (local.get 0) (local.get 1) (call $second))
+            (func $second (param i32) (param i32) (result i32)
+              (local.get 1)))"#,
+        calls: &[&[2, 3], &[9, 4], &[0, 0]],
+        interpret: i32x2_to_i32,
+    };
+
+    let ir = check(&case);
+
+    // The runtime pointer rides on the end of the argument list, after the wasm
+    // operands — the convention that keeps a wasm local index equal to its LLVM
+    // parameter index. A call that dropped it would not type-check against the
+    // callee, so this pins the order rather than the presence.
+    assert!(
+        ir.contains("call i32 @fn1(i32 %local0_val, i32 %local1_val, ptr %param2)"),
+        "the wasm operands come first and the runtime pointer last\n{ir}"
+    );
+}
+
+/// A chain of calls, three functions deep, so no function is both first and last.
+#[test]
+fn calls_chain_across_functions() {
+    let case = Case {
+        name: "call_chained",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32)
+              (local.get 1) (call $b))
+            (func $b (param i32) (result i32) (local.get 0) (call $a))
+            (func $a (param i32) (result i32) (local.get 0)))"#,
+        calls: &[&[0, 5], &[0, 42]],
+        interpret: i32x2_to_i32,
+    };
+
+    check(&case);
+}
+
+/// Two functions that never call each other.
+///
+/// Worth its own case: every other module in this suite has exactly one function, so
+/// nothing else here would notice per-function state surviving into the next body.
+/// It did — the simulated stack kept a function's results, and the next function's
+/// `end` then found its recorded height off by that much.
+#[test]
+fn a_second_function_starts_from_a_clean_stack() {
+    let case = Case {
+        name: "two_funcs_no_call",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32)
+              (local.get 1))
+            (func $unused (param i32) (result i32) (local.get 0)))"#,
+        calls: &[&[1, 7]],
+        interpret: i32x2_to_i32,
+    };
+
+    check(&case);
+}
+
+/// A callee with several results returns a struct, which the caller takes apart into
+/// one stack value per field.
+///
+/// The two halves have to agree on the shape: `build_func_return` assembles the
+/// struct through memory and returns it *by value*, and the call site stores it into
+/// an alloca of its own to read the fields back out. An earlier shape returned a
+/// pointer to the callee's alloca instead — which verifies, and runs correctly at
+/// `-O0`, and returns garbage as soon as anything optimises. Hence the companion
+/// test below.
+#[test]
+fn a_multi_result_call_is_destructured_into_stack_values() {
+    let case = Case {
+        name: "call_multi_result",
+        wat: r#"(module
+            (func (export "f") (param i32) (param i32) (result i32 i64)
+              (local.get 0) (call $pair))
+            (func $pair (param i32) (result i32 i64)
+              (local i64)
+              (local.get 0) (local.get 1)))"#,
+        calls: &[&[7, 0], &[13, 0]],
+        interpret: i32x2_to_i32i64,
+    };
+
+    let ir = check(&case);
+
+    assert!(
+        ir.contains("call { i32, i64 } @fn1("),
+        "several results come back as one struct value, not a pointer\n{ir}"
+    );
+    assert!(
+        !ir.contains("ret ptr"),
+        "a function must not return a pointer into its own dead frame\n{ir}"
+    );
+}
+
+/// The multi-result call still computes the same thing after `-O2`.
+///
+/// The pointer-into-a-dead-frame shape this guards against survived every other
+/// check in this file: it verified, and `lli` ran it correctly unoptimised. Only
+/// optimisation exposed it, so only optimisation can pin it.
+#[test]
+fn a_multi_result_call_survives_optimisation() {
+    let wat = r#"(module
+        (func (export "f") (param i32) (param i32) (result i32 i64)
+          (local.get 0) (call $pair))
+        (func $pair (param i32) (result i32 i64)
+          (local i64)
+          (local.get 0) (local.get 1)))"#;
+    let calls: &[&[i32]] = &[&[7, 0], &[13, 0]];
+    let entry = entry_fn_name(wat);
+
+    let ir = lower(wat);
+
+    let Some(plain) = run("multi_result_o0", &ir, calls, &entry) else {
+        return;
+    };
+    let Some(optimised) = optimise("multi_result", &ir, "default<O2>") else {
+        return;
+    };
+    let Some(fast) = run("multi_result_o2", &optimised, calls, &entry) else {
+        return;
+    };
+
+    assert_eq!(
+        plain, fast,
+        "optimising changed the results\n--- O2 ---\n{optimised}"
+    );
+}
