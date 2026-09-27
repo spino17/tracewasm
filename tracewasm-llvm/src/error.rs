@@ -551,10 +551,13 @@ pub enum PhiError {
     /// The entry block has no predecessors, so a phi there selects on nothing.
     #[error("phi instructions cannot be added to the first basic block of the function")]
     PhiInstructionCannotBeAddedToEntryBasicBlock,
-    /// A phi names one value per predecessor, so the same predecessor cannot appear
-    /// twice.
-    #[error("basic block branch already in phi instruction")]
-    BasicBlockBranchAlreadyInPhiInstruction,
+    /// A predecessor was named twice with two different values.
+    ///
+    /// Naming it twice is itself fine — LLVM counts predecessors by edge, and a
+    /// `switch` with two cases selecting one block reaches it along two — but one
+    /// value arrives along an edge, so the entries have to agree.
+    #[error("a phi's entries for the same predecessor must all carry the same value")]
+    PhiBranchValueConflict,
     /// A phi with no incoming values selects nothing, and its type is whatever its
     /// first branch says — so with none there is no type to give it either.
     #[error("a phi instruction needs at least one branch")]

@@ -11,21 +11,24 @@ use crate::{
     interner::TyId,
     value::{ConstValue, I1Value, Signedness, ValueId},
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use std::fmt::Display;
 
 pub mod cursor;
 
-/// A phi node: one incoming value per predecessor block.
+/// A phi node: one incoming value per predecessor *edge*.
 ///
 /// Held separately from a block's other instructions, since LLVM requires phis to
-/// come first. Every branch must have the phi's own type, and the same predecessor
-/// may appear only once — `blocks` is what makes the second check cheap.
+/// come first. Every branch must have the phi's own type, and every entry naming the
+/// same predecessor must carry the same value — `blocks` is what makes the second
+/// check cheap.
 pub struct PhiInstruction {
-    /// The incoming edges, as (predecessor, value) pairs.
+    /// The incoming edges, as (predecessor, value) pairs. A block that reaches this
+    /// one along several edges appears once per edge.
     pub(crate) branches: Vec<(BasicBlockId, ValueId)>,
-    /// The predecessors already named, so a repeat can be refused.
-    pub(crate) blocks: FxHashSet<BasicBlockId>,
+    /// What each predecessor already contributes, so a repeat can be checked against
+    /// it without scanning `branches`.
+    pub(crate) blocks: FxHashMap<BasicBlockId, ValueId>,
     /// The phi's type, taken from its first branch. Every later branch is checked
     /// against it.
     pub(crate) ref_ty: TyId,
@@ -56,8 +59,8 @@ impl PhiInstrHandler {
     /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — the value's type differs
     ///   from the phi's. A phi produces one value, so there is nothing a second type
     ///   could be.
-    /// - [`PhiError::BasicBlockBranchAlreadyInPhiInstruction`] — that predecessor is
-    ///   already named.
+    /// - [`PhiError::PhiBranchValueConflict`] — that predecessor is already named,
+    ///   and with a different value.
     pub fn add_branch(
         &self,
         branch: (BasicBlockId, ValueId),
@@ -81,11 +84,22 @@ impl PhiInstrHandler {
         let block_id = branch.0;
         let instr = &mut ctx.get_block_mut(self.block).phis[index];
 
-        if instr.blocks.contains(&block_id) {
-            return Err(PhiError::BasicBlockBranchAlreadyInPhiInstruction);
+        // A predecessor may be named more than once. LLVM counts predecessors by
+        // *edge* — a `switch` with two cases selecting one block holds that block in
+        // two operand slots, so it appears twice in the block's predecessor list and
+        // the verifier wants an entry per appearance. `br_table 0 0 1` is exactly
+        // that, and it is ordinary wasm.
+        //
+        // What stays refused is two entries for one predecessor that disagree: only
+        // one value arrives along an edge, whichever case took it.
+        match instr.blocks.get(&block_id) {
+            Some(known) if *known != branch.1 => return Err(PhiError::PhiBranchValueConflict),
+            Some(_) => {}
+            None => {
+                instr.blocks.insert(block_id, branch.1);
+            }
         }
 
-        instr.blocks.insert(block_id);
         instr.branches.push(branch);
 
         Ok(())

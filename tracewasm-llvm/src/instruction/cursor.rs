@@ -20,7 +20,7 @@ use crate::{
     interner::TyId,
     value::{ConstValue, I1Value, Signedness, Value, ValueId, ValueKind},
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::{Deref, DerefMut};
 
 /// What to call the register an instruction defines.
@@ -245,7 +245,7 @@ impl<'a> Cursor<'a> {
         let phi_id = self.block.add_phi(
             PhiInstruction {
                 branches: vec![],
-                blocks: FxHashSet::default(),
+                blocks: FxHashMap::default(),
                 ref_ty,
                 value: val,
             },
@@ -2959,10 +2959,60 @@ mod tests {
             .expect("the block is still open");
     }
 
-    /// A phi names one value per *predecessor*, so the same predecessor twice is a
-    /// bug in the caller — and it is a different bug from an entry-block phi.
+    /// One value can arrive from a predecessor along more than one edge, and then the
+    /// phi names that predecessor once per edge.
+    ///
+    /// LLVM counts predecessors by edge: a `switch` with two cases selecting the same
+    /// block holds it in two operand slots, so the verifier reports *"PHINode should
+    /// have one entry for each predecessor"* against a phi that names it only once.
+    /// `br_table 0 0 1` lowers to exactly that, so this is ordinary rather than
+    /// exotic.
     #[test]
-    fn a_phi_takes_each_predecessor_once() {
+    fn a_predecessor_reached_twice_is_named_twice() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let other = f
+            .add_basic_block("other".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let (v1, v2) = (value(1, &mut builder), value(2, &mut builder));
+        let mut cursor = builder.cursor_at_block(body);
+
+        let (phi, _) = cursor
+            .build_phi(
+                &[(entry, v1), (other, v2)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
+            .unwrap();
+
+        phi.add_branch((entry, v1), &mut builder)
+            .expect("`entry` reaching this block twice with the same value is legal");
+
+        let stored = &builder.blocks.get(body.raw()).unwrap().phis[phi.index];
+
+        assert_eq!(
+            stored.branches.len(),
+            3,
+            "an entry per edge, so the repeat is written out again"
+        );
+        assert_eq!(
+            stored.blocks.len(),
+            2,
+            "but only two distinct predecessors contribute"
+        );
+    }
+
+    /// Two entries for one predecessor carrying *different* values is the bug the
+    /// repeat check is really for — and it is a different bug from an entry-block phi.
+    ///
+    /// LLVM refuses it too: *"PHI node has multiple entries for the same basic block
+    /// with different incoming values!"*. Only one value arrives along an edge.
+    #[test]
+    fn a_predecessor_cannot_contribute_two_different_values() {
         let mut builder = fixture();
         let f = add_fn("f", &mut builder).unwrap();
         let entry = f
@@ -2989,15 +3039,14 @@ mod tests {
 
         let err = phi
             .add_branch((entry, v3), &mut builder)
-            .expect_err("`entry` is already a predecessor of this phi");
+            .expect_err("`entry` already contributes a different value");
 
         assert!(
-            matches!(err, PhiError::BasicBlockBranchAlreadyInPhiInstruction),
-            "a repeated predecessor is not an entry-block error, got: {err}"
+            matches!(err, PhiError::PhiBranchValueConflict),
+            "a conflicting repeat is not an entry-block error, got: {err}"
         );
 
-        // One incoming value per predecessor, and the two branches it was built
-        // with are the two it has — not four.
+        // The rejected branch left nothing behind.
         let stored = &builder.blocks.get(body.raw()).unwrap().phis[phi.index];
 
         assert_eq!(stored.branches.len(), 2);

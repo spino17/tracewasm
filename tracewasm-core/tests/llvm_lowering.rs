@@ -707,8 +707,10 @@ fn br_table_lowers_and_matches_the_interpreter() {
 ///
 /// Common shape — any `match` where several arms do the same thing — so this is
 /// worth turning on rather than working around.
+/// A table entry that repeats a label is one `switch` case per entry, so the target
+/// has that predecessor twice and its phi names it twice. See
+/// `a_predecessor_reached_twice_is_named_twice` in `tracewasm-llvm`.
 #[test]
-#[ignore = "br_table with a repeated label that carries values is not lowered yet"]
 fn br_table_repeated_label_carrying_a_value() {
     let case = Case {
         name: "br_table_repeated_label_with_value",

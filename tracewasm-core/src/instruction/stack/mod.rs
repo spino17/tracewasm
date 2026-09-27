@@ -114,7 +114,6 @@ use tracewasm_llvm::{
         ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
-    value::{Const, ConstValue},
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
