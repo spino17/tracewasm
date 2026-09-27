@@ -1,6 +1,7 @@
 use tracewasm_llvm::{cfg::context::Context, interner::TyId};
 
 use crate::{
+    memory::mmap::MmapMemory,
     module::FuncIndex,
     runtime::value::{TableVal, Val},
 };
@@ -8,12 +9,13 @@ use std::marker::PhantomData;
 
 pub struct RuntimeInstance {
     globals: Box<[GlobalVal]>,
+    memory: MmapMemory,
     tables: Box<[TableEntry]>,
     table_entries: Box<[OptionalU32]>,
 }
 
 impl RuntimeInstance {
-    pub fn new(globals: Box<[Val]>, tables: Box<[TableVal]>) -> Self {
+    pub fn new(globals: Box<[Val]>, memory: MmapMemory, tables: Box<[TableVal]>) -> Self {
         let gbls = globals
             .into_iter()
             .map(|x| x.into())
@@ -49,6 +51,7 @@ impl RuntimeInstance {
 
         RuntimeInstance {
             globals: gbls,
+            memory,
             tables: tables.into_boxed_slice(),
             table_entries,
         }
