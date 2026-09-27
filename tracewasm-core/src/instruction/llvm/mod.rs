@@ -702,7 +702,7 @@ impl WasmInstrLLVMPassManager {
                     alignment,
                 )
             } else {
-                let ty = llvm_ty_from_wasm(local_ty, &mut entry_cursor);
+                let ty = Self::llvm_ty_from_wasm(local_ty, &mut entry_cursor);
                 let val = Value::zero_of_ty(ty, &mut entry_cursor)
                     .expect("type for wasm locals are always basic type i.e. i32, i64, f32, f64");
                 let alignment = ty.alignment(&entry_cursor);
@@ -756,8 +756,9 @@ impl WasmInstrLLVMPassManager {
                 instructions,
                 frame_layout,
                 &locals,
-                &runtime_ctx_ptr,
+                runtime_ctx_ptr,
                 func,
+                module,
                 self,
             )?;
 
@@ -858,35 +859,28 @@ impl WasmInstrLLVMPassManager {
             end_cursor.build_store(field_ptr, *field_val, OperandTy::Inferred, None)?;
         }
 
-        let return_val = end_cursor.build_load(
-            func_return_ptr,
-            OperandTy::Inferred,
-            None,
-            RegName::Named("fn_return_val".to_string()),
-        )?;
-
-        end_cursor.build_ret(Some(return_val), OperandTy::Inferred)?;
+        end_cursor.build_ret(Some(func_return_ptr), OperandTy::Inferred)?;
 
         Ok(())
     }
-}
 
-/// The LLVM type a wasm value type becomes.
-///
-/// A reference becomes `ptr`, since that is what one is once it is an operand.
-///
-/// # Panics
-///
-/// On `v128`, which [`Module::compile`](crate::module::Module::compile) rejects at
-/// section level — so reaching it here would mean the check was lost.
-fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
-    match ty {
-        ValType::I32 => ctx.i32_ty(),
-        ValType::I64 => ctx.i64_ty(),
-        ValType::F32 => ctx.f32_ty(),
-        ValType::F64 => ctx.f64_ty(),
-        ValType::Ref(_) => ctx.ptr_ty(),
-        ValType::V128 => unreachable!("v128 is rejected at Module check time"),
+    /// The LLVM type a wasm value type becomes.
+    ///
+    /// A reference becomes `ptr`, since that is what one is once it is an operand.
+    ///
+    /// # Panics
+    ///
+    /// On `v128`, which [`Module::compile`](crate::module::Module::compile) rejects at
+    /// section level — so reaching it here would mean the check was lost.
+    pub fn llvm_ty_from_wasm(ty: &ValType, ctx: &mut Context) -> TyId {
+        match ty {
+            ValType::I32 => ctx.i32_ty(),
+            ValType::I64 => ctx.i64_ty(),
+            ValType::F32 => ctx.f32_ty(),
+            ValType::F64 => ctx.f64_ty(),
+            ValType::Ref(_) => ctx.ptr_ty(),
+            ValType::V128 => unreachable!("v128 is rejected at Module check time"),
+        }
     }
 }
 
@@ -921,15 +915,7 @@ fn llvm_signature_from_wasm(
         // every function rustc emits for a unit return.
         [] => ctx.void_ty(),
         [result] => llvm_ty_from_wasm(result, ctx),
-        _ => {
-            let mut fields = vec![];
-
-            for result in results {
-                fields.push(llvm_ty_from_wasm(result, ctx));
-            }
-
-            ctx.struct_ty(&fields, false)?
-        }
+        _ => ctx.ptr_ty(), // pointer to the struct containing the result values as fields
     };
 
     Ok((llvm_params, llvm_result))
@@ -1028,7 +1014,7 @@ mod tests {
                     instructions,
                     frame_layout,
                     &[],
-                    &null_ptr,
+                    null_ptr,
                     func,
                     pass,
                 )

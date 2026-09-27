@@ -28,6 +28,8 @@
 //! helpers around block types and memory indices. The passes themselves are in
 //! [`stack`] and [`register`].
 
+use std::sync::Arc;
+
 use crate::instruction::llvm::WasmInstrLLVMPassManager;
 use crate::sealed::Internals;
 use crate::{
@@ -347,8 +349,9 @@ pub(crate) trait Instruction: Sized {
         instructions: &[Self],
         frame_layout: &Self::FrameLayout,
         locals: &[tracewasm_llvm::value::ValueId],
-        runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
         func: GlobalId<DefinedFunc>,
+        module: &Arc<Module<Self::Vm>>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error>;
 }

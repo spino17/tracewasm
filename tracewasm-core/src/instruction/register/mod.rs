@@ -155,6 +155,7 @@
 //! balanced without a reconciliation step.
 
 use crate::{
+    Register,
     error::{
         CallIndirectError, InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
     },
@@ -175,7 +176,8 @@ use crate::{
     },
     memory::Memory,
     module::{
-        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, Module, TableIndex, TyIndex,
+        ValType,
     },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
@@ -193,6 +195,7 @@ use std::{
     collections::hash_map::Entry,
     hash::{Hash, Hasher},
     mem::discriminant,
+    sync::Arc,
     vec,
 };
 use tracewasm_llvm::{
@@ -6498,8 +6501,9 @@ impl Instruction for RegInstruction {
         _instructions: &[RegInstruction],
         _frame_layout: &RegFrameLayout,
         _locals: &[tracewasm_llvm::value::ValueId],
-        _runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        _runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
         _func: GlobalId<DefinedFunc>,
+        _module: &Arc<Module<Register>>,
         _pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
         Err(anyhow::Error::msg(

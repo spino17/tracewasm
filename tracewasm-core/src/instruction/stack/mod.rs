@@ -93,7 +93,8 @@ use crate::{
     },
     memory::Memory,
     module::{
-        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, Module, TableIndex, TyIndex,
+        ValType,
     },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
@@ -104,7 +105,10 @@ use crate::{
     },
 };
 use rustc_hash::FxHashMap;
-use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use std::{
+    ops::{BitAnd, BitOr, BitXor, Neg},
+    sync::Arc,
+};
 use tracewasm_llvm::{
     cfg::{
         basic_block::BasicBlockId,
@@ -114,6 +118,8 @@ use tracewasm_llvm::{
         ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
+    interner::TyId,
+    value::ValueId,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
@@ -4210,8 +4216,9 @@ impl Instruction for StackInstruction {
         instructions: &[StackInstruction],
         frame_layout: &StackFrameLayout,
         locals: &[tracewasm_llvm::value::ValueId],
-        _runtime_ctx_ptr: &tracewasm_llvm::value::ValueId,
+        runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
         func: GlobalId<DefinedFunc>,
+        module: &Arc<Module<crate::Stack>>,
         pass_manager: &mut WasmInstrLLVMPassManager,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
         match self {
@@ -4255,22 +4262,64 @@ impl Instruction for StackInstruction {
                     .get_func(func_index)
                     .expect("function always exist if it has made up till this (compile) phase!");
 
-                let mut params = vec![];
-                let start_index = pass_manager.simulated_stack.height() - *params_count;
+                let mut params: Vec<(ValueId, OperandTy)> = pass_manager
+                    .simulated_stack
+                    .pops_and_reverse(*params_count)
+                    .iter()
+                    .map(|x| (*x, OperandTy::Inferred))
+                    .collect();
 
-                for i in start_index..pass_manager.simulated_stack.height() {
-                    params.push((
-                        pass_manager.simulated_stack.stack[i as usize],
-                        OperandTy::Inferred,
-                    ));
-                }
+                params.push((runtime_ctx_ptr, OperandTy::Inferred));
 
-                curr_cursor.build_call(
+                let result = curr_cursor.build_call(
                     callee_func,
                     &params,
                     OperandTy::Inferred,
                     RegName::Named(format!("func{}_{}_result", func_index.0, instr_index)),
                 )?;
+
+                let results =
+                    &module.types[module.func_decls[func_index.0 as usize].ty.0 as usize].results;
+
+                let results_count = results.len();
+
+                if results_count > 1 {
+                    debug_assert!(result.is_ptr(&curr_cursor));
+
+                    let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                    for (i, ty) in results.iter().enumerate() {
+                        let field_index = curr_cursor.const_value(i as i32, OperandTy::Inferred)?;
+
+                        let field_ptr = curr_cursor.build_get_element_ptr(
+                            result,
+                            OperandTy::Inferred,
+                            &[zero_index, field_index],
+                            Some(true),
+                            RegName::Named(format!(
+                                "func{}_{}_result_{}_ptr",
+                                func_index.0, instr_index, i
+                            )),
+                        )?;
+
+                        let llvm_ty =
+                            WasmInstrLLVMPassManager::llvm_ty_from_wasm(ty, &mut curr_cursor);
+
+                        let field_val = curr_cursor.build_load(
+                            field_ptr,
+                            OperandTy::Asserted(llvm_ty),
+                            llvm_ty.alignment(&curr_cursor),
+                            RegName::Named(format!(
+                                "func{}_{}_result_{}_val",
+                                func_index.0, instr_index, i
+                            )),
+                        )?;
+
+                        pass_manager.simulated_stack.push(field_val);
+                    }
+                } else if results_count == 1 {
+                    pass_manager.simulated_stack.push(result);
+                }
             }
             StackInstruction::CallIndirect {
                 ty_index,
