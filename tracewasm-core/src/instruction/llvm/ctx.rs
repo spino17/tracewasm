@@ -69,10 +69,6 @@ impl RuntimeInstance {
 
         unsafe { f(&mut ctx) }
     }
-
-    pub fn llvm_ty(ctx: &mut Context) -> TyId {
-        todo!()
-    }
 }
 
 #[repr(C)]
@@ -84,31 +80,47 @@ pub struct RuntimeContext<'a> {
     phantom: PhantomData<&'a RuntimeInstance>,
 }
 
-/// One global's slot: an untyped payload plus the tag saying how to read it.
-///
-/// Generated code never reads the tag. A `global.get i` knows the type from
-/// `Module::globals[i]`, and validation guarantees that is the type the operand
-/// has — so the tag is for the host, which asks for a global's value without
-/// knowing what it is.
-#[repr(C)]
-pub struct GlobalVal {
-    val: u64,
-    tag: u8,
+impl<'a> RuntimeContext<'a> {
+    pub fn llvm_ty(ctx: &mut Context) -> TyId {
+        let mut fields: Vec<TyId> = vec![];
+
+        fields.push(ctx.ptr_ty());
+        fields.push(ctx.i32_ty());
+        fields.push(ctx.ptr_ty());
+        fields.push(ctx.i32_ty());
+
+        ctx.struct_ty(&fields, false).unwrap()
+    }
 }
 
+/// One global's slot: eight bytes, untyped.
+///
+/// Nothing records *which* type a slot holds, because every reader already knows by
+/// the time it looks. Generated code resolves the type from `Module::globals[i]`
+/// when it emits the access and burns it into the instruction — by the time that
+/// code runs there is no type left to consult, only a `load i64` or `load float` at
+/// a fixed offset. The host reads the type from the same place, through the module
+/// its instance holds. And encoding is handed a [`Val`], which carries its own.
+///
+/// So a tag would be written and never read. It is not free either: `u64` plus `u8`
+/// rounds up to sixteen bytes, doubling the array and turning each access into a
+/// two-field `getelementptr` rather than a scaled index.
+#[repr(transparent)]
+pub struct GlobalVal(u64);
+
 impl GlobalVal {
-    /// The payload is an `i32`, in the low four bytes.
-    pub const TAG_I32: u8 = 0;
-    /// The payload is an `i64`.
-    pub const TAG_I64: u8 = 1;
-    /// The payload is an `f32` bit pattern, in the low four bytes.
-    pub const TAG_F32: u8 = 2;
-    /// The payload is an `f64` bit pattern.
-    pub const TAG_F64: u8 = 3;
-    /// The payload is a function index.
-    pub const TAG_FUNC_REF: u8 = 4;
-    /// A null function reference. The payload is not meaningful.
-    pub const TAG_NULL_REF: u8 = 5;
+    /// The function index reserved to mean a null reference.
+    ///
+    /// Wasm's function index space is `u32`, so this is in principle a real index —
+    /// but a module needs four billion functions to reach it, and validation gives
+    /// out long before. Reserving it is what lets a `funcref` global sit in eight
+    /// bytes with no discriminant beside it.
+    pub const NULL_FUNC_REF: u64 = u32::MAX as u64;
+
+    /// The raw eight bytes, as generated code would load them.
+    pub fn bits(&self) -> u64 {
+        self.0
+    }
 }
 
 impl From<Val> for GlobalVal {
@@ -126,22 +138,25 @@ impl From<Val> for GlobalVal {
     /// integer; [`f32::to_bits`] keeps the encoding, so a NaN payload and the sign of
     /// a negative zero both survive.
     fn from(value: Val) -> Self {
-        let (val, tag) = match value {
+        GlobalVal(match value {
             // `as u32` before widening. A negative `i32` cast straight to `u64`
             // sign-extends, filling the upper four bytes; nothing reads those back
             // for an `i32` global, but leaving them set makes two equal globals
             // differ byte-for-byte, which is a poor thing for a slot to do.
-            Val::I32(v) => (v as u32 as u64, Self::TAG_I32),
-            Val::I64(v) => (v as u64, Self::TAG_I64),
-            Val::F32(v) => (v.to_bits() as u64, Self::TAG_F32),
-            Val::F64(v) => (v.to_bits(), Self::TAG_F64),
-            // Null is a tag rather than a reserved index, so every `u32` remains a
-            // usable function index.
-            Val::Ref(Some(FuncIndex(index))) => (index as u64, Self::TAG_FUNC_REF),
-            Val::Ref(None) => (0, Self::TAG_NULL_REF),
-        };
+            Val::I32(v) => v as u32 as u64,
+            Val::I64(v) => v as u64,
+            Val::F32(v) => v.to_bits() as u64,
+            Val::F64(v) => v.to_bits(),
+            Val::Ref(Some(FuncIndex(index))) => {
+                debug_assert!(
+                    index as u64 != Self::NULL_FUNC_REF,
+                    "function index {index} is the one reserved for a null reference"
+                );
 
-        GlobalVal { val, tag }
+                index as u64
+            }
+            Val::Ref(None) => Self::NULL_FUNC_REF,
+        })
     }
 }
 
@@ -149,6 +164,17 @@ impl From<Val> for GlobalVal {
 pub struct TableEntry {
     table_ptr: *mut OptionalU32,
     table_len: u32,
+}
+
+impl TableEntry {
+    pub fn llvm_ty(ctx: &mut Context) -> TyId {
+        let mut fields: Vec<TyId> = vec![];
+
+        fields.push(ctx.ptr_ty());
+        fields.push(ctx.i32_ty());
+
+        ctx.struct_ty(&fields, false).unwrap()
+    }
 }
 
 /// One table slot: a nullable function index, flattened for `repr(C)`.
@@ -192,6 +218,7 @@ impl From<Option<FuncIndex>> for OptionalU32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracewasm_llvm::cfg::module::{DataLayout, Triple};
 
     /// The layout the generated code will GEP into.
     ///
@@ -203,9 +230,9 @@ mod tests {
     fn the_slot_layouts_are_what_the_llvm_side_must_match() {
         use std::mem::{align_of, offset_of, size_of};
 
-        assert_eq!((size_of::<GlobalVal>(), align_of::<GlobalVal>()), (16, 8));
-        assert_eq!(offset_of!(GlobalVal, val), 0);
-        assert_eq!(offset_of!(GlobalVal, tag), 8);
+        // Eight bytes and nothing beside them, so the generated access is a scaled
+        // index off `globals_ptr` rather than a walk into a struct.
+        assert_eq!((size_of::<GlobalVal>(), align_of::<GlobalVal>()), (8, 8));
 
         assert_eq!(
             (size_of::<OptionalU32>(), align_of::<OptionalU32>()),
@@ -228,23 +255,49 @@ mod tests {
         assert_eq!(offset_of!(RuntimeContext, tables_len), 24);
     }
 
+    /// [`RuntimeContext::llvm_ty`] describes the same bytes as the `repr(C)` struct.
+    ///
+    /// The two are independent descriptions of one layout, so a field added to one
+    /// and not the other corrupts every access with nothing to report it. The test
+    /// above pins the Rust side against literals; this pins the LLVM side's field
+    /// list, which is what determines its offsets.
+    ///
+    /// That the field list implies the *same* offsets was checked against LLVM
+    /// itself — `getelementptr (%Ctx, ptr null, i32 0, i32 N)` on
+    /// `{ ptr, i32, ptr, i32 }` gives size 32 and offsets 0, 8, 16, 24, matching
+    /// `offset_of!` exactly. `PhantomData` is absent here on purpose: it is
+    /// zero-sized, so it contributes nothing to the `repr(C)` layout either.
+    #[test]
+    fn the_llvm_type_lists_the_same_fields_as_the_rust_struct() {
+        let mut ctx = Context::new(
+            Triple::new(
+                "arm64".to_string(),
+                "apple".to_string(),
+                "macosx".to_string(),
+                None,
+            ),
+            DataLayout::default(),
+        );
+
+        let ty = RuntimeContext::llvm_ty(&mut ctx);
+
+        assert_eq!(ctx.display(ty).to_string(), "{ ptr, i32, ptr, i32 }");
+    }
+
     /// Each variant's payload and tag, spelled out.
     #[test]
     fn a_val_encodes_into_its_slot() {
         let cases = [
-            (Val::I32(7), 7u64, GlobalVal::TAG_I32),
-            (Val::I64(7), 7, GlobalVal::TAG_I64),
-            (Val::F32(1.0), 0x3f80_0000, GlobalVal::TAG_F32),
-            (Val::F64(1.0), 0x3ff0_0000_0000_0000, GlobalVal::TAG_F64),
-            (Val::Ref(Some(FuncIndex(3))), 3, GlobalVal::TAG_FUNC_REF),
-            (Val::Ref(None), 0, GlobalVal::TAG_NULL_REF),
+            (Val::I32(7), 7u64),
+            (Val::I64(7), 7),
+            (Val::F32(1.0), 0x3f80_0000),
+            (Val::F64(1.0), 0x3ff0_0000_0000_0000),
+            (Val::Ref(Some(FuncIndex(3))), 3),
+            (Val::Ref(None), GlobalVal::NULL_FUNC_REF),
         ];
 
-        for (val, expected_payload, expected_tag) in cases {
-            let slot = GlobalVal::from(val);
-
-            assert_eq!(slot.val, expected_payload);
-            assert_eq!(slot.tag, expected_tag);
+        for (val, expected) in cases {
+            assert_eq!(GlobalVal::from(val).bits(), expected);
         }
     }
 
@@ -255,13 +308,13 @@ mod tests {
     /// but it would make `-1` and a stale slot indistinguishable.
     #[test]
     fn a_negative_i32_does_not_sign_extend_into_the_upper_bytes() {
-        let slot = GlobalVal::from(Val::I32(-1));
+        let bits = GlobalVal::from(Val::I32(-1)).bits();
 
-        assert_eq!(slot.val, 0x0000_0000_ffff_ffff);
+        assert_eq!(bits, 0x0000_0000_ffff_ffff);
 
         // Still `-1` when read back at the width the global was declared with, which
         // is the only way generated code reads it.
-        assert_eq!(slot.val as u32 as i32, -1);
+        assert_eq!(bits as u32 as i32, -1);
     }
 
     /// Floats are stored by bit pattern, so a NaN payload and a signed zero survive.
@@ -271,25 +324,25 @@ mod tests {
     #[test]
     fn a_float_keeps_its_bit_pattern() {
         let nan = f64::from_bits(0x7ff8_0000_0000_dead);
-        let slot = GlobalVal::from(Val::F64(nan));
 
-        assert_eq!(slot.val, 0x7ff8_0000_0000_dead, "the NaN payload survives");
-
-        let neg_zero = GlobalVal::from(Val::F64(-0.0));
-        let pos_zero = GlobalVal::from(Val::F64(0.0));
-
-        assert_eq!(neg_zero.val, 0x8000_0000_0000_0000);
-        assert_eq!(pos_zero.val, 0);
-        assert_ne!(
-            neg_zero.val, pos_zero.val,
-            "`-0.0` and `0.0` are different globals"
+        assert_eq!(
+            GlobalVal::from(Val::F64(nan)).bits(),
+            0x7ff8_0000_0000_dead,
+            "the NaN payload survives"
         );
+
+        let neg_zero = GlobalVal::from(Val::F64(-0.0)).bits();
+        let pos_zero = GlobalVal::from(Val::F64(0.0)).bits();
+
+        assert_eq!(neg_zero, 0x8000_0000_0000_0000);
+        assert_eq!(pos_zero, 0);
+        assert_ne!(neg_zero, pos_zero, "`-0.0` and `0.0` are different globals");
 
         // The same for `f32`, whose payload sits in the low four bytes.
         let f32_nan = f32::from_bits(0x7fc0_beef);
 
-        assert_eq!(GlobalVal::from(Val::F32(f32_nan)).val, 0x7fc0_beef);
-        assert_eq!(GlobalVal::from(Val::F32(-0.0)).val, 0x8000_0000);
+        assert_eq!(GlobalVal::from(Val::F32(f32_nan)).bits(), 0x7fc0_beef);
+        assert_eq!(GlobalVal::from(Val::F32(-0.0)).bits(), 0x8000_0000);
     }
 
     /// A table slot, both ways round.
@@ -311,14 +364,29 @@ mod tests {
         assert_ne!(zero.tag, null.tag);
     }
 
-    /// `u32::MAX` is a usable index, not a sentinel.
+    /// The two slot kinds disagree about `u32::MAX`, deliberately.
     ///
-    /// It would be the natural null marker if the tag were dropped, so this records
-    /// that the current encoding does not reserve it.
+    /// A global has no room for a discriminant, so it spends the largest index on
+    /// null. A table slot kept its tag and does not, since a table is a `u32` of
+    /// payload either way and the fifth byte is padding it would pay for regardless.
+    ///
+    /// Pinned because the two are one field apart and reading either encoding with
+    /// the other's rule gives a plausible wrong answer rather than a crash: a null
+    /// global read as a table slot is function `4294967295`.
     #[test]
-    fn the_largest_index_is_an_ordinary_reference() {
-        let slot = OptionalU32::from(Some(FuncIndex(u32::MAX)));
+    fn only_a_global_reserves_the_largest_index_for_null() {
+        let table_slot = OptionalU32::from(Some(FuncIndex(u32::MAX)));
 
-        assert_eq!((slot.val, slot.tag), (u32::MAX, OptionalU32::TAG_SOME));
+        assert_eq!(
+            (table_slot.val, table_slot.tag),
+            (u32::MAX, OptionalU32::TAG_SOME),
+            "a table slot spells null in the tag, so every index stays usable"
+        );
+
+        assert_eq!(
+            GlobalVal::from(Val::Ref(None)).bits(),
+            GlobalVal::NULL_FUNC_REF,
+            "a global spells null as the reserved index"
+        );
     }
 }
