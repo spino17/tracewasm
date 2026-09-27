@@ -66,7 +66,7 @@ use tracewasm_llvm::{
         ControlFlowGraph,
         basic_block::BasicBlockId,
         context::Context,
-        global::{DeclaredFunc, DefinedFunc, GlobalId},
+        global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId},
         module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
     },
     error::PhiError,
@@ -538,15 +538,26 @@ impl ControlStack {
 #[derive(Default)]
 pub struct WasmInstrLLVMPassManager {
     /// Imported functions, which become LLVM declarations — a signature and no body.
-    declared_funcs: FxHashMap<FuncIndex, GlobalId<DeclaredFunc>>,
+    pub(crate) declared_funcs: FxHashMap<FuncIndex, GlobalId<DeclaredFunc>>,
     /// Locally-defined functions, which become LLVM definitions.
-    defined_funcs: FxHashMap<FuncIndex, GlobalId<DefinedFunc>>,
+    pub(crate) defined_funcs: FxHashMap<FuncIndex, GlobalId<DefinedFunc>>,
     pub(crate) instr_index_to_basic_block: InstrIndexToBasicBlockMap,
     pub(crate) simulated_stack: SimulatedStack,
     pub(crate) control_stack: ControlStack,
 }
 
 impl WasmInstrLLVMPassManager {
+    pub fn get_func(&self, func_index: &FuncIndex) -> Option<FuncRef> {
+        match self.defined_funcs.get(func_index) {
+            Some(func) => Some(FuncRef::Defined(*func)),
+            None => {
+                let func = *self.declared_funcs.get(func_index)?;
+
+                Some(FuncRef::Declared(func))
+            }
+        }
+    }
+
     /// Translates a whole module into one [`ControlFlowGraph`].
     ///
     /// Signatures first, bodies second, in two passes over the index space. A body

@@ -4247,6 +4247,35 @@ impl Instruction for StackInstruction {
 
                 curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
             }
+            StackInstruction::Call {
+                func_index,
+                params_count,
+            } => {
+                let callee_func = pass_manager
+                    .get_func(func_index)
+                    .expect("function always exist if it has made up till this (compile) phase!");
+
+                let mut params = vec![];
+                let start_index = pass_manager.simulated_stack.height() - *params_count;
+
+                for i in start_index..pass_manager.simulated_stack.height() {
+                    params.push((
+                        pass_manager.simulated_stack.stack[i as usize],
+                        OperandTy::Inferred,
+                    ));
+                }
+
+                curr_cursor.build_call(
+                    callee_func,
+                    &params,
+                    OperandTy::Inferred,
+                    RegName::Named(format!("func{}_{}_result", func_index.0, instr_index)),
+                )?;
+            }
+            StackInstruction::CallIndirect {
+                ty_index,
+                table_index,
+            } => todo!(),
             StackInstruction::Block { end_index } => {
                 pass_manager.control_stack.enter_label(
                     LabelKind::Block,
