@@ -83,12 +83,7 @@ pub struct RuntimeContext<'a> {
 
 impl<'a> RuntimeContext<'a> {
     pub fn llvm_ty(ctx: &mut Context) -> TyId {
-        let mut fields: Vec<TyId> = vec![];
-
-        fields.push(ctx.ptr_ty());
-        fields.push(ctx.i32_ty());
-        fields.push(ctx.ptr_ty());
-        fields.push(ctx.i32_ty());
+        let fields: Vec<TyId> = vec![ctx.ptr_ty(), ctx.i32_ty(), ctx.ptr_ty(), ctx.i32_ty()];
 
         ctx.struct_ty(&fields, false).unwrap()
     }
@@ -169,10 +164,7 @@ pub struct TableEntry {
 
 impl TableEntry {
     pub fn llvm_ty(ctx: &mut Context) -> TyId {
-        let mut fields: Vec<TyId> = vec![];
-
-        fields.push(ctx.ptr_ty());
-        fields.push(ctx.i32_ty());
+        let fields: Vec<TyId> = vec![ctx.ptr_ty(), ctx.i32_ty()];
 
         ctx.struct_ty(&fields, false).unwrap()
     }
