@@ -29,8 +29,8 @@ pub struct PhiInstruction {
     /// What each predecessor already contributes, so a repeat can be checked against
     /// it without scanning `branches`.
     pub(crate) blocks: FxHashMap<BasicBlockId, ValueId>,
-    /// The phi's type: its first branch's, or the asserted type when it was built
-    /// with none. Every later branch is checked against it.
+    /// The phi's type: the asserted type if one was given, otherwise its first
+    /// branch's. Every branch is checked against it.
     pub(crate) ref_ty: TyId,
     /// The register this phi defines.
     pub(crate) value: ValueId,

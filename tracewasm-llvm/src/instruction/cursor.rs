@@ -212,8 +212,9 @@ impl<'a> Cursor<'a> {
     /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///
-    /// The phi's type comes from the **first** branch; every branch given here, and
-    /// every one added later through the handle, is checked against it.
+    /// The phi's type is `ty` when asserted, and otherwise comes from the **first**
+    /// branch; every branch given here, and every one added later through the
+    /// handle, is checked against it.
     ///
     /// # Errors
     ///
@@ -226,21 +227,45 @@ impl<'a> Cursor<'a> {
     /// - [`PhiError::PhiInstructionAddError`] — phis come first in a block.
     /// - [`PhiError::BasicBlockAlreadyTerminated`] — the block already ended.
     /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — a branch disagrees with the
-    ///   phi's type.
+    ///   phi's type, including an asserted `ty` that the first branch doesn't have.
+    /// - [`PhiError::PhiBranchValueConflict`] — two branches name the same
+    ///   predecessor with different values.
+    ///
+    /// Every branch is checked before the phi is created, so on a branch error the
+    /// block is left exactly as it was.
     pub fn build_phi(
         &mut self,
         branches: &[(BasicBlockId, ValueId)],
         ty: OperandTy,
         reg: RegName,
     ) -> Result<(PhiInstrHandler, ValueId), PhiError> {
-        let ref_ty = if branches.is_empty() {
-            match ty {
-                OperandTy::Asserted(ty) => ty,
-                OperandTy::Inferred => return Err(PhiError::PhiInstructionWithNoBranches),
-            }
-        } else {
-            branches[0].1.ty(self.ctx)
+        let ref_ty = match ty {
+            OperandTy::Asserted(ty) => ty,
+            OperandTy::Inferred => match branches.first() {
+                Some((_, first)) => first.ty(self.ctx),
+                None => return Err(PhiError::PhiInstructionWithNoBranches),
+            },
         };
+
+        // Every branch is checked before anything is created, so a refused phi leaves
+        // the block, and the register names, as they were. `add_branch` below makes
+        // the same two checks one branch at a time, too late to undo the phi.
+        let mut seen: FxHashMap<BasicBlockId, ValueId> = FxHashMap::default();
+
+        for &(block, value) in branches {
+            let value_ty = value.ty(self.ctx);
+
+            if value_ty != ref_ty {
+                return Err(PhiError::PhiInstructionBranchTypeMismatch(
+                    self.ctx.display(ref_ty).to_string(),
+                    self.ctx.display(value_ty).to_string(),
+                ));
+            }
+
+            if *seen.entry(block).or_insert(value) != value {
+                return Err(PhiError::PhiBranchValueConflict);
+            }
+        }
 
         let func_id = self.ctx.get_block(self.block).func_id;
         let val = Value::from_register(&reg, ref_ty, func_id, self.ctx)?;
@@ -1748,6 +1773,112 @@ mod tests {
             builder.blocks.get(body.raw()).unwrap().phis.is_empty(),
             "the refused phi must not have been added"
         );
+    }
+
+    /// An asserted type is the phi's type, so a first branch of another type is
+    /// refused — before the phi is added, so the block is left as it was.
+    #[test]
+    fn a_phi_checks_its_first_branch_against_an_asserted_type() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let v = value(1, &mut builder);
+
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(&[(entry, v)], OperandTy::Asserted(i64_ty), "result".into())
+            .expect_err("an `i32` branch can't feed an `i64` phi");
+
+        assert!(matches!(
+            err,
+            PhiError::PhiInstructionBranchTypeMismatch(ref phi, ref branch)
+                if phi == "i64" && branch == "i32"
+        ));
+        assert!(
+            builder.blocks.get(body.raw()).unwrap().phis.is_empty(),
+            "the refused phi must not have been added"
+        );
+
+        // A matching assertion is accepted, and is the type the phi has.
+        let (_, result) = builder
+            .cursor_at_block(body)
+            .build_phi(&[(entry, v)], OperandTy::Asserted(i32_ty), "result".into())
+            .unwrap();
+
+        assert_eq!(result.ty(&builder), i32_ty);
+    }
+
+    /// Every branch is checked before the phi exists, not just the first: a bad
+    /// later branch leaves no half-built phi behind, and doesn't use up the
+    /// register's name.
+    #[test]
+    fn a_refused_phi_leaves_the_block_and_its_names_untouched() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let left = f.add_basic_block("left".to_string(), &mut builder).unwrap();
+        let right = f
+            .add_basic_block("right".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let one = value(1, &mut builder);
+        let two = value(2, &mut builder);
+        let wide = builder.const_value(3i64, OperandTy::Inferred).unwrap();
+
+        let no_phis = |builder: &Builder| builder.blocks.get(body.raw()).unwrap().phis.is_empty();
+
+        // The third branch has the wrong type.
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (right, wide)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .expect_err("an `i64` branch can't join an `i32` phi");
+
+        assert!(matches!(
+            err,
+            PhiError::PhiInstructionBranchTypeMismatch(ref phi, ref branch)
+                if phi == "i32" && branch == "i64"
+        ));
+        assert!(no_phis(&builder), "no half-built phi is left behind");
+
+        // Two branches name one predecessor with different values.
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (entry, two)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .expect_err("one edge carries one value");
+
+        assert!(matches!(err, PhiError::PhiBranchValueConflict));
+        assert!(no_phis(&builder), "no half-built phi is left behind");
+
+        // Neither refusal took the name: a good phi still gets `%result`, not
+        // `%result1`.
+        let (_, result) = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (entry, one)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .unwrap();
+        let ValueKind::Reg(reg) = builder.get_value(result).kind() else {
+            panic!("a phi defines a register");
+        };
+
+        assert_eq!(builder.str_interner.value(reg.name.0), "result");
     }
 
     /// The entry block has no predecessors, so a phi there has nothing to choose
