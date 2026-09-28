@@ -16,6 +16,7 @@ use std::ffi::{CStr, c_char};
 use std::ptr;
 
 pub mod error;
+pub mod func;
 
 const PIPELINE: &CStr = c"default<O3>";
 
@@ -114,7 +115,7 @@ impl Drop for JITModule<'_> {
     }
 }
 
-impl JITModule<'_> {
+impl<'jit> JITModule<'jit> {
     pub fn optimize(&mut self, level: LLVMCodeGenOptLevel) -> Result<(), JITError> {
         unsafe {
             let triple = LLVMOrcLLJITGetTripleString(self.jit.jit); // owned by the JIT
@@ -126,7 +127,23 @@ impl JITModule<'_> {
             opt_result
         }
     }
+
+    pub fn compile(self) -> JITCompiledInstance<'jit> {
+        todo!()
+    }
 }
+
+pub struct JITCompiledInstance<'jit> {
+    jit: &'jit JITHandler,
+}
+
+impl<'jit> JITCompiledInstance<'jit> {
+    pub fn get_func() -> Func {
+        todo!()
+    }
+}
+
+pub struct Func {}
 
 unsafe fn take_message(msg: *mut c_char) -> String {
     if msg.is_null() {
