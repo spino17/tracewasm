@@ -1,4 +1,5 @@
 use crate::error::JITError;
+use crate::func::LLVMHostFunc;
 use llvm_sys::core::*;
 use llvm_sys::error::*;
 use llvm_sys::ir_reader::LLVMParseIRInContext2;
@@ -6,11 +7,15 @@ use llvm_sys::orc2::lljit::*;
 use llvm_sys::orc2::*;
 use llvm_sys::prelude::LLVMContextRef;
 use llvm_sys::prelude::LLVMModuleRef;
+use llvm_sys::prelude::LLVMTypeRef;
 use llvm_sys::target::{LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget};
 use llvm_sys::target_machine::*;
 use llvm_sys::transforms::pass_builder::LLVMCreatePassBuilderOptions;
 use llvm_sys::transforms::pass_builder::LLVMDisposePassBuilderOptions;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
+use std::any::TypeId;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::{CStr, c_char};
 use std::ptr;
@@ -22,6 +27,9 @@ const PIPELINE: &CStr = c"default<O3>";
 
 pub struct JITHandler {
     jit: LLVMOrcLLJITRef,
+    // Host symbols live in the JIT's main dylib, shared by every module, so the
+    // same name can only ever be bound to one function: name -> (address, type).
+    host_funcs: RefCell<HashMap<String, (usize, TypeId)>>,
 }
 
 impl Drop for JITHandler {
@@ -56,10 +64,41 @@ impl JITHandler {
             jit
         };
 
-        Ok(JITHandler { jit })
+        Ok(JITHandler {
+            jit,
+            host_funcs: RefCell::new(HashMap::new()),
+        })
     }
 
-    pub fn jit_module(&self, name: &str, module_str: &str) -> Result<JITModule<'_>, JITError> {
+    /// Defines `name` in the JIT, or does nothing if it's already bound to this
+    /// exact function.
+    fn define_host_func(
+        &self,
+        name: &str,
+        c_name: &CStr,
+        addr: usize,
+        ty: TypeId,
+    ) -> Result<(), JITError> {
+        let mut host_funcs = self.host_funcs.borrow_mut();
+
+        if let Some(&existing) = host_funcs.get(name) {
+            return if existing == (addr, ty) {
+                Ok(())
+            } else {
+                Err(JITError::HostFuncAlreadyLinked(name.into()))
+            };
+        }
+
+        unsafe {
+            define_host_fn(self.jit, c_name, addr)?;
+        }
+
+        host_funcs.insert(name.into(), (addr, ty));
+
+        Ok(())
+    }
+
+    pub fn parse_module(&self, name: &str, module_str: &str) -> Result<JITModule<'_>, JITError> {
         let c_name = CString::new(name).map_err(|_| JITError::InvalidModuleName)?;
 
         let (ctx, module) = unsafe {
@@ -96,9 +135,9 @@ impl JITHandler {
 /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 /// let mut module = {
 ///     let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
-///     jit.jit_module("m", "").unwrap()
+///     jit.parse_module("m", "").unwrap()
 /// }; // `jit` dropped here while `module` still borrows it
-/// module.optimize().unwrap();
+/// module.optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
 /// ```
 pub struct JITModule<'jit> {
     ctx: LLVMContextRef,
@@ -128,8 +167,48 @@ impl<'jit> JITModule<'jit> {
         }
     }
 
-    pub fn compile(self) -> JITCompiledInstance<'jit> {
-        todo!()
+    /// Links a host function to the module's `declare` of the same name. The IR
+    /// signature is inferred from `F` and must match the declaration exactly.
+    ///
+    /// A function item has to be coerced to a pointer first; `_` lets the compiler
+    /// fill in the types:
+    ///
+    /// ```
+    /// # use tracewasm_jit::JITHandler;
+    /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+    /// extern "C" fn add(a: i64, b: i64) -> i64 { a + b }
+    ///
+    /// let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
+    /// let module = jit.parse_module("m", "declare i64 @add(i64, i64)").unwrap();
+    ///
+    /// module.link_host_func("add", add as extern "C" fn(_, _) -> _).unwrap();
+    /// ```
+    pub fn link_host_func<F: LLVMHostFunc>(&self, name: &str, func: F) -> Result<(), JITError> {
+        let c_name = CString::new(name).map_err(|_| JITError::InvalidFuncName)?;
+
+        unsafe {
+            let decl = LLVMGetNamedFunction(self.module, c_name.as_ptr());
+
+            // A body in the module would collide with the host symbol.
+            if decl.is_null() || LLVMIsDeclaration(decl) == 0 {
+                return Err(JITError::HostFuncNotDeclared(name.into()));
+            }
+
+            // Types are uniqued per context, so pointer equality is type equality.
+            let declared = LLVMGlobalGetValueType(decl);
+            let host = F::llvm_type(self.ctx);
+
+            if declared != host {
+                return Err(JITError::HostFuncSignatureMismatch {
+                    name: name.into(),
+                    declared: type_to_string(declared),
+                    host: type_to_string(host),
+                });
+            }
+        }
+
+        self.jit
+            .define_host_func(name, &c_name, func.addr(), TypeId::of::<F>())
     }
 }
 
@@ -265,4 +344,45 @@ unsafe fn optimize(
 
         result
     }
+}
+
+/// Defines one host function as an absolute symbol in the JIT.
+///
+/// # Safety
+/// `jit` must be a valid, live JIT, and `addr` must be the address of a function
+/// whose signature matches the symbol's declaration in the IR.
+unsafe fn define_host_fn(jit: LLVMOrcLLJITRef, name: &CStr, addr: usize) -> Result<(), JITError> {
+    unsafe {
+        let mut pair = LLVMOrcCSymbolMapPair {
+            // Applies the platform's symbol mangling (a leading `_` on macOS).
+            Name: LLVMOrcLLJITMangleAndIntern(jit, name.as_ptr()),
+            Sym: LLVMJITEvaluatedSymbol {
+                Address: addr as u64,
+                Flags: LLVMJITSymbolFlags {
+                    GenericFlags: LLVMJITSymbolGenericFlags::LLVMJITSymbolGenericFlagsExported
+                        as u8
+                        | LLVMJITSymbolGenericFlags::LLVMJITSymbolGenericFlagsCallable as u8,
+                    TargetFlags: 0,
+                },
+            },
+        };
+
+        let mu = LLVMOrcAbsoluteSymbols(&mut pair, 1);
+        let err = LLVMOrcJITDylibDefine(LLVMOrcLLJITGetMainJITDylib(jit), mu);
+
+        // On failure the dylib doesn't take `mu`, so it's still ours to free.
+        if !err.is_null() {
+            LLVMOrcDisposeMaterializationUnit(mu);
+        }
+
+        check(err)
+    }
+}
+
+/// Renders an IR type as text, e.g. `i64 (i64, i64)`.
+///
+/// # Safety
+/// `ty` must be a valid, live LLVM type.
+unsafe fn type_to_string(ty: LLVMTypeRef) -> String {
+    unsafe { take_message(LLVMPrintTypeToString(ty)) }
 }

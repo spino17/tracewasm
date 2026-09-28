@@ -20,7 +20,7 @@ fn jit() -> JITHandler {
 #[test]
 fn parses_and_optimizes() {
     let jit = jit();
-    let mut module = jit.jit_module("m", IR).unwrap();
+    let mut module = jit.parse_module("m", IR).unwrap();
 
     module
         .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
@@ -30,7 +30,7 @@ fn parses_and_optimizes() {
 #[test]
 fn optimize_can_run_twice() {
     let jit = jit();
-    let mut module = jit.jit_module("m", IR).unwrap();
+    let mut module = jit.parse_module("m", IR).unwrap();
 
     module
         .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
@@ -43,8 +43,8 @@ fn optimize_can_run_twice() {
 #[test]
 fn several_modules_share_one_jit() {
     let jit = jit();
-    let mut a = jit.jit_module("a", IR).unwrap();
-    let mut b = jit.jit_module("b", IR).unwrap();
+    let mut a = jit.parse_module("a", IR).unwrap();
+    let mut b = jit.parse_module("b", IR).unwrap();
 
     a.optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
         .unwrap();
@@ -55,7 +55,7 @@ fn several_modules_share_one_jit() {
 #[test]
 fn bad_ir_is_an_error() {
     let jit = jit();
-    let err = jit.jit_module("m", "define i32 @f( {").err().unwrap();
+    let err = jit.parse_module("m", "define i32 @f( {").err().unwrap();
 
     assert!(matches!(err, JITError::LLVMError(ref s) if s.starts_with("IR parse error")));
 }
@@ -63,7 +63,7 @@ fn bad_ir_is_an_error() {
 #[test]
 fn nul_in_name_is_an_error_not_a_panic() {
     let jit = jit();
-    let err = jit.jit_module("a\0b", IR).err().unwrap();
+    let err = jit.parse_module("a\0b", IR).err().unwrap();
 
     assert!(matches!(err, JITError::InvalidModuleName));
 }
