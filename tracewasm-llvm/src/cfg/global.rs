@@ -276,8 +276,8 @@ pub enum FuncRef {
     /// Nothing ties the pointer to a function, so the signature is taken on trust
     /// rather than looked up.
     Pointer {
-        /// The callee's address. Must be a `ptr`-typed register; anything else
-        /// currently panics in [`name_and_sig`](FuncRef::name_and_sig).
+        /// The callee's address. Must be a `ptr`-typed register; anything else is
+        /// refused by [`name_and_sig`](FuncRef::name_and_sig).
         ptr: Value,
         /// The signature the call is checked against: arity, argument types and
         /// result. It is the caller's claim about what `ptr` points at; a wrong one
@@ -295,12 +295,11 @@ impl FuncRef {
     ///
     /// # Errors
     ///
-    /// [`CallError::FunctionNotFound`] if the handle names a function this module
-    /// does not have, which can only happen across contexts.
-    ///
-    /// # Panics
-    ///
-    /// For a [`Pointer`](Self::Pointer) whose `ptr` isn't a `ptr`-typed register.
+    /// - [`CallError::FunctionNotFound`] if the handle names a function this module
+    ///   does not have, which can only happen across contexts.
+    /// - [`CallError::IndirectCalleeNotPointer`] if a [`Pointer`](Self::Pointer)'s
+    ///   `ptr` isn't `ptr`-typed.
+    /// - [`CallError::IndirectCalleeNotRegister`] if it is, but isn't a register.
     pub fn name_and_sig<'a, 'b: 'a>(
         &'b self,
         ctx: &'a Context,
@@ -346,11 +345,13 @@ impl FuncRef {
             }
             FuncRef::Pointer { ptr, sig } => {
                 if !ptr.is_ptr(ctx) {
-                    todo!() // RAISE ERROR
+                    return Err(CallError::IndirectCalleeNotPointer(
+                        ctx.display(ptr.ty()).to_string(),
+                    ));
                 }
 
                 let ValueKind::Reg(reg) = ptr.kind() else {
-                    todo!() // RAISE ERROR
+                    return Err(CallError::IndirectCalleeNotRegister);
                 };
 
                 let name = reg.name;

@@ -289,6 +289,17 @@ pub enum CallError {
     /// handle came from a different [`Context`](crate::cfg::context::Context).
     #[error("no function named `{0}` has been added to this module")]
     FunctionNotFound(String),
+    /// An indirect call's callee ([`FuncRef::Pointer`](crate::cfg::global::FuncRef::Pointer))
+    /// isn't a pointer. Holds its type.
+    #[error("an indirect call's callee has type `{0}`, not `ptr`")]
+    IndirectCalleeNotPointer(String),
+    /// An indirect call's callee is a pointer but not a register: a constant such as
+    /// `null`, or a global. An indirect call goes through a register holding the
+    /// address; a global function is called directly, through its
+    /// [`Defined`](crate::cfg::global::FuncRef::Defined) or
+    /// [`Declared`](crate::cfg::global::FuncRef::Declared) handle.
+    #[error("an indirect call's callee must be a register holding a function's address")]
+    IndirectCalleeNotRegister,
     /// The callee takes a different number of arguments.
     #[error("`{name}` takes `{expected}` argument(s), but `{given}` were given")]
     ParamCountMismatch {

@@ -1797,4 +1797,48 @@ mod tests {
             )
         );
     }
+
+    /// An indirect call spells its callee as the register, `%fp`, with the result
+    /// type from the signature it carries.
+    #[test]
+    fn an_indirect_call_is_emitted_through_its_register() {
+        let mut builder = fixture();
+
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let caller = builder
+            .define_function(
+                "caller".to_string(),
+                &[(ptr_ty, "fp".into()), (i32_ty, "n".into())],
+                i32_ty,
+            )
+            .unwrap();
+        let entry = caller
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        let fp = caller.params(&builder)[0];
+        let n = caller.params(&builder)[1];
+        let callee = crate::cfg::global::FuncRef::Pointer {
+            ptr: builder.get_value(fp).clone(),
+            sig: FuncSignature::new(&[i32_ty], i32_ty),
+        };
+
+        let mut cursor = builder.cursor_at_block(entry);
+        let r = cursor
+            .build_call(
+                callee,
+                &[(n, OperandTy::Inferred)],
+                OperandTy::Inferred,
+                "r".into(),
+            )
+            .unwrap();
+
+        cursor.build_ret(Some(r), OperandTy::Inferred).unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(ir.contains("%r = call i32 %fp(i32 %n)"), "{ir}");
+    }
 }

@@ -2926,6 +2926,72 @@ mod tests {
         );
     }
 
+    /// An indirect call goes through a `ptr` register holding the callee's address.
+    /// Anything else is refused with an error: a non-pointer, and a pointer that isn't
+    /// a register (a constant such as `null`, or a global, which is called directly).
+    #[test]
+    fn an_indirect_call_needs_a_ptr_register() {
+        let mut builder = fixture();
+
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let caller = builder
+            .define_function(
+                "caller".to_string(),
+                &[(ptr_ty, "fp".into()), (i32_ty, "n".into())],
+                i32_ty,
+            )
+            .unwrap();
+        let entry = caller
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        let fp = caller.params(&builder)[0];
+        let n = caller.params(&builder)[1];
+        let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
+        let global = Value::from_global(caller, &mut builder);
+        let sig = crate::value::FuncSignature::new(&[i32_ty], i32_ty);
+        let through = |id: ValueId, builder: &Builder| FuncRef::Pointer {
+            ptr: builder.get_value(id).clone(),
+            sig: sig.clone(),
+        };
+
+        let not_a_pointer = through(n, &builder);
+        let a_constant = through(null, &builder);
+        let a_global = through(global, &builder);
+        let a_register = through(fp, &builder);
+        let mut cursor = builder.cursor_at_block(entry);
+
+        assert!(matches!(
+            cursor.build_call(not_a_pointer, &[(n, OperandTy::Inferred)], OperandTy::Inferred, "r".into()),
+            Err(InstructionError::Call(CallError::IndirectCalleeNotPointer(ref ty))) if ty == "i32"
+        ));
+
+        for callee in [a_constant, a_global] {
+            assert!(matches!(
+                cursor.build_call(
+                    callee,
+                    &[(n, OperandTy::Inferred)],
+                    OperandTy::Inferred,
+                    "r".into()
+                ),
+                Err(InstructionError::Call(CallError::IndirectCalleeNotRegister))
+            ));
+        }
+
+        let r = cursor
+            .build_call(
+                a_register,
+                &[(n, OperandTy::Inferred)],
+                OperandTy::Inferred,
+                "r".into(),
+            )
+            .expect("a `ptr` register is what an indirect call goes through");
+
+        assert_eq!(r.ty(&cursor), i32_ty, "typed by the signature's result");
+    }
+
     /// A `call` is not a terminator, so the block stays open after one.
     #[test]
     fn a_call_does_not_end_its_block() {
