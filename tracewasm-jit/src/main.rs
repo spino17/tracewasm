@@ -1,6 +1,6 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
-use tracewasm_jit::JITHandler;
 use tracewasm_jit::error::JITError;
+use tracewasm_jit::{JITHandler, OptLevel};
 
 // Two exports and one import.
 //
@@ -59,11 +59,13 @@ fn main() -> Result<(), JITError> {
     // 1. Create the JIT, with code generation at the aggressive level.
     let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
 
-    // 2. Parse the IR and run the optimizer for the host CPU.
+    // 2. Parse the IR, link the import, then run the optimizer for the host CPU.
+    //    Linking has to come first; `optimize` would otherwise treat library-named
+    //    declarations as the C library's functions.
     let mut module = jit.parse_module("hello_module", IR)?;
 
-    module.optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
     module.link_host_func("host_print", host_print as extern "C" fn(_, _))?;
+    module.optimize(OptLevel::O3)?;
 
     let instance = unsafe { module.compile() }?;
 

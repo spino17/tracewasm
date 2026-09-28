@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tracewasm_jit::error::JITError;
 use tracewasm_jit::func::{Func, LLVMFunc};
-use tracewasm_jit::{JITCompiledInstance, JITHandler};
+use tracewasm_jit::{JITCompiledInstance, JITHandler, OptLevel};
 
 const IR: &str = r#"
 @msg = private constant [13 x i8] c"Hello, world!"
@@ -94,18 +94,17 @@ fn jit() -> JITHandler {
 fn instance(jit: &JITHandler, optimize: bool) -> JITCompiledInstance<'_> {
     let mut module = jit.parse_module("m", IR).unwrap();
 
-    if optimize {
-        module
-            .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
-            .unwrap();
-    }
-
     module
         .link_host_func("host_print", host_print as extern "C" fn(_, _))
         .unwrap();
     module
         .link_host_func("host_double", host_double as extern "C" fn(_) -> _)
         .unwrap();
+
+    // Linking comes first, so the optimizer sees the declarations as `nobuiltin`.
+    if optimize {
+        module.optimize(OptLevel::O3).unwrap();
+    }
 
     // SAFETY: every function in `IR` is defined for the inputs these tests use.
     unsafe { module.compile() }.unwrap()
@@ -251,7 +250,7 @@ fn unknown_name_is_not_exported() {
 }
 
 #[test]
-fn unlinked_host_function_fails_at_lookup() {
+fn unlinked_host_function_fails_at_compile() {
     let jit = jit();
     let module = jit
         .parse_module(
@@ -260,15 +259,67 @@ fn unlinked_host_function_fails_at_lookup() {
         )
         .unwrap();
 
-    // SAFETY: `f` never runs; the lookup fails first. (ORC prints the missing
-    // symbol's name to stderr; the error itself only names `f`.)
-    let inst = unsafe { module.compile() }.unwrap();
-    let err = inst.get_func::<(), i64>("f").err().unwrap();
+    // SAFETY: nothing runs; compilation fails first.
+    let err = unsafe { module.compile() }.err().unwrap();
 
     assert!(
-        matches!(err, JITError::LLVMError(ref s) if s.contains("materialize")),
+        matches!(err, JITError::UnresolvedSymbol(ref n) if n == "missing"),
         "{err:?}"
     );
+}
+
+#[test]
+fn external_global_is_unresolved() {
+    let jit = jit();
+    let module = jit
+        .parse_module(
+            "m",
+            "@g = external global i64\ndefine i64 @f() {\n  %v = load i64, ptr @g\n  ret i64 %v\n}",
+        )
+        .unwrap();
+
+    // SAFETY: nothing runs; compilation fails first.
+    let err = unsafe { module.compile() }.err().unwrap();
+
+    assert!(
+        matches!(err, JITError::UnresolvedSymbol(ref n) if n == "g"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn backend_library_calls_resolve_against_the_process() {
+    // A variable-length `llvm.memcpy` and `frem` lower to calls to `memcpy` and
+    // `fmod`, which the module never declares.
+    let ir = r#"
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+
+define void @copy(ptr %dst, ptr %src, i64 %n) {
+  call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %n, i1 false)
+  ret void
+}
+
+define double @rem(double %a, double %b) {
+  %r = frem double %a, %b
+  ret double %r
+}
+"#;
+    let jit = jit();
+    let module = jit.parse_module("m", ir).unwrap();
+
+    // SAFETY: the test passes valid, non-overlapping buffers of `n` bytes.
+    let inst = unsafe { module.compile() }.unwrap();
+    let copy = inst
+        .get_func::<(*mut u64, *const u64, i64), ()>("copy")
+        .unwrap();
+    let rem = inst.get_func::<(f64, f64), f64>("rem").unwrap();
+    let src = [1_u64, 2, 3, 4];
+    let mut dst = [0_u64; 4];
+
+    copy.call(dst.as_mut_ptr(), src.as_ptr(), 32);
+
+    assert_eq!(dst, src);
+    assert_eq!(rem.call(7.5, 2.0), 1.5);
 }
 
 #[test]
@@ -289,17 +340,199 @@ fn two_modules_in_one_jit() {
 }
 
 #[test]
-fn duplicate_export_across_modules_is_an_error() {
+fn the_same_module_compiles_twice_with_separate_state() {
+    let ir = r#"
+@counter = global i64 0
+
+define i64 @bump() {
+  %v = load i64, ptr @counter
+  %n = add i64 %v, 1
+  store i64 %n, ptr @counter
+  ret i64 %n
+}
+"#;
     let jit = jit();
-    let ir = "define i64 @same() {\n  ret i64 1\n}";
-    let a = jit.parse_module("a", ir).unwrap();
-    let b = jit.parse_module("b", ir).unwrap();
 
-    // SAFETY: `same` is total.
-    unsafe { a.compile() }.unwrap();
+    // SAFETY: `bump` is total.
+    let (a, b) = unsafe {
+        (
+            jit.parse_module("m", ir).unwrap().compile().unwrap(),
+            jit.parse_module("m", ir).unwrap().compile().unwrap(),
+        )
+    };
+    let bump_a = a.get_func::<(), i64>("bump").unwrap();
+    let bump_b = b.get_func::<(), i64>("bump").unwrap();
 
+    assert_eq!(bump_a.call(), 1);
+    assert_eq!(bump_a.call(), 2);
+    assert_eq!(bump_b.call(), 1);
+}
+
+#[test]
+fn dropped_instances_can_be_replaced() {
+    let jit = jit();
+    let ir = "define i64 @f() {\n  ret i64 7\n}";
+
+    for _ in 0..50 {
+        // SAFETY: `f` is total.
+        let inst = unsafe { jit.parse_module("m", ir).unwrap().compile() }.unwrap();
+
+        assert_eq!(inst.get_func::<(), i64>("f").unwrap().call(), 7);
+    }
+}
+
+static ABS_CALLS: AtomicI64 = AtomicI64::new(0);
+
+// Named like the C library's `abs`, but deliberately not it.
+extern "C" fn not_abs(x: i32) -> i32 {
+    ABS_CALLS.fetch_add(1, Ordering::SeqCst);
+
+    x + 100
+}
+
+const ABS_IR: &str = r#"
+declare i32 @abs(i32)
+
+define i32 @folded() {
+  %r = call i32 @abs(i32 -5)
+  ret i32 %r
+}
+
+define void @result_unused(i32 %x) {
+  %r = call i32 @abs(i32 %x)
+  ret void
+}
+"#;
+
+#[test]
+fn optimizer_keeps_host_functions_named_like_libc() {
+    let jit = jit();
+    let mut module = jit.parse_module("m", ABS_IR).unwrap();
+
+    module
+        .link_host_func("abs", not_abs as extern "C" fn(_) -> _)
+        .unwrap();
+    module.optimize(OptLevel::O3).unwrap();
+
+    // SAFETY: both functions are total.
+    let inst = unsafe { module.compile() }.unwrap();
+    let folded = inst.get_func::<(), i32>("folded").unwrap();
+    let result_unused = inst.get_func::<(i32,), ()>("result_unused").unwrap();
+
+    // Not constant-folded to libc's `abs(-5) == 5`.
+    assert_eq!(folded.call(), 95);
+
+    // Not deleted as a side-effect-free libc call.
+    let before = ABS_CALLS.load(Ordering::SeqCst);
+
+    result_unused.call(1);
+
+    assert!(ABS_CALLS.load(Ordering::SeqCst) > before);
+}
+
+#[test]
+fn optimizer_may_drop_unused_host_declarations() {
+    let jit = jit();
+    let mut module = jit
+        .parse_module(
+            "m",
+            "declare i64 @unused(i64)\ndefine i64 @f() {\n  ret i64 1\n}",
+        )
+        .unwrap();
+
+    module
+        .link_host_func("unused", host_double as extern "C" fn(_) -> _)
+        .unwrap();
+    module.optimize(OptLevel::O3).unwrap();
+
+    // SAFETY: `f` is total.
+    let inst = unsafe { module.compile() }.unwrap();
+
+    assert_eq!(inst.get_func::<(), i64>("f").unwrap().call(), 1);
+}
+
+#[test]
+fn hidden_functions_are_not_exported_and_dont_break_compile() {
+    let jit = jit();
+    let ir = "define hidden i64 @secret() {\n  ret i64 1\n}\ndefine i64 @open() {\n  %r = call i64 @secret()\n  ret i64 %r\n}";
+
+    // SAFETY: both functions are total.
+    let inst = unsafe { jit.parse_module("m", ir).unwrap().compile() }.unwrap();
+
+    assert_eq!(inst.get_func::<(), i64>("open").unwrap().call(), 1);
     assert!(matches!(
-        unsafe { b.compile() },
-        Err(JITError::LLVMError(_))
+        inst.get_func::<(), i64>("secret"),
+        Err(JITError::FuncNotExported(_))
     ));
+}
+
+#[test]
+fn weak_and_linkonce_odr_functions_are_exported() {
+    let jit = jit();
+    let ir =
+        "define weak i64 @w() {\n  ret i64 3\n}\ndefine linkonce_odr i64 @l() {\n  ret i64 4\n}";
+
+    // SAFETY: both functions are total.
+    let inst = unsafe { jit.parse_module("m", ir).unwrap().compile() }.unwrap();
+
+    assert_eq!(inst.get_func::<(), i64>("w").unwrap().call(), 3);
+    assert_eq!(inst.get_func::<(), i64>("l").unwrap().call(), 4);
+}
+
+const CTOR_IR: &str = r#"
+@g = global i64 0
+@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]
+
+define internal void @init() {
+  store i64 42, ptr @g
+  ret void
+}
+
+define i64 @get() {
+  %v = load i64, ptr @g
+  ret i64 %v
+}
+"#;
+
+#[test]
+fn static_constructors_are_rejected() {
+    let jit = jit();
+    let module = jit.parse_module("m", CTOR_IR).unwrap();
+
+    // SAFETY: nothing runs; compilation fails first.
+    let err = unsafe { module.compile() }.err().unwrap();
+
+    assert!(matches!(err, JITError::StaticInitializers));
+}
+
+#[test]
+fn a_constructor_the_optimizer_folds_away_is_fine() {
+    let jit = jit();
+    let mut module = jit.parse_module("m", CTOR_IR).unwrap();
+
+    // GlobalOpt evaluates `init` at compile time and folds it into `@g`.
+    module.optimize(OptLevel::O2).unwrap();
+
+    // SAFETY: `get` is total.
+    let inst = unsafe { module.compile() }.unwrap();
+
+    assert_eq!(inst.get_func::<(), i64>("get").unwrap().call(), 42);
+}
+
+#[test]
+fn many_exports_are_looked_up_together() {
+    let jit = jit();
+    let ir: String = (0..20)
+        .map(|i| format!("define i64 @f{i}() {{\n  ret i64 {i}\n}}\n"))
+        .collect();
+
+    // SAFETY: all functions are total.
+    let inst = unsafe { jit.parse_module("m", &ir).unwrap().compile() }.unwrap();
+
+    for i in 0..20 {
+        assert_eq!(
+            inst.get_func::<(), i64>(&format!("f{i}")).unwrap().call(),
+            i
+        );
+    }
 }

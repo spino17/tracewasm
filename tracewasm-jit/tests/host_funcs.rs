@@ -1,6 +1,6 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
-use tracewasm_jit::JITHandler;
 use tracewasm_jit::error::JITError;
+use tracewasm_jit::{JITHandler, OptLevel};
 
 const IR: &str = r#"
 declare void @host_print(ptr, i64)
@@ -55,7 +55,7 @@ fn jit() -> JITHandler {
 #[test]
 fn links_every_supported_shape() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
 
     m.link_host_func("host_print", host_print as extern "C" fn(_, _))
         .unwrap();
@@ -72,7 +72,7 @@ fn links_every_supported_shape() {
 #[test]
 fn signature_mismatch_is_rejected() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
 
     // IR: i32 (i32). Host: i64 (i64, i64).
     let err = m.link_host_func("narrow", add as Add).err().unwrap();
@@ -94,7 +94,7 @@ fn signature_mismatch_is_rejected() {
 #[test]
 fn void_vs_value_return_is_a_mismatch() {
     let jit = jit();
-    let m = jit.parse_module("m", "declare i64 @f()").unwrap();
+    let mut m = jit.parse_module("m", "declare i64 @f()").unwrap();
     let err = m
         .link_host_func("f", tick as extern "C" fn())
         .err()
@@ -106,7 +106,7 @@ fn void_vs_value_return_is_a_mismatch() {
 #[test]
 fn variadic_declaration_is_a_mismatch() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
     let err = m
         .link_host_func("variadic", one as extern "C" fn(_) -> _)
         .err()
@@ -116,27 +116,39 @@ fn variadic_declaration_is_a_mismatch() {
 }
 
 #[test]
-fn undeclared_name_is_rejected() {
+fn undeclared_name_is_accepted() {
+    // Nothing calls it, so there's no signature to check.
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
-    let err = m.link_host_func("nowhere", add as Add).err().unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
 
-    assert!(matches!(err, JITError::HostFuncNotDeclared(ref n) if n == "nowhere"));
+    m.link_host_func("nowhere", add as Add).unwrap();
+}
+
+#[test]
+fn linking_after_optimize_is_rejected() {
+    let jit = jit();
+    let mut m = jit.parse_module("m", IR).unwrap();
+
+    m.optimize(OptLevel::O2).unwrap();
+
+    let err = m.link_host_func("add", add as Add).err().unwrap();
+
+    assert!(matches!(err, JITError::HostFuncLinkedAfterOptimize(ref n) if n == "add"));
 }
 
 #[test]
 fn name_with_a_body_in_the_module_is_rejected() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
     let err = m.link_host_func("defined", add as Add).err().unwrap();
 
-    assert!(matches!(err, JITError::HostFuncNotDeclared(ref n) if n == "defined"));
+    assert!(matches!(err, JITError::HostFuncDefinedInModule(ref n) if n == "defined"));
 }
 
 #[test]
 fn nul_in_func_name_is_an_error() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
     let err = m.link_host_func("a\0b", add as Add).err().unwrap();
 
     assert!(matches!(err, JITError::InvalidFuncName));
@@ -145,31 +157,32 @@ fn nul_in_func_name_is_an_error() {
 #[test]
 fn relinking_the_same_function_is_a_no_op() {
     let jit = jit();
-    let m = jit.parse_module("m", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
 
     m.link_host_func("add", add as Add).unwrap();
     m.link_host_func("add", add as Add).unwrap();
-}
-
-#[test]
-fn two_modules_can_share_a_host_function() {
-    let jit = jit();
-    let a = jit.parse_module("a", IR).unwrap();
-    let b = jit.parse_module("b", IR).unwrap();
-
-    a.link_host_func("add", add as Add).unwrap();
-    b.link_host_func("add", add as Add).unwrap();
 }
 
 #[test]
 fn a_different_function_under_a_linked_name_is_rejected() {
     let jit = jit();
-    let a = jit.parse_module("a", IR).unwrap();
-    let b = jit.parse_module("b", IR).unwrap();
+    let mut m = jit.parse_module("m", IR).unwrap();
 
-    a.link_host_func("add", add as Add).unwrap();
+    m.link_host_func("add", add as Add).unwrap();
 
-    let err = b.link_host_func("add", sub as Add).err().unwrap();
+    let err = m.link_host_func("add", sub as Add).err().unwrap();
 
     assert!(matches!(err, JITError::HostFuncAlreadyLinked(ref n) if n == "add"));
+}
+
+#[test]
+fn modules_link_host_functions_independently() {
+    let jit = jit();
+    let mut a = jit.parse_module("a", IR).unwrap();
+    let mut b = jit.parse_module("b", IR).unwrap();
+
+    // Each module gets its own JITDylib, so the same name can mean different
+    // functions in different modules.
+    a.link_host_func("add", add as Add).unwrap();
+    b.link_host_func("add", sub as Add).unwrap();
 }
