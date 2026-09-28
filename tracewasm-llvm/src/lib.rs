@@ -3,7 +3,8 @@
 //! This is a construction layer for a compiler backend: you build a
 //! [`ControlFlowGraph`](cfg::ControlFlowGraph) out of functions, basic blocks and
 //! instructions, and [`IREmitter`](cfg::emit::IREmitter) turns it into text that
-//! `llvm-as` accepts. Nothing here parses IR or links against libLLVM.
+//! `llvm-as` accepts. Nothing here parses IR or links against libLLVM, except the
+//! `jit` module, which is only built with the `jit` feature.
 //!
 //! # The shape of the API
 //!
@@ -65,6 +66,8 @@ pub mod constants;
 pub mod error;
 pub mod instruction;
 pub mod interner;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod value;
 
 #[cfg(test)]

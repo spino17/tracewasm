@@ -1,4 +1,4 @@
-use crate::JITCompiledInstance;
+use crate::jit::JITCompiledInstance;
 use llvm_sys::core::*;
 use llvm_sys::prelude::{LLVMContextRef, LLVMTypeRef};
 use std::marker::PhantomData;

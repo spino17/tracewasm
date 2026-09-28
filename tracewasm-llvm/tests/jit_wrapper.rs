@@ -1,6 +1,6 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
-use tracewasm_jit::error::JITError;
-use tracewasm_jit::{JITHandler, OptLevel};
+use tracewasm_llvm::jit::error::JITError;
+use tracewasm_llvm::jit::{JITHandler, OptLevel};
 
 const IR: &str = r#"
 define i64 @sum_to(i64 %n) {

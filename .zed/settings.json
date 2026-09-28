@@ -1,0 +1,13 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          // `tracewasm_llvm::jit` only exists with this feature; without it
+          // rust-analyzer treats the module as configured out.
+          "features": ["tracewasm-llvm/jit"]
+        }
+      }
+    }
+  }
+}

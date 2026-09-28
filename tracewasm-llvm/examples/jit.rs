@@ -1,6 +1,6 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
-use tracewasm_jit::error::JITError;
-use tracewasm_jit::{JITHandler, OptLevel, imported};
+use tracewasm_llvm::jit::error::JITError;
+use tracewasm_llvm::jit::{JITHandler, OptLevel, imported};
 
 // Two exports and one import.
 //

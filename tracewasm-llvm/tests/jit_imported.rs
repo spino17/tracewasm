@@ -4,8 +4,8 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracewasm_jit::error::JITError;
-use tracewasm_jit::{JITCompiledInstance, JITHandler, OptLevel, imported};
+use tracewasm_llvm::jit::error::JITError;
+use tracewasm_llvm::jit::{JITCompiledInstance, JITHandler, OptLevel, imported};
 
 static PRINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static TICKS: AtomicU64 = AtomicU64::new(0);

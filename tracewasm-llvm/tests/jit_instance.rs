@@ -1,9 +1,9 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tracewasm_jit::error::JITError;
-use tracewasm_jit::func::{Func, LLVMFunc};
-use tracewasm_jit::{JITCompiledInstance, JITHandler, OptLevel};
+use tracewasm_llvm::jit::error::JITError;
+use tracewasm_llvm::jit::func::{Func, LLVMFunc};
+use tracewasm_llvm::jit::{JITCompiledInstance, JITHandler, OptLevel};
 
 const IR: &str = r#"
 @msg = private constant [13 x i8] c"Hello, world!"

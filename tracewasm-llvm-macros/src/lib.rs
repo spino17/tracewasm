@@ -5,8 +5,8 @@ use syn::spanned::Spanned;
 use syn::{Error, FnArg, ItemFn, LitStr, ReturnType, parse_macro_input};
 
 /// Registers a free function as a host function. Every module
-/// `tracewasm_jit::JITHandler::parse_module` parses then links it under the
-/// function's name, or under `name = "..."` if given. See `tracewasm_jit::imported`
+/// `tracewasm_llvm::jit::JITHandler::parse_module` parses then links it under the
+/// function's name, or under `name = "..."` if given. See `tracewasm_llvm::jit::imported`
 /// for the full contract.
 #[proc_macro_attribute]
 pub fn imported(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -105,13 +105,13 @@ fn expand(attr: TokenStream2, func: &ItemFn) -> syn::Result<TokenStream2> {
             }
 
             fn link(
-                module: &mut ::tracewasm_jit::JITModule<'_>,
-            ) -> ::core::result::Result<(), ::tracewasm_jit::error::JITError> {
+                module: &mut ::tracewasm_llvm::jit::JITModule<'_>,
+            ) -> ::core::result::Result<(), ::tracewasm_llvm::jit::error::JITError> {
                 module.link_host_func(#name, shim as extern "C" fn(#(#tys),*) -> #ret)
             }
 
-            ::tracewasm_jit::__private::inventory::submit! {
-                ::tracewasm_jit::__private::HostFuncRegistration::new(link)
+            ::tracewasm_llvm::jit::__private::inventory::submit! {
+                ::tracewasm_llvm::jit::__private::HostFuncRegistration::new(link)
             }
         };
     })

@@ -1,5 +1,17 @@
-use crate::error::JITError;
-use crate::func::{Func, LLVMFuncParams, LLVMFuncResult, LLVMHostFunc, fn_type};
+//! Compiles and runs textual IR in-process, through LLVM's ORC JIT.
+//!
+//! Only built with the `jit` feature, since it links libLLVM. It takes IR as text,
+//! so it pairs with [`IREmitter`](crate::cfg::emit::IREmitter) but doesn't depend
+//! on it: any IR that parses and verifies will do.
+//!
+//! The flow follows LLVM's: [`JITHandler::parse_module`] parses, verifies and
+//! links [`#[imported]`](imported) host functions; [`JITModule::link_host_func`]
+//! links more by hand; [`JITModule::optimize`] runs the IR pipeline;
+//! [`JITModule::compile`] compiles everything into its own JITDylib; and
+//! [`JITCompiledInstance::get_func`] hands out type-checked functions to call.
+
+use crate::jit::error::JITError;
+use crate::jit::func::{Func, LLVMFuncParams, LLVMFuncResult, LLVMHostFunc, fn_type};
 use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
 use llvm_sys::core::*;
 use llvm_sys::error::*;
@@ -46,7 +58,7 @@ pub mod func;
 /// fails to parse with [`HostFuncSignatureMismatch`](error::JITError::HostFuncSignatureMismatch).
 ///
 /// ```
-/// use tracewasm_jit::{JITHandler, imported};
+/// use tracewasm_llvm::jit::{JITHandler, imported};
 /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 ///
 /// #[imported]
@@ -74,7 +86,7 @@ pub mod func;
 /// Only safe, non-generic free functions qualify:
 ///
 /// ```compile_fail
-/// # use tracewasm_jit::imported;
+/// # use tracewasm_llvm::jit::imported;
 /// #[imported]
 /// unsafe fn raw(p: *const u8) -> u8 {
 ///     unsafe { *p }
@@ -82,7 +94,7 @@ pub mod func;
 /// ```
 ///
 /// ```compile_fail
-/// # use tracewasm_jit::imported;
+/// # use tracewasm_llvm::jit::imported;
 /// #[imported]
 /// fn generic<T: Copy>(x: T) -> T {
 ///     x
@@ -92,16 +104,16 @@ pub mod func;
 /// and every type in the signature must cross the JIT boundary:
 ///
 /// ```compile_fail
-/// # use tracewasm_jit::imported;
+/// # use tracewasm_llvm::jit::imported;
 /// #[imported]
 /// fn takes_a_string(s: String) {}
 /// ```
-pub use tracewasm_jit_macros::imported;
+pub use tracewasm_llvm_macros::imported;
 
 #[doc(hidden)]
 pub mod __private {
-    use crate::JITModule;
-    use crate::error::JITError;
+    use crate::jit::JITModule;
+    use crate::jit::error::JITError;
 
     pub use inventory;
 
@@ -267,7 +279,7 @@ impl JITHandler {
 /// from, so it can't outlive the JIT whose triple and data layout it uses.
 ///
 /// ```compile_fail,E0597
-/// # use tracewasm_jit::{JITHandler, OptLevel};
+/// # use tracewasm_llvm::jit::{JITHandler, OptLevel};
 /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 /// let mut module = {
 ///     let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
@@ -327,7 +339,7 @@ impl<'jit> JITModule<'jit> {
     /// fill in the types:
     ///
     /// ```
-    /// # use tracewasm_jit::JITHandler;
+    /// # use tracewasm_llvm::jit::JITHandler;
     /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
     /// extern "C" fn add(a: i64, b: i64) -> i64 { a + b }
     ///
@@ -580,7 +592,7 @@ impl<'jit> JITCompiledInstance<'jit> {
     /// `R`, which must match its IR definition exactly.
     ///
     /// ```
-    /// # use tracewasm_jit::JITHandler;
+    /// # use tracewasm_llvm::jit::JITHandler;
     /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
     /// let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
     /// let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";
@@ -596,7 +608,7 @@ impl<'jit> JITCompiledInstance<'jit> {
     /// `call` only accepts the looked-up signature:
     ///
     /// ```compile_fail,E0308
-    /// # use tracewasm_jit::JITHandler;
+    /// # use tracewasm_llvm::jit::JITHandler;
     /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
     /// # let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
     /// # let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";
@@ -609,7 +621,7 @@ impl<'jit> JITCompiledInstance<'jit> {
     /// and can't outlive the instance:
     ///
     /// ```compile_fail,E0597
-    /// # use tracewasm_jit::JITHandler;
+    /// # use tracewasm_llvm::jit::JITHandler;
     /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
     /// # let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
     /// # let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";

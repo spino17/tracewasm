@@ -550,36 +550,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracewasm-jit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "inventory",
- "llvm-sys",
- "thiserror",
- "tracewasm-jit-macros",
-]
-
-[[package]]
-name = "tracewasm-jit-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "tracewasm-llvm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "id-arena",
+ "inventory",
+ "llvm-sys",
  "ordered-float",
  "regex",
  "rustc-hash",
  "thiserror",
+ "tracewasm-llvm-macros",
  "tracewasm-utils",
+]
+
+[[package]]
+name = "tracewasm-llvm-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
