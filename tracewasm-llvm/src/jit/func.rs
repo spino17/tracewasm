@@ -1,3 +1,6 @@
+//! The Rust types that can cross the JIT boundary, and [`Func`], a compiled
+//! function you can call.
+
 use crate::jit::JITCompiledInstance;
 use llvm_sys::core::*;
 use llvm_sys::prelude::{LLVMContextRef, LLVMTypeRef};
@@ -11,7 +14,8 @@ mod sealed {
     pub trait SealedParams {}
 }
 
-/// A Rust type that can be passed to a host function, with its IR type.
+/// A Rust type that can cross the JIT boundary as a parameter, of a host function
+/// or of a compiled one, with its IR type.
 ///
 /// Only types whose C ABI needs no `zeroext`/`signext` attribute are included,
 /// so `i8`, `u8`, `i16`, `u16` and `bool` are deliberately missing.
@@ -22,7 +26,8 @@ pub trait LLVMFuncParam: sealed::Sealed + Copy + 'static {
     unsafe fn llvm_type(ctx: LLVMContextRef) -> LLVMTypeRef;
 }
 
-/// A Rust type that a host function can return, with its IR type. `()` is `void`.
+/// A Rust type that a host function or a compiled function can return, with its
+/// IR type. `()` is `void`.
 pub trait LLVMFuncResult: sealed::Sealed + 'static {
     /// # Safety
     /// `ctx` must be a valid, live LLVM context.
@@ -42,6 +47,7 @@ pub trait LLVMFuncParams: sealed::SealedParams + 'static {
 pub trait LLVMFunc {
     /// The parameters as a tuple, e.g. `(i64, i64)`.
     type Params;
+    /// The result type, e.g. `i64`, or `()` for `void`.
     type Results;
 }
 
@@ -78,8 +84,8 @@ pub(crate) unsafe fn fn_type<P: LLVMFuncParams, R: LLVMFuncResult>(
 /// A compiled function whose signature was checked against its IR definition
 /// when it was looked up. `call` accepts exactly the parameters `P` and returns `R`.
 ///
-/// It borrows the instance it came from, so it can't be called after the JIT
-/// that owns its code is gone.
+/// It borrows the [`JITCompiledInstance`] it came from, whose drop frees the code,
+/// so it can't be called once that instance is gone.
 pub struct Func<'a, P, R> {
     addr: usize,
     _inst: PhantomData<&'a JITCompiledInstance<'a>>,
@@ -193,6 +199,8 @@ macro_rules! func {
         }
 
         impl<$($a: LLVMFuncParam,)* R: LLVMFuncResult> Func<'_, ($($a,)*), R> {
+            /// Calls the compiled function. The arguments are exactly the
+            /// parameter types it was looked up with.
             #[allow(non_snake_case, clippy::too_many_arguments)]
             pub fn call(&self, $($a: $a),*) -> R {
                 // SAFETY: `from_addr`'s contract: `addr` is live compiled code whose

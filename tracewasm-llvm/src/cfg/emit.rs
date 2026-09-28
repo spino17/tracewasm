@@ -22,8 +22,9 @@ use anyhow::bail;
 /// Renders a [`ControlFlowGraph`] as textual `.ll`.
 ///
 /// A [`CfgVisitor`] that appends to a string as it walks. The output is what
-/// `llvm-as` accepts: the crate's own test builds a module using every instruction
-/// and checks that `llvm-as` both parses **and** verifies it.
+/// `llvm-as` accepts: the crate's own test builds a module using every instruction and
+/// compares it against IR that was checked by hand with `llvm-as` ("parsed and
+/// verified"). The tests don't run `llvm-as` themselves.
 ///
 /// Nothing is validated here — a block without a terminator, or a phi missing an
 /// entry for a predecessor, is emitted as-is and reported by `llvm-as`.
@@ -39,8 +40,8 @@ impl IREmitter {
     ///
     /// If the graph contains something the emitter cannot spell. Currently that is
     /// only a constant expression other than
-    /// [`GetElementPtr`](crate::value::ConstExpr::GetElementPtr), since the others
-    /// carry no operands — refused rather than written as a placeholder `llvm-as`
+    /// [`GetElementPtr`](crate::value::ConstExpr::GetElementPtr) or
+    /// [`Const`](crate::value::ConstExpr::Const), since the others carry no operands — refused rather than written as a placeholder `llvm-as`
     /// could not parse.
     pub fn emit(cfg: ControlFlowGraph) -> Result<String, anyhow::Error> {
         let mut emitter = IREmitter {
@@ -381,9 +382,8 @@ impl CfgVisitor for IREmitter {
         operands: &RetOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        // `ret void` carries no operand; every other result is `ret <ty> <val>`, and
-        // the type comes from the instruction rather than the value so a `void`
-        // return still spells its type.
+        // `ret <ty> <val>` takes the type from the value itself; only `ret void`,
+        // which has no value, spells the instruction's type.
         match &operands.value {
             Some(value) => {
                 self.push_line(&format!("ret {}", Self::typed_operand(*value, ctx)?));
@@ -1280,7 +1280,7 @@ mod tests {
         let i32_ty = builder.i32_ty();
         let ptr_ty = builder.ptr_ty();
 
-        // A constant gep is the one initializer `ConstExpr` can express today.
+        // A constant gep: an initializer that is a constant expression, not a literal.
         let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
         let zero = Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap();
 

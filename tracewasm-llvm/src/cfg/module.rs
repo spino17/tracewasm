@@ -272,8 +272,8 @@ impl Display for DataLayout {
 ///
 /// Owned by the [`Context`](crate::cfg::context::Context), which the finished
 /// [`ControlFlowGraph`](crate::cfg::ControlFlowGraph) takes over. Functions are held
-/// as ids into the context's arena; `func_names` maps each name to its signature,
-/// which is what makes a duplicate `@name` a build error rather than something
+/// as ids into the context's arena; `globals` maps each `@name`, function or
+/// variable, to its [`GlobalData`], which is what makes a duplicate `@name` a build error rather than something
 /// `llvm-as` discovers later.
 ///
 /// The target strings are rendered from a [`Triple`] and a [`DataLayout`] at

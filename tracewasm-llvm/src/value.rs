@@ -1,7 +1,7 @@
 //! Types and the values that carry them.
 //!
 //! A [`Value`] is what an instruction operates on: a type plus how the value is
-//! obtained — a register, a pooled constant, or a constant expression.
+//! obtained — a register, a constant expression (literals included), or a global.
 //!
 //! # Values live once, and are named by id
 //!
@@ -226,6 +226,8 @@ impl TyId {
         matches!(ty_obj, Type::Void)
     }
 
+    /// A struct type's field types and whether it's packed (`<{ … }>`), or `None`
+    /// if this isn't a struct.
     pub fn try_struct<'a>(&self, ctx: &'a Context) -> Option<(&'a [TyId], bool)> {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -239,10 +241,11 @@ impl TyId {
     /// The ABI alignment of this type in bytes, or `None` where it is not a fixed
     /// number this crate decides.
     ///
-    /// Only the scalars answer. For them alignment equals width, which is why this
-    /// reads as a width table; a pointer's and an aggregate's come from the target's
-    /// data layout, so `None` here means "let the ABI default apply" rather than
-    /// "unaligned" — which is exactly how the builders read a `None` `align`.
+    /// Scalars and structs answer: a scalar's alignment equals its width, a packed
+    /// struct's is 1, and any other struct's is its largest field's. A pointer's, an
+    /// array's, a function's and `void`'s come from the target's data layout, so
+    /// `None` here means "let the ABI default apply" rather than "unaligned" — which
+    /// is exactly how the builders read a `None` `align`.
     pub fn alignment(&self, ctx: &Context) -> Option<u32> {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
@@ -732,7 +735,8 @@ impl Value {
     /// Usually reached as [`const_value`](crate::cfg::context::Context::const_value)
     /// on whichever of the builder or cursor is in hand.
     ///
-    /// Widths convert freely among integers, and between `float` and `double`.
+    /// Integers convert among widths when the value fits, `float` widens to `double`,
+    /// and `double` narrows to `float` only when the value is exact.
     /// Crossing between integers and floats, or reaching a pointer, is refused —
     /// those need a real `sitofp`/`inttoptr` instruction, and folding them here would
     /// silently drop it.
@@ -759,7 +763,7 @@ impl Value {
     /// The zero of `ty`: `0`, `0.0`, or `null`.
     ///
     /// What a wasm local is initialised to, so it answers for the types
-    /// [`ValType`](crate::value::Type) maps onto and `None` for the rest. A
+    /// wasm's `ValType` maps onto and `None` for the rest. A
     /// reference's zero is the null pointer, which is what `ref.null` means.
     pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<ValueId> {
         let ty_obj = ctx.ty_interner.value(ty.raw());
@@ -787,9 +791,9 @@ impl Value {
 
     /// Interns `name` and builds a register of the given type.
     ///
-    /// Crate-private because a register has to be *defined* by something: the
-    /// builders call this after `name_for_reg` has issued a unique name, and record
-    /// the definition so the pointee of a pointer can later be traced back.
+    /// Crate-private because a register has to be *defined* by something: this
+    /// issues a unique name through `name_for_reg`, and the builders record the
+    /// definition so the pointee of a pointer can later be traced back.
     /// Constructing one freely would produce a `%name` that no instruction defines.
     pub(crate) fn from_register(
         name: &RegName,
@@ -1100,7 +1104,7 @@ impl ConstExpr {
 }
 
 #[derive(Debug, Clone, Copy)]
-/// A named local, `%x`.
+/// A local register, named (`%x`) or unnamed (`%N`).
 ///
 /// The name alone is not an identity: names are interned per *context*, so `%sum` in
 /// two functions is one [`StrId`]. What makes a register unique is that name together
@@ -1370,8 +1374,9 @@ pub trait Const {
 
     /// Folds the literal into `ty`, or `None` if it does not belong there.
     ///
-    /// Integers narrow and widen among themselves, truncating the way LLVM's `trunc`
-    /// would; floats convert between `float` and `double`. Nothing crosses between
+    /// Integers narrow and widen among themselves, narrowing only when the value fits
+    /// under `signedness` (an out-of-range value gives `None` rather than being
+    /// truncated); `float` widens to `double`, and `double` narrows only when exact. Nothing crosses between
     /// integers and floats, and nothing reaches a pointer — those need a real
     /// conversion instruction.
     fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue>;
@@ -1717,7 +1722,7 @@ impl Const for NullPtr {
 /// A value already known to be an `i1`, so a conditional branch cannot be handed
 /// anything else.
 ///
-/// It keeps the pool id it was narrowed from rather than re-deriving `i1` on the way
+/// It keeps the value id it was narrowed from rather than re-deriving `i1` on the way
 /// back: [`ValueId::try_i1`] has already resolved and checked that id, so converting
 /// back needs neither the interner nor a second chance to fail.
 #[derive(Debug)]
@@ -1787,7 +1792,7 @@ mod tests {
     }
 
     /// The type a value reports is the one it was cast *to*, not the one the Rust
-    /// literal had — otherwise a later `into_i1` or a type check reads the wrong
+    /// literal had — otherwise a later `try_i1` or a type check reads the wrong
     /// answer.
     #[test]
     fn a_cast_sets_the_values_type_and_its_stored_variant() {
@@ -2287,7 +2292,8 @@ mod tests {
     /// The non-finite values survive narrowing, because every one of them is exactly
     /// representable at the smaller width.
     ///
-    /// This is what [`f64::is_finite`] guards in the range check: `inf` is greater
+    /// This is why the range check is a round trip that lets NaN through, not a
+    /// bounds test: `inf` is greater
     /// than `f32::MAX`, so a bare bounds test would refuse a value that converts
     /// perfectly. `llvm-as` accepts all of them as `float` — the hex form the emitter
     /// writes is the f32 widened back to f64, which lands on the canonical bit
@@ -2668,10 +2674,10 @@ mod tests {
         );
     }
 
-    /// `into_i1` gates the conditional-branch operand, so it has to reject a
+    /// `try_i1` gates the conditional-branch operand, so it has to reject a
     /// non-`i1` by *returning*, not by panicking while building the message.
     #[test]
-    fn into_i1_accepts_only_i1() {
+    fn try_i1_accepts_only_i1() {
         let mut ctx = crate::test_support::ctx();
 
         let ok = Value::from_const(true, OperandTy::Inferred, &mut ctx).unwrap();
@@ -2938,11 +2944,11 @@ mod tests {
     /// arrived as an `i32 4` and one that arrived as an `i64 4` would be two pool
     /// entries for the type LLVM writes one way. Since a `TyId` comparison is how
     /// every downstream check now tests types, that would make them *reject valid
-    /// IR* rather than fail loudly — see the phi in `instruction.rs`.
+    /// IR* rather than fail loudly — see the phi in `instruction/mod.rs`.
     ///
     /// It is also the only thing LLVM can parse: there is no variable-length array
     /// type, and `llvm-as` refuses `[%n x i32]` in the lexer. A runtime count is
-    /// `alloca`'s `num_elements` operand, which is a `Value`.
+    /// `alloca`'s `count` operand, which is a `Value`.
     #[test]
     fn an_array_length_is_a_number_so_one_length_is_one_type() {
         let mut ctx = crate::test_support::ctx();

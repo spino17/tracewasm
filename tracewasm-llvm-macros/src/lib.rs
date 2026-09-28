@@ -1,3 +1,7 @@
+//! The `#[imported]` attribute for `tracewasm-llvm`'s JIT. Use it through
+//! `tracewasm_llvm::jit::imported` (with the `jit` feature), not from here: the
+//! code it generates names paths in `tracewasm_llvm::jit`.
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};

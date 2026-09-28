@@ -55,9 +55,16 @@ pub mod func;
 ///
 /// Every registered function is linked into every module. A module that doesn't
 /// declare one is unaffected; one that declares it with a different signature
-/// fails to parse with [`HostFuncSignatureMismatch`](error::JITError::HostFuncSignatureMismatch).
+/// fails to parse with [`HostFuncSignatureMismatch`](error::JITError::HostFuncSignatureMismatch),
+/// and one that defines a function of the same name fails with
+/// [`HostFuncDefinedInModule`](error::JITError::HostFuncDefinedInModule).
 ///
-/// ```
+/// "Every module" means every one in the process, which includes tests that share
+/// a binary. Edition-2024 doctests are merged into one binary by default, so a
+/// doctest using `#[imported]` should be marked `standalone_crate`, as the ones
+/// here are.
+///
+/// ```standalone_crate
 /// use tracewasm_llvm::jit::{JITHandler, imported};
 /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 ///
@@ -131,14 +138,21 @@ pub mod __private {
     inventory::collect!(HostFuncRegistration);
 }
 
-/// An IR optimization level, as in `opt -O<n>`.
+/// An IR optimization level, as in `opt -O<n>`. Each runs LLVM's standard
+/// `default<O…>` pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptLevel {
+    /// No optimization.
     O0,
+    /// Quick optimizations only.
     O1,
+    /// The usual optimizations.
     O2,
+    /// Everything `O2` does, plus more aggressive inlining and vectorization.
     O3,
+    /// Like `O2`, but favouring smaller code.
     Os,
+    /// Smallest code, even at a cost in speed.
     Oz,
 }
 
@@ -167,6 +181,8 @@ impl OptLevel {
     }
 }
 
+/// An LLVM ORC JIT (an `LLJIT`) for the host machine. Parse modules into it with
+/// [`parse_module`](Self::parse_module); everything compiled borrows it.
 pub struct JITHandler {
     jit: LLVMOrcLLJITRef,
     // Every compiled module gets its own JITDylib, which needs a unique name.
@@ -226,8 +242,9 @@ impl JITHandler {
     /// function into it.
     ///
     /// A module that names no target gets the JIT's. One that does must name the
-    /// JIT's architecture and exactly the JIT's data layout: code generated for
-    /// another layout can't be retargeted by swapping the layout string.
+    /// JIT's architecture and OS (spelling aside: `arm64-apple-macosx` matches
+    /// `aarch64-apple-darwin25.1.0`) and exactly the JIT's data layout: IR written
+    /// for another platform can't be retargeted by swapping those strings.
     pub fn parse_module(&self, name: &str, module_str: &str) -> Result<JITModule<'_>, JITError> {
         let c_name = CString::new(name).map_err(|_| JITError::InvalidModuleName)?;
 

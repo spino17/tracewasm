@@ -78,7 +78,8 @@ impl Builder {
 
     /// Adds a global variable to the module.
     ///
-    /// Emits `@name = global <ty> <initializer>`. The value is a
+    /// Emits `@name = global <ty> <initializer>`, or `@name = external global <ty>`
+    /// when there is no initializer. The value is a
     /// [`Value::from_global`](crate::value::Value::from_global) away from being usable
     /// as an operand, where its type is `ptr` and `ty` is what that pointer points at.
     ///
@@ -101,7 +102,10 @@ impl Builder {
     /// [`ContextError::DuplicateGlobalName`] if the name is taken — globals and
     /// functions share one namespace, so a variable may not reuse a function's name.
     /// [`ContextError::GlobalVariableTypeNotSized`] if `ty` is `void` or a function
-    /// type, neither of which a variable can hold. Plus the two above.
+    /// type, neither of which a variable can hold.
+    /// [`ContextError::GlobalTypeAndInitializerBothAbsent`] and
+    /// [`ContextError::GlobalInitializerTypeMismatch`] for the table's last row and
+    /// an inexact first row.
     pub fn declare_global_variable<T: Into<String>>(
         &mut self,
         name: T,
@@ -174,8 +178,8 @@ impl Builder {
     /// "use of undefined value".
     ///
     /// Parameters are **types only**, with no name hints, because a declaration has
-    /// no body for a name to refer to. Nothing is returned either: there is no
-    /// [`FuncId`], since there is no function here to add blocks to. The signature is
+    /// no body for a name to refer to. The returned `GlobalId<DeclaredFunc>` has no
+    /// `add_basic_block`, since there is no body here to add blocks to. The signature is
     /// recorded under the name, so
     /// [`Cursor::build_call`](crate::instruction::cursor::Cursor::build_call)
     /// resolves against it exactly as it would a defined function, and checks
@@ -243,11 +247,11 @@ impl Builder {
     ///
     /// Each parameter is a type and an optional name hint. A named parameter keeps
     /// its hint; an unnamed one draws the next number from the function's counter, so
-    /// `&[(i32_ty, None), (i32_ty, None)]` yields `%0` and `%1` and the body's first
+    /// `&[(i32_ty, RegName::Unnamed), (i32_ty, RegName::Unnamed)]` yields `%0` and `%1` and the body's first
     /// unnamed temporary is `%2`. Named parameters consume no numbers.
     ///
-    /// The returned [`FuncId`] is how blocks are added and how the function is read
-    /// back.
+    /// The returned `GlobalId<DefinedFunc>` is how blocks are added and how the
+    /// function is read back.
     ///
     /// # Errors
     ///
@@ -347,8 +351,8 @@ impl Builder {
 
     /// Finishes the module, numbering its unnamed registers.
     ///
-    /// Consumes the builder, so nothing more can be added. The [`Context`] is still
-    /// needed to read the result, since everything inside it is an id.
+    /// Consumes the builder, so nothing more can be added. The graph takes over the
+    /// [`Context`], so reading it needs nothing else.
     ///
     /// # Why the numbering happens here
     ///

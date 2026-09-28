@@ -251,17 +251,18 @@ impl GlobalData {
 
 /// A callable function, however the module came by it.
 ///
-/// A call names its callee with one of these rather than with a string, and the only
-/// sources of one are
+/// A call names its callee with one of these rather than with a string. For a direct
+/// call the only sources are
 /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-/// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call to
-/// a function the module does not have cannot be written — there is no handle to pass
-/// — and the signature behind it is guaranteed to be on record.
+/// [`declare_function`](crate::cfg::builder::Builder::declare_function), so a direct
+/// call to a function the module does not have cannot be written — there is no handle
+/// to pass — and the signature behind it is guaranteed to be on record. An indirect
+/// call ([`Pointer`](Self::Pointer)) carries its own signature instead.
 ///
-/// The two are separate at every other point in the API, because only a definition has
-/// blocks to add. They come together here because a call does not care: it needs a
-/// name and a signature, and both kinds have those. `From` is implemented for each, so
-/// a call site can write `f.into()`.
+/// Definitions and declarations are separate at every other point in the API, because
+/// only a definition has blocks to add. They come together here because a call does not
+/// care: it needs a name and a signature, and both kinds have those. `From` is
+/// implemented for each, so a call site can write `f.into()`.
 #[derive(Clone)]
 pub enum FuncRef {
     /// A function this module defines.
@@ -269,8 +270,18 @@ pub enum FuncRef {
     /// A function this module declares but does not define — a host import, or
     /// anything else resolved at link time.
     Declared(GlobalId<DeclaredFunc>),
+    /// An indirect call through a register holding a function's address, emitted as
+    /// `call <ret> %name(...)`.
+    ///
+    /// Nothing ties the pointer to a function, so the signature is taken on trust
+    /// rather than looked up.
     Pointer {
+        /// The callee's address. Must be a `ptr`-typed register; anything else
+        /// currently panics in [`name_and_sig`](FuncRef::name_and_sig).
         ptr: Value,
+        /// The signature the call is checked against: arity, argument types and
+        /// result. It is the caller's claim about what `ptr` points at; a wrong one
+        /// gives IR whose behaviour is undefined at run time.
         sig: FuncSignature,
     },
 }
@@ -278,14 +289,18 @@ pub enum FuncRef {
 impl FuncRef {
     /// The callee's name and signature, for a `call` to check itself against.
     ///
-    /// Read out together because a call needs both and the borrow rules make taking
-    /// them separately awkward — see the note in the body about interning while the
-    /// function table is borrowed.
+    /// Read out together because a call needs both. The signature is borrowed from
+    /// the module's globals (or from the [`Pointer`](Self::Pointer) itself); a caller
+    /// that goes on to intern types copies it first.
     ///
     /// # Errors
     ///
     /// [`CallError::FunctionNotFound`] if the handle names a function this module
     /// does not have, which can only happen across contexts.
+    ///
+    /// # Panics
+    ///
+    /// For a [`Pointer`](Self::Pointer) whose `ptr` isn't a `ptr`-typed register.
     pub fn name_and_sig<'a, 'b: 'a>(
         &'b self,
         ctx: &'a Context,
@@ -294,9 +309,8 @@ impl FuncRef {
             FuncRef::Declared(func) => {
                 let name = func.name;
 
-                // The signature is read out by value before anything below borrows `ctx`
-                // mutably: casting an argument interns into the type pool, which a live
-                // borrow of the function table would forbid.
+                // Borrowed from `ctx.module.globals`; a caller that interns types
+                // afterwards (casting arguments does) copies the signature first.
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),
@@ -314,9 +328,8 @@ impl FuncRef {
             FuncRef::Defined(func) => {
                 let name = func.name;
 
-                // The signature is read out by value before anything below borrows `ctx`
-                // mutably: casting an argument interns into the type pool, which a live
-                // borrow of the function table would forbid.
+                // Borrowed from `ctx.module.globals`; a caller that interns types
+                // afterwards (casting arguments does) copies the signature first.
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),

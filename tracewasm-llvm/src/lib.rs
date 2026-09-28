@@ -15,8 +15,8 @@
 //!   [`StrId`](interner::StrId), [`FuncId`](cfg::function::FuncId),
 //!   [`BasicBlockId`](cfg::basic_block::BasicBlockId) — and **an id only means
 //!   anything against the context that issued it**.
-//! - A [`Builder`](cfg::builder::Builder) owns the module: it adds functions and
-//!   hands out cursors.
+//! - A [`Builder`](cfg::builder::Builder) owns the context (and so the module): it
+//!   adds functions and hands out cursors.
 //! - A [`Cursor`](instruction::cursor::Cursor) points at one basic block and writes
 //!   instructions into it.
 //!
@@ -25,7 +25,7 @@
 //! #     builder::Builder, context::Context, emit::IREmitter,
 //! #     module::{DataLayout, Triple},
 //! # };
-//! let mut ctx = Context::new(
+//! let ctx = Context::new(
 //!     Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
 //!     DataLayout::default(),
 //! );
@@ -60,6 +60,13 @@
 //! holding them, so structurally equal types are one pool entry and comparing two
 //! types is comparing two integers. The cost is that a type cannot print itself —
 //! rendering needs the pool, via [`Context::display`](cfg::context::Context::display).
+//!
+//! # Running the IR
+//!
+//! With the `jit` feature, the `jit` module parses emitted (or any other) textual IR
+//! into LLVM's ORC JIT, links host functions into it, optimizes and compiles it, and
+//! hands back type-checked functions to call. It is the one part of the crate that
+//! links libLLVM, so it's opt-in; see the module's own docs.
 
 pub mod cfg;
 pub mod constants;
@@ -72,3 +79,9 @@ pub mod value;
 
 #[cfg(test)]
 mod test_support;
+
+// Compiles the README's examples as doctests, so they can't go stale. They use the
+// JIT, so only with the `jit` feature.
+#[cfg(all(doctest, feature = "jit"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

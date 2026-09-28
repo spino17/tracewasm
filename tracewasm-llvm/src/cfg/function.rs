@@ -30,8 +30,9 @@ pub struct Function {
 
 /// A handle to a [`Function`] in a [`Context`]'s arena.
 ///
-/// Carries the methods that read or extend the function, so `f.add_basic_block(..)`
-/// reads like a method call even though the storage lives in the context.
+/// Internal: callers hold a `GlobalId<DefinedFunc>`, which carries the methods that
+/// read or extend the function, so `f.add_basic_block(..)` reads like a method call
+/// even though the storage lives in the context.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FuncId(Id<Function>);
 

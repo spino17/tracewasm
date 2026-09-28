@@ -32,6 +32,7 @@ use crate::{
 ///
 /// ```text
 /// visit_cfg
+///   visit_global_variable   for each global variable
 ///   visit_imported_func     for each declaration
 ///   visit_func              for each defined function
 ///     visit_basic_block     for each block
@@ -45,9 +46,11 @@ use crate::{
 /// The `post_*` hooks default to returning `OkType::default()`, so an implementation
 /// only overrides the ones it needs.
 pub trait CfgVisitor {
-    /// What each visit returns. Collected and handed to the `post_*` hooks, so a
-    /// visitor that accumulates results can use them; an emitter that writes as it
-    /// goes uses `()`.
+    /// What each visit returns. The module-level results (global variables,
+    /// declarations, functions) are collected and handed to
+    /// [`post_module_visit`](Self::post_module_visit); what `visit_func` and
+    /// `visit_basic_block` return is not passed on. An emitter that writes as it goes
+    /// uses `()`.
     type OkType: Default;
 
     /// How a visit fails. The walk stops at the first error.
@@ -418,7 +421,8 @@ pub trait CfgVisitor {
         Ok(Self::OkType::default())
     }
 
-    /// Runs after every declaration and every function, with what each returned.
+    /// Runs after every global variable, declaration and function, with what each
+    /// returned.
     /// Its return value is what [`walk_cfg`](Self::walk_cfg) yields.
     fn post_module_visit(
         &mut self,

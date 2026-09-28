@@ -133,8 +133,9 @@ impl From<TyId> for OperandTy {
 ///
 /// # Ending a block
 ///
-/// The three terminator builders — [`build_unconditional_br`](Self::build_unconditional_br),
-/// [`build_conditional_br`](Self::build_conditional_br) and [`build_ret`](Self::build_ret) —
+/// The terminator builders — [`build_unconditional_br`](Self::build_unconditional_br),
+/// [`build_conditional_br`](Self::build_conditional_br), [`build_ret`](Self::build_ret),
+/// [`build_switch`](Self::build_switch) and [`build_unreachable`](Self::build_unreachable) —
 /// take `self` **by value**. Once a block is ended, that cursor is gone, and the
 /// compiler enforces it:
 ///
@@ -216,8 +217,10 @@ impl<'a> Cursor<'a> {
     ///
     /// # Errors
     ///
-    /// - [`PhiError::PhiInstructionWithNoBranches`] — a phi with no incoming values
-    ///   selects nothing, and there would be no type to give it.
+    /// - [`PhiError::PhiInstructionWithNoBranches`] — no branches and `ty` is
+    ///   [`OperandTy::Inferred`], so there is no type to give the phi. With an
+    ///   asserted `ty`, a phi can start with no branches and get them through the
+    ///   handle.
     /// - [`PhiError::PhiInstructionCannotBeAddedToEntryBasicBlock`] — the entry block
     ///   has no predecessors.
     /// - [`PhiError::PhiInstructionAddError`] — phis come first in a block.
@@ -319,9 +322,9 @@ impl<'a> Cursor<'a> {
     ///
     /// | `val` | `ty` | result |
     /// |---|---|---|
-    /// | `Some(v)` | `Some(t)` | `v` folded into `t` |
-    /// | `Some(v)` | `None` | type taken from `v` |
-    /// | `None` | `Some(void)` | `ret void` |
+    /// | `Some(v)` | `Asserted(t)` | `v` folded into `t` |
+    /// | `Some(v)` | `Inferred` | type taken from `v` |
+    /// | `None` | `Asserted(void)` | `ret void` |
     ///
     /// # Errors
     ///
@@ -502,7 +505,7 @@ impl<'a> Cursor<'a> {
     /// Builds `%x = load <ty>, ptr %p`, returning the loaded value.
     ///
     /// `ty` may be omitted when the pointer can be traced back to what it points at —
-    /// an `alloca` or a `getelementptr`. A pointer that arrived as a function
+    /// an `alloca`, a `getelementptr` (instruction or constant expression), or a global. A pointer that arrived as a function
     /// parameter cannot be, so there the type is required.
     ///
     /// # Errors
@@ -738,7 +741,7 @@ impl<'a> Cursor<'a> {
 
         add_instruction_to_block_and_get_value(
             InstructionKind::GetElementPtr(GetElementPtrOperands {
-                // The resolved type, not the caller's `Option`: when it was inferred
+                // The resolved type, not the caller's `OperandTy`: when it was inferred
                 // from the pointer, that is the type the instruction has to be emitted
                 // with, and it is the one the walk above validated.
                 source_ty: final_source_ty,
@@ -767,11 +770,13 @@ impl<'a> Cursor<'a> {
     ///
     /// # Naming the callee
     ///
-    /// The callee is a [`FuncRef`], and the only sources of one are
+    /// The callee is a [`FuncRef`]. For a direct call the only sources of one are
     /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-    /// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call
+    /// [`declare_function`](crate::cfg::builder::Builder::declare_function), so a call
     /// to a function that is not in the module cannot be written: there is no handle
-    /// to pass. A host import is reachable through the second of those, and is checked
+    /// to pass. An indirect call through a pointer
+    /// ([`FuncRef::Pointer`]) carries its own
+    /// signature. A host import is reachable through the second of those, and is checked
     /// exactly as a definition would be.
     ///
     /// A function's own handle exists from the moment it is defined, before any of its
@@ -1050,19 +1055,18 @@ impl<'a> Cursor<'a> {
     /// and `ashr`/`lshr` — widen a narrower **constant** to match, zero- or
     /// sign-extending as that operation says.
     ///
-    /// The other seven refuse to widen at all. `add`, `sub`, `mul`, `shl`, `and`, `or`
-    /// and `xor` have a single opcode each because the result bits are the same under
-    /// either reading — which means nothing says how to *widen* an operand, and the
-    /// two choices give different answers. So they require operands that already share
-    /// a type, exactly as `icmp eq` does.
+    /// The other seven — `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — have a
+    /// single opcode each because the result bits are the same under either reading.
+    /// They never read their operands as signed or unsigned, so a narrower constant
+    /// widens by keeping the value it was written as: `-1i32` becomes `i64 -1`.
     ///
     /// A differing-width *register* is always refused: widening one needs an
     /// instruction this builder will not insert on the caller's behalf.
     ///
     /// # Errors
     ///
-    /// - [`IBinOpError::OperandsNotCastable`] — a signed operation whose operands
-    ///   have no common type.
+    /// - [`IBinOpError::OperandsNotCastable`] — the operands have no common type: a
+    ///   register of a different width, or a constant that doesn't fit.
     /// - [`IBinOpError::OperandTypeNotInteger`] — floats need the `f`-prefixed
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
@@ -1615,7 +1619,7 @@ fn try_cast_param_and_check_with_func_signature(
 /// Appends an instruction that defines a register, and records where it was defined.
 ///
 /// Shared by every value-producing builder. Recording the definition — block *and*
-/// index — is what later lets [`Value::try_inferring_pointee_ty`](crate::value::Value)
+/// index — is what later lets `ValueId::try_inferring_pointee_ty`
 /// walk back from a pointer to the instruction that produced it. The index alone
 /// would be meaningless, since each block numbers its instructions from zero.
 fn add_instruction_to_block_and_get_value(
@@ -1724,9 +1728,6 @@ mod tests {
 
     /// A phi selects between incoming values, so with none there is nothing to
     /// select — and no first branch to take the phi's type from either.
-    ///
-    /// This is the one phi path that does not reach `Value::ty`, so it is the only
-    /// one runnable until that lands.
     #[test]
     fn a_phi_needs_at_least_one_branch() {
         let mut builder = fixture();
@@ -3630,7 +3631,8 @@ mod tests {
     }
 
     /// Omitting the source type is allowed when the pointer says what it points to —
-    /// and the *inferred* type is what the instruction is emitted with, not `None`.
+    /// and the *inferred* type is what the instruction is emitted with, not
+    /// `OperandTy::Inferred`.
     #[test]
     fn a_gep_emits_the_inferred_source_type() {
         let mut builder = fixture();
@@ -3663,7 +3665,7 @@ mod tests {
 
         assert_eq!(
             *source_ty, struct_ty,
-            "the resolved type is emitted, not the caller's `None`"
+            "the resolved type is emitted, not the caller's `OperandTy::Inferred`"
         );
     }
 
@@ -4767,9 +4769,6 @@ mod tests {
         }
     }
 
-    /// The seven operations with no signedness refuse to widen, because nothing says
-    /// which way to fill the new bits and the two answers differ.
-    ///
     /// An operation that never reads its operands widens a narrower literal by
     /// **value**, so `-1i32` arrives as `i64 -1`.
     ///
@@ -4823,8 +4822,7 @@ mod tests {
         }
     }
 
-    /// Matching operands are fine for those same operations — the refusal is about
-    /// widening, not about the operation.
+    /// Matching operands need no widening at all, for those same operations.
     #[test]
     fn a_signedness_free_operation_accepts_matching_operands() {
         let mut builder = fixture();

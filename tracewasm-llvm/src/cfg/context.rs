@@ -128,7 +128,6 @@ impl Context {
         Ok(name)
     }
 
-    /// Resolves a block id. Panics only if the id came from another context.
     /// Allocates a value and hands back its id. The only way a [`ValueId`] is made.
     pub(crate) fn alloc_value(&mut self, value: Value) -> ValueId {
         ValueId::new(self.values.alloc(value))
@@ -712,7 +711,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "valid id are never constructed")]
     fn an_id_from_another_context_panics_rather_than_writing_elsewhere() {
-        // A builder per context: a builder's duplicate-name set holds `StrId`s,
+        // A builder per context: the module's globals map is keyed by `StrId`s,
         // which only mean anything against the context they were interned in.
         let mut builder_a = fixture();
         let mut builder_b = fixture();

@@ -1,7 +1,7 @@
 //! What the builders return when they refuse to build something.
 //!
 //! The errors are layered so that each builder returns the narrowest type that can
-//! describe its failures — [`Cursor::build_alloca`](crate::instruction::cursor::Cursor)
+//! describe its failures — [`Cursor::build_alloca`](crate::instruction::cursor::Cursor::build_alloca)
 //! yields an [`InstructionError`], not a catch-all — and every layer converts upward
 //! through `#[from]`, so `?` composes without hand-written matches.
 //!
@@ -40,8 +40,11 @@ use tracewasm_utils::error::TracewasmUtilsError;
 
 /// Anything that can go wrong while building a module.
 ///
-/// The top of the hierarchy: every other error in this module converts into it, so a
-/// caller that does not care which layer failed can use this one type throughout.
+/// The top of the hierarchy. [`TypeError`], [`TracewasmUtilsError`] and
+/// [`InstructionError`] convert into it directly, and the per-instruction errors reach
+/// it through `InstructionError`; `#[from]` doesn't chain, so a
+/// [`ContextError`] or a per-instruction error needs converting to
+/// `InstructionError` first.
 #[derive(Error, Debug)]
 pub enum BuildError {
     /// A value could not be given the type it was asked for.
@@ -63,9 +66,10 @@ pub enum TypeError {
     /// A conditional branch takes an `i1`, and this value is not one.
     #[error("value of type `{0}` cannot be converted into i1 value")]
     ValueToI1ValueFailed(String),
-    /// A constant could not be folded into the requested type. Widths convert freely
-    /// among integers and among floats; crossing between them, or reaching a pointer,
-    /// needs a real instruction.
+    /// A constant could not be folded into the requested type. Integers convert
+    /// among widths when the value fits, `float` widens to `double`, and `double`
+    /// narrows to `float` only when exact; crossing between integers and floats, or
+    /// reaching a pointer, needs a real instruction.
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(String, String),
     /// An aggregate was given a member that has no size.
@@ -149,8 +153,8 @@ pub enum ContextError {
 /// An instruction could not be built.
 ///
 /// The variants here are the checks shared across instructions; the per-instruction
-/// ones live in [`AllocaError`], [`StoreError`], [`RetError`], [`GepError`] and
-/// [`PhiError`], each reachable through a `#[from]` arm.
+/// ones live in their own enums below ([`AllocaError`], [`CallError`], [`PhiError`]
+/// and so on), each reachable through a `#[from]` arm.
 #[derive(Error, Debug)]
 pub enum InstructionError {
     /// `load` and `store` address memory through a pointer, so the operand naming
@@ -278,14 +282,11 @@ pub enum RetError {
 /// A `call` could not be built.
 #[derive(Error, Debug)]
 pub enum CallError {
-    /// No function of that name has been added to the module.
+    /// The callee's handle names a function this module does not have.
     ///
-    /// The table holds only what
-    /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-    /// [`declare_function`](crate::cfg::builder::Builder::declare_function) have
-    /// registered *so far*, so this also covers a **forward call** — one to a
-    /// function that will be added later — even though LLVM makes every function in
-    /// a module mutually visible. A host import is fine once declared.
+    /// Calls name their callee by handle, not by string, and a handle only exists
+    /// once its function is defined or declared, so this can only happen when the
+    /// handle came from a different [`Context`](crate::cfg::context::Context).
     #[error("no function named `{0}` has been added to this module")]
     FunctionNotFound(String),
     /// The callee takes a different number of arguments.
@@ -558,8 +559,8 @@ pub enum PhiError {
     /// value arrives along an edge, so the entries have to agree.
     #[error("a phi's entries for the same predecessor must all carry the same value")]
     PhiBranchValueConflict,
-    /// A phi with no incoming values selects nothing, and its type is whatever its
-    /// first branch says — so with none there is no type to give it either.
+    /// No branches were given and no type was asserted, so there is nothing to type
+    /// the phi by. With an asserted type, a phi can start empty.
     #[error("a phi instruction needs at least one branch")]
     PhiInstructionWithNoBranches,
     /// A phi is typed once and every incoming value has to have that type — the

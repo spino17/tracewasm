@@ -29,8 +29,8 @@ pub struct PhiInstruction {
     /// What each predecessor already contributes, so a repeat can be checked against
     /// it without scanning `branches`.
     pub(crate) blocks: FxHashMap<BasicBlockId, ValueId>,
-    /// The phi's type, taken from its first branch. Every later branch is checked
-    /// against it.
+    /// The phi's type: its first branch's, or the asserted type when it was built
+    /// with none. Every later branch is checked against it.
     pub(crate) ref_ty: TyId,
     /// The register this phi defines.
     pub(crate) value: ValueId,
@@ -108,8 +108,9 @@ impl PhiInstrHandler {
 
 /// Every instruction this crate can build.
 ///
-/// Three of these — [`UnconditionalBr`](Self::UnconditionalBr),
-/// [`ConditionalBr`](Self::ConditionalBr) and [`Ret`](Self::Ret) — are *terminators*:
+/// Five of these — [`UnconditionalBr`](Self::UnconditionalBr),
+/// [`ConditionalBr`](Self::ConditionalBr), [`Ret`](Self::Ret),
+/// [`Switch`](Self::Switch) and [`Unreachable`](Self::Unreachable) — are *terminators*:
 /// they end a block, and adding one locks it.
 pub enum InstructionKind {
     /// `br label %target`.
@@ -287,8 +288,8 @@ impl GetElementPtrOperands {
 
 /// Operands of a `call`.
 pub struct CallOperands {
-    /// The callee, by name. Resolved against the module's function table when the
-    /// call is built, so the signature is known to match by the time it is stored.
+    /// The callee: a `@global`, checked against the module's function table when
+    /// the call is built, or a `%local` pointer whose signature came with it.
     pub func_name: FuncName,
     /// What the callee returns, `void` included.
     ///
