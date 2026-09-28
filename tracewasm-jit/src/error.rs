@@ -16,6 +16,14 @@ pub enum JITError {
         declared: String,
         host: String,
     },
+    #[error("module exports no function `{0}`")]
+    FuncNotExported(String),
+    #[error("function `{name}` is defined as `{declared}` but was requested as `{requested}`")]
+    FuncSignatureMismatch {
+        name: String,
+        declared: String,
+        requested: String,
+    },
     #[error("a different host function is already linked as `{0}`")]
     HostFuncAlreadyLinked(String),
     #[error("error from LLVM Backend: {0}")]

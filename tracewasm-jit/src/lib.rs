@@ -1,5 +1,6 @@
 use crate::error::JITError;
-use crate::func::LLVMHostFunc;
+use crate::func::{Func, LLVMFuncParams, LLVMFuncResult, LLVMHostFunc, fn_type};
+use llvm_sys::LLVMLinkage;
 use llvm_sys::core::*;
 use llvm_sys::error::*;
 use llvm_sys::ir_reader::LLVMParseIRInContext2;
@@ -19,6 +20,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::{CStr, c_char};
 use std::ptr;
+use std::sync::OnceLock;
 
 pub mod error;
 pub mod func;
@@ -41,11 +43,19 @@ impl Drop for JITHandler {
 
 impl JITHandler {
     pub fn new(level: LLVMCodeGenOptLevel) -> Result<Self, JITError> {
-        let jit = unsafe {
-            if LLVM_InitializeNativeTarget() != 0 || LLVM_InitializeNativeAsmPrinter() != 0 {
-                return Err(JITError::InitializationError);
-            }
+        // Registering targets mutates a global list without locking, so racing
+        // `new` calls on different threads can corrupt it. Do it exactly once.
+        static NATIVE_TARGET: OnceLock<bool> = OnceLock::new();
 
+        let initialized = *NATIVE_TARGET.get_or_init(|| unsafe {
+            LLVM_InitializeNativeTarget() == 0 && LLVM_InitializeNativeAsmPrinter() == 0
+        });
+
+        if !initialized {
+            return Err(JITError::InitializationError);
+        }
+
+        let jit = unsafe {
             let default_triple = LLVMGetDefaultTargetTriple();
             let jit_tm = host_target_machine(default_triple, level);
 
@@ -210,19 +220,126 @@ impl<'jit> JITModule<'jit> {
         self.jit
             .define_host_func(name, &c_name, func.addr(), TypeId::of::<F>())
     }
-}
 
-pub struct JITCompiledInstance<'jit> {
-    jit: &'jit JITHandler,
-}
+    /// Hands the module to the JIT. Code is generated lazily, on the first
+    /// `get_func`; every host function the module declares must be linked first.
+    ///
+    /// # Safety
+    /// Calling a compiled function runs the module's code, which the type system
+    /// can't see into: that code must not have undefined behaviour for any
+    /// arguments it can be called with.
+    pub unsafe fn compile(self) -> Result<JITCompiledInstance<'jit>, JITError> {
+        // Recorded now, because ORC owns the module (and may free it) from here on.
+        let exports = unsafe { exported_signatures(self.module) };
 
-impl<'jit> JITCompiledInstance<'jit> {
-    pub fn get_func() -> Func {
-        todo!()
+        // ORC takes the context and module, so our `Drop` must not run.
+        let this = std::mem::ManuallyDrop::new(self);
+
+        unsafe {
+            let tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(this.ctx); // takes ctx
+            let tsm = LLVMOrcCreateNewThreadSafeModule(this.module, tsc); // takes module
+
+            LLVMOrcDisposeThreadSafeContext(tsc); // the module keeps its own reference
+
+            // Takes `tsm` even on failure.
+            check(LLVMOrcLLJITAddLLVMIRModule(
+                this.jit.jit,
+                LLVMOrcLLJITGetMainJITDylib(this.jit.jit),
+                tsm,
+            ))?;
+        }
+
+        Ok(JITCompiledInstance {
+            jit: this.jit,
+            exports,
+        })
     }
 }
 
-pub struct Func {}
+/// A module that has been handed to the JIT. Its compiled code lives as long as
+/// the `JITHandler`.
+pub struct JITCompiledInstance<'jit> {
+    jit: &'jit JITHandler,
+    // Exported function name -> its IR signature, as text.
+    exports: HashMap<String, String>,
+}
+
+impl<'jit> JITCompiledInstance<'jit> {
+    /// Looks up an exported function taking the parameter tuple `P` and returning
+    /// `R`, which must match its IR definition exactly. The first lookup generates the module's code.
+    ///
+    /// ```
+    /// # use tracewasm_jit::JITHandler;
+    /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+    /// let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
+    /// let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";
+    /// let module = jit.parse_module("m", ir).unwrap();
+    /// // SAFETY: `add` is defined for all inputs.
+    /// let instance = unsafe { module.compile() }.unwrap();
+    ///
+    /// let add = instance.get_func::<(i64, i64), i64>("add").unwrap();
+    ///
+    /// assert_eq!(add.call(2, 3), 5);
+    /// ```
+    ///
+    /// `call` only accepts the looked-up signature:
+    ///
+    /// ```compile_fail,E0308
+    /// # use tracewasm_jit::JITHandler;
+    /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+    /// # let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
+    /// # let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";
+    /// # let instance = unsafe { jit.parse_module("m", ir).unwrap().compile() }.unwrap();
+    /// let add = instance.get_func::<(i64, i64), i64>("add").unwrap();
+    ///
+    /// add.call(2.0_f64, 3);
+    /// ```
+    ///
+    /// and can't outlive the instance:
+    ///
+    /// ```compile_fail,E0597
+    /// # use tracewasm_jit::JITHandler;
+    /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+    /// # let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
+    /// # let ir = "define i64 @add(i64 %a, i64 %b) {\n  %r = add i64 %a, %b\n  ret i64 %r\n}";
+    /// let add = {
+    ///     let instance = unsafe { jit.parse_module("m", ir).unwrap().compile() }.unwrap();
+    ///     instance.get_func::<(i64, i64), i64>("add").unwrap()
+    /// }; // `instance` dropped here while `add` still borrows it
+    ///
+    /// add.call(2, 3);
+    /// ```
+    pub fn get_func<P: LLVMFuncParams, R: LLVMFuncResult>(
+        &self,
+        name: &str,
+    ) -> Result<Func<'_, P, R>, JITError> {
+        let declared = self
+            .exports
+            .get(name)
+            .ok_or_else(|| JITError::FuncNotExported(name.into()))?;
+        let requested = signature_of::<P, R>();
+
+        if *declared != requested {
+            return Err(JITError::FuncSignatureMismatch {
+                name: name.into(),
+                declared: declared.clone(),
+                requested,
+            });
+        }
+
+        let c_name = CString::new(name).map_err(|_| JITError::InvalidFuncName)?;
+        let mut addr: LLVMOrcExecutorAddress = 0;
+
+        unsafe {
+            // Applies the platform's symbol mangling itself.
+            check(LLVMOrcLLJITLookup(self.jit.jit, &mut addr, c_name.as_ptr()))?;
+
+            // SAFETY: the signature matches the IR definition, and the code lives
+            // in the JIT, which outlives `self`.
+            Ok(Func::from_addr(addr as usize))
+        }
+    }
+}
 
 unsafe fn take_message(msg: *mut c_char) -> String {
     if msg.is_null() {
@@ -376,6 +493,50 @@ unsafe fn define_host_fn(jit: LLVMOrcLLJITRef, name: &CStr, addr: usize) -> Resu
         }
 
         check(err)
+    }
+}
+
+/// The IR signatures of the functions a module defines with external linkage,
+/// which are the only ones the JIT can look up.
+///
+/// # Safety
+/// `module` must be a valid, live LLVM module.
+unsafe fn exported_signatures(module: LLVMModuleRef) -> HashMap<String, String> {
+    let mut exports = HashMap::new();
+
+    unsafe {
+        let mut f = LLVMGetFirstFunction(module);
+
+        while !f.is_null() {
+            if LLVMIsDeclaration(f) == 0 && LLVMGetLinkage(f) == LLVMLinkage::LLVMExternalLinkage {
+                let mut len = 0;
+                let name = LLVMGetValueName2(f, &mut len);
+                let name = std::slice::from_raw_parts(name as *const u8, len);
+
+                exports.insert(
+                    String::from_utf8_lossy(name).into_owned(),
+                    type_to_string(LLVMGlobalGetValueType(f)),
+                );
+            }
+
+            f = LLVMGetNextFunction(f);
+        }
+    }
+
+    exports
+}
+
+/// The IR signature taking `P` and returning `R`, as text. Types from different contexts can't be compared
+/// directly, so signatures are compared by how they print.
+fn signature_of<P: LLVMFuncParams, R: LLVMFuncResult>() -> String {
+    // SAFETY: the context is created, used and disposed of here.
+    unsafe {
+        let ctx = LLVMContextCreate();
+        let s = type_to_string(fn_type::<P, R>(ctx));
+
+        LLVMContextDispose(ctx);
+
+        s
     }
 }
 

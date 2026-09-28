@@ -1,11 +1,14 @@
+use crate::JITCompiledInstance;
 use llvm_sys::core::*;
 use llvm_sys::prelude::{LLVMContextRef, LLVMTypeRef};
+use std::marker::PhantomData;
 
 // The traits below are sealed: an impl that named the wrong IR type, or a host
 // function whose `addr` wasn't really an `extern "C"` function of that type,
 // would let safe code call through a mismatched signature.
 mod sealed {
     pub trait Sealed {}
+    pub trait SealedParams {}
 }
 
 /// A Rust type that can be passed to a host function, with its IR type.
@@ -27,6 +30,21 @@ pub trait LLVMFuncResult: sealed::Sealed + 'static {
     unsafe fn llvm_type(ctx: LLVMContextRef) -> LLVMTypeRef;
 }
 
+/// A tuple of parameter types, e.g. `(i64, i64)`, with their IR types.
+pub trait LLVMFuncParams: sealed::SealedParams + 'static {
+    /// # Safety
+    /// `ctx` must be a valid, live LLVM context.
+    #[doc(hidden)]
+    unsafe fn llvm_types(ctx: LLVMContextRef) -> Vec<LLVMTypeRef>;
+}
+
+/// The signature of a function crossing the JIT boundary.
+pub trait LLVMFunc {
+    /// The parameters as a tuple, e.g. `(i64, i64)`.
+    type Params;
+    type Results;
+}
+
 /// An `extern "C"` function pointer that can be linked into the JIT.
 pub trait LLVMHostFunc: sealed::Sealed + Copy + 'static {
     #[doc(hidden)]
@@ -36,6 +54,62 @@ pub trait LLVMHostFunc: sealed::Sealed + Copy + 'static {
     /// `ctx` must be a valid, live LLVM context.
     #[doc(hidden)]
     unsafe fn llvm_type(ctx: LLVMContextRef) -> LLVMTypeRef;
+}
+
+/// The IR function type taking `P` and returning `R`.
+///
+/// # Safety
+/// `ctx` must be a valid, live LLVM context.
+pub(crate) unsafe fn fn_type<P: LLVMFuncParams, R: LLVMFuncResult>(
+    ctx: LLVMContextRef,
+) -> LLVMTypeRef {
+    unsafe {
+        let mut params = P::llvm_types(ctx);
+
+        LLVMFunctionType(
+            R::llvm_type(ctx),
+            params.as_mut_ptr(),
+            params.len() as u32,
+            0, // not variadic
+        )
+    }
+}
+
+/// A compiled function whose signature was checked against its IR definition
+/// when it was looked up. `call` accepts exactly the parameters `P` and returns `R`.
+///
+/// It borrows the instance it came from, so it can't be called after the JIT
+/// that owns its code is gone.
+pub struct Func<'a, P, R> {
+    addr: usize,
+    _inst: PhantomData<&'a JITCompiledInstance<'a>>,
+    _sig: PhantomData<fn(P) -> R>,
+}
+
+impl<P, R> LLVMFunc for Func<'_, P, R> {
+    type Params = P;
+    type Results = R;
+}
+
+impl<P, R> Clone for Func<'_, P, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P, R> Copy for Func<'_, P, R> {}
+
+impl<'a, P, R> Func<'a, P, R> {
+    /// # Safety
+    /// `addr` must be the address of compiled code whose IR signature matches
+    /// `P` and `R`, and that code must stay live for `'a`.
+    pub(crate) unsafe fn from_addr(addr: usize) -> Self {
+        Func {
+            addr,
+            _inst: PhantomData,
+            _sig: PhantomData,
+        }
+    }
 }
 
 macro_rules! scalar {
@@ -95,8 +169,17 @@ impl LLVMFuncResult for () {
     }
 }
 
-macro_rules! host_func {
+macro_rules! func {
     ($($a:ident),*) => {
+        impl<$($a: LLVMFuncParam,)*> sealed::SealedParams for ($($a,)*) {}
+
+        impl<$($a: LLVMFuncParam,)*> LLVMFuncParams for ($($a,)*) {
+            #[allow(unused_variables, unused_unsafe)] // with no parameters, `ctx` goes unused
+            unsafe fn llvm_types(ctx: LLVMContextRef) -> Vec<LLVMTypeRef> {
+                unsafe { vec![$(<$a as LLVMFuncParam>::llvm_type(ctx)),*] }
+            }
+        }
+
         impl<$($a: LLVMFuncParam,)* R: LLVMFuncResult> sealed::Sealed for extern "C" fn($($a),*) -> R {}
 
         impl<$($a: LLVMFuncParam,)* R: LLVMFuncResult> LLVMHostFunc for extern "C" fn($($a),*) -> R {
@@ -105,27 +188,29 @@ macro_rules! host_func {
             }
 
             unsafe fn llvm_type(ctx: LLVMContextRef) -> LLVMTypeRef {
-                unsafe {
-                    let mut params: Vec<LLVMTypeRef> = vec![$(<$a as LLVMFuncParam>::llvm_type(ctx)),*];
+                unsafe { fn_type::<($($a,)*), R>(ctx) }
+            }
+        }
 
-                    LLVMFunctionType(
-                        R::llvm_type(ctx),
-                        params.as_mut_ptr(),
-                        params.len() as u32,
-                        0, // not variadic
-                    )
-                }
+        impl<$($a: LLVMFuncParam,)* R: LLVMFuncResult> Func<'_, ($($a,)*), R> {
+            #[allow(non_snake_case, clippy::too_many_arguments)]
+            pub fn call(&self, $($a: $a),*) -> R {
+                // SAFETY: `from_addr`'s contract: `addr` is live compiled code whose
+                // IR signature is exactly this one.
+                let f: extern "C" fn($($a),*) -> R = unsafe { std::mem::transmute(self.addr) };
+
+                f($($a),*)
             }
         }
     };
 }
 
-host_func!();
-host_func!(A1);
-host_func!(A1, A2);
-host_func!(A1, A2, A3);
-host_func!(A1, A2, A3, A4);
-host_func!(A1, A2, A3, A4, A5);
-host_func!(A1, A2, A3, A4, A5, A6);
-host_func!(A1, A2, A3, A4, A5, A6, A7);
-host_func!(A1, A2, A3, A4, A5, A6, A7, A8);
+func!();
+func!(A1);
+func!(A1, A2);
+func!(A1, A2, A3);
+func!(A1, A2, A3, A4);
+func!(A1, A2, A3, A4, A5);
+func!(A1, A2, A3, A4, A5, A6);
+func!(A1, A2, A3, A4, A5, A6, A7);
+func!(A1, A2, A3, A4, A5, A6, A7, A8);
