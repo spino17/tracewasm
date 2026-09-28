@@ -536,3 +536,73 @@ fn many_exports_are_looked_up_together() {
         );
     }
 }
+
+// Laid out by C rules: `y` is followed by 4 bytes of padding so `z` is 8-aligned.
+// The IR's `%Point` gets the same layout from the JIT's data layout.
+#[repr(C)]
+#[derive(Debug, PartialEq)]
+struct Point {
+    x: i64,
+    y: i32,
+    z: f64,
+}
+
+const POINT_IR: &str = r#"
+%Point = type { i64, i32, double }
+
+; Scales every field by `k` in place.
+define void @scale(ptr %p, i64 %k) {
+  %xp = getelementptr inbounds %Point, ptr %p, i32 0, i32 0
+  %yp = getelementptr inbounds %Point, ptr %p, i32 0, i32 1
+  %zp = getelementptr inbounds %Point, ptr %p, i32 0, i32 2
+
+  %x = load i64, ptr %xp
+  %x2 = mul i64 %x, %k
+  store i64 %x2, ptr %xp
+
+  %y = load i32, ptr %yp
+  %k32 = trunc i64 %k to i32
+  %y2 = mul i32 %y, %k32
+  store i32 %y2, ptr %yp
+
+  %z = load double, ptr %zp
+  %kf = sitofp i64 %k to double
+  %z2 = fmul double %z, %kf
+  store double %z2, ptr %zp
+
+  ret void
+}
+"#;
+
+#[test]
+fn module_mutates_a_rust_struct_through_a_pointer() {
+    for optimize in [false, true] {
+        let jit = jit();
+        let mut module = jit.parse_module("m", POINT_IR).unwrap();
+
+        if optimize {
+            module.optimize(OptLevel::O3).unwrap();
+        }
+
+        // SAFETY: `scale` only touches the three fields of the `Point` it's given.
+        let inst = unsafe { module.compile() }.unwrap();
+        let scale = inst.get_func::<(*mut Point, i64), ()>("scale").unwrap();
+        let mut point = Point {
+            x: 3,
+            y: -4,
+            z: 1.5,
+        };
+
+        scale.call(&mut point, 10);
+
+        assert_eq!(
+            point,
+            Point {
+                x: 30,
+                y: -40,
+                z: 15.0
+            },
+            "optimized: {optimize}"
+        );
+    }
+}
