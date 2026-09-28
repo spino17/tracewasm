@@ -115,11 +115,10 @@ impl Drop for JITModule<'_> {
 }
 
 impl JITModule<'_> {
-    pub fn optimize(&mut self) -> Result<(), JITError> {
+    pub fn optimize(&mut self, level: LLVMCodeGenOptLevel) -> Result<(), JITError> {
         unsafe {
             let triple = LLVMOrcLLJITGetTripleString(self.jit.jit); // owned by the JIT
-            let opt_tm =
-                host_target_machine(triple, LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
+            let opt_tm = host_target_machine(triple, level)?;
             let opt_result = optimize(self.module, opt_tm, PIPELINE);
 
             LLVMDisposeTargetMachine(opt_tm);

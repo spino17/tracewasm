@@ -22,7 +22,9 @@ fn parses_and_optimizes() {
     let jit = jit();
     let mut module = jit.jit_module("m", IR).unwrap();
 
-    module.optimize().unwrap();
+    module
+        .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
+        .unwrap();
 }
 
 #[test]
@@ -30,8 +32,12 @@ fn optimize_can_run_twice() {
     let jit = jit();
     let mut module = jit.jit_module("m", IR).unwrap();
 
-    module.optimize().unwrap();
-    module.optimize().unwrap();
+    module
+        .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
+        .unwrap();
+    module
+        .optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
+        .unwrap();
 }
 
 #[test]
@@ -40,8 +46,10 @@ fn several_modules_share_one_jit() {
     let mut a = jit.jit_module("a", IR).unwrap();
     let mut b = jit.jit_module("b", IR).unwrap();
 
-    a.optimize().unwrap();
-    b.optimize().unwrap();
+    a.optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
+        .unwrap();
+    b.optimize(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)
+        .unwrap();
 }
 
 #[test]
