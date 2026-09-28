@@ -61,6 +61,7 @@ const PIPELINE: &CStr = c"default<O3>";
 extern "C" fn host_print(ptr: *const u8, len: u64) {
     // SAFETY: generated code passes a pointer to `len` valid bytes.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+
     println!("{}", String::from_utf8_lossy(bytes));
 }
 
@@ -73,12 +74,15 @@ fn check(err: LLVMErrorRef) -> Result<(), String> {
     if err.is_null() {
         return Ok(());
     }
+
     // SAFETY: `err` is a non-null error from LLVM; getting its message consumes it,
     // and the message is a valid C string until we dispose of it.
     unsafe {
         let msg = LLVMGetErrorMessage(err);
         let s = CStr::from_ptr(msg).to_string_lossy().into_owned();
+
         LLVMDisposeErrorMessage(msg);
+
         Err(s)
     }
 }
@@ -91,9 +95,12 @@ unsafe fn take_message(msg: *mut c_char) -> String {
     if msg.is_null() {
         return "unknown error".into();
     }
+
     unsafe {
         let s = CStr::from_ptr(msg).to_string_lossy().into_owned();
+
         LLVMDisposeMessage(msg);
+
         s
     }
 }
@@ -109,12 +116,14 @@ unsafe fn host_target_machine(
     unsafe {
         let mut target: LLVMTargetRef = ptr::null_mut();
         let mut err: *mut c_char = ptr::null_mut();
+
         if LLVMGetTargetFromTriple(triple, &mut target, &mut err) != 0 {
             return Err(take_message(err));
         }
 
         let cpu = LLVMGetHostCPUName();
         let features = LLVMGetHostCPUFeatures();
+
         let tm = LLVMCreateTargetMachine(
             target,
             triple,
@@ -124,6 +133,7 @@ unsafe fn host_target_machine(
             LLVMRelocMode::LLVMRelocDefault,
             LLVMCodeModel::LLVMCodeModelJITDefault,
         );
+
         LLVMDisposeMessage(cpu);
         LLVMDisposeMessage(features);
 
@@ -150,6 +160,7 @@ unsafe fn parse_ir(ctx: LLVMContextRef, ir: &str, name: &CStr) -> Result<LLVMMod
         let mut module: LLVMModuleRef = ptr::null_mut();
         let mut msg: *mut c_char = ptr::null_mut();
         let failed = LLVMParseIRInContext2(ctx, buf, &mut module, &mut msg) != 0;
+
         LLVMDisposeMemoryBuffer(buf); // the "2" variant doesn't take ownership
 
         if failed {
@@ -172,7 +183,9 @@ unsafe fn optimize(
     unsafe {
         let opts = LLVMCreatePassBuilderOptions();
         let result = check(LLVMRunPasses(module, pipeline.as_ptr(), tm, opts));
+
         LLVMDisposePassBuilderOptions(opts);
+
         result
     }
 }
@@ -184,10 +197,12 @@ unsafe fn optimize(
 unsafe fn print_module(title: &str, module: LLVMModuleRef) {
     unsafe {
         let text = LLVMPrintModuleToString(module);
+
         println!(
             "===== {title} =====\n{}",
             CStr::from_ptr(text).to_string_lossy()
         );
+
         LLVMDisposeMessage(text);
     }
 }
@@ -212,7 +227,9 @@ unsafe fn define_host_fn(jit: LLVMOrcLLJITRef, name: &CStr, addr: usize) -> Resu
                 },
             },
         };
+
         let mu = LLVMOrcAbsoluteSymbols(&mut pair, 1);
+
         check(LLVMOrcJITDylibDefine(LLVMOrcLLJITGetMainJITDylib(jit), mu))
     }
 }
@@ -225,9 +242,12 @@ unsafe fn define_host_fn(jit: LLVMOrcLLJITRef, name: &CStr, addr: usize) -> Resu
 /// disposed.
 unsafe fn lookup<F: Copy>(jit: LLVMOrcLLJITRef, name: &CStr) -> Result<F, String> {
     assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<usize>());
+
     let mut addr: LLVMOrcExecutorAddress = 0;
+
     unsafe {
         check(LLVMOrcLLJITLookup(jit, &mut addr, name.as_ptr()))?;
+
         Ok(std::mem::transmute_copy(&(addr as usize)))
     }
 }
@@ -243,22 +263,28 @@ fn main() -> Result<(), String> {
 
         // 2. Create the JIT, with code generation at the aggressive level.
         let default_triple = LLVMGetDefaultTargetTriple();
+
         let jit_tm = host_target_machine(
             default_triple,
             LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive,
         );
+
         LLVMDisposeMessage(default_triple);
+
         let jit_tm = jit_tm?;
 
         let jtmb = LLVMOrcJITTargetMachineBuilderCreateFromTargetMachine(jit_tm); // takes jit_tm
         let builder = LLVMOrcCreateLLJITBuilder();
+
         LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(builder, jtmb); // takes jtmb
 
         let mut jit: LLVMOrcLLJITRef = ptr::null_mut();
+
         check(LLVMOrcCreateLLJIT(&mut jit, builder))?; // takes builder
 
         // 3. Parse the IR, then set the JIT's target so layouts match the host.
         let ctx = LLVMContextCreate();
+
         let module = match parse_ir(ctx, IR, c"hello_module") {
             Ok(m) => m,
             Err(e) => {
@@ -268,6 +294,7 @@ fn main() -> Result<(), String> {
         };
 
         let triple = LLVMOrcLLJITGetTripleString(jit); // owned by the JIT
+
         LLVMSetTarget(module, triple);
         LLVMSetDataLayout(module, LLVMOrcLLJITGetDataLayoutStr(jit));
 
@@ -276,7 +303,9 @@ fn main() -> Result<(), String> {
         // 4. Run the IR optimizer, using a target machine for the host CPU.
         let opt_tm = host_target_machine(triple, LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
         let opt_result = optimize(module, opt_tm, PIPELINE);
+
         LLVMDisposeTargetMachine(opt_tm);
+
         opt_result?;
 
         print_module("after optimization", module);
@@ -284,7 +313,9 @@ fn main() -> Result<(), String> {
         // 5. Hand the context to ORC, then the module to the JIT.
         let tsc = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx); // takes ctx
         let tsm = LLVMOrcCreateNewThreadSafeModule(module, tsc);
+
         LLVMOrcDisposeThreadSafeContext(tsc); // the module keeps its own reference
+
         check(LLVMOrcLLJITAddLLVMIRModule(
             jit,
             LLVMOrcLLJITGetMainJITDylib(jit),

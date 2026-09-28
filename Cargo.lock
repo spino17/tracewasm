@@ -538,7 +538,9 @@ dependencies = [
 name = "tracewasm-jit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "llvm-sys",
+ "thiserror",
 ]
 
 [[package]]
