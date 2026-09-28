@@ -7,7 +7,7 @@ members = [
     "tracewasm-scratch",
     "tracewasm-test",
     "tracewasm-llvm"
-, "tracewasm-utils", "tracewasm-jit"]
+, "tracewasm-utils", "tracewasm-jit", "tracewasm-jit-macros"]
 
 resolver = "3"
 

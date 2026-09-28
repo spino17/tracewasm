@@ -1,6 +1,6 @@
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
 use tracewasm_jit::error::JITError;
-use tracewasm_jit::{JITHandler, OptLevel};
+use tracewasm_jit::{JITHandler, OptLevel, imported};
 
 // Two exports and one import.
 //
@@ -46,9 +46,10 @@ exit:
 }
 "#;
 
-// The host implementation of the import. `link_host_func` checks its signature
-// against the declaration.
-extern "C" fn host_print(ptr: *const u8, len: u64) {
+// The host implementation of the import. `#[imported]` links it into every parsed
+// module, checking its signature against the declaration.
+#[imported]
+fn host_print(ptr: *const u8, len: u64) {
     // SAFETY: generated code passes a pointer to `len` valid bytes.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
 
@@ -59,12 +60,10 @@ fn main() -> Result<(), JITError> {
     // 1. Create the JIT, with code generation at the aggressive level.
     let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
 
-    // 2. Parse the IR, link the import, then run the optimizer for the host CPU.
-    //    Linking has to come first; `optimize` would otherwise treat library-named
-    //    declarations as the C library's functions.
+    // 2. Parse the IR, which also links `host_print`, then run the optimizer for
+    //    the host CPU.
     let mut module = jit.parse_module("hello_module", IR)?;
 
-    module.link_host_func("host_print", host_print as extern "C" fn(_, _))?;
     module.optimize(OptLevel::O3)?;
 
     let instance = unsafe { module.compile() }?;

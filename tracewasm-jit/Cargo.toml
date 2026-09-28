@@ -7,3 +7,5 @@ edition = "2024"
 llvm-sys = "221.0.0"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+inventory = "0.3"
+tracewasm-jit-macros = { path = "../tracewasm-jit-macros" }

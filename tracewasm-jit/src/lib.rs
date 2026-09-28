@@ -30,6 +30,95 @@ use std::sync::mpsc;
 pub mod error;
 pub mod func;
 
+/// Registers a free function as a host function, so every module
+/// [`JITHandler::parse_module`] parses has it linked, exactly as if
+/// [`JITModule::link_host_func`] had been called for it. It's linked under the
+/// function's own name, or under `name = "..."`.
+///
+/// The function can be any safe, non-generic free function whose parameter and
+/// result types are supported ([`func::LLVMFuncParam`], [`func::LLVMFuncResult`]);
+/// it doesn't need to be `extern "C"`, because the macro generates a C-ABI shim
+/// for the JIT to call. A panic in it aborts the process rather than unwinding
+/// into JIT'd code.
+///
+/// Every registered function is linked into every module. A module that doesn't
+/// declare one is unaffected; one that declares it with a different signature
+/// fails to parse with [`HostFuncSignatureMismatch`](error::JITError::HostFuncSignatureMismatch).
+///
+/// ```
+/// use tracewasm_jit::{JITHandler, imported};
+/// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+///
+/// #[imported]
+/// fn double(x: i64) -> i64 {
+///     x * 2
+/// }
+///
+/// #[imported(name = "log")]
+/// fn log_value(x: i64) {
+///     println!("{x}");
+/// }
+///
+/// let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault).unwrap();
+/// let ir = "declare i64 @double(i64)\n\
+///           define i64 @quad(i64 %x) {\n  %d = call i64 @double(i64 %x)\n  %q = call i64 @double(i64 %d)\n  ret i64 %q\n}";
+///
+/// // No `link_host_func` call: `double` was linked by `parse_module`.
+/// let module = jit.parse_module("m", ir).unwrap();
+/// // SAFETY: `quad` is defined for all inputs.
+/// let instance = unsafe { module.compile() }.unwrap();
+///
+/// assert_eq!(instance.get_func::<(i64,), i64>("quad").unwrap().call(5), 20);
+/// ```
+///
+/// Only safe, non-generic free functions qualify:
+///
+/// ```compile_fail
+/// # use tracewasm_jit::imported;
+/// #[imported]
+/// unsafe fn raw(p: *const u8) -> u8 {
+///     unsafe { *p }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use tracewasm_jit::imported;
+/// #[imported]
+/// fn generic<T: Copy>(x: T) -> T {
+///     x
+/// }
+/// ```
+///
+/// and every type in the signature must cross the JIT boundary:
+///
+/// ```compile_fail
+/// # use tracewasm_jit::imported;
+/// #[imported]
+/// fn takes_a_string(s: String) {}
+/// ```
+pub use tracewasm_jit_macros::imported;
+
+#[doc(hidden)]
+pub mod __private {
+    use crate::JITModule;
+    use crate::error::JITError;
+
+    pub use inventory;
+
+    /// One `#[imported]` function, as its expansion registers it.
+    pub struct HostFuncRegistration {
+        pub(crate) link: fn(&mut JITModule<'_>) -> Result<(), JITError>,
+    }
+
+    impl HostFuncRegistration {
+        pub const fn new(link: fn(&mut JITModule<'_>) -> Result<(), JITError>) -> Self {
+            HostFuncRegistration { link }
+        }
+    }
+
+    inventory::collect!(HostFuncRegistration);
+}
+
 /// An IR optimization level, as in `opt -O<n>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptLevel {
@@ -121,7 +210,8 @@ impl JITHandler {
         })
     }
 
-    /// Parses and verifies textual IR.
+    /// Parses and verifies textual IR, then links every [`#[imported]`](imported)
+    /// function into it.
     ///
     /// A module that names no target gets the JIT's. One that does must name the
     /// JIT's architecture and exactly the JIT's data layout: code generated for
@@ -129,7 +219,7 @@ impl JITHandler {
     pub fn parse_module(&self, name: &str, module_str: &str) -> Result<JITModule<'_>, JITError> {
         let c_name = CString::new(name).map_err(|_| JITError::InvalidModuleName)?;
 
-        let module = unsafe {
+        let mut module = unsafe {
             let ctx = LLVMContextCreate();
 
             let module = match parse_ir(ctx, module_str, &c_name) {
@@ -154,6 +244,11 @@ impl JITHandler {
         unsafe {
             module.adopt_target()?;
             verify(module.module)?;
+        }
+
+        // Before anything can optimize the module: see `link_host_func`.
+        for registration in inventory::iter::<__private::HostFuncRegistration> {
+            (registration.link)(&mut module)?;
         }
 
         Ok(module)
