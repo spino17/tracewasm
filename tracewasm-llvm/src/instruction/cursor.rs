@@ -11,7 +11,7 @@ use crate::{
         ICmpError, InstructionError, PhiError, RetError, SelectError, StoreError, SwitchError,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
+        Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
         FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
         IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
         PhiInstrHandler, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
@@ -441,7 +441,7 @@ impl<'a> Cursor<'a> {
     /// rather than restated.
     ///
     /// `count` allocates room for several elements: the value, and optionally a type
-    /// to give it. `align` must be a power of two; `None` means the ABI default.
+    /// to give it. The slot gets the type's ABI alignment, from the data layout.
     ///
     /// # Errors
     ///
@@ -450,24 +450,15 @@ impl<'a> Cursor<'a> {
     ///   it, is not an integer.
     /// - [`AllocaError::AllocaCountTypeMismatch`] — the count does not fold into the
     ///   type given for it.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`; leaving
-    ///   `align` off is how the default is asked for.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_alloca(
         &mut self,
         ty: TyId,
         count: Option<(ValueId, OperandTy)>,
-        align: Option<u32>,
         reg: RegName,
     ) -> Result<ValueId, InstructionError> {
         if !ty.is_first_class(self.ctx) {
             return Err(AllocaError::TypeNotAllocatable(ty.display(self.ctx).to_string()).into());
-        }
-
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let mut final_count: Option<ValueId> = None;
@@ -515,7 +506,6 @@ impl<'a> Cursor<'a> {
             InstructionKind::Alloca(AllocaOperands {
                 ty,
                 count: final_count,
-                align,
             }),
             result_ty,
             self.block,
@@ -530,6 +520,9 @@ impl<'a> Cursor<'a> {
     /// an `alloca`, a `getelementptr` (instruction or constant expression), or a global. A pointer that arrived as a function
     /// parameter cannot be, so there the type is required.
     ///
+    /// `access` says whether `ptr` may be assumed to have the type's ABI alignment;
+    /// see [`Access`].
+    ///
     /// # Errors
     ///
     /// - [`InstructionError::PointerOperandExpected`] — the operand is not a `ptr`.
@@ -539,25 +532,18 @@ impl<'a> Cursor<'a> {
     ///   disagrees with what the pointer was traced to. Stricter than LLVM, which
     ///   allows a load to reinterpret.
     /// - [`InstructionError::LoadedTypeUnknown`] — no type given and none inferable.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_load(
         &mut self,
         ptr: ValueId,
         ty: OperandTy,
-        align: Option<u32>,
+        access: Access,
         reg: RegName,
     ) -> Result<ValueId, InstructionError> {
         if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
                 ptr.ty(self.ctx).display(self.ctx).to_string(),
             ));
-        }
-
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let pointee_ty = ptr.try_inferring_pointee_ty(self.block, self.ctx);
@@ -589,7 +575,7 @@ impl<'a> Cursor<'a> {
             InstructionKind::Load(LoadOperands {
                 ty: final_ty,
                 ptr,
-                align,
+                access,
             }),
             final_ty,
             self.block,
@@ -602,7 +588,7 @@ impl<'a> Cursor<'a> {
     ///
     /// Produces no value, so it defines no register. With `ty` given, the value is
     /// folded into it — a constant widens, a register must already match. Without,
-    /// the value keeps its own type.
+    /// the value keeps its own type. `access` is as for [`build_load`](Self::build_load).
     ///
     /// # Errors
     ///
@@ -611,25 +597,18 @@ impl<'a> Cursor<'a> {
     /// - [`StoreError::StoredValueTypeMismatch`] — the value does not fold into `ty`.
     /// - [`StoreError::StoredValueDoesNotMatchPointee`] — the value disagrees with
     ///   what the pointer was traced to. Stricter than LLVM.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_store(
         &mut self,
         ptr: ValueId,
         value: ValueId,
         ty: OperandTy,
-        align: Option<u32>,
+        access: Access,
     ) -> Result<(), InstructionError> {
         if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
                 ptr.ty(self.ctx).display(self.ctx).to_string(),
             ));
-        }
-
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let final_val = if let OperandTy::Asserted(ty) = ty {
@@ -663,7 +642,7 @@ impl<'a> Cursor<'a> {
                 kind: InstructionKind::Store(StoreOperands {
                     value: final_val,
                     ptr,
-                    align,
+                    access,
                 }),
                 value: None,
             },
@@ -1710,9 +1689,7 @@ mod tests {
 
         // A non-terminator first, so the block is still open for the branch that
         // follows it — a branch consumes the cursor and closes the block.
-        cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
-            .unwrap();
+        cursor.build_alloca(i32_ty, None, RegName::Unnamed).unwrap();
         cursor.build_unconditional_br(body).unwrap();
 
         let instrs = &builder.blocks.get(entry.raw()).unwrap().instructions;
@@ -2072,9 +2049,7 @@ mod tests {
 
         // A plain instruction, not a terminator: this is about phis coming *first*,
         // not about the block being closed, which is a separate rule.
-        cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
-            .unwrap();
+        cursor.build_alloca(i32_ty, None, RegName::Unnamed).unwrap();
 
         let err = cursor
             .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
@@ -2103,7 +2078,7 @@ mod tests {
 
         for _ in 0..3 {
             cursor
-                .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                .build_alloca(i32_ty, None, RegName::Unnamed)
                 .expect("a block that has not branched still accepts instructions");
         }
 
@@ -2182,7 +2157,7 @@ mod tests {
         let mut reopened = builder.cursor_at_block(entry);
 
         let err = reopened
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect_err("`entry` already ends in a branch");
 
         assert!(
@@ -2267,7 +2242,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                .build_alloca(i32_ty, None, RegName::Unnamed)
                 .map(|_| ()),
             "alloca",
         );
@@ -2275,15 +2250,18 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_load(ptr, i32_ty.into(), None, RegName::Unnamed)
+                .build_load(ptr, i32_ty.into(), Access::Aligned, RegName::Unnamed)
                 .map(|_| ()),
             "load",
         );
 
         terminated(
-            builder
-                .cursor_at_block(entry)
-                .build_store(ptr, seven, OperandTy::Inferred, None),
+            builder.cursor_at_block(entry).build_store(
+                ptr,
+                seven,
+                OperandTy::Inferred,
+                Access::Aligned,
+            ),
             "store",
         );
 
@@ -2356,7 +2334,7 @@ mod tests {
 
             assert!(
                 reopened
-                    .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                    .build_alloca(i32_ty, None, RegName::Unnamed)
                     .is_err(),
                 "attempt {attempt} must still be refused"
             );
@@ -2385,7 +2363,7 @@ mod tests {
             .expect("a phi opens the block");
 
         cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect("instructions follow the phi");
 
         cursor
@@ -2596,7 +2574,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect_err("`entry` already returned");
 
         assert!(
@@ -2641,7 +2619,7 @@ mod tests {
         );
 
         cursor
-            .build_load(base, i32_ty.into(), None, "v".into())
+            .build_load(base, i32_ty.into(), Access::Aligned, "v".into())
             .expect("the explicit type stands when inference declines");
     }
 
@@ -2675,7 +2653,7 @@ mod tests {
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
-                .build_load(base, ty.into(), None, reg.into())
+                .build_load(base, ty.into(), Access::Aligned, reg.into())
                 .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
 
             assert_eq!(loaded.ty(&cursor), ty, "the load has the type it was given");
@@ -2684,7 +2662,7 @@ mod tests {
         let seven = Value::from_const(7i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         cursor
-            .build_store(base, seven, OperandTy::Inferred, None)
+            .build_store(base, seven, OperandTy::Inferred, Access::Aligned)
             .expect("storing through a parameter works for the same reason");
 
         // And a `getelementptr` needs its source type given, since there is none to
@@ -2741,7 +2719,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, "x".into())
+            .build_alloca(i32_ty, None, "x".into())
             .unwrap();
 
         assert_eq!(
@@ -3150,7 +3128,7 @@ mod tests {
         );
 
         cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect("the block is still open");
     }
 
@@ -3277,7 +3255,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, "s".into())
+            .build_alloca(struct_ty, None, "s".into())
             .expect("a struct is allocatable");
 
         (cursor, slot, struct_ty)
@@ -3311,7 +3289,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, "s".into())
+            .build_alloca(struct_ty, None, "s".into())
             .expect("a struct is allocatable");
 
         (cursor, slot, array_ty, f64_ty)
@@ -3360,13 +3338,13 @@ mod tests {
 
         assert!(
             cursor
-                .build_store(elem, a_double, OperandTy::Inferred, None)
+                .build_store(elem, a_double, OperandTy::Inferred, Access::Aligned)
                 .is_ok(),
             "the element is a double"
         );
 
         let err = cursor
-            .build_store(elem, an_i32, OperandTy::Inferred, None)
+            .build_store(elem, an_i32, OperandTy::Inferred, Access::Aligned)
             .expect_err("an i32 is not what this points to");
 
         assert!(
@@ -3511,7 +3489,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(outer, None, None, "s".into())
+            .build_alloca(outer, None, "s".into())
             .expect("a struct is allocatable");
 
         (
@@ -3660,7 +3638,7 @@ mod tests {
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .build_load(elem, tys.i64.into(), None, "v".into())
+            .build_load(elem, tys.i64.into(), Access::Aligned, "v".into())
             .expect("an i64 is loadable");
 
         assert_eq!(cursor.display(loaded.ty(&cursor)).to_string(), "i64");
@@ -3670,7 +3648,7 @@ mod tests {
         // check has to accept it.
         assert!(
             cursor
-                .build_store(elem, loaded, OperandTy::Inferred, None)
+                .build_store(elem, loaded, OperandTy::Inferred, Access::Aligned)
                 .is_ok(),
             "what was loaded from a slot must store back into it"
         );
@@ -3693,7 +3671,7 @@ mod tests {
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
         let loaded_ptr = cursor
-            .build_load(ptr_field, tys.ptr.into(), None, "q".into())
+            .build_load(ptr_field, tys.ptr.into(), Access::Aligned, "q".into())
             .expect("a ptr is loadable");
 
         assert!(
@@ -3971,7 +3949,7 @@ mod tests {
 
         let i32_ty = cursor.i32_ty();
 
-        let slot = cursor.build_alloca(i32_ty, None, None, "p".into()).unwrap();
+        let slot = cursor.build_alloca(i32_ty, None, "p".into()).unwrap();
 
         let zero = value(0, &mut cursor);
         let one = Value::from_const(1i32, OperandTy::Inferred, &mut cursor).unwrap();
@@ -4008,7 +3986,7 @@ mod tests {
         let reg = reg_val("v", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_store(ptr, reg, i64_ty.into(), None)
+            .build_store(ptr, reg, i64_ty.into(), Access::Aligned)
             .expect_err("an i32 register is not an i64");
 
         assert!(
@@ -4029,7 +4007,7 @@ mod tests {
         let seven = Value::from_const(7i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         cursor
-            .build_store(ptr, seven, i64_ty.into(), None)
+            .build_store(ptr, seven, i64_ty.into(), Access::Aligned)
             .expect("an i32 constant stores as an i64");
 
         let block = cursor.blocks.get(cursor.block.raw()).unwrap();
@@ -4063,7 +4041,7 @@ mod tests {
         let void_ty = cursor.void_ty();
 
         let err = cursor
-            .build_alloca(void_ty, None, None, RegName::Unnamed)
+            .build_alloca(void_ty, None, RegName::Unnamed)
             .expect_err("`void` has no size");
 
         assert!(
@@ -4090,7 +4068,7 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(array_ty, None, None, "buf".into())
+            .build_alloca(array_ty, None, "buf".into())
             .expect("`[4 x i32]` is sized");
 
         assert_eq!(
@@ -4115,7 +4093,6 @@ mod tests {
             .build_alloca(
                 i32_ty,
                 Some((a_float, OperandTy::Inferred)),
-                None,
                 RegName::Unnamed,
             )
             .expect_err("a float is not a count");
@@ -4131,12 +4108,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_alloca(
-                    i32_ty,
-                    Some((an_int, f64_ty.into())),
-                    None,
-                    RegName::Unnamed
-                ),
+                cursor.build_alloca(i32_ty, Some((an_int, f64_ty.into())), RegName::Unnamed),
                 Err(InstructionError::Alloca(
                     AllocaError::AllocaCountNotAnInteger(_)
                 ))
@@ -4157,12 +4129,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_alloca(
-                    i32_ty,
-                    Some((one, OperandTy::Inferred)),
-                    None,
-                    RegName::Unnamed
-                )
+                .build_alloca(i32_ty, Some((one, OperandTy::Inferred)), RegName::Unnamed)
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -4180,7 +4147,7 @@ mod tests {
         let n = reg_val("n", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_alloca(i32_ty, Some((n, i64_ty.into())), None, RegName::Unnamed)
+            .build_alloca(i32_ty, Some((n, i64_ty.into())), RegName::Unnamed)
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
@@ -4217,17 +4184,17 @@ mod tests {
         let f64_ty = in_entry.f64_ty();
 
         in_entry
-            .build_load(ptr, i32_ty.into(), None, "a".into())
+            .build_load(ptr, i32_ty.into(), Access::Aligned, "a".into())
             .unwrap();
 
         let second = in_entry
-            .build_load(ptr, i64_ty.into(), None, "b".into())
+            .build_load(ptr, i64_ty.into(), Access::Aligned, "b".into())
             .unwrap();
 
         let mut in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .build_load(ptr, f64_ty.into(), None, "c".into())
+            .build_load(ptr, f64_ty.into(), Access::Aligned, "c".into())
             .unwrap();
 
         let func_id = builder.get_block(entry).func_id;
@@ -4285,7 +4252,7 @@ mod tests {
         let i32_ty = cursor.i32_ty();
 
         let loaded = cursor
-            .build_load(ptr, i32_ty.into(), None, "x".into())
+            .build_load(ptr, i32_ty.into(), Access::Aligned, "x".into())
             .expect("loading an i32 through a ptr is fine");
 
         assert_eq!(
@@ -4304,7 +4271,7 @@ mod tests {
         let i64_ty = cursor.i64_ty();
 
         cursor
-            .build_load(ptr, i64_ty.into(), None, "x".into())
+            .build_load(ptr, i64_ty.into(), Access::Aligned, "x".into())
             .unwrap();
 
         let block = cursor.blocks.get(cursor.block.raw()).unwrap();
@@ -4332,7 +4299,7 @@ mod tests {
         let i32_ty = cursor.i32_ty();
 
         let err = cursor
-            .build_load(not_a_ptr, i32_ty.into(), None, "x".into())
+            .build_load(not_a_ptr, i32_ty.into(), Access::Aligned, "x".into())
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -4363,7 +4330,7 @@ mod tests {
         let void_ty = cursor.void_ty();
 
         let err = cursor
-            .build_load(ptr, void_ty.into(), None, RegName::Unnamed)
+            .build_load(ptr, void_ty.into(), Access::Aligned, RegName::Unnamed)
             .expect_err("`void` has no size");
 
         assert!(
@@ -4398,58 +4365,56 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_load(ptr, id.into(), None, RegName::Unnamed)
+                    .build_load(ptr, id.into(), Access::Aligned, RegName::Unnamed)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
         }
     }
 
-    /// An explicit alignment must be a power of two. The cases below are the ones
-    /// `llvm-as` accepts and rejects — note `1` is valid (it is `2^0`) and `0` is
-    /// not, which an even-number test gets backwards in both directions.
+    /// An aligned access leaves the alignment to the data layout and an unaligned one
+    /// promises nothing: there is no number to get wrong, so both are always accepted,
+    /// and each is emitted as it says.
     #[test]
-    fn an_explicit_alignment_must_be_a_power_of_two() {
+    fn a_load_and_store_are_emitted_with_the_access_they_were_given() {
         let mut builder = fixture();
-        let (mut cursor, ptr) = block_with_ptr(&mut builder);
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function("f".to_string(), &[(ptr_ty, "p".into())], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let p = f.params(&builder)[0];
+        let mut cursor = builder.cursor_at_block(entry);
 
-        let i32_ty = cursor.i32_ty();
+        let a = cursor
+            .build_load(p, i32_ty.into(), Access::Aligned, "a".into())
+            .unwrap();
+        let u = cursor
+            .build_load(p, i32_ty.into(), Access::Unaligned, "u".into())
+            .unwrap();
 
-        for align in [1, 2, 4, 8, 16, 4096] {
-            assert!(
-                cursor
-                    .build_load(ptr, i32_ty.into(), Some(align), RegName::Unnamed)
-                    .is_ok(),
-                "align {align} is a power of two"
-            );
+        cursor
+            .build_store(p, a, OperandTy::Inferred, Access::Aligned)
+            .unwrap();
+        cursor
+            .build_store(p, u, OperandTy::Inferred, Access::Unaligned)
+            .unwrap();
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%a = load i32, ptr %p\n",
+            "%u = load i32, ptr %p, align 1\n",
+            "store i32 %a, ptr %p\n",
+            "store i32 %u, ptr %p, align 1\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
         }
-
-        for align in [0, 3, 6, 10, 12] {
-            let err = cursor
-                .build_load(ptr, i32_ty.into(), Some(align), RegName::Unnamed)
-                .expect_err("not a power of two");
-
-            assert!(
-                matches!(&err, InstructionError::AlignmentNotPowerOfTwo(a) if *a == align),
-                "expected an alignment error for {align}, got: {err}"
-            );
-        }
-    }
-
-    /// Omitting the alignment is how the ABI default is asked for, and is always
-    /// allowed.
-    #[test]
-    fn an_omitted_alignment_is_allowed() {
-        let mut builder = fixture();
-        let (mut cursor, ptr) = block_with_ptr(&mut builder);
-
-        let i32_ty = cursor.i32_ty();
-
-        assert!(
-            cursor
-                .build_load(ptr, i32_ty.into(), None, RegName::Unnamed)
-                .is_ok()
-        );
     }
 
     /// A block plus the cursor writing into it, for the `icmp` tests below — which
@@ -5378,7 +5343,7 @@ mod tests {
 
         assert!(
             matches!(
-                again.build_alloca(i32_ty, None, None, RegName::Unnamed),
+                again.build_alloca(i32_ty, None, RegName::Unnamed),
                 Err(InstructionError::BasicBlockAlreadyTerminated(_))
             ),
             "nothing may follow a terminator, whichever cursor asks"

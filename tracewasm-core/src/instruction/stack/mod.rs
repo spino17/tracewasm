@@ -115,7 +115,7 @@ use tracewasm_llvm::{
         global::{DefinedFunc, GlobalId},
     },
     instruction::{
-        ICond,
+        Access, ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
     value::ValueId,
@@ -4233,7 +4233,7 @@ impl Instruction for StackInstruction {
                 let local_val = curr_cursor.build_load(
                     *local_ptr,
                     OperandTy::Inferred,
-                    None,
+                    Access::Aligned,
                     RegName::Named(format!("local{}_val", index)),
                 )?;
 
@@ -4244,14 +4244,19 @@ impl Instruction for StackInstruction {
                 let local_ptr = &locals[index];
                 let val = pass_manager.simulated_stack.pop();
 
-                curr_cursor.build_store(*local_ptr, val, OperandTy::Inferred, None)?;
+                curr_cursor.build_store(*local_ptr, val, OperandTy::Inferred, Access::Aligned)?;
             }
             StackInstruction::LocalTee { index } => {
                 let index = index.0 as usize;
                 let local_ptr = &locals[index];
                 let top_val = pass_manager.simulated_stack.peek_from_top(0);
 
-                curr_cursor.build_store(*local_ptr, *top_val, OperandTy::Inferred, None)?;
+                curr_cursor.build_store(
+                    *local_ptr,
+                    *top_val,
+                    OperandTy::Inferred,
+                    Access::Aligned,
+                )?;
             }
             StackInstruction::Call {
                 func_index,
@@ -4310,11 +4315,15 @@ impl Instruction for StackInstruction {
                 let func_return_ptr = curr_cursor.build_alloca(
                     result_ty,
                     None,
-                    result_ty.alignment(&curr_cursor),
                     RegName::Named(format!("func{}_{}_result_ptr", func_index.0, instr_index)),
                 )?;
 
-                curr_cursor.build_store(func_return_ptr, result, OperandTy::Inferred, None)?;
+                curr_cursor.build_store(
+                    func_return_ptr,
+                    result,
+                    OperandTy::Inferred,
+                    Access::Aligned,
+                )?;
 
                 let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
 
@@ -4335,7 +4344,7 @@ impl Instruction for StackInstruction {
                     let field_val = curr_cursor.build_load(
                         field_ptr,
                         OperandTy::Asserted(*field_ty),
-                        field_ty.alignment(&curr_cursor),
+                        Access::Aligned,
                         RegName::Named(format!(
                             "func{}_{}_result_{}_val",
                             func_index.0, instr_index, i

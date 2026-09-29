@@ -10,7 +10,7 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
+        Access, AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
         FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
         LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands, SwitchOperands,
         UnconditionalBrOperands,
@@ -201,11 +201,12 @@ impl IREmitter {
         Ok(format!("{} = ", Self::operand(value, ctx)?))
     }
 
-    /// `, align N`, or nothing when the ABI default is wanted.
-    fn alignment(align: Option<u32>) -> String {
-        match align {
-            Some(align) => format!(", align {align}"),
-            None => String::new(),
+    /// Nothing for an aligned access, which leaves LLVM to take the ABI alignment
+    /// from the data layout; `, align 1` for one that promises nothing.
+    fn access(access: Access) -> &'static str {
+        match access {
+            Access::Aligned => "",
+            Access::Unaligned => ", align 1",
         }
     }
 }
@@ -436,11 +437,10 @@ impl CfgVisitor for IREmitter {
         };
 
         self.push_line(&format!(
-            "{}alloca {}{}{}",
+            "{}alloca {}{}",
             Self::assignment(value, ctx)?,
             ctx.display(operands.ty),
             count,
-            Self::alignment(operands.align)
         ));
 
         Ok(())
@@ -457,7 +457,7 @@ impl CfgVisitor for IREmitter {
             Self::assignment(value, ctx)?,
             ctx.display(operands.ty),
             Self::typed_operand(operands.ptr, ctx)?,
-            Self::alignment(operands.align)
+            Self::access(operands.access)
         ));
 
         Ok(())
@@ -472,7 +472,7 @@ impl CfgVisitor for IREmitter {
             "store {}, {}{}",
             Self::typed_operand(operands.value, ctx)?,
             Self::typed_operand(operands.ptr, ctx)?,
-            Self::alignment(operands.align)
+            Self::access(operands.access)
         ));
 
         Ok(())
@@ -842,9 +842,7 @@ mod tests {
 
         let mut in_entry = builder.cursor_at_block(entry);
 
-        let slot = in_entry
-            .build_alloca(struct_ty, None, Some(8), "s".into())
-            .unwrap();
+        let slot = in_entry.build_alloca(struct_ty, None, "s".into()).unwrap();
 
         let count = in_entry.const_value(4i32, OperandTy::Inferred).unwrap();
         let zero = in_entry.const_value(0i32, OperandTy::Inferred).unwrap();
@@ -852,12 +850,7 @@ mod tests {
         let two = in_entry.const_value(2i32, OperandTy::Inferred).unwrap();
 
         in_entry
-            .build_alloca(
-                i64_ty,
-                Some((count, OperandTy::Inferred)),
-                None,
-                RegName::Unnamed,
-            )
+            .build_alloca(i64_ty, Some((count, OperandTy::Inferred)), RegName::Unnamed)
             .unwrap();
 
         let elem = in_entry
@@ -871,33 +864,30 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .build_load(elem, f64_ty.into(), Some(8), "d".into())
+            .build_load(elem, f64_ty.into(), Access::Aligned, "d".into())
             .unwrap();
 
+        // Stored back unaligned, so both spellings of an access are pinned.
         in_entry
-            .build_store(elem, loaded, OperandTy::Inferred, Some(8))
+            .build_store(elem, loaded, OperandTy::Inferred, Access::Unaligned)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
         // `llvm-as` with "floating point constant invalid for type".
         let a_float = in_entry.const_value(0.1f32, OperandTy::Inferred).unwrap();
 
-        let float_slot = in_entry
-            .build_alloca(f32_ty, None, None, "fs".into())
-            .unwrap();
+        let float_slot = in_entry.build_alloca(f32_ty, None, "fs".into()).unwrap();
 
         in_entry
-            .build_store(float_slot, a_float, OperandTy::Inferred, None)
+            .build_store(float_slot, a_float, OperandTy::Inferred, Access::Aligned)
             .unwrap();
 
         let null = in_entry.const_value(NullPtr, OperandTy::Inferred).unwrap();
 
-        let ptr_slot = in_entry
-            .build_alloca(ptr_ty, None, None, "np".into())
-            .unwrap();
+        let ptr_slot = in_entry.build_alloca(ptr_ty, None, "np".into()).unwrap();
 
         in_entry
-            .build_store(ptr_slot, null, OperandTy::Inferred, None)
+            .build_store(ptr_slot, null, OperandTy::Inferred, Access::Aligned)
             .unwrap();
         in_entry.build_unconditional_br(body).unwrap();
 
@@ -1045,11 +1035,11 @@ mod tests {
             "\n",
             "define i32 @main(i32 %n, ptr %0) {\n",
             "entry:\n",
-            "    %s = alloca { i32, [4 x double] }, align 8\n",
+            "    %s = alloca { i32, [4 x double] }\n",
             "    %1 = alloca i64, i32 4\n",
             "    %e = getelementptr inbounds { i32, [4 x double] }, ptr %s, i32 0, i32 1, i32 2\n",
-            "    %d = load double, ptr %e, align 8\n",
-            "    store double %d, ptr %e, align 8\n",
+            "    %d = load double, ptr %e\n",
+            "    store double %d, ptr %e, align 1\n",
             "    %fs = alloca float\n",
             "    store float 0x3FB99999A0000000, ptr %fs\n",
             "    %np = alloca ptr\n",
@@ -1340,7 +1330,7 @@ mod tests {
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(address, OperandTy::Inferred, None, "v".into())
+            .build_load(address, OperandTy::Inferred, Access::Aligned, "v".into())
             .expect("the global says what it points at");
 
         assert_eq!(
@@ -1350,7 +1340,7 @@ mod tests {
         );
 
         cursor
-            .build_store(address, loaded, OperandTy::Inferred, None)
+            .build_store(address, loaded, OperandTy::Inferred, Access::Aligned)
             .unwrap();
 
         cursor.build_ret(None, void_ty.into()).unwrap();
@@ -1644,10 +1634,10 @@ mod tests {
             "a constant gep is a pointer, like the instruction"
         );
 
-        let slot = cursor.build_alloca(ptr_ty, None, None, "s".into()).unwrap();
+        let slot = cursor.build_alloca(ptr_ty, None, "s".into()).unwrap();
 
         cursor
-            .build_store(slot, const_gep, OperandTy::Inferred, None)
+            .build_store(slot, const_gep, OperandTy::Inferred, Access::Aligned)
             .expect("a constant expression is a valid store value");
 
         cursor.build_ret(None, void_ty.into()).unwrap();

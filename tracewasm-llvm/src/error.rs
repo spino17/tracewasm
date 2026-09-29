@@ -182,10 +182,6 @@ pub enum InstructionError {
          pointer operand"
     )]
     LoadedTypeUnknown,
-    /// An explicit alignment must be a power of two. `0` is not one — leaving the
-    /// alignment off is how the ABI default is asked for.
-    #[error("alignment must be a power of two, but got `{0}`")]
-    AlignmentNotPowerOfTwo(u32),
     /// The block already ends in a terminator, so nothing may follow. Consuming the
     /// cursor prevents this for the cursor that branched; this catches a *second*
     /// cursor opened at the same block, which the type system cannot see.

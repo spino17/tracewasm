@@ -238,52 +238,6 @@ impl TyId {
         Some((fields, *packed))
     }
 
-    /// The ABI alignment of this type in bytes, or `None` where it is not a fixed
-    /// number this crate decides.
-    ///
-    /// Scalars and structs answer: a scalar's alignment equals its width, a packed
-    /// struct's is 1, and any other struct's is its largest field's. A pointer's, an
-    /// array's, a function's and `void`'s come from the target's data layout, so
-    /// `None` here means "let the ABI default apply" rather than "unaligned" — which
-    /// is exactly how the builders read a `None` `align`.
-    pub fn alignment(&self, ctx: &Context) -> Option<u32> {
-        let ty_obj = ctx.ty_interner.value(self.raw());
-
-        let width = match ty_obj {
-            Type::I1 => 1,
-            Type::I8 => 1,
-            Type::I16 => 2,
-            Type::I32 => 4,
-            Type::I64 => 8,
-            Type::Half => 2,
-            Type::Bfloat => 2,
-            Type::Float => 4,
-            Type::Double => 8,
-            Type::Struct { fields, packed } => {
-                if *packed {
-                    return Some(1);
-                }
-
-                let mut max_alignment = u32::MIN;
-
-                for field in fields {
-                    let field_alignment = field.alignment(ctx)?;
-
-                    if max_alignment < field_alignment {
-                        max_alignment = field_alignment;
-                    }
-                }
-
-                return Some(max_alignment);
-            }
-            Type::Ptr | Type::Array { .. } | Type::Func(_) | Type::Void => {
-                return None;
-            }
-        };
-
-        Some(width)
-    }
-
     /// How many bits this type occupies, or `None` if that is not a fixed number.
     ///
     /// `None` for `ptr` (target-dependent) and for `void` and the aggregates. Note
@@ -978,11 +932,7 @@ impl Value {
                 let ptr_instr = &ctx.get_block(def.block).instructions[def.instr_index];
 
                 match &ptr_instr.kind {
-                    InstructionKind::Alloca(AllocaOperands {
-                        ty,
-                        count,
-                        align: _,
-                    }) => PointeeTy {
+                    InstructionKind::Alloca(AllocaOperands { ty, count }) => PointeeTy {
                         ty: *ty,
                         count: *count,
                     },

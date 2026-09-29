@@ -507,7 +507,7 @@ mod tests {
         let i32_ty = cursor.i32_ty();
 
         cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect("an i32 is allocatable")
     }
 

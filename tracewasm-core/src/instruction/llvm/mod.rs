@@ -71,7 +71,7 @@ use tracewasm_llvm::{
     },
     error::PhiError,
     instruction::{
-        PhiInstrHandler,
+        Access, PhiInstrHandler,
         cursor::{OperandTy, RegName},
     },
     interner::TyId,
@@ -678,41 +678,35 @@ impl WasmInstrLLVMPassManager {
 
         for (counter, (i, local_ty)) in local_types.iter().enumerate().enumerate() {
             // last param is runtime ctx!
-            let (ptr, val, alignment) = if i < params.len() - 1 {
+            let (ptr, val) = if i < params.len() - 1 {
                 let param = &params[i];
                 let ty = param.ty(&entry_cursor);
-                let alignment = ty.alignment(&entry_cursor);
 
                 (
                     entry_cursor.build_alloca(
                         ty,
                         None,
-                        alignment,
                         RegName::Named(format!("local{}", counter)),
                     )?,
                     *param,
-                    alignment,
                 )
             } else {
                 let ty = Self::llvm_ty_from_wasm(local_ty, &mut entry_cursor);
                 let val = Value::zero_of_ty(ty, &mut entry_cursor)
                     .expect("type for wasm locals are always basic type i.e. i32, i64, f32, f64");
-                let alignment = ty.alignment(&entry_cursor);
 
                 (
                     entry_cursor.build_alloca(
                         ty,
                         None,
-                        alignment,
                         RegName::Named(format!("local{}", counter)),
                     )?,
                     val,
-                    alignment,
                 )
             };
 
             locals.push(ptr);
-            entry_cursor.build_store(ptr, val, OperandTy::Inferred, alignment)?;
+            entry_cursor.build_store(ptr, val, OperandTy::Inferred, Access::Aligned)?;
         }
 
         let func_end = func.add_basic_block("end", ctx)?;
@@ -826,7 +820,6 @@ impl WasmInstrLLVMPassManager {
         let func_return_ptr = end_cursor.build_alloca(
             result_ty,
             None,
-            result_ty.alignment(&end_cursor),
             RegName::Named("fn_return_ptr".to_string()),
         )?;
 
@@ -847,13 +840,13 @@ impl WasmInstrLLVMPassManager {
                 RegName::Named(format!("result{}_ptr", i)),
             )?;
 
-            end_cursor.build_store(field_ptr, *field_val, OperandTy::Inferred, None)?;
+            end_cursor.build_store(field_ptr, *field_val, OperandTy::Inferred, Access::Aligned)?;
         }
 
         let func_return_val = end_cursor.build_load(
             func_return_ptr,
             OperandTy::Inferred,
-            None,
+            Access::Aligned,
             RegName::Named("fn_return_val".into()),
         )?;
 

@@ -216,6 +216,22 @@ pub struct RetOperands {
     pub value: Option<ValueId>,
 }
 
+/// Whether a `load` or `store` may assume its address is aligned.
+///
+/// There is no numeric alignment: the builders never promise more than the ABI
+/// alignment the target's data layout gives the type, and never ask the caller to
+/// know what that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// The address has the type's ABI alignment. Emitted with no `align`, so LLVM
+    /// takes it from the data layout. An address that isn't aligned is undefined
+    /// behaviour, which is what lets the optimizer rely on it.
+    Aligned,
+    /// The address may have any alignment. Emitted as `align 1`, promising nothing:
+    /// for a field of a packed struct, or bytes read out of a buffer.
+    Unaligned,
+}
+
 /// Operands of a `load`.
 pub struct LoadOperands {
     /// The type read out of memory. Under opaque pointers this comes from the
@@ -223,8 +239,8 @@ pub struct LoadOperands {
     pub ty: TyId,
     /// The address.
     pub ptr: ValueId,
-    /// Explicit alignment. `None` means the ABI default.
-    pub align: Option<u32>,
+    /// Whether the address may be assumed aligned.
+    pub access: Access,
 }
 
 /// Operands of a `store`.
@@ -233,18 +249,17 @@ pub struct StoreOperands {
     pub value: ValueId,
     /// The address.
     pub ptr: ValueId,
-    /// Explicit alignment. `None` means the ABI default.
-    pub align: Option<u32>,
+    /// Whether the address may be assumed aligned.
+    pub access: Access,
 }
 
 /// Operands of an `alloca`.
 pub struct AllocaOperands {
     /// The type allocated. The instruction's *result* is a `ptr` to this.
     pub ty: TyId,
-    /// Element count, for allocating an array's worth. `None` allocates one.
+    /// Element count, for allocating an array's worth. `None` allocates one. The
+    /// slot always gets the type's ABI alignment.
     pub count: Option<ValueId>,
-    /// Explicit alignment. `None` means the ABI default.
-    pub align: Option<u32>,
 }
 
 /// Operands of a `getelementptr`.
