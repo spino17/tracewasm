@@ -10,7 +10,8 @@
 //!
 //! Three things are threaded through almost every call:
 //!
-//! - A [`Context`](cfg::context::Context) owns the arenas and the interner pools.
+//! - A [`Context`](cfg::context::Context) owns the arenas and the interner pools,
+//!   and is created for a [`Target`](cfg::module::Target).
 //!   Everything is addressed by id — [`TyId`](interner::TyId),
 //!   [`StrId`](interner::StrId), [`FuncId`](cfg::function::FuncId),
 //!   [`BasicBlockId`](cfg::basic_block::BasicBlockId) — and **an id only means
@@ -21,14 +22,9 @@
 //!   instructions into it.
 //!
 //! ```
-//! # use tracewasm_llvm::cfg::{
-//! #     builder::Builder, context::Context, emit::IREmitter,
-//! #     module::{DataLayout, Triple},
-//! # };
-//! let ctx = Context::new(
-//!     Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
-//!     DataLayout::default(),
-//! );
+//! # use tracewasm_llvm::cfg::{context::Context, emit::IREmitter, module::Target};
+//! // The target is fixed up front; `Unspecified` leaves it to whatever consumes the IR.
+//! let ctx = Context::new(Target::Unspecified);
 //! let mut builder = ctx.builder();
 //!
 //! let i32_ty = builder.i32_ty();

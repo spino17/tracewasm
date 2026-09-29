@@ -9,7 +9,7 @@ use tracewasm_llvm::{
     cfg::{
         context::Context,
         emit::IREmitter,
-        module::{DataLayout, Triple},
+        module::{Target, Triple},
     },
     instruction::{IBinOp, ICond, cursor::OperandTy},
 };
@@ -28,15 +28,12 @@ use tracewasm_llvm::{
 /// ```
 #[test]
 fn a_frontend_can_build_a_loop_with_a_back_edge() {
-    let mut ctx = Context::new(
-        Triple::new(
-            "arm64".to_string(),
-            "apple".to_string(),
-            "macosx".to_string(),
-            None,
-        ),
-        DataLayout::default(),
-    );
+    let mut ctx = Context::new(Target::Triple(Triple::new(
+        "arm64".to_string(),
+        "apple".to_string(),
+        "macosx".to_string(),
+        None,
+    )));
 
     let i32_ty = ctx.i32_ty();
     let mut builder = ctx.builder();
@@ -157,15 +154,12 @@ fn a_frontend_can_build_a_loop_with_a_back_edge() {
 /// ```
 #[test]
 fn a_frontend_can_close_a_back_edge_from_an_inner_block() {
-    let mut ctx = Context::new(
-        Triple::new(
-            "arm64".to_string(),
-            "apple".to_string(),
-            "macosx".to_string(),
-            None,
-        ),
-        DataLayout::default(),
-    );
+    let mut ctx = Context::new(Target::Triple(Triple::new(
+        "arm64".to_string(),
+        "apple".to_string(),
+        "macosx".to_string(),
+        None,
+    )));
 
     let i32_ty = ctx.i32_ty();
     let mut builder = ctx.builder();

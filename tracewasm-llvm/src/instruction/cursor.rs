@@ -140,11 +140,8 @@ impl From<TyId> for OperandTy {
 /// compiler enforces it:
 ///
 /// ```compile_fail
-/// # use tracewasm_llvm::cfg::{context::Context, module::{DataLayout, Triple}};
-/// # let ctx = Context::new(
-/// #     Triple::new("arm64".to_string(), "apple".to_string(), "macosx".to_string(), None),
-/// #     DataLayout::default(),
-/// # );
+/// # use tracewasm_llvm::cfg::{context::Context, module::Target};
+/// # let ctx = Context::new(Target::Unspecified);
 /// # let mut builder = ctx.builder();
 /// # let void_ty = builder.void_ty();
 /// # let f = builder.define_function("f".to_string(), &[], void_ty).unwrap();

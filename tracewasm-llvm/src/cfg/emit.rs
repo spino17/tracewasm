@@ -217,9 +217,8 @@ impl CfgVisitor for IREmitter {
     fn visit_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
         self.unset_indentation();
 
-        // An unset data layout is the empty string, and an empty
-        // `target datalayout = ""` line is not what "unset" means. A structured
-        // `Triple` is always present, so that guard is belt-and-braces.
+        // Whatever the `Target` left unset is the empty string, and an empty
+        // `target datalayout = ""` line is not what "unset" means: it gets no line.
         if !cfg.context.module.data_layout.is_empty() {
             self.push_line(&format!(
                 "target datalayout = \"{}\"",
@@ -749,7 +748,7 @@ impl CfgVisitor for IREmitter {
 mod tests {
     use super::*;
     use crate::{
-        cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
+        cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Target, Triple},
         error::ContextError,
         instruction::{
             CastOp, FBinOp, FCond, GetElementPtrOperands, IBinOp, ICond,
@@ -1748,11 +1747,8 @@ mod tests {
     }
 
     /// An unset data layout is omitted rather than written as an empty string —
-    /// `target datalayout = ""` is not what "unset" means.
-    ///
-    /// Note that a [`Triple`](crate::cfg::module::Triple) is always present now that
-    /// it is structured, so a module with no functions still emits its `target
-    /// triple` line and the blank separator after it.
+    /// `target datalayout = ""` is not what "unset" means. A [`Target::Triple`] still
+    /// emits its `target triple` line, and the blank separator after it.
     #[test]
     fn an_unset_data_layout_emits_no_datalayout_line() {
         let ctx = crate::test_support::ctx();
@@ -1769,22 +1765,31 @@ mod tests {
         );
     }
 
+    /// With [`Target::Unspecified`] there is nothing to write: no `target` lines, and
+    /// no blank separator either.
+    #[test]
+    fn an_unspecified_target_emits_no_target_lines() {
+        let ir = IREmitter::emit(Context::new(Target::Unspecified).builder().build()).unwrap();
+
+        assert_eq!(ir, "");
+    }
+
     /// And a layout that *is* set gets its own line, ahead of the triple.
     #[test]
     fn a_set_data_layout_is_emitted_before_the_triple() {
-        let ctx = Context::new(
-            Triple::new(
+        let ctx = Context::new(Target::Full {
+            triple: Triple::new(
                 "arm64".to_string(),
                 "apple".to_string(),
                 "macosx".to_string(),
                 None,
             ),
-            DataLayout::new(vec![
+            data_layout: DataLayout::new(vec![
                 DataLayoutSpec::Endianness(Endianness::Little),
                 DataLayoutSpec::Mangling(Mangling::MachO),
                 DataLayoutSpec::StackAlignment(128),
             ]),
-        );
+        });
 
         let ir = IREmitter::emit(ctx.builder().build()).unwrap();
 

@@ -1,6 +1,7 @@
 //! The errors the JIT reports, from parsing a module through to looking up a
 //! compiled function.
 
+use crate::error::TargetParseError;
 use thiserror::Error;
 
 /// Everything that can go wrong between [`JITHandler::new`](super::JITHandler::new)
@@ -11,6 +12,11 @@ pub enum JITError {
     /// [`JITHandler::new`](super::JITHandler::new).
     #[error("initialization failed for native target")]
     InitializationError,
+    /// [`JITHandler::target`](super::JITHandler::target) couldn't express the host's
+    /// triple or data layout as a [`Target`](crate::cfg::module::Target): its layout
+    /// has a specification the IR builder doesn't model.
+    #[error("the host's target can't be expressed: {0}")]
+    HostTarget(#[from] TargetParseError),
     /// The name given to [`parse_module`](super::JITHandler::parse_module)
     /// contains a NUL byte, which LLVM's C API can't take.
     #[error("module name contains a NUL byte")]

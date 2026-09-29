@@ -6,7 +6,7 @@ use crate::{
         builder::Builder,
         function::{FuncId, Function},
         global::{GlobalEntity, GlobalId},
-        module::{DataLayout, Module, Triple},
+        module::{Module, Target},
     },
     constants::ENTRY_IN_ARENA_SHOULD_EXIST_FOR_ID,
     error::{ContextError, TypeError},
@@ -46,13 +46,14 @@ pub struct Context {
 }
 
 impl Context {
-    /// An empty context for the given target.
+    /// An empty context for the given target. Pass [`Target::Unspecified`] to leave
+    /// the choice to whatever consumes the IR.
     ///
     /// One per module. Everything built against it is addressed by id, and an id only
     /// means anything here — see the type-level note above.
-    pub fn new(triple: Triple, data_layout: DataLayout) -> Self {
+    pub fn new(target: Target) -> Self {
         Context {
-            module: Module::new(triple, data_layout),
+            module: Module::new(target),
             values: Arena::default(),
             blocks: Arena::default(),
             funcs: Arena::default(),

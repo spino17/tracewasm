@@ -19,7 +19,7 @@ use tracewasm_llvm::{
     cfg::{
         context::Context,
         emit::IREmitter,
-        module::{DataLayout, Triple},
+        module::{Target, Triple},
     },
     instruction::{
         IBinOp, ICond,
@@ -28,10 +28,12 @@ use tracewasm_llvm::{
 };
 
 fn ctx() -> Context {
-    Context::new(
-        Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
-        DataLayout::default(),
-    )
+    Context::new(Target::Triple(Triple::new(
+        "arm64".into(),
+        "apple".into(),
+        "macosx".into(),
+        None,
+    )))
 }
 
 /// The `%N` in each `%N = ...`, in the order they are printed.

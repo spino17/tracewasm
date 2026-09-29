@@ -32,24 +32,17 @@ tracewasm-llvm = { path = "../tracewasm-llvm", features = ["jit"] }  # builder +
 Three things are threaded through almost every call:
 
 - a **`Context`**, which owns the arenas and the interned types, strings and
-  constants. Everything is addressed by id, and **an id only means anything
-  against the context that issued it**;
+  constants, and is created for a `Target`. Everything is addressed by id, and
+  **an id only means anything against the context that issued it**;
 - a **`Builder`**, which owns the context: it adds functions and globals, and
   hands out cursors;
 - a **`Cursor`**, which points at one basic block and writes instructions into it.
 
 ```rust
-use tracewasm_llvm::cfg::{
-    context::Context,
-    emit::IREmitter,
-    module::{DataLayout, Triple},
-};
+use tracewasm_llvm::cfg::{context::Context, emit::IREmitter, module::Target};
 use tracewasm_llvm::instruction::{IBinOp, cursor::OperandTy};
 
-let ctx = Context::new(
-    Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
-    DataLayout::default(),
-);
+let ctx = Context::new(Target::Unspecified);
 let mut builder = ctx.builder();
 
 // define i64 @add(i64 %a, i64 %b)
@@ -71,6 +64,21 @@ assert!(ir.contains("%sum = add i64 %a, %b"));
 
 `Builder::build` numbers unnamed registers (`%0`, `%1`, …) in printed order, the
 way LLVM requires, so a frontend can create blocks in whatever order suits it.
+
+### Choosing a target
+
+The target is fixed when the `Context` is created, so every layout-dependent
+decision made while building sees the same one:
+
+| `Target` | Emits | Use it when |
+|---|---|---|
+| `Unspecified` | no `target` lines | whatever consumes the IR should decide; the JIT supplies the host's |
+| `Triple(t)` | `target triple` | the platform matters but its layout can be defaulted |
+| `Full { triple, data_layout }` | both | the IR has to mean exactly one machine |
+
+A data layout without a triple can't be written. `Triple` and `DataLayout` parse
+from LLVM's own strings (`"arm64-apple-darwin25.1.0".parse()`), and a layout
+specification the crate doesn't model is refused rather than dropped.
 
 ### Stricter than LLVM, on purpose
 
@@ -106,24 +114,20 @@ instance, so a function can't be called after its code is gone.
 
 ### From the builder to a call
 
-Emit the graph and pass the text straight to the JIT. Give the `Context` the
-host's triple — here, Apple silicon — and leave the data layout unset so the
-JIT supplies its own.
+Emit the graph and pass the text straight to the JIT. `jit.target()` is the host's
+exact triple and data layout, so building for it bakes them into the IR;
+`Target::Unspecified` works too, since the JIT fills in whatever a module leaves
+unset.
 
-```rust,no_run
+```rust
 use llvm_sys::target_machine::LLVMCodeGenOptLevel;
-use tracewasm_llvm::cfg::{
-    context::Context,
-    emit::IREmitter,
-    module::{DataLayout, Triple},
-};
+use tracewasm_llvm::cfg::{context::Context, emit::IREmitter};
 use tracewasm_llvm::instruction::{IBinOp, cursor::OperandTy};
 use tracewasm_llvm::jit::{JITHandler, OptLevel};
 
-let ctx = Context::new(
-    Triple::new("arm64".into(), "apple".into(), "macosx".into(), None),
-    DataLayout::default(),
-);
+let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
+
+let ctx = Context::new(jit.target()?);
 let mut builder = ctx.builder();
 let i64_ty = builder.i64_ty();
 let f = builder.define_function("add", &[(i64_ty, "a".into()), (i64_ty, "b".into())], i64_ty)?;
@@ -134,7 +138,6 @@ let sum = cursor.build_ibinop(IBinOp::Add, OperandTy::Inferred, a, b, "sum".into
 cursor.build_ret(Some(sum), i64_ty.into())?;
 let ir = IREmitter::emit(builder.build())?;
 
-let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive)?;
 let mut module = jit.parse_module("add", &ir)?;
 module.optimize(OptLevel::O3)?;
 
@@ -207,7 +210,8 @@ Each of these is an error, not a silent miscompile:
   the backend adds on its own (`memcpy` for a large `llvm.memcpy`, `fmod` for
   `frem`) resolve against the host process.
 - **The target must match.** A module's triple must name the host's architecture
-  and OS, and a data layout it states must be exactly the host's.
+  and OS, and a data layout it states must be exactly the host's — which is what
+  `jit.target()` gives.
 - **No static constructors.** A non-empty `llvm.global_ctors`/`llvm.global_dtors`
   is refused: ORC's C API can't run them. `optimize` often folds a constructor into
   the globals it initializes, which removes it.

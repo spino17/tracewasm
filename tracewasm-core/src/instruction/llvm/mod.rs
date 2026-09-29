@@ -67,7 +67,7 @@ use tracewasm_llvm::{
         basic_block::BasicBlockId,
         context::Context,
         global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId},
-        module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
+        module::Target,
     },
     error::PhiError,
     instruction::{
@@ -575,20 +575,9 @@ impl WasmInstrLLVMPassManager {
         mut self,
         module: &Arc<Module<V>>,
     ) -> Result<ControlFlowGraph, anyhow::Error> {
-        // TODO: get this from the system on which this function is called!
-        let ctx = Context::new(
-            Triple::new(
-                "arm64".to_string(),
-                "apple".to_string(),
-                "macosx".to_string(),
-                None,
-            ),
-            DataLayout::new(vec![
-                DataLayoutSpec::Endianness(Endianness::Little),
-                DataLayoutSpec::Mangling(Mangling::MachO),
-                DataLayoutSpec::StackAlignment(128),
-            ]),
-        );
+        // Left to whatever consumes the IR: the JIT fills in the host's triple and
+        // data layout, which is exactly the machine this runs on.
+        let ctx = Context::new(Target::Unspecified);
 
         let mut builder = ctx.builder();
 
@@ -942,11 +931,7 @@ mod tests {
     use super::*;
     use crate::instruction::stack::{LabelSignature, StackFrameLayout, StackInstruction};
     use tracewasm_llvm::{
-        cfg::{
-            builder::Builder,
-            emit::IREmitter,
-            module::{DataLayout, Triple},
-        },
+        cfg::{builder::Builder, emit::IREmitter, module::Target},
         instruction::cursor::OperandTy,
         value::NullPtr,
     };
@@ -978,15 +963,7 @@ mod tests {
     /// `todo!()` arm. That is enough to pin the control arms: the condition's
     /// comparison, the fall-through terminators, and the phis at the `end`.
     fn harness() -> (Builder, GlobalId<DefinedFunc>, BasicBlockId, ValueId) {
-        let ctx = Context::new(
-            Triple::new(
-                "arm64".to_string(),
-                "apple".to_string(),
-                "macosx".to_string(),
-                None,
-            ),
-            DataLayout::default(),
-        );
+        let ctx = Context::new(Target::Unspecified);
 
         let mut builder = ctx.builder();
         let i32_ty = builder.i32_ty();

@@ -10,6 +10,7 @@
 //! [`JITModule::compile`] compiles everything into its own JITDylib; and
 //! [`JITCompiledInstance::get_func`] hands out type-checked functions to call.
 
+use crate::cfg::module::Target;
 use crate::jit::error::JITError;
 use crate::jit::func::{Func, LLVMFuncParams, LLVMFuncResult, LLVMHostFunc, fn_type};
 use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
@@ -281,6 +282,47 @@ impl JITHandler {
         }
 
         Ok(module)
+    }
+
+    /// The JIT's own target, the host's triple and full data layout, for
+    /// [`Context::new`](crate::cfg::context::Context::new). IR built for it bakes in
+    /// the exact layout the JIT compiles for, and [`parse_module`](Self::parse_module)
+    /// accepts it as-is.
+    ///
+    /// [`Target::Unspecified`] works with the JIT too, since `parse_module` fills in
+    /// what a module leaves unset; this is for when the frontend needs the layout
+    /// while it builds.
+    ///
+    /// ```
+    /// # use tracewasm_llvm::jit::JITHandler;
+    /// # use tracewasm_llvm::cfg::{context::Context, emit::IREmitter};
+    /// # use llvm_sys::target_machine::LLVMCodeGenOptLevel;
+    /// let jit = JITHandler::new(LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault)?;
+    /// let ctx = Context::new(jit.target()?);
+    /// let ir = IREmitter::emit(ctx.builder().build())?;
+    ///
+    /// assert!(ir.contains("target datalayout"));
+    /// jit.parse_module("m", &ir)?;
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`JITError::HostTarget`] if the host's layout has a specification the IR
+    /// builder doesn't model.
+    pub fn target(&self) -> Result<Target, JITError> {
+        // SAFETY: both strings are owned by the live JIT and outlive this call.
+        let (triple, data_layout) = unsafe {
+            (
+                CStr::from_ptr(LLVMOrcLLJITGetTripleString(self.jit)),
+                CStr::from_ptr(LLVMOrcLLJITGetDataLayoutStr(self.jit)),
+            )
+        };
+
+        Ok(Target::Full {
+            triple: triple.to_string_lossy().parse()?,
+            data_layout: data_layout.to_string_lossy().parse()?,
+        })
     }
 
     fn fresh_dylib_name(&self) -> CString {

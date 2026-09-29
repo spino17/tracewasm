@@ -211,7 +211,7 @@ impl From<Option<FuncIndex>> for OptionalU32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracewasm_llvm::cfg::module::{DataLayout, Triple};
+    use tracewasm_llvm::cfg::module::Target;
 
     /// The layout the generated code will GEP into.
     ///
@@ -262,15 +262,7 @@ mod tests {
     /// zero-sized, so it contributes nothing to the `repr(C)` layout either.
     #[test]
     fn the_llvm_type_lists_the_same_fields_as_the_rust_struct() {
-        let mut ctx = Context::new(
-            Triple::new(
-                "arm64".to_string(),
-                "apple".to_string(),
-                "macosx".to_string(),
-                None,
-            ),
-            DataLayout::default(),
-        );
+        let mut ctx = Context::new(Target::Unspecified);
 
         let ty = RuntimeContext::llvm_ty(&mut ctx);
 

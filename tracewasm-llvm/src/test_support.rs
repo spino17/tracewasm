@@ -9,7 +9,7 @@ use crate::{
         builder::Builder,
         context::Context,
         global::{DefinedFunc, GlobalId},
-        module::{DataLayout, Triple},
+        module::{Target, Triple},
     },
     error::ContextError,
     instruction::cursor::OperandTy,
@@ -31,15 +31,12 @@ pub(crate) fn fixture() -> Builder {
 
 /// Just the context, for the tests that never touch a builder.
 pub(crate) fn ctx() -> Context {
-    Context::new(
-        Triple::new(
-            "arm64".to_string(),
-            "apple".to_string(),
-            "macosx".to_string(),
-            None,
-        ),
-        DataLayout::default(),
-    )
+    Context::new(Target::Triple(Triple::new(
+        "arm64".to_string(),
+        "apple".to_string(),
+        "macosx".to_string(),
+        None,
+    )))
 }
 
 /// A function taking nothing and returning `void`, for the tests whose subject is

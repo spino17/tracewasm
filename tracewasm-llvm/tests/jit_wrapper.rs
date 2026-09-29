@@ -144,3 +144,36 @@ fn same_architecture_on_another_os_is_rejected() {
 
     assert!(matches!(err, JITError::TripleMismatch { ref module, .. } if *module == triple));
 }
+
+/// `jit.target()` is the host's exact triple and layout: IR built for it carries
+/// both, and the JIT accepts it because they match its own to the character.
+#[test]
+fn ir_built_for_the_jits_target_is_accepted_as_is() {
+    use tracewasm_llvm::cfg::{context::Context, emit::IREmitter, module::Target};
+
+    let jit = jit();
+    let Target::Full {
+        triple,
+        data_layout,
+    } = jit.target().unwrap()
+    else {
+        panic!("the JIT always knows both");
+    };
+
+    let ctx = Context::new(Target::Full {
+        triple: triple.clone(),
+        data_layout: data_layout.clone(),
+    });
+    let ir = IREmitter::emit(ctx.builder().build()).unwrap();
+
+    assert!(
+        ir.contains(&format!("target datalayout = \"{data_layout}\"")),
+        "{ir}"
+    );
+    assert!(
+        ir.contains(&format!("target triple = \"{triple}\"")),
+        "{ir}"
+    );
+
+    jit.parse_module("m", &ir).unwrap();
+}

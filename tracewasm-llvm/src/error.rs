@@ -646,3 +646,19 @@ pub enum GepError {
     #[error("a value of type `{0}` cannot be indexed into")]
     TypeNotIndexable(String),
 }
+
+/// A target triple or data layout string could not be parsed.
+///
+/// Returned by the `FromStr` impls of [`Triple`](crate::cfg::module::Triple) and
+/// [`DataLayout`](crate::cfg::module::DataLayout).
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum TargetParseError {
+    /// Fewer than three `-`-separated parts, or an empty one.
+    #[error("`{0}` is not a target triple: expected `arch-vendor-os[-env]`")]
+    Triple(String),
+    /// A data layout specification that is malformed, or of a kind this crate
+    /// doesn't model. It's refused rather than dropped, since dropping it would
+    /// describe a different machine.
+    #[error("`{0}` is not a data layout specification this crate models")]
+    DataLayoutSpec(String),
+}
