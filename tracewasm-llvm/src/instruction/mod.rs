@@ -181,6 +181,7 @@ pub enum InstructionKind {
     ///
     /// The only instruction with no operands at all — the keyword is the whole of it.
     Unreachable,
+    /// `%x = extractvalue <agg> %v, <i>, …` — a field or element of an aggregate.
     ExtractValue(ExtractValueOperands),
 }
 
@@ -868,8 +869,13 @@ pub struct SelectOperands {
     pub false_arm: ValueId,
 }
 
+/// Operands of an `extractvalue`.
 pub struct ExtractValueOperands {
-    agg_ty: TyId,
-    val: ValueId,
-    indices: Vec<ConstValue>,
+    /// The aggregate's type: the struct or array being read from.
+    pub agg_ty: TyId,
+    /// The aggregate itself.
+    pub val: ValueId,
+    /// The path to the field or element, one struct field or array element per level.
+    /// Never empty.
+    pub indices: Vec<u32>,
 }

@@ -23,6 +23,7 @@
 //!     ├── SwitchError
 //!     ├── SelectError
 //!     ├── PhiError ── ContextError
+//!     ├── ExtractInsertValueError
 //!     └── ContextError
 //! ```
 //!
@@ -229,6 +230,7 @@ pub enum InstructionError {
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
+    /// See [`ExtractInsertValueError`].
     #[error("{0}")]
     ExtractInsertValue(#[from] ExtractInsertValueError),
 }
@@ -584,8 +586,33 @@ pub enum PhiError {
     Context(#[from] ContextError),
 }
 
+/// An `extractvalue` could not be built: its indices don't lead anywhere inside the
+/// aggregate.
+///
+/// Indices are plain `u32`s, as in LLVM, where they're literals rather than values —
+/// so a negative or non-integer index can't be written in the first place.
 #[derive(Error, Debug)]
-pub enum ExtractInsertValueError {}
+pub enum ExtractInsertValueError {
+    /// No indices. LLVM requires at least one: `extractvalue {i32} %x` doesn't parse.
+    #[error("an `extractvalue` needs at least one index")]
+    NoIndices,
+    /// An index would descend into a type that isn't a struct or an array — the
+    /// operand's own type, or a field reached by the indices before it. Holds that
+    /// type.
+    #[error("a value of type `{0}` is not a struct or an array, so it can't be indexed into")]
+    NotAggregate(String),
+    /// An index is past the last field of a struct or the last element of an array.
+    /// `llvm-as` refuses it too, with "invalid indices for extractvalue".
+    #[error("index `{index}` is out of bounds for `{ty}`, which has {len} element(s)")]
+    IndexOutOfBounds {
+        /// The struct or array being indexed.
+        ty: String,
+        /// The index given.
+        index: u32,
+        /// How many fields or elements it has.
+        len: u64,
+    },
+}
 
 /// A `getelementptr` could not be built.
 ///

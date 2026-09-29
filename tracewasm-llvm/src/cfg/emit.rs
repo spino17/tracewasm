@@ -10,10 +10,10 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        Access, AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands, SwitchOperands,
-        UnconditionalBrOperands,
+        Access, AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands,
+        ExtractValueOperands, FBinOpOperands, FCmpOperands, FNegOperands, GetElementPtrOperands,
+        IBinOpOperands, ICmpOperands, LoadOperands, PhiInstruction, RetOperands, SelectOperands,
+        StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     value::{ConstExpr, ConstValue, FuncSignature, I1Value, ValueId, ValueKind},
 };
@@ -719,6 +719,30 @@ impl CfgVisitor for IREmitter {
             Self::operand(operands.true_arm, ctx)?,
             ctx.display(operands.arms_ty),
             Self::operand(operands.false_arm, ctx)?
+        ));
+
+        Ok(())
+    }
+
+    fn visit_extract_value(
+        &mut self,
+        operands: &ExtractValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // The typed operand spells the aggregate's type; the indices are bare
+        // literals, comma-separated after it.
+        let indices: String = operands
+            .indices
+            .iter()
+            .map(|index| format!(", {index}"))
+            .collect();
+
+        self.push_line(&format!(
+            "{}extractvalue {}{}",
+            Self::assignment(value, ctx)?,
+            Self::typed_operand(operands.val, ctx)?,
+            indices
         ));
 
         Ok(())

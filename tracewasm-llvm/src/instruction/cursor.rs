@@ -7,8 +7,9 @@ use crate::{
         global::FuncRef,
     },
     error::{
-        AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
-        ICmpError, InstructionError, PhiError, RetError, SelectError, StoreError, SwitchError,
+        AllocaError, CallError, CastError, ExtractInsertValueError, FBinOpError, FCmpError,
+        GepError, IBinOpError, ICmpError, InstructionError, PhiError, RetError, SelectError,
+        StoreError, SwitchError,
     },
     instruction::{
         Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands,
@@ -1556,26 +1557,48 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
 
+    /// Builds `%x = extractvalue <agg> %v, <i>, …`, returning the field or element the
+    /// indices lead to.
+    ///
+    /// Each index picks a struct field or an array element, one level down, and the
+    /// result has the type of whatever the last one lands on: for `{ i32, [2 x i64] }`,
+    /// `&[1, 0]` is an `i64`. Indices are plain numbers, as in LLVM, where they are
+    /// literals rather than values.
+    ///
+    /// This is how a multi-value call result is unpacked without going through
+    /// memory.
+    ///
+    /// # Errors
+    ///
+    /// - [`ExtractInsertValueError::NoIndices`] — LLVM requires at least one.
+    /// - [`ExtractInsertValueError::NotAggregate`] — `val`, or a field an earlier
+    ///   index reached, isn't a struct or an array.
+    /// - [`ExtractInsertValueError::IndexOutOfBounds`] — past a struct's last field
+    ///   or an array's last element.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_extract_value(
         &mut self,
         val: ValueId,
-        indices: &[ConstValue],
+        indices: &[u32],
         reg: RegName,
-        ctx: &mut Context,
     ) -> Result<ValueId, InstructionError> {
-        let ref_ty = val.ty(ctx);
-        let final_ty = ref_ty.walk_ty_for_extract_or_insert_value(indices, ctx)?;
+        if indices.is_empty() {
+            return Err(ExtractInsertValueError::NoIndices.into());
+        }
+
+        let agg_ty = val.ty(self.ctx);
+        let result_ty = agg_ty.walk_ty_for_extract_or_insert_value(indices, self.ctx)?;
 
         add_instruction_to_block_and_get_value(
             InstructionKind::ExtractValue(ExtractValueOperands {
-                agg_ty: ref_ty,
+                agg_ty,
                 val,
                 indices: indices.to_vec(),
             }),
-            final_ty,
+            result_ty,
             self.block,
             reg,
-            ctx,
+            self.ctx,
         )
     }
 }
@@ -3119,6 +3142,139 @@ mod tests {
             .expect("a `ptr` register is what an indirect call goes through");
 
         assert_eq!(r.ty(&cursor), i32_ty, "typed by the signature's result");
+    }
+
+    /// An `extractvalue` reads a field or element out of an aggregate, typed by what
+    /// the indices lead to, and is emitted with the aggregate's type and the bare
+    /// indices.
+    #[test]
+    fn extract_value_reads_what_the_indices_lead_to() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let pair_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, pair_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function("f".to_string(), &[(agg_ty, "s".into())], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let first = cursor.build_extract_value(s, &[0], "first".into()).unwrap();
+        let pair = cursor.build_extract_value(s, &[1], "pair".into()).unwrap();
+        let second = cursor
+            .build_extract_value(s, &[1, 0], "second".into())
+            .unwrap();
+
+        assert_eq!(first.ty(&cursor), i32_ty);
+        assert_eq!(pair.ty(&cursor), pair_ty);
+        assert_eq!(
+            second.ty(&cursor),
+            i64_ty,
+            "a path descends one level per index"
+        );
+
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%first = extractvalue { i32, [2 x i64] } %s, 0\n",
+            "%pair = extractvalue { i32, [2 x i64] } %s, 1\n",
+            "%second = extractvalue { i32, [2 x i64] } %s, 1, 0\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
+    /// No indices, indexing past a struct's last field or an array's last element,
+    /// or into something that isn't an aggregate: all refused, as `llvm-as` refuses
+    /// them.
+    #[test]
+    fn extract_value_refuses_indices_that_lead_nowhere() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, i64_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let array_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[
+                    (agg_ty, "s".into()),
+                    (i32_ty, "n".into()),
+                    (array_ty, "a".into()),
+                ],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let a = f.params(&builder)[2];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        assert!(matches!(
+            cursor.build_extract_value(s, &[], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::NoIndices
+            ))
+        ));
+
+        assert!(matches!(
+            cursor.build_extract_value(a, &[2], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::IndexOutOfBounds { ref ty, index: 2, len: 2 }
+            )) if ty == "[2 x i64]"
+        ));
+
+        assert!(matches!(
+            cursor.build_extract_value(s, &[2], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::IndexOutOfBounds { ref ty, index: 2, len: 2 }
+            )) if ty == "{ i32, i64 }"
+        ));
+
+        // Not an aggregate at all, and an index that goes past a scalar field.
+        for (val, indices) in [(n, &[0][..]), (s, &[0, 0][..])] {
+            assert!(matches!(
+                cursor.build_extract_value(val, indices, RegName::Unnamed),
+                Err(InstructionError::ExtractInsertValue(
+                    ExtractInsertValueError::NotAggregate(ref ty)
+                )) if ty == "i32"
+            ));
+        }
     }
 
     /// A `call` is not a terminator, so the block stays open after one.

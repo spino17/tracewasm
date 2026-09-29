@@ -208,34 +208,6 @@ impl TyId {
         )
     }
 
-    pub fn is_array(&self, ctx: &Context) -> Option<TyId> {
-        let ty_obj = ctx.ty_interner.value(self.raw());
-
-        let Type::Array {
-            size: _size,
-            element_ty,
-        } = ty_obj
-        else {
-            return None;
-        };
-
-        Some(*element_ty)
-    }
-
-    pub fn is_struct<'a>(&self, ctx: &'a Context) -> Option<&'a [TyId]> {
-        let ty_obj = ctx.ty_interner.value(self.raw());
-
-        let Type::Struct {
-            fields,
-            packed: _packed,
-        } = ty_obj
-        else {
-            return None;
-        };
-
-        Some(&fields)
-    }
-
     /// Whether this is `i32` specifically.
     ///
     /// Narrower than [`is_integer`](Self::is_integer) because a `getelementptr` index
@@ -252,6 +224,17 @@ impl TyId {
         let ty_obj = ctx.ty_interner.value(self.raw());
 
         matches!(ty_obj, Type::Void)
+    }
+
+    /// An array type's element type and length, or `None` if this isn't an array.
+    pub fn try_array(&self, ctx: &Context) -> Option<(TyId, u64)> {
+        let ty_obj = ctx.ty_interner.value(self.raw());
+
+        let Type::Array { size, element_ty } = ty_obj else {
+            return None;
+        };
+
+        Some((*element_ty, *size))
     }
 
     /// A struct type's field types and whether it's packed (`<{ … }>`), or `None`
@@ -295,44 +278,43 @@ impl TyId {
 
     pub(crate) fn walk_ty_for_extract_or_insert_value(
         &self,
-        indices: &[ConstValue],
+        indices: &[u32],
         ctx: &mut Context,
     ) -> Result<TyId, ExtractInsertValueError> {
         if indices.is_empty() {
             return Ok(*self);
         }
 
-        if let Some(element_ty) = self.is_array(ctx) {
-            element_ty.walk_ty_for_extract_or_insert_value(&indices[1..], ctx)
-        } else if let Some(fields) = self.is_struct(ctx) {
-            let index = indices[0];
+        if let Some((element_ty, size)) = self.try_array(ctx) {
+            let index = indices[0] as usize;
 
-            let index = match index {
-                ConstValue::I1(val) => val as i64,
-                ConstValue::I8(val) => val as i64,
-                ConstValue::I16(val) => val as i64,
-                ConstValue::I32(val) => val as i64,
-                ConstValue::I64(val) => val,
-                ConstValue::Double(_) | ConstValue::Float(_) | ConstValue::NullPtr => {
-                    todo!() // raise error: index should be integer
-                }
-            };
-
-            if index < 0 {
-                todo!() // raise error - can't be negative!
+            if index as u64 >= size {
+                return Err(ExtractInsertValueError::IndexOutOfBounds {
+                    ty: ctx.display(*self).to_string(),
+                    index: indices[0],
+                    len: size,
+                });
             }
 
-            let index = index as u64 as usize;
+            element_ty.walk_ty_for_extract_or_insert_value(&indices[1..], ctx)
+        } else if let Some((fields, _)) = self.try_struct(ctx) {
+            let index = indices[0] as usize;
 
             if index >= fields.len() {
-                todo!() // out of bounds access!
+                return Err(ExtractInsertValueError::IndexOutOfBounds {
+                    ty: ctx.display(*self).to_string(),
+                    index: indices[0],
+                    len: fields.len() as u64,
+                });
             }
 
             let field_ty = fields[index];
 
             field_ty.walk_ty_for_extract_or_insert_value(&indices[1..], ctx)
         } else {
-            todo!() // raise error - type is not aggregate!
+            Err(ExtractInsertValueError::NotAggregate(
+                ctx.display(*self).to_string(),
+            ))
         }
     }
 

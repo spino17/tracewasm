@@ -9,10 +9,10 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visibility},
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
-        SwitchOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, ExtractValueOperands,
+        FBinOpOperands, FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands,
+        ICmpOperands, InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands,
+        StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, ValueId},
 };
@@ -204,6 +204,15 @@ pub trait CfgVisitor {
     /// but the context.
     fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an `extractvalue`. The result has the type of the field or element the
+    /// indices lead to.
+    fn visit_extract_value(
+        &mut self,
+        operands: &ExtractValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -308,6 +317,9 @@ pub trait CfgVisitor {
                     self.visit_select(operands, *val.unwrap(), ctx)?
                 }
                 InstructionKind::Unreachable => self.visit_unreachable(ctx)?,
+                InstructionKind::ExtractValue(operands) => {
+                    self.visit_extract_value(operands, *val.unwrap(), ctx)?
+                }
             });
         }
 
