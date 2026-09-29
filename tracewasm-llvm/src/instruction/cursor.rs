@@ -14,8 +14,8 @@ use crate::{
     instruction::{
         Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands,
         ExtractValueOperands, FBinOp, FBinOpOperands, FCmpOperands, FCond, FNegOperands,
-        GetElementPtrOperands, IBinOp, IBinOpOperands, ICmpOperands, ICond, Instruction,
-        InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands,
+        GetElementPtrOperands, IBinOp, IBinOpOperands, ICmpOperands, ICond, InsertValueOperands,
+        Instruction, InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands,
         SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     interner::TyId,
@@ -1596,6 +1596,79 @@ impl<'a> Cursor<'a> {
                 indices: indices.to_vec(),
             }),
             result_ty,
+            self.block,
+            reg,
+            self.ctx,
+        )
+    }
+
+    /// Builds `%x = insertvalue <agg> %a, <ty> %v, <i>, …`, returning a copy of the
+    /// aggregate with the field or element the indices lead to replaced by `val`.
+    ///
+    /// The indices are walked as for [`build_extract_value`](Self::build_extract_value),
+    /// and `val` has to have the type of what they lead to. With `ty` asserted, `val`
+    /// is folded into it first — a constant widens, a register must already match.
+    /// The result has the aggregate's type.
+    ///
+    /// # Errors
+    ///
+    /// - [`ExtractInsertValueError::NoIndices`] — LLVM requires at least one.
+    /// - [`ExtractInsertValueError::InsertedValueTypeMismatch`] — `val` doesn't fold
+    ///   into the asserted `ty`.
+    /// - [`ExtractInsertValueError::NotAggregate`] and
+    ///   [`ExtractInsertValueError::IndexOutOfBounds`] — as for `build_extract_value`.
+    /// - [`ExtractInsertValueError::InsertedValueDoesNotMatchField`] — `val`'s type
+    ///   isn't the field's.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
+    pub fn build_insert_value(
+        &mut self,
+        agg_val: ValueId,
+        val: ValueId,
+        ty: OperandTy,
+        indices: &[u32],
+        reg: RegName,
+    ) -> Result<ValueId, InstructionError> {
+        if indices.is_empty() {
+            return Err(ExtractInsertValueError::NoIndices.into());
+        }
+
+        let final_val = if let OperandTy::Asserted(ty) = ty {
+            let value_ty = self.ctx.display(val.ty(self.ctx)).to_string();
+
+            let Some(casted_val) = val.try_cast(ty, Signedness::Signed, self.ctx) else {
+                return Err(ExtractInsertValueError::InsertedValueTypeMismatch(
+                    value_ty,
+                    ty.display(self.ctx).to_string(),
+                )
+                .into());
+            };
+
+            casted_val
+        } else {
+            val
+        };
+
+        let ty = final_val.ty(self.ctx);
+        let agg_ty = agg_val.ty(self.ctx);
+        let expected_ty = agg_ty.walk_ty_for_extract_or_insert_value(indices, self.ctx)?;
+
+        if expected_ty != ty {
+            return Err(ExtractInsertValueError::InsertedValueDoesNotMatchField(
+                self.ctx.display(ty).to_string(),
+                self.ctx.display(expected_ty).to_string(),
+            )
+            .into());
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::InsertValue(InsertValueOperands {
+                agg_ty,
+                agg_val,
+                val: final_val,
+                ty,
+                indices: indices.to_vec(),
+            }),
+            agg_ty,
             self.block,
             reg,
             self.ctx,
@@ -3275,6 +3348,137 @@ mod tests {
                 )) if ty == "i32"
             ));
         }
+    }
+
+    /// An `insertvalue` replaces what the indices lead to and yields the aggregate's
+    /// type. An asserted type lets a narrower constant widen into the field.
+    #[test]
+    fn insert_value_replaces_what_the_indices_lead_to() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let pair_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, pair_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[(agg_ty, "s".into()), (i32_ty, "n".into())],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let seven = value(7, &mut builder);
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let first = cursor
+            .build_insert_value(s, n, OperandTy::Inferred, &[0], "first".into())
+            .unwrap();
+        let nested = cursor
+            .build_insert_value(first, seven, i64_ty.into(), &[1, 1], "nested".into())
+            .unwrap();
+
+        assert_eq!(first.ty(&cursor), agg_ty, "the result is the aggregate");
+        assert_eq!(nested.ty(&cursor), agg_ty);
+
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%first = insertvalue { i32, [2 x i64] } %s, i32 %n, 0\n",
+            "%nested = insertvalue { i32, [2 x i64] } %first, i64 7, 1, 1\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
+    /// Every way an `insertvalue` can be wrong is refused: no indices, a value that
+    /// doesn't fold into its asserted type, one that doesn't match the field, and
+    /// indices that lead nowhere.
+    #[test]
+    fn insert_value_refuses_what_does_not_fit() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, i64_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[(agg_ty, "s".into()), (i32_ty, "n".into())],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let err = |r: Result<ValueId, InstructionError>| match r {
+            Err(InstructionError::ExtractInsertValue(e)) => e,
+            other => panic!(
+                "expected an extract/insert error, got {:?}",
+                other.map(|_| ())
+            ),
+        };
+
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[], RegName::Unnamed)),
+            ExtractInsertValueError::NoIndices
+        ));
+
+        // An `i32` register can't be widened by assertion; that needs a real `sext`.
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, i64_ty.into(), &[1], RegName::Unnamed)),
+            ExtractInsertValueError::InsertedValueTypeMismatch(ref from, ref to)
+                if from == "i32" && to == "i64"
+        ));
+
+        // No assertion: the `i32` is checked as-is against the `i64` field.
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[1], RegName::Unnamed)),
+            ExtractInsertValueError::InsertedValueDoesNotMatchField(ref value, ref field)
+                if value == "i32" && field == "i64"
+        ));
+
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[2], RegName::Unnamed)),
+            ExtractInsertValueError::IndexOutOfBounds {
+                index: 2,
+                len: 2,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            err(cursor.build_insert_value(n, n, OperandTy::Inferred, &[0], RegName::Unnamed)),
+            ExtractInsertValueError::NotAggregate(ref ty) if ty == "i32"
+        ));
     }
 
     /// A `call` is not a terminator, so the block stays open after one.

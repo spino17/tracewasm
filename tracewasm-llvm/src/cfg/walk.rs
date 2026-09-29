@@ -11,8 +11,8 @@ use crate::{
     instruction::{
         AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, ExtractValueOperands,
         FBinOpOperands, FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands,
-        ICmpOperands, InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands,
-        StoreOperands, SwitchOperands, UnconditionalBrOperands,
+        ICmpOperands, InsertValueOperands, InstructionKind, LoadOperands, PhiInstruction,
+        RetOperands, SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     value::{FuncSignature, I1Value, ValueId},
 };
@@ -213,6 +213,14 @@ pub trait CfgVisitor {
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
+    /// Visits an `insertvalue`. The result has the aggregate's type.
+    fn visit_insert_value(
+        &mut self,
+        operands: &InsertValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
         &mut self,
@@ -319,6 +327,9 @@ pub trait CfgVisitor {
                 InstructionKind::Unreachable => self.visit_unreachable(ctx)?,
                 InstructionKind::ExtractValue(operands) => {
                     self.visit_extract_value(operands, *val.unwrap(), ctx)?
+                }
+                InstructionKind::InsertValue(operands) => {
+                    self.visit_insert_value(operands, *val.unwrap(), ctx)?
                 }
             });
         }

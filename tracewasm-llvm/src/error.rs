@@ -586,16 +586,25 @@ pub enum PhiError {
     Context(#[from] ContextError),
 }
 
-/// An `extractvalue` could not be built: its indices don't lead anywhere inside the
-/// aggregate.
+/// An `extractvalue` or `insertvalue` could not be built: its indices don't lead
+/// anywhere inside the aggregate, or the inserted value doesn't fit where they lead.
 ///
 /// Indices are plain `u32`s, as in LLVM, where they're literals rather than values —
 /// so a negative or non-integer index can't be written in the first place.
 #[derive(Error, Debug)]
 pub enum ExtractInsertValueError {
     /// No indices. LLVM requires at least one: `extractvalue {i32} %x` doesn't parse.
-    #[error("an `extractvalue` needs at least one index")]
+    #[error("an `extractvalue` or `insertvalue` needs at least one index")]
     NoIndices,
+    /// The inserted value could not be folded into the type asserted for it. A
+    /// constant widens; a register has to match. Holds the value's type and the
+    /// asserted one.
+    #[error("a value of type `{0}` cannot be inserted as `{1}`")]
+    InsertedValueTypeMismatch(String, String),
+    /// The inserted value's type differs from the field or element the indices lead
+    /// to. Holds the value's type and the field's.
+    #[error("a value of type `{0}` cannot be inserted into a field of type `{1}`")]
+    InsertedValueDoesNotMatchField(String, String),
     /// An index would descend into a type that isn't a struct or an array — the
     /// operand's own type, or a field reached by the indices before it. Holds that
     /// type.

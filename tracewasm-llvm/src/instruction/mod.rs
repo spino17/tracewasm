@@ -183,6 +183,9 @@ pub enum InstructionKind {
     Unreachable,
     /// `%x = extractvalue <agg> %v, <i>, …` — a field or element of an aggregate.
     ExtractValue(ExtractValueOperands),
+    /// `%x = insertvalue <agg> %a, <ty> %v, <i>, …` — a copy of an aggregate with one
+    /// field or element replaced.
+    InsertValue(InsertValueOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -875,6 +878,21 @@ pub struct ExtractValueOperands {
     pub agg_ty: TyId,
     /// The aggregate itself.
     pub val: ValueId,
+    /// The path to the field or element, one struct field or array element per level.
+    /// Never empty.
+    pub indices: Vec<u32>,
+}
+
+/// Operands of an `insertvalue`.
+pub struct InsertValueOperands {
+    /// The aggregate's type, which is also the result's.
+    pub agg_ty: TyId,
+    /// The aggregate being copied.
+    pub agg_val: ValueId,
+    /// The value put in place of the field or element.
+    pub val: ValueId,
+    /// `val`'s type: the type of the field or element the indices lead to.
+    pub ty: TyId,
     /// The path to the field or element, one struct field or array element per level.
     /// Never empty.
     pub indices: Vec<u32>,
