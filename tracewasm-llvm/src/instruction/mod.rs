@@ -181,6 +181,7 @@ pub enum InstructionKind {
     ///
     /// The only instruction with no operands at all — the keyword is the whole of it.
     Unreachable,
+    ExtractValue(ExtractValueOperands),
 }
 
 /// One instruction: what it does, and the register it defines.
@@ -865,4 +866,10 @@ pub struct SelectOperands {
     pub true_arm: ValueId,
     /// The value taken when it is false.
     pub false_arm: ValueId,
+}
+
+pub struct ExtractValueOperands {
+    agg_ty: TyId,
+    val: ValueId,
+    indices: Vec<ConstValue>,
 }

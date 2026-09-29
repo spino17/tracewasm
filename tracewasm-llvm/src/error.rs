@@ -229,6 +229,8 @@ pub enum InstructionError {
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
+    #[error("{0}")]
+    ExtractInsertValue(#[from] ExtractInsertValueError),
 }
 
 /// An `alloca` could not be built.
@@ -581,6 +583,9 @@ pub enum PhiError {
     #[error("{0}")]
     Context(#[from] ContextError),
 }
+
+#[derive(Error, Debug)]
+pub enum ExtractInsertValueError {}
 
 /// A `getelementptr` could not be built.
 ///

@@ -11,11 +11,11 @@ use crate::{
         ICmpError, InstructionError, PhiError, RetError, SelectError, StoreError, SwitchError,
     },
     instruction::{
-        Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
-        FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
-        IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
-        PhiInstrHandler, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
-        SwitchOperands, UnconditionalBrOperands,
+        Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands,
+        ExtractValueOperands, FBinOp, FBinOpOperands, FCmpOperands, FCond, FNegOperands,
+        GetElementPtrOperands, IBinOp, IBinOpOperands, ICmpOperands, ICond, Instruction,
+        InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands,
+        SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     interner::TyId,
     value::{ConstValue, I1Value, Signedness, Value, ValueId, ValueKind},
@@ -1554,6 +1554,29 @@ impl<'a> Cursor<'a> {
         self.block.set_locked(self.ctx);
 
         Ok(())
+    }
+
+    pub fn build_extract_value(
+        &mut self,
+        val: ValueId,
+        indices: &[ConstValue],
+        reg: RegName,
+        ctx: &mut Context,
+    ) -> Result<ValueId, InstructionError> {
+        let ref_ty = val.ty(ctx);
+        let final_ty = ref_ty.walk_ty_for_extract_or_insert_value(indices, ctx)?;
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::ExtractValue(ExtractValueOperands {
+                agg_ty: ref_ty,
+                val,
+                indices: indices.to_vec(),
+            }),
+            final_ty,
+            self.block,
+            reg,
+            ctx,
+        )
     }
 }
 
