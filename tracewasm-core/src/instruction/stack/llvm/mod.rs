@@ -49,6 +49,7 @@
 //! phi placement right twice.
 
 use crate::{
+    instruction::stack::FuncContext,
     module::{FuncIndex, Module, ValType},
     runtime::stack::Stack,
 };
@@ -734,17 +735,15 @@ impl WasmInstrLLVMPassManager {
 
             let instr = &instructions[index];
 
-            let (next_block, next_instr_index) = instr.emit_llvm_ir(
-                index,
-                cursor,
+            let func_ctx = FuncContext {
+                func,
                 instructions,
                 frame_layout,
-                &locals,
-                runtime_ctx_ptr,
-                func,
-                module,
-                self,
-            )?;
+                locals: &locals,
+            };
+
+            let (next_block, next_instr_index) =
+                instr.emit_llvm_ir(index, cursor, runtime_ctx_ptr, module, self, func_ctx)?;
 
             index = next_instr_index;
             cursor = ctx.cursor_at_block(next_block);
@@ -1000,20 +999,17 @@ mod tests {
         while index < instructions.len() {
             let cursor = builder.cursor_at_block(block);
 
+            let func_ctx = FuncContext {
+                func,
+                instructions,
+                frame_layout,
+                locals: &[],
+            };
+
             // No locals: these cases are about control flow, and none of the operators
             // under test reads a local slot.
             let (next_block, next_index) = instructions[index]
-                .emit_llvm_ir(
-                    index,
-                    cursor,
-                    instructions,
-                    frame_layout,
-                    &[],
-                    null_ptr,
-                    func,
-                    &module,
-                    pass,
-                )
+                .emit_llvm_ir(index, cursor, null_ptr, &module, pass, func_ctx)
                 .unwrap();
 
             between(pass, builder, index);

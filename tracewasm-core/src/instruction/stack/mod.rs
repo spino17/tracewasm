@@ -4210,6 +4210,13 @@ impl Instruction for StackInstruction {
     }
 }
 
+pub struct FuncContext<'a> {
+    pub(crate) func: GlobalId<DefinedFunc>,
+    pub(crate) instructions: &'a [StackInstruction],
+    pub(crate) frame_layout: &'a StackFrameLayout,
+    pub(crate) locals: &'a [tracewasm_llvm::value::ValueId],
+}
+
 impl StackInstruction {
     // A CFG-building pass needs the cursor, the whole instruction stream, the frame
     // layout, the locals, the runtime pointer and the enclosing function — grouping
@@ -4235,18 +4242,15 @@ impl StackInstruction {
         &self,
         instr_index: usize,
         mut curr_cursor: Cursor<'a>,
-        instructions: &[StackInstruction],
-        frame_layout: &StackFrameLayout,
-        locals: &[tracewasm_llvm::value::ValueId],
         runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
-        func: GlobalId<DefinedFunc>,
         module: &Arc<Module<crate::Stack>>,
         pass_manager: &mut WasmInstrLLVMPassManager,
+        func_ctx: FuncContext<'_>,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
         match self {
             StackInstruction::LocalGet { index } => {
                 let index = index.0 as usize;
-                let local_ptr = &locals[index];
+                let local_ptr = &func_ctx.locals[index];
 
                 // Named, like every register this pass defines: an unnamed one takes
                 // its number when it is *created*, but LLVM numbers by position in the
@@ -4264,14 +4268,14 @@ impl StackInstruction {
             }
             StackInstruction::LocalSet { index } => {
                 let index = index.0 as usize;
-                let local_ptr = &locals[index];
+                let local_ptr = &func_ctx.locals[index];
                 let val = pass_manager.simulated_stack.pop();
 
                 curr_cursor.build_store(*local_ptr, val, OperandTy::Inferred, Access::Aligned)?;
             }
             StackInstruction::LocalTee { index } => {
                 let index = index.0 as usize;
-                let local_ptr = &locals[index];
+                let local_ptr = &func_ctx.locals[index];
                 let top_val = pass_manager.simulated_stack.peek_from_top(0);
 
                 curr_cursor.build_store(
@@ -4349,13 +4353,15 @@ impl StackInstruction {
                     *end_index as usize,
                 );
 
-                let block =
-                    func.add_basic_block(format!("block{}", instr_index), &mut curr_cursor)?;
+                let block = func_ctx
+                    .func
+                    .add_basic_block(format!("block{}", instr_index), &mut curr_cursor)?;
 
-                let end =
-                    func.add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
+                let end = func_ctx
+                    .func
+                    .add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
 
-                let label_sig = frame_layout
+                let label_sig = func_ctx.frame_layout
                 .label_instr_index_to_signature
                 .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
@@ -4377,13 +4383,15 @@ impl StackInstruction {
                     *end_index as usize,
                 );
 
-                let loop_block =
-                    func.add_basic_block(format!("loop{}", instr_index), &mut curr_cursor)?;
+                let loop_block = func_ctx
+                    .func
+                    .add_basic_block(format!("loop{}", instr_index), &mut curr_cursor)?;
 
-                let end_block =
-                    func.add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
+                let end_block = func_ctx
+                    .func
+                    .add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
 
-                let label_sig = frame_layout
+                let label_sig = func_ctx.frame_layout
                 .label_instr_index_to_signature
                 .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
@@ -4444,10 +4452,12 @@ impl StackInstruction {
                     *end_index as usize,
                 );
 
-                let (recorded_height, _) =
-                    Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
+                let (recorded_height, _) = Self::recorded_height_and_arity_from_end_instruction(
+                    *end_index,
+                    func_ctx.instructions,
+                );
 
-                let label_sig = frame_layout
+                let label_sig = func_ctx.frame_layout
                 .label_instr_index_to_signature
                 .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
@@ -4468,8 +4478,9 @@ impl StackInstruction {
                     RegName::Named(format!("if{}_cond", instr_index)),
                 )?;
 
-                let if_then =
-                    func.add_basic_block(format!("if{}_then", instr_index), &mut curr_cursor)?;
+                let if_then = func_ctx
+                    .func
+                    .add_basic_block(format!("if{}_then", instr_index), &mut curr_cursor)?;
 
                 // The block's params are live *before* the branch, so they dominate both
                 // arms and can be used as they are — no phi. Collected bottom-up, which
@@ -4481,8 +4492,9 @@ impl StackInstruction {
                 }
 
                 let if_else = if let Some(else_index) = else_index {
-                    let if_else =
-                        func.add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
+                    let if_else = func_ctx
+                        .func
+                        .add_basic_block(format!("if{}_else", instr_index), &mut curr_cursor)?;
 
                     pass_manager.instr_index_to_basic_block.new_else(
                         *else_index,
@@ -4495,8 +4507,9 @@ impl StackInstruction {
                     None
                 };
 
-                let if_end =
-                    func.add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
+                let if_end = func_ctx
+                    .func
+                    .add_basic_block(format!("if{}_end", instr_index), &mut curr_cursor)?;
 
                 pass_manager.instr_index_to_basic_block.new_end(
                     *end_index,
@@ -4540,7 +4553,7 @@ impl StackInstruction {
 
                 let (recorded_height, arity) = Self::recorded_height_and_arity_from_end_instruction(
                     *if_end_index,
-                    instructions,
+                    func_ctx.instructions,
                 );
 
                 debug_assert!(pass_manager.simulated_stack.height() - recorded_height == arity);
@@ -4606,7 +4619,7 @@ impl StackInstruction {
                 let (recorded_height, _) =
                     StackInstruction::recorded_height_and_arity_from_end_instruction(
                         curr_label_end_index as u32,
-                        instructions,
+                        func_ctx.instructions,
                     );
 
                 pass_manager.simulated_stack.truncate(recorded_height);
@@ -4662,8 +4675,9 @@ impl StackInstruction {
                     RegName::Named(format!("br_if{}_cond", instr_index)),
                 )?;
 
-                let br_if_false =
-                    func.add_basic_block(format!("br_if{}_false", instr_index), &mut curr_cursor)?;
+                let br_if_false = func_ctx
+                    .func
+                    .add_basic_block(format!("br_if{}_false", instr_index), &mut curr_cursor)?;
 
                 let start_index = pass_manager.simulated_stack.height() - *arity;
                 let mut results = vec![];
@@ -4686,7 +4700,7 @@ impl StackInstruction {
                 return Ok((br_if_false, instr_index + 1));
             }
             StackInstruction::BrTable { start_index, len } => {
-                let targets = &frame_layout.br_table_targets()
+                let targets = &func_ctx.frame_layout.br_table_targets()
                     [*start_index as usize..(*start_index + *len) as usize];
 
                 let index = pass_manager.simulated_stack.pop();
@@ -4735,7 +4749,7 @@ impl StackInstruction {
                 let (recorded_height, _) =
                     StackInstruction::recorded_height_and_arity_from_end_instruction(
                         curr_label_end_index as u32,
-                        instructions,
+                        func_ctx.instructions,
                     );
 
                 pass_manager.simulated_stack.truncate(recorded_height);
