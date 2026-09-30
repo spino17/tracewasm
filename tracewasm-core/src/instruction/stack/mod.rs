@@ -4302,51 +4302,12 @@ impl Instruction for StackInstruction {
                     return Ok((curr_cursor.basic_block(), instr_index + 1));
                 }
 
-                let result_ty = result.ty(&curr_cursor);
-
-                let (field_types, _) = result_ty
-                    .try_struct(&curr_cursor)
-                    .expect("more than one result values are returned as struct typed value");
-
-                let field_types = field_types.to_vec();
-
-                debug_assert!(field_types.len() == results_count);
-
-                let func_return_ptr = curr_cursor.build_alloca(
-                    result_ty,
-                    None,
-                    RegName::Named(format!("func{}_{}_result_ptr", func_index.0, instr_index)),
-                )?;
-
-                curr_cursor.build_store(
-                    func_return_ptr,
-                    result,
-                    OperandTy::Inferred,
-                    Access::Aligned,
-                )?;
-
-                let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
-
-                for (i, field_ty) in field_types.iter().enumerate() {
-                    let field_index = curr_cursor.const_value(i as i32, OperandTy::Inferred)?;
-
-                    let field_ptr = curr_cursor.build_get_element_ptr(
-                        func_return_ptr,
-                        OperandTy::Inferred,
-                        &[zero_index, field_index],
-                        Some(true),
+                for i in 0..results_count {
+                    let field_val = curr_cursor.build_extract_value(
+                        result,
+                        &[i as u32],
                         RegName::Named(format!(
-                            "func{}_{}_result_{}_ptr",
-                            func_index.0, instr_index, i
-                        )),
-                    )?;
-
-                    let field_val = curr_cursor.build_load(
-                        field_ptr,
-                        OperandTy::Asserted(*field_ty),
-                        Access::Aligned,
-                        RegName::Named(format!(
-                            "func{}_{}_result_{}_val",
+                            "func{}_{}_result_{}",
                             func_index.0, instr_index, i
                         )),
                     )?;

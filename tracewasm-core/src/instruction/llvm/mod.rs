@@ -1161,6 +1161,37 @@ mod tests {
         );
     }
 
+    /// A call to a multi-value function unpacks its result struct with one
+    /// `extractvalue` per result, each at its own index: result `i` is field `i`.
+    #[test]
+    fn a_multi_value_call_extracts_each_result_at_its_own_index() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (func $pair (param i32 i64) (result i32 i64)
+                local.get 0
+                local.get 1)
+              (func (param i32 i64) (result i32 i64)
+                local.get 0
+                local.get 1
+                call $pair))
+            "#,
+        )
+        .unwrap();
+        let module = Module::<crate::Stack>::compile(&bytes).unwrap();
+        let ir = IREmitter::emit(module.build_cfg().unwrap()).unwrap();
+
+        let extracts: Vec<&str> = ir
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("= extractvalue"))
+            .collect();
+
+        assert_eq!(extracts.len(), 2, "one per result:\n{ir}");
+        assert!(extracts[0].ends_with(", 0"), "{ir}");
+        assert!(extracts[1].ends_with(", 1"), "{ir}");
+    }
+
     #[test]
     fn a_multi_value_end_keeps_its_results_in_stack_order() {
         let (mut builder, func, entry, n) = harness();
