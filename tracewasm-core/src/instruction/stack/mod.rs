@@ -87,9 +87,8 @@ use crate::{
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
-        UnreachableTrackingControlStack, check_memory_index,
-        llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager},
-        params_and_results_from_blockty,
+        UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
+        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager},
     },
     memory::Memory,
     module::{
@@ -121,6 +120,8 @@ use tracewasm_llvm::{
     value::ValueId,
 };
 use wasmparser::{BlockType, Operator, OperatorsReader};
+
+pub mod llvm;
 
 /// A lowered TraceWasm instruction.
 ///
@@ -4207,7 +4208,9 @@ impl Instruction for StackInstruction {
 
         Ok(res)
     }
+}
 
+impl StackInstruction {
     fn emit_llvm_ir<'a>(
         &self,
         instr_index: usize,
@@ -4333,8 +4336,8 @@ impl Instruction for StackInstruction {
                     func.add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
 
                 let label_sig = frame_layout
-                    .label_instr_index_to_signature
-                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                .label_instr_index_to_signature
+                .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 pass_manager.instr_index_to_basic_block.new_end(
                     *end_index,
@@ -4361,8 +4364,8 @@ impl Instruction for StackInstruction {
                     func.add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
 
                 let label_sig = frame_layout
-                    .label_instr_index_to_signature
-                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                .label_instr_index_to_signature
+                .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 let param_types = &label_sig.params;
                 let params_count = param_types.len() as u32;
@@ -4398,8 +4401,8 @@ impl Instruction for StackInstruction {
                 curr_cursor.build_unconditional_br(loop_block)?;
 
                 let (phi_vals, _) = pass_manager
-                    .instr_index_to_basic_block
-                    .loop_phi_vals_and_block(instr_index as u32).expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+                .instr_index_to_basic_block
+                .loop_phi_vals_and_block(instr_index as u32).expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                 for i in 0..params_count {
                     pass_manager.simulated_stack.stack[(start_index + i) as usize] =
@@ -4425,8 +4428,8 @@ impl Instruction for StackInstruction {
                     Self::recorded_height_and_arity_from_end_instruction(*end_index, instructions);
 
                 let label_sig = frame_layout
-                    .label_instr_index_to_signature
-                    .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                .label_instr_index_to_signature
+                .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 let results_ty = &label_sig.results;
 
@@ -4608,9 +4611,9 @@ impl Instruction for StackInstruction {
                     (else_block, curr_label_else_index as usize + 1)
                 } else {
                     let (phi_vals, end_block) = pass_manager
-                        .instr_index_to_basic_block
-                        .end_phi_vals_and_block(curr_label_end_index as u32)
-                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+                    .instr_index_to_basic_block
+                    .end_phi_vals_and_block(curr_label_end_index as u32)
+                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                     for val in phi_vals {
                         pass_manager.simulated_stack.push(*val);
@@ -4737,9 +4740,9 @@ impl Instruction for StackInstruction {
                     (else_block, curr_label_else_index as usize + 1)
                 } else {
                     let (phi_vals, end_block) = pass_manager
-                        .instr_index_to_basic_block
-                        .end_phi_vals_and_block(curr_label_end_index as u32)
-                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+                    .instr_index_to_basic_block
+                    .end_phi_vals_and_block(curr_label_end_index as u32)
+                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                     for val in phi_vals {
                         pass_manager.simulated_stack.push(*val);
@@ -4793,9 +4796,7 @@ impl Instruction for StackInstruction {
 
         Ok((curr_cursor.basic_block(), instr_index + 1))
     }
-}
 
-impl StackInstruction {
     fn recorded_height_and_arity_from_end_instruction(
         end_index: u32,
         instructions: &[StackInstruction],

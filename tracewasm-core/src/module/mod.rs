@@ -26,7 +26,10 @@ use crate::{
         config::Config,
         traits::{ImportRegistry, Params, Results},
     },
-    instruction::{Instruction, llvm::WasmInstrLLVMPassManager, stack::StackInstruction},
+    instruction::{
+        Instruction,
+        stack::{StackInstruction, llvm::WasmInstrLLVMPassManager},
+    },
     memory::Memory,
     runtime::{
         TraceVM,
@@ -2087,7 +2090,9 @@ impl<V: VirtualMachine> Module<V> {
 
         Ok(instance)
     }
+}
 
+impl Module<crate::Stack> {
     /// Translates this module into an LLVM control-flow graph.
     ///
     /// The pass lowers the *already-lowered* instruction stream rather than the
@@ -2101,7 +2106,7 @@ impl<V: VirtualMachine> Module<V> {
     /// # Errors
     ///
     /// Whatever the pass reports, including any operator it does not yet lower.
-    pub fn build_cfg(self: &Arc<Module<V>>) -> Result<ControlFlowGraph, anyhow::Error> {
+    pub fn build_cfg(self: &Arc<Module<crate::Stack>>) -> Result<ControlFlowGraph, anyhow::Error> {
         let pass_manager = WasmInstrLLVMPassManager::default();
 
         pass_manager.compile(self)

@@ -155,16 +155,13 @@
 //! balanced without a reconciliation step.
 
 use crate::{
-    Register,
     error::{
         CallIndirectError, InstructionExecutionError, MemoryAccessKind, MemoryError, TraceWasmError,
     },
     instance::{Instance, traits::ImportRegistry},
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
-        UnreachableTrackingControlStack, check_memory_index,
-        llvm::WasmInstrLLVMPassManager,
-        params_and_results_from_blockty,
+        UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
         register::{
             arena::{Arena, Id},
             backpatch::{BackPatchableSlot, BackpatchMap, InstructionSource},
@@ -6492,23 +6489,6 @@ impl Instruction for RegInstruction {
         };
 
         Ok(res)
-    }
-
-    fn emit_llvm_ir<'a>(
-        &self,
-        _instr_index: usize,
-        _curr_cursor: Cursor<'a>,
-        _instructions: &[RegInstruction],
-        _frame_layout: &RegFrameLayout,
-        _locals: &[tracewasm_llvm::value::ValueId],
-        _runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
-        _func: GlobalId<DefinedFunc>,
-        _module: &Arc<Module<Register>>,
-        _pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<(BasicBlockId, usize), anyhow::Error> {
-        Err(anyhow::Error::msg(
-            "currently LLVM IR cannot be emitted for register instructions",
-        ))
     }
 }
 

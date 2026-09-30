@@ -50,7 +50,6 @@
 
 use crate::{
     VirtualMachine,
-    instruction::Instruction,
     module::{FuncIndex, Module, ValType},
     runtime::stack::Stack,
 };
@@ -571,9 +570,9 @@ impl WasmInstrLLVMPassManager {
     /// Whatever the builders report. A rejection here is a bug in this pass rather
     /// than bad input: the module has already been validated, so the IR it describes
     /// is well-formed by the time it gets here.
-    pub fn compile<V: VirtualMachine>(
+    pub fn compile(
         mut self,
-        module: &Arc<Module<V>>,
+        module: &Arc<Module<crate::Stack>>,
     ) -> Result<ControlFlowGraph, anyhow::Error> {
         // Left to whatever consumes the IR: the JIT fills in the host's triple and
         // data layout, which is exactly the machine this runs on.
@@ -646,11 +645,11 @@ impl WasmInstrLLVMPassManager {
     ///
     /// The loop is index-driven rather than a `for` over the slice: an arm returns
     /// where to resume, which after a `br` is not the next instruction.
-    fn compile_func<V: VirtualMachine>(
+    fn compile_func(
         &mut self,
         func_index: FuncIndex,
         func: GlobalId<DefinedFunc>,
-        module: &Arc<Module<V>>,
+        module: &Arc<Module<crate::Stack>>,
         ctx: &mut Context,
     ) -> Result<(), anyhow::Error> {
         debug_assert!(func_index.0 >= module.imported_func_count);

@@ -28,9 +28,6 @@
 //! helpers around block types and memory indices. The passes themselves are in
 //! [`stack`] and [`register`].
 
-use std::sync::Arc;
-
-use crate::instruction::llvm::WasmInstrLLVMPassManager;
 use crate::sealed::Internals;
 use crate::{
     VirtualMachine,
@@ -44,15 +41,11 @@ use crate::{
     },
 };
 use smallvec::SmallVec;
-use tracewasm_llvm::cfg::basic_block::BasicBlockId;
-use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId};
-use tracewasm_llvm::instruction::cursor::Cursor;
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 // No outer doc comments on these: each module carries its own `//!` docs, and an
 // outer `///` at the declaration site re-scopes the intra-doc links inside it to
 // this module, silently breaking every one that resolved in its own scope.
-pub mod llvm;
 pub mod register;
 pub mod stack;
 
@@ -322,38 +315,6 @@ pub(crate) trait Instruction: Sized {
         caller_base_data: &Self::CallerBaseData,
         imported_func_count: u32,
     ) -> Result<Step<Self>, Box<InstructionExecutionError>>;
-
-    // A CFG-building pass needs the cursor, the whole instruction stream, the frame
-    // layout, the locals, the runtime pointer and the enclosing function — grouping
-    // them into a context struct would only move the list.
-    /// Translates this one instruction into LLVM IR, returning where to carry on.
-    ///
-    /// The return is `(block, next_index)` rather than nothing, because neither is
-    /// implied by the instruction alone: an `if` leaves the cursor in its *then*
-    /// block, and a `br` resumes at the enclosing label's `else` or `end` rather than
-    /// at the following instruction. The driver in
-    /// [`compile_func`](llvm::WasmInstrLLVMPassManager) does what it is told rather
-    /// than tracking control flow a second time.
-    ///
-    /// `instructions` is the whole body, since a control instruction reads the
-    /// operand arity and unwind height off the `end` it names. `locals` is one
-    /// pointer per local, `runtime_ctx_ptr` the instance pointer threaded in as the
-    /// last parameter.
-    ///
-    /// Only the stack machine implements this; the register machine returns an error.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_llvm_ir<'a>(
-        &self,
-        instr_index: usize,
-        curr_cursor: Cursor<'a>,
-        instructions: &[Self],
-        frame_layout: &Self::FrameLayout,
-        locals: &[tracewasm_llvm::value::ValueId],
-        runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
-        func: GlobalId<DefinedFunc>,
-        module: &Arc<Module<Self::Vm>>,
-        pass_manager: &mut WasmInstrLLVMPassManager,
-    ) -> Result<(BasicBlockId, usize), anyhow::Error>;
 }
 
 /// The kind of label an operator opens, tracked only while skipping dead code.
