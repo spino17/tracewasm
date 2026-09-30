@@ -5,7 +5,15 @@ use crate::{
     runtime::value::{TableVal, Val},
 };
 use std::marker::PhantomData;
-use tracewasm_llvm::{cfg::context::Context, interner::TyId};
+use tracewasm_llvm::{
+    cfg::context::Context,
+    instruction::{
+        Access,
+        cursor::{Cursor, OperandTy, RegName},
+    },
+    interner::TyId,
+    value::ValueId,
+};
 
 pub struct RuntimeInstance {
     globals: Box<[GlobalVal]>,
@@ -87,15 +95,73 @@ impl<'a> RuntimeContext<'a> {
 
         ctx.struct_ty(&fields, false).unwrap()
     }
+
+    pub fn global_ptr(
+        runtime_ctx_ptr: ValueId,
+        cursor: &mut Cursor<'_>,
+        reg: RegName,
+    ) -> Result<ValueId, anyhow::Error> {
+        let ptr_ty = OperandTy::Asserted(RuntimeContext::llvm_ty(cursor));
+        let zero_index = cursor.const_value(0i32, OperandTy::Inferred)?;
+        let index = cursor.const_value(0i32, OperandTy::Inferred)?;
+
+        let global_ptr_ptr = cursor.build_get_element_ptr(
+            runtime_ctx_ptr,
+            ptr_ty,
+            &[zero_index, index],
+            Some(true),
+            RegName::Unnamed,
+        )?;
+
+        let ptr_ty = cursor.ptr_ty();
+
+        let global_ptr = cursor.build_load(
+            global_ptr_ptr,
+            OperandTy::Asserted(ptr_ty),
+            Access::Aligned,
+            reg,
+        )?;
+
+        Ok(global_ptr)
+    }
+
+    pub fn table_ptr(
+        runtime_ctx_ptr: ValueId,
+        cursor: &mut Cursor<'_>,
+        reg: RegName,
+    ) -> Result<ValueId, anyhow::Error> {
+        let ptr_ty = OperandTy::Asserted(RuntimeContext::llvm_ty(cursor));
+        let zero_index = cursor.const_value(0i32, OperandTy::Inferred)?;
+        let index = cursor.const_value(2i32, OperandTy::Inferred)?;
+
+        let table_ptr_ptr = cursor.build_get_element_ptr(
+            runtime_ctx_ptr,
+            ptr_ty,
+            &[zero_index, index],
+            Some(true),
+            RegName::Unnamed,
+        )?;
+
+        let ptr_ty = cursor.ptr_ty();
+
+        let table_ptr = cursor.build_load(
+            table_ptr_ptr,
+            OperandTy::Asserted(ptr_ty),
+            Access::Aligned,
+            reg,
+        )?;
+
+        Ok(table_ptr)
+    }
 }
 
 /// One global's slot: eight bytes, untyped.
 ///
 /// Nothing records *which* type a slot holds, because every reader already knows by
-/// the time it looks. Generated code resolves the type from `Module::globals[i]`
-/// when it emits the access and burns it into the instruction — by the time that
-/// code runs there is no type left to consult, only a `load i64` or `load float` at
-/// a fixed offset. The host reads the type from the same place, through the module
+/// the time it looks. Generated code always loads the slot as an `i64`, then converts
+/// it to the global's type — resolved from `Module::globals[i]` when the access is
+/// emitted — with a `trunc` and/or a `bitcast`. By the time that code runs there is
+/// no type left to consult. The host reads the type from the same place, through the module
 /// its instance holds. And encoding is handed a [`Val`], which carries its own.
 ///
 /// So a tag would be written and never read. It is not free either: `u64` plus `u8`
@@ -125,10 +191,10 @@ impl From<Val> for GlobalVal {
     /// Two things here are load-bearing, and nothing downstream would catch either
     /// getting them wrong:
     ///
-    /// The payload goes in the **low** bytes, which is where a `load i32` or
-    /// `load float` at the slot's address finds it on a little-endian target. It is
-    /// the only arrangement the generated code can read, since that code loads the
-    /// global's declared type directly rather than an `i64` it then narrows.
+    /// The payload goes in the **low** bits of the `u64`, which is where the generated
+    /// code finds it: it loads the whole slot as an `i64` and narrows it with `trunc`,
+    /// which keeps the low bits by value. So the arrangement holds whatever the
+    /// target's byte order.
     ///
     /// Floats are stored **by bit pattern**. `v as u64` would round the value to an
     /// integer; [`f32::to_bits`] keeps the encoding, so a NaN payload and the sign of

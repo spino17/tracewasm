@@ -88,7 +88,7 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
         UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
-        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager},
+        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager, ctx::RuntimeContext},
     },
     memory::Memory,
     module::{
@@ -114,7 +114,7 @@ use tracewasm_llvm::{
         global::{DefinedFunc, GlobalId},
     },
     instruction::{
-        Access, ICond,
+        Access, CastOp, ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
     value::ValueId,
@@ -4285,6 +4285,83 @@ impl StackInstruction {
                     Access::Aligned,
                 )?;
             }
+            StackInstruction::GlobalGet { index } => {
+                let global_ptr = RuntimeContext::global_ptr(
+                    runtime_ctx_ptr,
+                    &mut curr_cursor,
+                    RegName::Named(format!("global{}_ptr", instr_index)),
+                )?;
+
+                let index_val = curr_cursor.const_value(index.0 as i32, OperandTy::Inferred)?;
+                let i64_ty = curr_cursor.i64_ty();
+                let i32_ty = curr_cursor.i32_ty();
+
+                let global_index_ptr = curr_cursor.build_get_element_ptr(
+                    global_ptr,
+                    OperandTy::Asserted(i64_ty),
+                    &[index_val],
+                    Some(true),
+                    RegName::Named(format!("global{}_{}_ptr", instr_index, index.0)),
+                )?;
+
+                let global_val = curr_cursor.build_load(
+                    global_index_ptr,
+                    OperandTy::Asserted(i64_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("global{}_{}_val", instr_index, index.0)),
+                )?;
+
+                let global_ty = &module.globals[index.0 as usize].ty.content_type();
+
+                let global_val = match global_ty {
+                    ValType::I32 => curr_cursor.build_cast(
+                        CastOp::Trunc,
+                        global_val,
+                        OperandTy::Inferred,
+                        i32_ty,
+                        RegName::Named(format!("global{}_{}_val_as_i32", instr_index, index.0)),
+                    )?,
+                    ValType::I64 => global_val,
+                    // Floats are stored by bit pattern in the low bits, so the value is
+                    // recovered with a `bitcast` of the same width: `f32` through the
+                    // low 32 bits, `f64` from the whole slot.
+                    ValType::F32 => {
+                        let bits = curr_cursor.build_cast(
+                            CastOp::Trunc,
+                            global_val,
+                            OperandTy::Inferred,
+                            i32_ty,
+                            RegName::Named(format!("global{}_{}_val_bits", instr_index, index.0)),
+                        )?;
+                        let f32_ty = curr_cursor.f32_ty();
+
+                        curr_cursor.build_cast(
+                            CastOp::Bitcast,
+                            bits,
+                            OperandTy::Inferred,
+                            f32_ty,
+                            RegName::Named(format!("global{}_{}_val_as_f32", instr_index, index.0)),
+                        )?
+                    }
+                    ValType::F64 => {
+                        let f64_ty = curr_cursor.f64_ty();
+
+                        curr_cursor.build_cast(
+                            CastOp::Bitcast,
+                            global_val,
+                            OperandTy::Inferred,
+                            f64_ty,
+                            RegName::Named(format!("global{}_{}_val_as_f64", instr_index, index.0)),
+                        )?
+                    }
+                    ValType::Ref(_) | ValType::V128 => {
+                        unreachable!("globals with function ref or v128 not allowed!")
+                    }
+                };
+
+                pass_manager.simulated_stack.push(global_val);
+            }
+            StackInstruction::GlobalSet { index } => todo!(),
             StackInstruction::Call {
                 func_index,
                 params_count,
