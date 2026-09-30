@@ -4333,6 +4333,7 @@ impl StackInstruction {
                             i32_ty,
                             RegName::Named(format!("global{}_{}_val_bits", instr_index, index.0)),
                         )?;
+
                         let f32_ty = curr_cursor.f32_ty();
 
                         curr_cursor.build_cast(
@@ -4361,7 +4362,76 @@ impl StackInstruction {
 
                 pass_manager.simulated_stack.push(global_val);
             }
-            StackInstruction::GlobalSet { index } => todo!(),
+            StackInstruction::GlobalSet { index } => {
+                let val = pass_manager.simulated_stack.pop();
+
+                let global_ptr = RuntimeContext::global_ptr(
+                    runtime_ctx_ptr,
+                    &mut curr_cursor,
+                    RegName::Named(format!("global{}_ptr", instr_index)),
+                )?;
+
+                let index_val = curr_cursor.const_value(index.0 as i32, OperandTy::Inferred)?;
+                let i64_ty = curr_cursor.i64_ty();
+                let i32_ty = curr_cursor.i32_ty();
+
+                let global_index_ptr = curr_cursor.build_get_element_ptr(
+                    global_ptr,
+                    OperandTy::Asserted(i64_ty),
+                    &[index_val],
+                    Some(true),
+                    RegName::Named(format!("global{}_{}_ptr", instr_index, index.0)),
+                )?;
+
+                let global_ty = &module.globals[index.0 as usize].ty.content_type();
+
+                // Into the slot's `i64`, with the same bits `From<Val> for GlobalVal`
+                // writes: an `i32` zero-extended (upper bits clear), a float by bit
+                // pattern in the low bits.
+                let casted_val = match global_ty {
+                    ValType::I32 => curr_cursor.build_cast(
+                        CastOp::Zext,
+                        val,
+                        OperandTy::Inferred,
+                        i64_ty,
+                        RegName::Named(format!("global{}_{}_casted_val", instr_index, index.0)),
+                    )?,
+                    ValType::I64 => val,
+                    ValType::F32 => {
+                        let bits = curr_cursor.build_cast(
+                            CastOp::Bitcast,
+                            val,
+                            OperandTy::Inferred,
+                            i32_ty,
+                            RegName::Named(format!("global{}_{}_val_bits", instr_index, index.0)),
+                        )?;
+
+                        curr_cursor.build_cast(
+                            CastOp::Zext,
+                            bits,
+                            OperandTy::Inferred,
+                            i64_ty,
+                            RegName::Named(format!("global{}_{}_casted_val", instr_index, index.0)),
+                        )?
+                    }
+                    ValType::F64 => curr_cursor.build_cast(
+                        CastOp::Bitcast,
+                        val,
+                        OperandTy::Inferred,
+                        i64_ty,
+                        RegName::Named(format!("global{}_{}_casted_val", instr_index, index.0)),
+                    )?,
+                    ValType::Ref(_) => todo!(),
+                    ValType::V128 => unreachable!("globals with v128 not allowed!"),
+                };
+
+                curr_cursor.build_store(
+                    global_index_ptr,
+                    casted_val,
+                    OperandTy::Asserted(i64_ty),
+                    Access::Aligned,
+                )?;
+            }
             StackInstruction::Call {
                 func_index,
                 params_count,
