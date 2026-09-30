@@ -173,8 +173,7 @@ use crate::{
     },
     memory::Memory,
     module::{
-        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, Module, TableIndex, TyIndex,
-        ValType,
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
     },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
@@ -192,15 +191,7 @@ use std::{
     collections::hash_map::Entry,
     hash::{Hash, Hasher},
     mem::discriminant,
-    sync::Arc,
     vec,
-};
-use tracewasm_llvm::{
-    cfg::{
-        basic_block::BasicBlockId,
-        global::{DefinedFunc, GlobalId},
-    },
-    instruction::cursor::Cursor,
 };
 use tracewasm_utils::interner::{InternedId, Interner};
 // The bitwise and negation arms name these as methods, as the stack machine's do.

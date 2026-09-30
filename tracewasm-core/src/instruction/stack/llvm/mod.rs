@@ -49,7 +49,6 @@
 //! phi placement right twice.
 
 use crate::{
-    VirtualMachine,
     module::{FuncIndex, Module, ValType},
     runtime::stack::Stack,
 };

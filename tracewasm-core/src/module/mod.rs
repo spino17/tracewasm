@@ -2100,8 +2100,9 @@ impl Module<crate::Stack> {
     /// before it starts. The result is rendered by
     /// [`IREmitter`](tracewasm_llvm::cfg::emit::IREmitter).
     ///
-    /// Only the stack machine is translated. A module compiled for the register
-    /// machine comes back with an error rather than a partial graph.
+    /// Only the stack machine is lowered to LLVM, so this exists for
+    /// `Module<Stack>` alone: asking for a register-machine module's graph doesn't
+    /// compile.
     ///
     /// # Errors
     ///
