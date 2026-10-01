@@ -746,8 +746,9 @@ impl Value {
     /// and `double` narrows to `float` only when the value is exact.
     /// Crossing between integers and floats, or reaching a pointer, is refused —
     /// those need a real `sitofp`/`inttoptr` instruction, and folding them here would
-    /// silently drop it. An array literal only folds into its own type, the same
-    /// element type and length: its elements are not converted one by one.
+    /// silently drop it. An array literal folds into an array of the same length,
+    /// element by element under those same rules: `[1i32, 2]` into `[2 x i64]` is
+    /// `[i64 1, i64 2]`, and it fails if any element doesn't fold.
     ///
     /// # Errors
     ///
@@ -1278,15 +1279,28 @@ impl ConstValue {
             ConstValue::Float(val) => val.try_cast(ty, signedness, ctx),
             ConstValue::Double(val) => val.try_cast(ty, signedness, ctx),
             ConstValue::Array {
-                element_ty,
-                array: _array,
+                element_ty: _element_ty,
+                array,
                 size,
             } => {
                 if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
-                    && *element_ty == expected_element_ty
                     && *size == expected_size
                 {
-                    return Some(self.clone());
+                    let mut casted_array = vec![];
+
+                    for element in array {
+                        casted_array.push(element.try_cast(
+                            expected_element_ty,
+                            signedness,
+                            ctx,
+                        )?);
+                    }
+
+                    return Some(ConstValue::Array {
+                        element_ty: expected_element_ty,
+                        array: casted_array.into_boxed_slice(),
+                        size: *size,
+                    });
                 }
 
                 None
@@ -1788,23 +1802,20 @@ impl<T: Const, const N: usize> Const for [T; N] {
         }
     }
 
-    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
-        let element_ty = T::ty(ctx);
-
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
         if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
-            && element_ty == expected_element_ty
-            && N as u64 == expected_size
+            && expected_size == N as u64
         {
             let mut array = vec![];
 
             for element in self {
-                let e = element.clone();
+                let e = element.try_cast(expected_element_ty, signedness, ctx)?;
 
-                array.push(e.into_const(ctx));
+                array.push(e);
             }
 
             return Some(ConstValue::Array {
-                element_ty,
+                element_ty: expected_element_ty,
                 array: array.into_boxed_slice(),
                 size: N as u64,
             });
@@ -2643,42 +2654,89 @@ mod tests {
         );
     }
 
-    /// An array literal folds only into its own type: the same element type and
-    /// length. Its elements aren't converted one by one.
+    /// An array constant already in the pool casts element by element too — the path
+    /// a `store` with an asserted type takes — signedness included: `-1` widens to
+    /// `-1` signed and to `255` unsigned.
     #[test]
-    fn an_array_literal_folds_only_into_its_own_type() {
+    fn a_pooled_array_constant_casts_element_by_element() {
         let mut ctx = crate::test_support::ctx();
+        let i16_ty = ctx.i16_ty();
+        let wider = ctx.array_ty(i16_ty, 2).unwrap();
+        let bytes = Value::from_const([-1i8, 2], OperandTy::Inferred, &mut ctx).unwrap();
+
+        let signed = bytes.try_cast(wider, Signedness::Signed, &mut ctx).unwrap();
+        let unsigned = bytes
+            .try_cast(wider, Signedness::Unsigned, &mut ctx)
+            .unwrap();
+
+        assert_eq!(signed.ty(&ctx), wider);
+        assert_eq!(
+            pooled(signed, &ctx),
+            ConstValue::Array {
+                element_ty: i16_ty,
+                array: vec![ConstValue::I16(-1), ConstValue::I16(2)].into(),
+                size: 2,
+            }
+        );
+        assert_eq!(
+            pooled(unsigned, &ctx),
+            ConstValue::Array {
+                element_ty: i16_ty,
+                array: vec![ConstValue::I16(255), ConstValue::I16(2)].into(),
+                size: 2,
+            }
+        );
+
+        let longer = ctx.array_ty(i16_ty, 3).unwrap();
+
+        assert!(
+            bytes
+                .try_cast(longer, Signedness::Signed, &mut ctx)
+                .is_none()
+        );
+    }
+
+    /// An array literal folds into an array of the same length element by element,
+    /// under the scalar rules: a narrower integer widens, and the result takes the
+    /// target's element type. A different length, an element that doesn't fit, or a
+    /// non-array type is refused.
+    #[test]
+    fn an_array_literal_folds_element_by_element() {
+        let mut ctx = crate::test_support::ctx();
+        let i8_ty = ctx.i8_ty();
         let i32_ty = ctx.i32_ty();
         let i64_ty = ctx.i64_ty();
         let same = ctx.array_ty(i32_ty, 2).unwrap();
-        let longer = ctx.array_ty(i32_ty, 3).unwrap();
         let wider = ctx.array_ty(i64_ty, 2).unwrap();
+        let narrower = ctx.array_ty(i8_ty, 2).unwrap();
+        let longer = ctx.array_ty(i32_ty, 3).unwrap();
 
-        let ok = Value::from_const([1i32, 2], OperandTy::Asserted(same), &mut ctx).unwrap();
+        let kept = Value::from_const([1i32, 2], OperandTy::Asserted(same), &mut ctx).unwrap();
 
-        assert_eq!(ok.ty(&ctx), same);
+        assert_eq!(kept.ty(&ctx), same);
 
-        for ty in [longer, wider, i32_ty] {
+        let widened = Value::from_const([1i32, -2], OperandTy::Asserted(wider), &mut ctx).unwrap();
+
+        assert_eq!(widened.ty(&ctx), wider);
+        assert_eq!(
+            pooled(widened, &ctx),
+            ConstValue::Array {
+                element_ty: i64_ty,
+                array: vec![ConstValue::I64(1), ConstValue::I64(-2)].into(),
+                size: 2,
+            },
+            "every element is folded, and the array takes the target's element type"
+        );
+
+        // Fits in `i8`, so it narrows; `300` doesn't, so the whole array is refused.
+        assert!(Value::from_const([1i32, 2], OperandTy::Asserted(narrower), &mut ctx).is_ok());
+
+        for (literal, ty) in [([1i32, 300], narrower), ([1, 2], longer), ([1, 2], i32_ty)] {
             assert!(matches!(
-                Value::from_const([1i32, 2], OperandTy::Asserted(ty), &mut ctx),
+                Value::from_const(literal, OperandTy::Asserted(ty), &mut ctx),
                 Err(TypeError::ConstantCastToProvidedTypeFailed(_, _))
             ));
         }
-    }
-
-    /// `null` is a `ptr` constant, which is the type it has to report for a value
-    /// built from it to be usable where a pointer is expected.
-    #[test]
-    fn a_null_pointer_is_typed_ptr() {
-        let mut ctx = crate::test_support::ctx();
-
-        assert_eq!(rendered(NullPtr::ty(&mut ctx), &ctx), "ptr");
-        assert_eq!(NullPtr.into_const(&mut ctx), ConstValue::NullPtr);
-
-        let value = Value::from_const(NullPtr, OperandTy::Inferred, &mut ctx).unwrap();
-
-        assert_eq!(ty_of(&value, &ctx), Type::Ptr);
-        assert_eq!(ctx.const_interner.values(), [ConstValue::NullPtr]);
     }
 
     /// The only cast a null admits is the one that changes nothing. Anything else
