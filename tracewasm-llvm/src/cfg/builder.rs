@@ -80,7 +80,7 @@ impl Builder {
     ///
     /// Emits `@name = global <ty> <initializer>`, or `@name = external global <ty>`
     /// when there is no initializer. The value is a
-    /// [`Value::from_global`](crate::value::Value::from_global) away from being usable
+    /// [`global_value`](crate::cfg::context::Context::global_value) away from being usable
     /// as an operand, where its type is `ptr` and `ty` is what that pointer points at.
     ///
     /// The two `Option`s are not independent — one of them has to say what the variable

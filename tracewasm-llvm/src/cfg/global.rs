@@ -167,9 +167,9 @@ impl GlobalEntity for GlobalVar {
 
 /// Anything a module names with an `@`, with its tag erased.
 ///
-/// This is what a [`Value`](crate::value::Value) holds once a global is used as an
-/// operand — by then the distinction no longer matters, since all three are addresses
-/// and all three render as `@name`.
+/// This is what a [`ConstValue::Global`](crate::value::ConstValue::Global) holds once a
+/// global is used as an operand — by then the distinction no longer matters, since all
+/// three are addresses and all three render as `@name`.
 #[derive(Debug, Clone, Copy)]
 pub enum Global {
     /// A global variable.

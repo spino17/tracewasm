@@ -98,12 +98,6 @@ impl IREmitter {
         match kind {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
             ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
-            // A global is referred to by name, whatever it names — a variable, a
-            // defined function, a declaration. Its *value* is the address, which is
-            // why `Value::from_global` types it `ptr`.
-            ValueKind::Global(global) => {
-                Ok(format!("@{}", ctx.str_interner.value(global.name().0)))
-            }
         }
     }
 
@@ -200,6 +194,10 @@ impl IREmitter {
 
                 format!("[{}]", elements.join(", "))
             }
+            // A global is referred to by name, whatever it names — a variable, a
+            // defined function, a declaration. Its *value* is the address, which is
+            // why it's typed `ptr`.
+            ConstValue::Global(global) => format!("@{}", ctx.str_interner.value(global.name().0)),
             ConstValue::NullPtr => "null".to_string(),
         }
     }
@@ -1388,7 +1386,7 @@ mod tests {
             .unwrap();
         let mut cursor = builder.cursor_at_block(entry);
 
-        let address = Value::from_global(counter, &mut cursor);
+        let address = cursor.global_value(counter);
 
         assert_eq!(
             address.ty(&cursor),
@@ -1507,6 +1505,53 @@ mod tests {
                 "@count = global i32 7\n",
             ),
             "\n--- emitted ---\n{ir}"
+        );
+    }
+
+    /// A global's address is a constant, so it can sit in an array literal: an
+    /// initializer of `[N x ptr]`, each element written `ptr @name`. The same global
+    /// taken twice is one pool entry.
+    #[test]
+    fn an_array_of_global_addresses_is_a_constant_initializer() {
+        let mut builder = fixture();
+
+        let seven = Value::from_const(7i32, OperandTy::Inferred, &mut builder).unwrap();
+        let ValueKind::ConstExpr(seven) = seven.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+        let a = builder
+            .declare_global_variable("a".to_string(), None, Some(seven.clone()))
+            .unwrap();
+        let c = builder
+            .declare_global_variable("c".to_string(), None, Some(seven))
+            .unwrap();
+
+        let first = builder.global_value(a);
+        let again = builder.global_value(a);
+
+        assert!(
+            matches!(
+                (first.kind(&builder), again.kind(&builder)),
+                (ValueKind::ConstExpr(ConstExpr::Const(x)), ValueKind::ConstExpr(ConstExpr::Const(y)))
+                    if x == y
+            ),
+            "one global is one pool entry"
+        );
+
+        let table = Value::from_const([a, c, a], OperandTy::Inferred, &mut builder).unwrap();
+        let ValueKind::ConstExpr(table) = table.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+
+        builder
+            .declare_global_variable("table".to_string(), None, Some(table))
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(
+            ir.contains("@table = global [3 x ptr] [ptr @a, ptr @c, ptr @a]\n"),
+            "{ir}"
         );
     }
 

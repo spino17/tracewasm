@@ -3175,7 +3175,7 @@ mod tests {
         let fp = caller.params(&builder)[0];
         let n = caller.params(&builder)[1];
         let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
-        let global = Value::from_global(caller, &mut builder);
+        let global = builder.global_value(caller);
         let sig = crate::value::FuncSignature::new(&[i32_ty], i32_ty);
         let through = |id: ValueId| FuncRef::Pointer {
             ptr: id,

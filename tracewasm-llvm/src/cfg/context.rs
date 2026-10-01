@@ -354,14 +354,16 @@ impl Context {
         Value::from_const_expr(expr, self)
     }
 
-    /// Takes a global's address as an operand.
+    /// Takes a global's address as an operand: a pooled
+    /// [`ConstValue::Global`], the same constant an
+    /// array literal of globals holds.
     ///
     /// The result is typed `ptr` whatever the global holds — `@g` is an address, and a
     /// function's address is as much a `ptr` as a variable's. What it points *at* is
     /// recorded separately, which is how a `load` or `store` through it can have its
     /// type inferred.
     pub fn global_value<T: GlobalEntity>(&mut self, global: GlobalId<T>) -> ValueId {
-        Value::from_global(global, self)
+        Value::from_const(global, OperandTy::Inferred, self).expect("type is inferred")
     }
 }
 

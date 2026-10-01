@@ -566,9 +566,6 @@ pub enum ValueKind {
     /// A constant folded from other constants, written inline in the IR rather than
     /// computed by an instruction. See [`ConstExpr`].
     ConstExpr(ConstExpr),
-    /// A module-level symbol, `@g` — a variable or a function. Its type is always
-    /// `ptr`, since what a global *is* as an operand is its address.
-    Global(Global),
 }
 
 /// An operand: a type, and where the value comes from.
@@ -846,26 +843,6 @@ impl Value {
         ctx.alloc_value(value)
     }
 
-    /// Takes a global's address as an operand.
-    ///
-    /// The result is a `ptr` whatever the global names — a variable, a defined
-    /// function, a declaration — which is exactly how LLVM types `@g`. What it points
-    /// at is recoverable separately, so a `load` or `store` through one needs no
-    /// explicit type.
-    ///
-    /// The tag is erased here: by the time a global is an operand, all three kinds
-    /// behave alike.
-    pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> ValueId {
-        let global = GlobalEntity::to_global(global);
-
-        let value = Value {
-            ty: ctx.ptr_ty(),
-            kind: ValueKind::Global(global),
-        };
-
-        ctx.alloc_value(value)
-    }
-
     /// The value's own type. For a pointer this is `ptr`, not the pointee.
     pub fn ty(&self) -> TyId {
         self.ty
@@ -946,7 +923,7 @@ impl Value {
             // Nothing is converted, so nothing is allocated: the *same* id comes back
             // and the value keeps its identity — which is what lets a later rename
             // reach every use of it.
-            ValueKind::ConstExpr(_) | ValueKind::Reg(_) | ValueKind::Global(_) => {
+            ValueKind::ConstExpr(_) | ValueKind::Reg(_) => {
                 if val_ty != ty {
                     return None;
                 }
@@ -1007,22 +984,26 @@ impl Value {
                     count: None,
                 },
                 ConstExpr::IntToPtr { .. } => return None,
+                ConstExpr::Const(const_id) => {
+                    let ConstValue::Global(global) = ctx.const_interner.value(const_id.raw())
+                    else {
+                        return None;
+                    };
+
+                    let name = global.name();
+
+                    let global =
+                        ctx.module.globals.get(&name).expect(
+                            "hitting this means logic for tracking global names is incorrect",
+                        );
+
+                    let ty_obj = global.pointee_ty(ctx);
+                    let ty = ctx.ty_interner.intern(ty_obj).into();
+
+                    PointeeTy { ty, count: None }
+                }
                 _ => return None,
             },
-            ValueKind::Global(global) => {
-                let name = global.name();
-
-                let global = ctx
-                    .module
-                    .globals
-                    .get(&name)
-                    .expect("hitting this means logic for tracking global names is incorrect");
-
-                let ty_obj = global.pointee_ty(ctx);
-                let ty = ctx.ty_interner.intern(ty_obj).into();
-
-                PointeeTy { ty, count: None }
-            }
         };
 
         Some(pointee_ty)
@@ -1159,6 +1140,10 @@ pub enum ConstValue {
         /// The length, `N`. Always `array.len()`.
         size: u64,
     },
+    /// `@name`, a global's address: a variable's, a defined function's or a declared
+    /// one's. Typed `ptr` whatever it names, as LLVM types it. This is how a global
+    /// is used as an operand, and what lets an array literal hold global addresses.
+    Global(Global),
     /// `null`.
     NullPtr,
 }
@@ -1220,7 +1205,7 @@ impl ConstValue {
                     size: *size,
                     element_ty: *element_ty,
                 },
-                ConstValue::NullPtr => Type::Ptr,
+                ConstValue::Global(_) | ConstValue::NullPtr => Type::Ptr,
             })
             .into()
     }
@@ -1256,7 +1241,7 @@ impl ConstValue {
             ConstValue::I64(val) => val.is_positive(),
             ConstValue::Float(val) => val.is_sign_positive(),
             ConstValue::Double(val) => val.is_sign_positive(),
-            ConstValue::NullPtr | ConstValue::Array { .. } => false,
+            ConstValue::Global(_) | ConstValue::NullPtr | ConstValue::Array { .. } => false,
         }
     }
 
@@ -1306,6 +1291,8 @@ impl ConstValue {
 
                 None
             }
+            // A global's address is a `ptr` and folds into nothing else.
+            ConstValue::Global(_) => ty.is_ptr(ctx).then(|| self.clone()),
             ConstValue::NullPtr => {
                 if ty.is_ptr(ctx) {
                     Some(ConstValue::NullPtr)
@@ -1401,6 +1388,14 @@ impl PartialEq for ConstValue {
                     false
                 }
             }
+            // By name: a name is exactly one global in a module, whatever its kind.
+            ConstValue::Global(global) => {
+                if let ConstValue::Global(other_global) = other {
+                    global.name() == other_global.name()
+                } else {
+                    false
+                }
+            }
             ConstValue::NullPtr => {
                 matches!(other, ConstValue::NullPtr)
             }
@@ -1438,6 +1433,7 @@ impl Hash for ConstValue {
                 // Each element through this same `Hash`, consistent with `eq` above.
                 array.hash(state);
             }
+            ConstValue::Global(global) => global.name().hash(state),
             ConstValue::NullPtr => {}
         }
     }
@@ -1853,15 +1849,19 @@ impl Const for NullPtr {
 
 impl<T: GlobalEntity> Const for GlobalId<T> {
     fn ty(ctx: &mut Context) -> TyId {
-        todo!()
+        ctx.ptr_ty()
     }
 
-    fn into_const(self, ctx: &mut Context) -> ConstValue {
-        todo!()
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
+        ConstValue::Global(T::to_global(self))
     }
 
-    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
-        todo!()
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        if !ty.is_ptr(ctx) {
+            return None;
+        }
+
+        Some(self.into_const(ctx))
     }
 }
 
