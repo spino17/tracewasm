@@ -1864,7 +1864,7 @@ mod tests {
         let fp = caller.params(&builder)[0];
         let n = caller.params(&builder)[1];
         let callee = crate::cfg::global::FuncRef::Pointer {
-            ptr: builder.get_value(fp).clone(),
+            ptr: fp,
             sig: FuncSignature::new(&[i32_ty], i32_ty),
         };
 

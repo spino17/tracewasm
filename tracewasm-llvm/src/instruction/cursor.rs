@@ -3177,15 +3177,15 @@ mod tests {
         let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
         let global = Value::from_global(caller, &mut builder);
         let sig = crate::value::FuncSignature::new(&[i32_ty], i32_ty);
-        let through = |id: ValueId, builder: &Builder| FuncRef::Pointer {
-            ptr: builder.get_value(id).clone(),
+        let through = |id: ValueId| FuncRef::Pointer {
+            ptr: id,
             sig: sig.clone(),
         };
 
-        let not_a_pointer = through(n, &builder);
-        let a_constant = through(null, &builder);
-        let a_global = through(global, &builder);
-        let a_register = through(fp, &builder);
+        let not_a_pointer = through(n);
+        let a_constant = through(null);
+        let a_global = through(global);
+        let a_register = through(fp);
         let mut cursor = builder.cursor_at_block(entry);
 
         assert!(matches!(

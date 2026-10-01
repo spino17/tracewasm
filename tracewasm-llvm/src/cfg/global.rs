@@ -2,7 +2,7 @@ use crate::{
     cfg::{context::Context, function::FuncId},
     error::CallError,
     interner::{StrId, TyId},
-    value::{ConstExpr, FuncSignature, Type, Value, ValueKind},
+    value::{ConstExpr, FuncSignature, Type, ValueId, ValueKind},
 };
 use std::{fmt::Display, hash::Hash};
 
@@ -278,7 +278,7 @@ pub enum FuncRef {
     Pointer {
         /// The callee's address. Must be a `ptr`-typed register; anything else is
         /// refused by [`name_and_sig`](FuncRef::name_and_sig).
-        ptr: Value,
+        ptr: ValueId,
         /// The signature the call is checked against: arity, argument types and
         /// result. It is the caller's claim about what `ptr` points at; a wrong one
         /// gives IR whose behaviour is undefined at run time.
@@ -346,11 +346,11 @@ impl FuncRef {
             FuncRef::Pointer { ptr, sig } => {
                 if !ptr.is_ptr(ctx) {
                     return Err(CallError::IndirectCalleeNotPointer(
-                        ctx.display(ptr.ty()).to_string(),
+                        ctx.display(ptr.ty(&ctx)).to_string(),
                     ));
                 }
 
-                let ValueKind::Reg(reg) = ptr.kind() else {
+                let ValueKind::Reg(reg) = ptr.kind(ctx) else {
                     return Err(CallError::IndirectCalleeNotRegister);
                 };
 
