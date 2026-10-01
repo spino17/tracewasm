@@ -2637,6 +2637,55 @@ mod tests {
         assert_eq!(rendered(empty.ty(&ctx), &ctx), "[0 x i64]");
     }
 
+    /// A global's address is a constant, so globals make an array literal too:
+    /// `[a, c]` is a `[2 x ptr]` holding both addresses. Asserted, it folds into an
+    /// array of `ptr` of the same length, and into nothing else.
+    #[test]
+    fn an_array_literal_of_globals_is_an_array_of_ptr() {
+        let mut builder = crate::test_support::fixture();
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let a = builder
+            .declare_global_variable("a", Some(i32_ty), None)
+            .unwrap();
+        let c = builder
+            .declare_global_variable("c", Some(i32_ty), None)
+            .unwrap();
+
+        let table = Value::from_const([a, c], OperandTy::Inferred, &mut builder).unwrap();
+
+        assert_eq!(rendered(table.ty(&builder), &builder), "[2 x ptr]");
+        assert_eq!(
+            pooled(table, &builder),
+            ConstValue::Array {
+                element_ty: ptr_ty,
+                array: vec![
+                    ConstValue::Global(Global::Variable(a)),
+                    ConstValue::Global(Global::Variable(c)),
+                ]
+                .into(),
+                size: 2,
+            }
+        );
+
+        let ptrs = builder.array_ty(ptr_ty, 2).unwrap();
+        let ints = builder.array_ty(i32_ty, 2).unwrap();
+        let longer = builder.array_ty(ptr_ty, 3).unwrap();
+
+        let asserted = Value::from_const([a, c], OperandTy::Asserted(ptrs), &mut builder).unwrap();
+
+        assert_eq!(asserted.ty(&builder), ptrs);
+
+        // An address is a `ptr` and folds into nothing else; the length has to match.
+        for ty in [ints, longer, ptr_ty] {
+            assert!(matches!(
+                Value::from_const([a, c], OperandTy::Asserted(ty), &mut builder),
+                Err(TypeError::ConstantCastToProvidedTypeFailed(_, _))
+            ));
+        }
+    }
+
     /// Equal arrays are one pool entry, and arrays that differ anywhere are not —
     /// float elements included, compared by bit pattern like scalar floats.
     #[test]
