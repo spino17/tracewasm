@@ -1557,6 +1557,7 @@ mod tests {
 
     /// Globals of different kinds mix in one array through the tag-erased `Global`:
     /// a variable, a defined function and a declared one are all a `ptr @name`.
+    /// `From` erases the tag, and naming the variant does the same.
     #[test]
     fn an_array_can_mix_kinds_of_global() {
         let mut builder = fixture();
@@ -1585,11 +1586,7 @@ mod tests {
         use crate::cfg::global::Global;
 
         let table = Value::from_const(
-            [
-                Global::Variable(a),
-                Global::DefinedFunc(f),
-                Global::DeclaredFunc(d),
-            ],
+            [Global::from(a), f.into(), Global::DeclaredFunc(d)],
             OperandTy::Inferred,
             &mut builder,
         )

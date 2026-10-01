@@ -1446,7 +1446,7 @@ impl Hash for ConstValue {
 /// fixed-size array of them (nested arrays included), which is what lets
 /// [`Value::from_const`] be called with a plain literal: `[1i32, 2, 3]` is a
 /// `[3 x i32]`. An array of one kind of global is `[a, c]`; one that mixes kinds uses
-/// [`Global`], e.g. `[Global::Variable(a), Global::DefinedFunc(f)]`.
+/// [`Global`], converted with `From`: `[Global::from(a), f.into()]`.
 pub trait Const: Clone {
     /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
     fn ty(ctx: &mut Context) -> TyId;
