@@ -136,9 +136,10 @@ impl IREmitter {
                     indices
                 ))
             }
-            ConstExpr::Const(const_id) => {
-                Ok(Self::constant(ctx.const_interner.value(const_id.raw())))
-            }
+            ConstExpr::Const(const_id) => Ok(Self::constant(
+                ctx.const_interner.value(const_id.raw()),
+                ctx,
+            )),
             // These four carry no operands to render — `PtrToInt` and `IntToPtr` have
             // no fields at all, and `BitCast`/`Trunc` name only a target type with no
             // value to convert. Refusing is honest: a placeholder would put text into
@@ -163,7 +164,10 @@ impl IREmitter {
     /// type", while `double 0.1` is fine. The hex form is exact by construction, so it
     /// sidesteps the distinction — and for a `float` the digits are the f32 value
     /// widened to f64, which is the encoding LLVM reads back.
-    fn constant(value: &ConstValue) -> String {
+    ///
+    /// An array is written element by element, each with its type:
+    /// `[i32 1, i32 2]`, and `[]` when empty.
+    fn constant(value: &ConstValue, ctx: &Context) -> String {
         match value {
             ConstValue::I1(v) => {
                 if *v == 0 {
@@ -180,6 +184,22 @@ impl IREmitter {
                 format!("0x{:016X}", (v.into_inner() as f64).to_bits())
             }
             ConstValue::Double(v) => format!("0x{:016X}", v.into_inner().to_bits()),
+            ConstValue::Array {
+                element_ty, array, ..
+            } => {
+                let elements: Vec<String> = array
+                    .iter()
+                    .map(|element| {
+                        format!(
+                            "{} {}",
+                            ctx.display(*element_ty),
+                            Self::constant(element, ctx)
+                        )
+                    })
+                    .collect();
+
+                format!("[{}]", elements.join(", "))
+            }
             ConstValue::NullPtr => "null".to_string(),
         }
     }
@@ -692,7 +712,7 @@ impl CfgVisitor for IREmitter {
             out.push_str(&format!(
                 "        {} {}, label {}\n",
                 ctx.display(operands.cond_ty),
-                Self::constant(case),
+                Self::constant(case, ctx),
                 Self::label(*label, ctx)
             ));
         }
@@ -1490,6 +1510,51 @@ mod tests {
         );
     }
 
+    /// An array literal initializer is written element by element, each with its
+    /// type — including an empty array and a nested one.
+    #[test]
+    fn array_literals_are_emitted_element_by_element() {
+        let mut builder = fixture();
+
+        for (name, value) in [
+            (
+                "a",
+                Value::from_const([1i32, -2, 3], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "e",
+                Value::from_const([0i32; 0], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "n",
+                Value::from_const([[1i8, 2], [3, 4]], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "f",
+                Value::from_const([1.5f32, 0.1], OperandTy::Inferred, &mut builder),
+            ),
+        ] {
+            let ValueKind::ConstExpr(init) = value.unwrap().kind(&builder).clone() else {
+                panic!("a constant is a constant expression")
+            };
+
+            builder
+                .declare_global_variable(name.to_string(), None, Some(init))
+                .unwrap();
+        }
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "@a = global [3 x i32] [i32 1, i32 -2, i32 3]\n",
+            "@e = global [0 x i32] []\n",
+            "@n = global [2 x [2 x i8]] [[2 x i8] [i8 1, i8 2], [2 x i8] [i8 3, i8 4]]\n",
+            "@f = global [2 x float] [float 0x3FF8000000000000, float 0x3FB99999A0000000]\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
     /// Given both, they have to agree — and **exactly**. `llvm-as` refuses
     /// `@g = global i32 true` with "constant expression type mismatch" even though an
     /// `i1` is an integer, and `@g = global double 0` with "integer constant must
@@ -1752,13 +1817,15 @@ mod tests {
     /// number.
     #[test]
     fn a_float_constant_is_encoded_as_its_widened_bits() {
+        let ctx = crate::test_support::ctx();
+
         assert_eq!(
-            IREmitter::constant(&ConstValue::Float(0.1f32.into())),
+            IREmitter::constant(&ConstValue::Float(0.1f32.into()), &ctx),
             "0x3FB99999A0000000"
         );
 
         assert_eq!(
-            IREmitter::constant(&ConstValue::Double(0.1f64.into())),
+            IREmitter::constant(&ConstValue::Double(0.1f64.into()), &ctx),
             "0x3FB999999999999A",
             "the same decimal is a different constant at double width"
         );
@@ -1766,22 +1833,24 @@ mod tests {
         // The one place the two agree, so a test that only used `1.0` would not tell
         // the encodings apart.
         assert_eq!(
-            IREmitter::constant(&ConstValue::Float(1.0f32.into())),
-            IREmitter::constant(&ConstValue::Double(1.0f64.into()))
+            IREmitter::constant(&ConstValue::Float(1.0f32.into()), &ctx),
+            IREmitter::constant(&ConstValue::Double(1.0f64.into()), &ctx)
         );
     }
 
     /// `i1` renders as `true`/`false`, and a null pointer as `null`.
     #[test]
     fn scalar_constants_render_as_llvm_spells_them() {
-        assert_eq!(IREmitter::constant(&ConstValue::I1(1)), "true");
-        assert_eq!(IREmitter::constant(&ConstValue::I1(0)), "false");
-        assert_eq!(IREmitter::constant(&ConstValue::I32(-7)), "-7");
+        let ctx = crate::test_support::ctx();
+
+        assert_eq!(IREmitter::constant(&ConstValue::I1(1), &ctx), "true");
+        assert_eq!(IREmitter::constant(&ConstValue::I1(0), &ctx), "false");
+        assert_eq!(IREmitter::constant(&ConstValue::I32(-7), &ctx), "-7");
         assert_eq!(
-            IREmitter::constant(&ConstValue::I64(1 << 40)),
+            IREmitter::constant(&ConstValue::I64(1 << 40), &ctx),
             "1099511627776"
         );
-        assert_eq!(IREmitter::constant(&ConstValue::NullPtr), "null");
+        assert_eq!(IREmitter::constant(&ConstValue::NullPtr, &ctx), "null");
     }
 
     /// An unset data layout is omitted rather than written as an empty string —

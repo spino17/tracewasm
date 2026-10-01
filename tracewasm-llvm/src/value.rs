@@ -746,7 +746,8 @@ impl Value {
     /// and `double` narrows to `float` only when the value is exact.
     /// Crossing between integers and floats, or reaching a pointer, is refused —
     /// those need a real `sitofp`/`inttoptr` instruction, and folding them here would
-    /// silently drop it.
+    /// silently drop it. An array literal only folds into its own type, the same
+    /// element type and length: its elements are not converted one by one.
     ///
     /// # Errors
     ///
@@ -1145,9 +1146,15 @@ pub enum ConstValue {
     Float(OrderedFloat<f32>),
     /// `double`, with the same caveat as [`Float`](Self::Float).
     Double(OrderedFloat<f64>),
+    /// `[N x T] [T e0, T e1, …]`, an array literal: every element a constant of the
+    /// same type. Equal when the element type, the length and every element are
+    /// equal, elements compared by bit pattern like the scalars.
     Array {
+        /// The elements' type, `T`.
         element_ty: TyId,
+        /// The elements, in order.
         array: Box<[ConstValue]>,
+        /// The length, `N`. Always `array.len()`.
         size: u64,
     },
     /// `null`.
@@ -1282,7 +1289,7 @@ impl ConstValue {
                     return Some(self.clone());
                 }
 
-                return None;
+                None
             }
             ConstValue::NullPtr => {
                 if ty.is_ptr(ctx) {
@@ -1365,7 +1372,20 @@ impl PartialEq for ConstValue {
                 element_ty,
                 array,
                 size,
-            } => todo!(),
+            } => {
+                // Element-wise through this same `eq`, so float elements compare by
+                // bit pattern exactly as scalar floats do.
+                if let ConstValue::Array {
+                    element_ty: other_element_ty,
+                    array: other_array,
+                    size: other_size,
+                } = other
+                {
+                    element_ty == other_element_ty && size == other_size && array == other_array
+                } else {
+                    false
+                }
+            }
             ConstValue::NullPtr => {
                 matches!(other, ConstValue::NullPtr)
             }
@@ -1397,7 +1417,12 @@ impl Hash for ConstValue {
                 element_ty,
                 array,
                 size,
-            } => todo!(),
+            } => {
+                element_ty.hash(state);
+                size.hash(state);
+                // Each element through this same `Hash`, consistent with `eq` above.
+                array.hash(state);
+            }
             ConstValue::NullPtr => {}
         }
     }
@@ -1405,13 +1430,16 @@ impl Hash for ConstValue {
 
 /// A Rust literal that can be used as an LLVM constant.
 ///
-/// Implemented for `bool`, the signed integers, `f32`/`f64` and [`NullPtr`], which is
-/// what lets [`Value::from_const`] be called with a plain literal.
+/// Implemented for `bool`, the signed integers, `f32`/`f64`, [`NullPtr`], and any
+/// fixed-size array of them (nested arrays included), which is what lets
+/// [`Value::from_const`] be called with a plain literal: `[1i32, 2, 3]` is a
+/// `[3 x i32]`.
 pub trait Const: Clone {
     /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
     fn ty(ctx: &mut Context) -> TyId;
 
-    /// Wraps the literal as a pool value at its default type.
+    /// Wraps the literal as a pool value at its default type. Takes the context
+    /// because an array has to intern its element type.
     fn into_const(self, ctx: &mut Context) -> ConstValue;
 
     /// Folds the literal into `ty`, or `None` if it does not belong there.
@@ -1782,7 +1810,7 @@ impl<T: Const, const N: usize> Const for [T; N] {
             });
         }
 
-        return None;
+        None
     }
 }
 
@@ -2544,6 +2572,98 @@ mod tests {
             before + 1,
             "only the accepted cast may reach the pool",
         );
+    }
+
+    /// The pool entry behind a constant value.
+    fn pooled(value: ValueId, ctx: &Context) -> ConstValue {
+        let ValueKind::ConstExpr(ConstExpr::Const(id)) = value.kind(ctx) else {
+            panic!("a literal is a pooled constant");
+        };
+
+        ctx.const_interner.value(id.raw()).clone()
+    }
+
+    /// A Rust array literal is an LLVM array constant: `[N x T]`, its elements each
+    /// a constant of `T`.
+    #[test]
+    fn an_array_literal_is_typed_by_its_element_and_length() {
+        let mut ctx = crate::test_support::ctx();
+
+        let array = Value::from_const([1i32, -2, 3], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_eq!(rendered(array.ty(&ctx), &ctx), "[3 x i32]");
+
+        let i32_ty = ctx.i32_ty();
+
+        assert_eq!(
+            pooled(array, &ctx),
+            ConstValue::Array {
+                element_ty: i32_ty,
+                array: vec![ConstValue::I32(1), ConstValue::I32(-2), ConstValue::I32(3)].into(),
+                size: 3,
+            }
+        );
+
+        let nested = Value::from_const([[1i8, 2], [3, 4]], OperandTy::Inferred, &mut ctx).unwrap();
+        let empty = Value::from_const([0i64; 0], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_eq!(rendered(nested.ty(&ctx), &ctx), "[2 x [2 x i8]]");
+        assert_eq!(rendered(empty.ty(&ctx), &ctx), "[0 x i64]");
+    }
+
+    /// Equal arrays are one pool entry, and arrays that differ anywhere are not —
+    /// float elements included, compared by bit pattern like scalar floats.
+    #[test]
+    fn array_literals_are_pooled_by_contents() {
+        let mut ctx = crate::test_support::ctx();
+        let id = |value: ValueId, ctx: &Context| match value.kind(ctx) {
+            ValueKind::ConstExpr(ConstExpr::Const(id)) => *id,
+            _ => panic!("a literal is a pooled constant"),
+        };
+
+        let a = Value::from_const([1i32, 2], OperandTy::Inferred, &mut ctx).unwrap();
+        let b = Value::from_const([1i32, 2], OperandTy::Inferred, &mut ctx).unwrap();
+        let reordered = Value::from_const([2i32, 1], OperandTy::Inferred, &mut ctx).unwrap();
+        let longer = Value::from_const([1i32, 2, 0], OperandTy::Inferred, &mut ctx).unwrap();
+        let wider = Value::from_const([1i64, 2], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_eq!(id(a, &ctx), id(b, &ctx), "equal arrays share an entry");
+
+        for other in [reordered, longer, wider] {
+            assert_ne!(id(a, &ctx), id(other, &ctx));
+        }
+
+        let zero = Value::from_const([0.0f64], OperandTy::Inferred, &mut ctx).unwrap();
+        let neg_zero = Value::from_const([-0.0f64], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_ne!(
+            id(zero, &ctx),
+            id(neg_zero, &ctx),
+            "`0.0` and `-0.0` differ in bits"
+        );
+    }
+
+    /// An array literal folds only into its own type: the same element type and
+    /// length. Its elements aren't converted one by one.
+    #[test]
+    fn an_array_literal_folds_only_into_its_own_type() {
+        let mut ctx = crate::test_support::ctx();
+        let i32_ty = ctx.i32_ty();
+        let i64_ty = ctx.i64_ty();
+        let same = ctx.array_ty(i32_ty, 2).unwrap();
+        let longer = ctx.array_ty(i32_ty, 3).unwrap();
+        let wider = ctx.array_ty(i64_ty, 2).unwrap();
+
+        let ok = Value::from_const([1i32, 2], OperandTy::Asserted(same), &mut ctx).unwrap();
+
+        assert_eq!(ok.ty(&ctx), same);
+
+        for ty in [longer, wider, i32_ty] {
+            assert!(matches!(
+                Value::from_const([1i32, 2], OperandTy::Asserted(ty), &mut ctx),
+                Err(TypeError::ConstantCastToProvidedTypeFailed(_, _))
+            ));
+        }
     }
 
     /// `null` is a `ptr` constant, which is the type it has to report for a value

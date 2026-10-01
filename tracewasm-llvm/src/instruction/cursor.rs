@@ -1434,7 +1434,7 @@ impl<'a> Cursor<'a> {
                 );
             }
 
-            case_vals.insert(casted_val);
+            case_vals.insert(casted_val.clone());
             final_cases.push((casted_val, *bb));
         }
 
@@ -4824,7 +4824,9 @@ mod tests {
         };
 
         let read = |v: ValueId| match v.kind(ctx) {
-            ValueKind::ConstExpr(ConstExpr::Const(id)) => *ctx.const_interner.value(id.raw()),
+            ValueKind::ConstExpr(ConstExpr::Const(id)) => {
+                ctx.const_interner.value(id.raw()).clone()
+            }
             other => panic!("operand is not a constant: {other:?}"),
         };
 

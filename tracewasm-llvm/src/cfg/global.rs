@@ -167,7 +167,7 @@ impl GlobalEntity for GlobalVar {
 
 /// Anything a module names with an `@`, with its tag erased.
 ///
-/// This is what a [`Value`] holds once a global is used as an
+/// This is what a [`Value`](crate::value::Value) holds once a global is used as an
 /// operand — by then the distinction no longer matters, since all three are addresses
 /// and all three render as `@name`.
 #[derive(Debug, Clone, Copy)]
@@ -225,7 +225,7 @@ pub enum GlobalKind {
 /// Everything the module records about one global, under its name.
 ///
 /// One shape for all three kinds, which is what lets a
-/// [`Value`] built from any global resolve its pointee the same
+/// [`Value`](crate::value::Value) built from any global resolve its pointee the same
 /// way — see [`pointee_ty`](Self::pointee_ty).
 pub struct GlobalData {
     pub(crate) linkage: Linkage,
@@ -346,7 +346,7 @@ impl FuncRef {
             FuncRef::Pointer { ptr, sig } => {
                 if !ptr.is_ptr(ctx) {
                     return Err(CallError::IndirectCalleeNotPointer(
-                        ctx.display(ptr.ty(&ctx)).to_string(),
+                        ctx.display(ptr.ty(ctx)).to_string(),
                     ));
                 }
 
