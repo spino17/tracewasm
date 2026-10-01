@@ -1555,6 +1555,64 @@ mod tests {
         );
     }
 
+    /// Globals of different kinds mix in one array through the tag-erased `Global`:
+    /// a variable, a defined function and a declared one are all a `ptr @name`.
+    #[test]
+    fn an_array_can_mix_kinds_of_global() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
+
+        let a = builder
+            .declare_global_variable("a".to_string(), Some(i32_ty), None)
+            .unwrap();
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let d = builder
+            .declare_function("d".to_string(), &[], void_ty)
+            .unwrap();
+
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .build_ret(None, void_ty.into())
+            .unwrap();
+
+        use crate::cfg::global::Global;
+
+        let table = Value::from_const(
+            [
+                Global::Variable(a),
+                Global::DefinedFunc(f),
+                Global::DeclaredFunc(d),
+            ],
+            OperandTy::Inferred,
+            &mut builder,
+        )
+        .unwrap();
+
+        assert_eq!(builder.display(table.ty(&builder)).to_string(), "[3 x ptr]");
+
+        let ValueKind::ConstExpr(table) = table.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+
+        builder
+            .declare_global_variable("table".to_string(), None, Some(table))
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(
+            ir.contains("@table = global [3 x ptr] [ptr @a, ptr @f, ptr @d]\n"),
+            "{ir}"
+        );
+    }
+
     /// An array literal initializer is written element by element, each with its
     /// type — including an empty array and a nested one.
     #[test]

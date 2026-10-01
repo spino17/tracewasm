@@ -202,6 +202,12 @@ pub struct GlobalId<T: GlobalEntity> {
     pub(crate) tag: T,
 }
 
+impl<T: GlobalEntity> From<GlobalId<T>> for Global {
+    fn from(value: GlobalId<T>) -> Self {
+        T::to_global(value)
+    }
+}
+
 /// A global variable's own data: what it holds, and what it starts as.
 ///
 /// The two are coupled. An initializer makes this a *definition*, and its type must

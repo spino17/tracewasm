@@ -1441,10 +1441,12 @@ impl Hash for ConstValue {
 
 /// A Rust literal that can be used as an LLVM constant.
 ///
-/// Implemented for `bool`, the signed integers, `f32`/`f64`, [`NullPtr`], and any
+/// Implemented for `bool`, the signed integers, `f32`/`f64`, [`NullPtr`], a global's
+/// address ([`GlobalId`] of any kind, or the tag-erased [`Global`]), and any
 /// fixed-size array of them (nested arrays included), which is what lets
 /// [`Value::from_const`] be called with a plain literal: `[1i32, 2, 3]` is a
-/// `[3 x i32]`.
+/// `[3 x i32]`. An array of one kind of global is `[a, c]`; one that mixes kinds uses
+/// [`Global`], e.g. `[Global::Variable(a), Global::DefinedFunc(f)]`.
 pub trait Const: Clone {
     /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
     fn ty(ctx: &mut Context) -> TyId;
@@ -1854,6 +1856,24 @@ impl<T: GlobalEntity> Const for GlobalId<T> {
 
     fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::Global(T::to_global(self))
+    }
+
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        if !ty.is_ptr(ctx) {
+            return None;
+        }
+
+        Some(self.into_const(ctx))
+    }
+}
+
+impl Const for Global {
+    fn ty(ctx: &mut Context) -> TyId {
+        ctx.ptr_ty()
+    }
+
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
+        ConstValue::Global(self)
     }
 
     fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
