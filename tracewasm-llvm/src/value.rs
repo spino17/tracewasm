@@ -758,9 +758,11 @@ impl Value {
         ctx: &mut Context,
     ) -> Result<ValueId, TypeError> {
         let val = ConstValue::new(val, optional_cast, ctx)?;
+        let ty = val.ty(ctx);
         let const_id = ctx.const_interner.intern(val);
+
         let value = Value {
-            ty: val.ty(ctx),
+            ty,
             kind: ValueKind::ConstExpr(ConstExpr::Const(const_id.into())),
         };
 
@@ -931,7 +933,7 @@ impl Value {
 
         match id.kind(ctx).clone() {
             ValueKind::ConstExpr(ConstExpr::Const(const_id)) => {
-                let const_val = *ctx.const_interner.value(const_id.raw());
+                let const_val = ctx.const_interner.value(const_id.raw()).clone();
                 let casted_const_val = const_val.try_cast(ty, signedness, ctx)?;
                 let casted_const_id = ctx.const_interner.intern(casted_const_val).into();
                 let value = Value::new(ty, ValueKind::ConstExpr(ConstExpr::Const(casted_const_id)));
@@ -1098,7 +1100,7 @@ impl ConstExpr {
             ConstExpr::Const(const_val) => {
                 // Copied out rather than borrowed: `ConstValue::ty` interns, which
                 // needs `&mut ctx` and so cannot run while the pool is borrowed.
-                let const_val = *ctx.const_interner.value(const_val.raw());
+                let const_val = ctx.const_interner.value(const_val.raw()).clone();
 
                 const_val.ty(ctx)
             }
@@ -1126,7 +1128,7 @@ pub struct Register {
 /// The float arms hold `OrderedFloat` only because `f32`/`f64` are not `Ord`; its
 /// own `Hash` is not used, since it canonicalises `-0.0` to `+0.0` and every NaN
 /// alike — see the hand-written [`Hash`] below.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ConstValue {
     /// `i1 true` / `i1 false`, stored as 0 or 1.
     I1(i8),
@@ -1143,6 +1145,11 @@ pub enum ConstValue {
     Float(OrderedFloat<f32>),
     /// `double`, with the same caveat as [`Float`](Self::Float).
     Double(OrderedFloat<f64>),
+    Array {
+        element_ty: TyId,
+        array: Box<[ConstValue]>,
+        size: u64,
+    },
     /// `null`.
     NullPtr,
 }
@@ -1179,7 +1186,7 @@ impl ConstValue {
 
             c
         } else {
-            val.into_const()
+            val.into_const(ctx)
         };
 
         Ok(val)
@@ -1196,6 +1203,14 @@ impl ConstValue {
                 ConstValue::I64(_) => Type::I64,
                 ConstValue::Float(_) => Type::Float,
                 ConstValue::Double(_) => Type::Double,
+                ConstValue::Array {
+                    element_ty,
+                    array: _array,
+                    size,
+                } => Type::Array {
+                    size: *size,
+                    element_ty: *element_ty,
+                },
                 ConstValue::NullPtr => Type::Ptr,
             })
             .into()
@@ -1232,7 +1247,7 @@ impl ConstValue {
             ConstValue::I64(val) => val.is_positive(),
             ConstValue::Float(val) => val.is_sign_positive(),
             ConstValue::Double(val) => val.is_sign_positive(),
-            ConstValue::NullPtr => false,
+            ConstValue::NullPtr | ConstValue::Array { .. } => false,
         }
     }
 
@@ -1255,6 +1270,20 @@ impl ConstValue {
             ConstValue::I64(val) => val.try_cast(ty, signedness, ctx),
             ConstValue::Float(val) => val.try_cast(ty, signedness, ctx),
             ConstValue::Double(val) => val.try_cast(ty, signedness, ctx),
+            ConstValue::Array {
+                element_ty,
+                array: _array,
+                size,
+            } => {
+                if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
+                    && *element_ty == expected_element_ty
+                    && *size == expected_size
+                {
+                    return Some(self.clone());
+                }
+
+                return None;
+            }
             ConstValue::NullPtr => {
                 if ty.is_ptr(ctx) {
                     Some(ConstValue::NullPtr)
@@ -1332,6 +1361,11 @@ impl PartialEq for ConstValue {
                     false
                 }
             }
+            ConstValue::Array {
+                element_ty,
+                array,
+                size,
+            } => todo!(),
             ConstValue::NullPtr => {
                 matches!(other, ConstValue::NullPtr)
             }
@@ -1359,6 +1393,11 @@ impl Hash for ConstValue {
             ConstValue::I64(v) => v.hash(state),
             ConstValue::Float(v) => v.into_inner().to_bits().hash(state),
             ConstValue::Double(v) => v.into_inner().to_bits().hash(state),
+            ConstValue::Array {
+                element_ty,
+                array,
+                size,
+            } => todo!(),
             ConstValue::NullPtr => {}
         }
     }
@@ -1368,12 +1407,12 @@ impl Hash for ConstValue {
 ///
 /// Implemented for `bool`, the signed integers, `f32`/`f64` and [`NullPtr`], which is
 /// what lets [`Value::from_const`] be called with a plain literal.
-pub trait Const {
+pub trait Const: Clone {
     /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
     fn ty(ctx: &mut Context) -> TyId;
 
     /// Wraps the literal as a pool value at its default type.
-    fn into_const(self) -> ConstValue;
+    fn into_const(self, ctx: &mut Context) -> ConstValue;
 
     /// Folds the literal into `ty`, or `None` if it does not belong there.
     ///
@@ -1390,7 +1429,7 @@ impl Const for bool {
         ctx.i1_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::I1(if self { 1 } else { 0 })
     }
 
@@ -1408,7 +1447,7 @@ impl Const for i8 {
         ctx.i8_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::I8(self)
     }
 
@@ -1442,7 +1481,7 @@ impl Const for i16 {
         ctx.i16_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::I16(self)
     }
 
@@ -1490,7 +1529,7 @@ impl Const for i32 {
         ctx.i32_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::I32(self)
     }
 
@@ -1556,7 +1595,7 @@ impl Const for i64 {
         ctx.i64_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::I64(self)
     }
 
@@ -1634,7 +1673,7 @@ impl Const for f32 {
         ctx.f32_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::Float(OrderedFloat(self))
     }
 
@@ -1656,7 +1695,7 @@ impl Const for f64 {
         ctx.f64_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::Double(OrderedFloat(self))
     }
 
@@ -1697,6 +1736,56 @@ impl Const for f64 {
     }
 }
 
+impl<T: Const, const N: usize> Const for [T; N] {
+    fn ty(ctx: &mut Context) -> TyId {
+        let element_ty = T::ty(ctx);
+
+        ctx.array_ty(element_ty, N as u64)
+            .expect("`Const` is only implemented by a subset of first-class types")
+    }
+
+    fn into_const(self, ctx: &mut Context) -> ConstValue {
+        let element_ty = T::ty(ctx);
+        let size = N as u64;
+        let mut array = vec![];
+
+        for element in self {
+            array.push(element.into_const(ctx));
+        }
+
+        ConstValue::Array {
+            element_ty,
+            array: array.into_boxed_slice(),
+            size,
+        }
+    }
+
+    fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        let element_ty = T::ty(ctx);
+
+        if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
+            && element_ty == expected_element_ty
+            && N as u64 == expected_size
+        {
+            let mut array = vec![];
+
+            for element in self {
+                let e = element.clone();
+
+                array.push(e.into_const(ctx));
+            }
+
+            return Some(ConstValue::Array {
+                element_ty,
+                array: array.into_boxed_slice(),
+                size: N as u64,
+            });
+        }
+
+        return None;
+    }
+}
+
 #[derive(Clone, Copy)]
 /// The `null` pointer constant, as something [`Value::from_const`] can take.
 ///
@@ -1709,7 +1798,7 @@ impl Const for NullPtr {
         ctx.ptr_ty()
     }
 
-    fn into_const(self) -> ConstValue {
+    fn into_const(self, _ctx: &mut Context) -> ConstValue {
         ConstValue::NullPtr
     }
 
@@ -1718,7 +1807,7 @@ impl Const for NullPtr {
             return None;
         }
 
-        Some(self.into_const())
+        Some(self.into_const(ctx))
     }
 }
 
@@ -2464,7 +2553,7 @@ mod tests {
         let mut ctx = crate::test_support::ctx();
 
         assert_eq!(rendered(NullPtr::ty(&mut ctx), &ctx), "ptr");
-        assert_eq!(NullPtr.into_const(), ConstValue::NullPtr);
+        assert_eq!(NullPtr.into_const(&mut ctx), ConstValue::NullPtr);
 
         let value = Value::from_const(NullPtr, OperandTy::Inferred, &mut ctx).unwrap();
 
