@@ -732,6 +732,35 @@ impl Value {
         Value { ty, kind }
     }
 
+    /// The zero of `ty`: `0`, `0.0`, or `null`.
+    ///
+    /// What a wasm local is initialised to, so it answers for the types
+    /// wasm's `ValType` maps onto and `None` for the rest. A
+    /// reference's zero is the null pointer, which is what `ref.null` means.
+    pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<ValueId> {
+        let ty_obj = ctx.ty_interner.value(ty.raw());
+
+        Some(
+            match ty_obj {
+                Type::I1 => Value::from_const(false, OperandTy::Inferred, ctx),
+                Type::I8 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I16 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I32 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::I64 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
+                Type::Float => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Double => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
+                Type::Ptr => Value::from_const(NullPtr, OperandTy::Inferred, ctx),
+                Type::Half
+                | Type::Bfloat
+                | Type::Array { .. }
+                | Type::Func(_)
+                | Type::Struct { .. }
+                | Type::Void => return None,
+            }
+            .expect("hitting this means the above casting is incorrect"),
+        )
+    }
+
     /// Interns a Rust literal as an LLVM constant.
     ///
     /// With [`OperandTy::Inferred`] the value keeps the type [`Const::ty`] gives it —
@@ -769,35 +798,6 @@ impl Value {
         };
 
         Ok(ctx.alloc_value(value))
-    }
-
-    /// The zero of `ty`: `0`, `0.0`, or `null`.
-    ///
-    /// What a wasm local is initialised to, so it answers for the types
-    /// wasm's `ValType` maps onto and `None` for the rest. A
-    /// reference's zero is the null pointer, which is what `ref.null` means.
-    pub fn zero_of_ty(ty: TyId, ctx: &mut Context) -> Option<ValueId> {
-        let ty_obj = ctx.ty_interner.value(ty.raw());
-
-        Some(
-            match ty_obj {
-                Type::I1 => Value::from_const(false, OperandTy::Inferred, ctx),
-                Type::I8 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
-                Type::I16 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
-                Type::I32 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
-                Type::I64 => Value::from_const(0, OperandTy::Asserted(ty), ctx),
-                Type::Float => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
-                Type::Double => Value::from_const(0.0, OperandTy::Asserted(ty), ctx),
-                Type::Ptr => Value::from_const(NullPtr, OperandTy::Inferred, ctx),
-                Type::Half
-                | Type::Bfloat
-                | Type::Array { .. }
-                | Type::Func(_)
-                | Type::Struct { .. }
-                | Type::Void => return None,
-            }
-            .expect("hitting this means the above casting is incorrect"),
-        )
     }
 
     /// Interns `name` and builds a register of the given type.
@@ -857,6 +857,7 @@ impl Value {
     /// behave alike.
     pub fn from_global<T: GlobalEntity>(global: GlobalId<T>, ctx: &mut Context) -> ValueId {
         let global = GlobalEntity::to_global(global);
+
         let value = Value {
             ty: ctx.ptr_ty(),
             kind: ValueKind::Global(global),
@@ -1011,7 +1012,7 @@ impl Value {
             ValueKind::Global(global) => {
                 let name = global.name();
 
-                let global = &ctx
+                let global = ctx
                     .module
                     .globals
                     .get(&name)
@@ -1847,6 +1848,20 @@ impl Const for NullPtr {
         }
 
         Some(self.into_const(ctx))
+    }
+}
+
+impl<T: GlobalEntity> Const for GlobalId<T> {
+    fn ty(ctx: &mut Context) -> TyId {
+        todo!()
+    }
+
+    fn into_const(self, ctx: &mut Context) -> ConstValue {
+        todo!()
+    }
+
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        todo!()
     }
 }
 
