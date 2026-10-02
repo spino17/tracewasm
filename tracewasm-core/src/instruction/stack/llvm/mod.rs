@@ -65,7 +65,7 @@ use tracewasm_llvm::{
         ControlFlowGraph,
         basic_block::BasicBlockId,
         context::Context,
-        global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId},
+        global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId, GlobalVar, GlobalVariable},
         module::Target,
     },
     error::PhiError,
@@ -629,14 +629,21 @@ impl WasmInstrLLVMPassManager {
             }
         }
 
-        // builder.declare_global_variable("fn_table".to_string(), None, Some(ConstExpr::new_const([], optional_cast, &mut ctx)));
+        let func_table_initializer =
+            ConstExpr::new_const(funcs, OperandTy::Inferred, &mut builder)?;
+
+        let func_table = builder.declare_global_variable(
+            "fn_table".to_string(),
+            None,
+            Some(func_table_initializer),
+        )?;
 
         for func_index in (imported_func_count as usize)..func_decls.len() {
             let func_index = FuncIndex(func_index as u32);
             // Copied out rather than borrowed: `compile_func` takes `&mut self`.
             let func = self.defined_funcs[&func_index];
 
-            self.compile_func(func_index, func, module, &mut builder)?;
+            self.compile_func(func_index, func, func_table, module, &mut builder)?;
         }
 
         Ok(builder.build())
@@ -656,6 +663,7 @@ impl WasmInstrLLVMPassManager {
         &mut self,
         func_index: FuncIndex,
         func: GlobalId<DefinedFunc>,
+        func_table: GlobalId<GlobalVar>,
         module: &Arc<Module<crate::Stack>>,
         ctx: &mut Context,
     ) -> Result<(), anyhow::Error> {
@@ -747,6 +755,7 @@ impl WasmInstrLLVMPassManager {
                 instructions,
                 frame_layout,
                 locals: &locals,
+                func_table,
             };
 
             let (next_block, next_instr_index) =

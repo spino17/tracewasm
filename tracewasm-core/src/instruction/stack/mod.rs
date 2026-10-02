@@ -88,7 +88,10 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
         UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
-        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager, ctx::RuntimeContext},
+        stack::llvm::{
+            IfCtx, LabelKind, WasmInstrLLVMPassManager,
+            ctx::{GlobalVal, RuntimeContext},
+        },
     },
     memory::Memory,
     module::{
@@ -111,7 +114,7 @@ use std::{
 use tracewasm_llvm::{
     cfg::{
         basic_block::BasicBlockId,
-        global::{DefinedFunc, GlobalId},
+        global::{DefinedFunc, GlobalId, GlobalVar},
     },
     instruction::{
         Access, CastOp, ICond,
@@ -4215,6 +4218,7 @@ pub struct FuncContext<'a> {
     pub(crate) instructions: &'a [StackInstruction],
     pub(crate) frame_layout: &'a StackFrameLayout,
     pub(crate) locals: &'a [tracewasm_llvm::value::ValueId],
+    pub(crate) func_table: GlobalId<GlobalVar>,
 }
 
 impl StackInstruction {
