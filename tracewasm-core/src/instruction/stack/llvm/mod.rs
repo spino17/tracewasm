@@ -65,7 +65,7 @@ use tracewasm_llvm::{
         ControlFlowGraph,
         basic_block::BasicBlockId,
         context::Context,
-        global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId, GlobalVar, GlobalVariable},
+        global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId, GlobalVar},
         module::Target,
     },
     error::PhiError,
@@ -1010,6 +1010,16 @@ mod tests {
         let module = empty_module();
         let mut index = 0;
 
+        // None of the operators under test calls through the table, but the context
+        // carries one, so give it the table `compile` builds for a module with no
+        // functions: empty.
+        let no_funcs: Vec<tracewasm_llvm::cfg::global::Global> = vec![];
+        let func_table_initializer =
+            ConstExpr::new_const(no_funcs, OperandTy::Inferred, builder).unwrap();
+        let func_table = builder
+            .declare_global_variable("fn_table".to_string(), None, Some(func_table_initializer))
+            .unwrap();
+
         // Index-driven, like `compile_func`: an arm returns where to resume, which is
         // not always the next instruction.
         while index < instructions.len() {
@@ -1020,6 +1030,7 @@ mod tests {
                 instructions,
                 frame_layout,
                 locals: &[],
+                func_table,
             };
 
             // No locals: these cases are about control flow, and none of the operators

@@ -88,10 +88,7 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
         UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
-        stack::llvm::{
-            IfCtx, LabelKind, WasmInstrLLVMPassManager,
-            ctx::{GlobalVal, RuntimeContext},
-        },
+        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager, ctx::RuntimeContext},
     },
     memory::Memory,
     module::{
