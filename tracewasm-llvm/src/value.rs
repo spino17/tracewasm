@@ -62,8 +62,10 @@ pub struct FuncSignature {
 }
 
 impl FuncSignature {
-    /// Builds a signature from already-interned parameter and result types.
-    pub(crate) fn new(params: &[TyId], result: TyId) -> Self {
+    /// Builds a signature from already-interned parameter and result types — for
+    /// example the `sig` of an indirect call through
+    /// [`FuncRef::Pointer`](crate::cfg::global::FuncRef::Pointer).
+    pub fn new(params: &[TyId], result: TyId) -> Self {
         FuncSignature {
             params: params.to_vec().into_boxed_slice(),
             result,
