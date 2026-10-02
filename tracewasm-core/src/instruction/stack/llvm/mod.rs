@@ -78,6 +78,7 @@ use tracewasm_llvm::{
 };
 
 pub mod ctx;
+pub mod emit;
 
 /// One open label's `end`: the block control lands in, and the phis waiting there.
 ///
@@ -382,15 +383,11 @@ impl InstrIndexToBasicBlockMap {
 /// translation a transcription rather than an analysis: wasm says "add the top two
 /// operands", so this pops two ids, emits an `add`, and pushes the result. Nothing is
 /// evaluated — a push records *which register* will hold the value at run time.
-pub(crate) struct SimulatedStack {
-    stack: Stack<ValueId>,
-}
+pub(crate) struct SimulatedStack(Stack<ValueId>);
 
 impl Default for SimulatedStack {
     fn default() -> Self {
-        SimulatedStack {
-            stack: Stack::new_with_capacity(0),
-        }
+        SimulatedStack(Stack::new_with_capacity(0))
     }
 }
 
@@ -398,13 +395,13 @@ impl Deref for SimulatedStack {
     type Target = Stack<ValueId>;
 
     fn deref(&self) -> &Self::Target {
-        &self.stack
+        &self.0
     }
 }
 
 impl DerefMut for SimulatedStack {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stack
+        &mut self.0
     }
 }
 
