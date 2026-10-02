@@ -74,7 +74,7 @@ use tracewasm_llvm::{
         cursor::{OperandTy, RegName},
     },
     interner::TyId,
-    value::{Value, ValueId},
+    value::{ConstExpr, Value, ValueId},
 };
 
 pub mod ctx;
@@ -583,6 +583,7 @@ impl WasmInstrLLVMPassManager {
         let ty_decls = &module.types;
         let func_decls = &module.func_decls;
         let imported_func_count = module.imported_func_count; // this many functions will be declared! rest are defined!
+        let mut funcs: Vec<tracewasm_llvm::cfg::global::Global> = vec![];
 
         // Signatures first, bodies second. A body may call any function — one declared
         // later in the index space, or itself — and the callee's handle has to exist
@@ -604,6 +605,8 @@ impl WasmInstrLLVMPassManager {
                     llvm_result,
                 )?;
 
+                funcs.push(func.into());
+
                 self.declared_funcs
                     .insert(FuncIndex(func_index as u32), func);
             } else {
@@ -619,10 +622,14 @@ impl WasmInstrLLVMPassManager {
                     llvm_result,
                 )?;
 
+                funcs.push(func.into());
+
                 self.defined_funcs
                     .insert(FuncIndex(func_index as u32), func);
             }
         }
+
+        // builder.declare_global_variable("fn_table".to_string(), None, Some(ConstExpr::new_const([], optional_cast, &mut ctx)));
 
         for func_index in (imported_func_count as usize)..func_decls.len() {
             let func_index = FuncIndex(func_index as u32);

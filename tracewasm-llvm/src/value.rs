@@ -1073,6 +1073,25 @@ pub enum ConstExpr {
 }
 
 impl ConstExpr {
+    /// A literal as a pooled constant expression, without allocating a value for it:
+    /// the form a global's initializer takes. Folded into `optional_cast` as
+    /// [`Value::from_const`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`TypeError::ConstantCastToProvidedTypeFailed`] if the literal does not fold
+    /// into the requested type.
+    pub fn new_const<C: Const>(
+        val: C,
+        optional_cast: OperandTy,
+        ctx: &mut Context,
+    ) -> Result<Self, TypeError> {
+        let val = ConstValue::new(val, optional_cast, ctx)?;
+        let const_id: ConstId = ctx.const_interner.intern(val).into();
+
+        Ok(ConstExpr::Const(const_id))
+    }
+
     /// The type the expression evaluates to.
     pub fn ty(&self, ctx: &mut Context) -> TyId {
         match self {
@@ -1173,7 +1192,7 @@ impl ConstValue {
         let val = if let OperandTy::Asserted(ty) = optional_cast {
             let Some(c) = val.try_cast(ty, Signedness::Signed, ctx) else {
                 return Err(TypeError::ConstantCastToProvidedTypeFailed(
-                    C::ty(ctx).display(ctx).to_string(),
+                    val.ty(ctx).display(ctx).to_string(),
                     ty.display(ctx).to_string(),
                 ));
             };
@@ -1442,14 +1461,17 @@ impl Hash for ConstValue {
 /// A Rust literal that can be used as an LLVM constant.
 ///
 /// Implemented for `bool`, the signed integers, `f32`/`f64`, [`NullPtr`], a global's
-/// address ([`GlobalId`] of any kind, or the tag-erased [`Global`]), and any
-/// fixed-size array of them (nested arrays included), which is what lets
-/// [`Value::from_const`] be called with a plain literal: `[1i32, 2, 3]` is a
-/// `[3 x i32]`. An array of one kind of global is `[a, c]`; one that mixes kinds uses
+/// address ([`GlobalId`] of any kind, or the tag-erased [`Global`]), and collections
+/// of them — a fixed-size array (nested arrays included), a slice or a `Vec` — which
+/// is what lets [`Value::from_const`] be called with a plain literal: `[1i32, 2, 3]`
+/// is a `[3 x i32]`, and so is `vec![1i32, 2, 3]`. A collection's elements have to be
+/// [`StaticConst`], so an empty one still has an element type. An array of one kind of global is `[a, c]`; one that mixes kinds uses
 /// [`Global`], converted with `From`: `[Global::from(a), f.into()]`.
 pub trait Const: Clone {
-    /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`.
-    fn ty(ctx: &mut Context) -> TyId;
+    /// The LLVM type this literal has by default: `i32` for `i32`, `double` for `f64`,
+    /// `[2 x i32]` for a two-element `Vec<i32>`. Takes the value because a slice's or
+    /// a `Vec`'s length is part of its type.
+    fn ty(&self, ctx: &mut Context) -> TyId;
 
     /// Wraps the literal as a pool value at its default type. Takes the context
     /// because an array has to intern its element type.
@@ -1465,8 +1487,108 @@ pub trait Const: Clone {
     fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue>;
 }
 
+/// A [`Const`] whose LLVM type is fixed by its Rust type alone, not by its value.
+///
+/// What a collection's elements need: the element type of `[T; N]`, `&[T]` or
+/// `Vec<T>` comes from `T::static_ty`, so an empty one still knows it — `[0 x i32]`
+/// has no element to ask. A slice or `Vec` isn't one itself, since its length is a
+/// property of the value; a fixed-size array is, since `N` is part of its type.
+pub trait StaticConst: Const {
+    /// The LLVM type every value of this Rust type has.
+    fn static_ty(ctx: &mut Context) -> TyId;
+}
+
+macro_rules! static_const {
+    ($($t:ty => $ty:ident),* $(,)?) => {$(
+        impl StaticConst for $t {
+            fn static_ty(ctx: &mut Context) -> TyId {
+                ctx.$ty()
+            }
+        }
+    )*};
+}
+
+static_const!(
+    bool => i1_ty,
+    i8 => i8_ty,
+    i16 => i16_ty,
+    i32 => i32_ty,
+    i64 => i64_ty,
+    f32 => f32_ty,
+    f64 => f64_ty,
+    NullPtr => ptr_ty,
+    Global => ptr_ty,
+);
+
+impl<T: GlobalEntity> StaticConst for GlobalId<T> {
+    fn static_ty(ctx: &mut Context) -> TyId {
+        ctx.ptr_ty()
+    }
+}
+
+impl<T: StaticConst, const N: usize> StaticConst for [T; N] {
+    fn static_ty(ctx: &mut Context) -> TyId {
+        array_ty_of::<T>(N, ctx)
+    }
+}
+
+/// `[len x T]`, the type of `len` constants of `T`.
+fn array_ty_of<T: StaticConst>(len: usize, ctx: &mut Context) -> TyId {
+    let element_ty = T::static_ty(ctx);
+
+    ctx.array_ty(element_ty, len as u64)
+        .expect("`Const` is only implemented by a subset of first-class types")
+}
+
+/// An array constant holding `elements`, typed by `T` even when there are none.
+fn array_const_of<T: StaticConst>(
+    elements: impl IntoIterator<Item = T>,
+    ctx: &mut Context,
+) -> ConstValue {
+    let element_ty = T::static_ty(ctx);
+    let array: Box<[ConstValue]> = elements
+        .into_iter()
+        .map(|element| element.into_const(ctx))
+        .collect();
+
+    ConstValue::Array {
+        element_ty,
+        size: array.len() as u64,
+        array,
+    }
+}
+
+/// `elements` folded into `ty`, which has to be an array of the same length, one
+/// element at a time under the scalar rules.
+fn cast_array_of<T: Const>(
+    elements: &[T],
+    ty: TyId,
+    signedness: Signedness,
+    ctx: &mut Context,
+) -> Option<ConstValue> {
+    if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
+        && expected_size == elements.len() as u64
+    {
+        let mut array = vec![];
+
+        for element in elements {
+            let e = element.try_cast(expected_element_ty, signedness, ctx)?;
+
+            array.push(e);
+        }
+
+        return Some(ConstValue::Array {
+            element_ty: expected_element_ty,
+            array: array.into_boxed_slice(),
+            size: elements.len() as u64,
+        });
+    }
+
+    None
+}
+
 impl Const for bool {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.i1_ty()
     }
 
@@ -1484,7 +1606,7 @@ impl Const for bool {
 }
 
 impl Const for i8 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.i8_ty()
     }
 
@@ -1518,7 +1640,7 @@ impl Const for i8 {
 }
 
 impl Const for i16 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.i16_ty()
     }
 
@@ -1566,7 +1688,7 @@ impl Const for i16 {
 }
 
 impl Const for i32 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.i32_ty()
     }
 
@@ -1632,7 +1754,7 @@ impl Const for i32 {
 }
 
 impl Const for i64 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.i64_ty()
     }
 
@@ -1710,7 +1832,7 @@ impl Const for i64 {
 }
 
 impl Const for f32 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.f32_ty()
     }
 
@@ -1732,7 +1854,7 @@ impl Const for f32 {
 }
 
 impl Const for f64 {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.f64_ty()
     }
 
@@ -1777,50 +1899,48 @@ impl Const for f64 {
     }
 }
 
-impl<T: Const, const N: usize> Const for [T; N] {
-    fn ty(ctx: &mut Context) -> TyId {
-        let element_ty = T::ty(ctx);
-
-        ctx.array_ty(element_ty, N as u64)
-            .expect("`Const` is only implemented by a subset of first-class types")
+impl<T: StaticConst, const N: usize> Const for [T; N] {
+    fn ty(&self, ctx: &mut Context) -> TyId {
+        Self::static_ty(ctx)
     }
 
     fn into_const(self, ctx: &mut Context) -> ConstValue {
-        let element_ty = T::ty(ctx);
-        let size = N as u64;
-        let mut array = vec![];
-
-        for element in self {
-            array.push(element.into_const(ctx));
-        }
-
-        ConstValue::Array {
-            element_ty,
-            array: array.into_boxed_slice(),
-            size,
-        }
+        array_const_of(self, ctx)
     }
 
     fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
-        if let Some((expected_element_ty, expected_size)) = ty.try_array(ctx)
-            && expected_size == N as u64
-        {
-            let mut array = vec![];
+        cast_array_of(self, ty, signedness, ctx)
+    }
+}
 
-            for element in self {
-                let e = element.try_cast(expected_element_ty, signedness, ctx)?;
+/// A slice is an array constant of its length: `&[1i32, 2][..]` is a `[2 x i32]`.
+impl<T: StaticConst> Const for &[T] {
+    fn ty(&self, ctx: &mut Context) -> TyId {
+        array_ty_of::<T>(self.len(), ctx)
+    }
 
-                array.push(e);
-            }
+    fn into_const(self, ctx: &mut Context) -> ConstValue {
+        array_const_of(self.iter().cloned(), ctx)
+    }
 
-            return Some(ConstValue::Array {
-                element_ty: expected_element_ty,
-                array: array.into_boxed_slice(),
-                size: N as u64,
-            });
-        }
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        cast_array_of(self, ty, signedness, ctx)
+    }
+}
 
-        None
+/// A `Vec` is an array constant of its length — the form for a table whose size is
+/// only known at run time, such as one entry per function.
+impl<T: StaticConst> Const for Vec<T> {
+    fn ty(&self, ctx: &mut Context) -> TyId {
+        array_ty_of::<T>(self.len(), ctx)
+    }
+
+    fn into_const(self, ctx: &mut Context) -> ConstValue {
+        array_const_of(self, ctx)
+    }
+
+    fn try_cast(&self, ty: TyId, signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
+        cast_array_of(self, ty, signedness, ctx)
     }
 }
 
@@ -1832,7 +1952,7 @@ impl<T: Const, const N: usize> Const for [T; N] {
 pub struct NullPtr;
 
 impl Const for NullPtr {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.ptr_ty()
     }
 
@@ -1841,7 +1961,7 @@ impl Const for NullPtr {
     }
 
     fn try_cast(&self, ty: TyId, _signedness: Signedness, ctx: &mut Context) -> Option<ConstValue> {
-        if NullPtr::ty(ctx) != ty {
+        if self.ty(ctx) != ty {
             return None;
         }
 
@@ -1850,7 +1970,7 @@ impl Const for NullPtr {
 }
 
 impl<T: GlobalEntity> Const for GlobalId<T> {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.ptr_ty()
     }
 
@@ -1868,7 +1988,7 @@ impl<T: GlobalEntity> Const for GlobalId<T> {
 }
 
 impl Const for Global {
-    fn ty(ctx: &mut Context) -> TyId {
+    fn ty(&self, ctx: &mut Context) -> TyId {
         ctx.ptr_ty()
     }
 
@@ -2704,6 +2824,91 @@ mod tests {
                 Err(TypeError::ConstantCastToProvidedTypeFailed(_, _))
             ));
         }
+    }
+
+    /// A `Vec` or a slice is an array constant of its length, the same pool entry as
+    /// the equivalent fixed-size array.
+    #[test]
+    fn a_vec_or_slice_is_an_array_of_its_length() {
+        let mut ctx = crate::test_support::ctx();
+        let id = |value: ValueId, ctx: &Context| match value.kind(ctx) {
+            ValueKind::ConstExpr(ConstExpr::Const(id)) => *id,
+            _ => panic!("a literal is a pooled constant"),
+        };
+
+        let array = Value::from_const([1i32, 2, 3], OperandTy::Inferred, &mut ctx).unwrap();
+        let vec = Value::from_const(vec![1i32, 2, 3], OperandTy::Inferred, &mut ctx).unwrap();
+        let slice = Value::from_const(&[1i32, 2, 3][..], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_eq!(rendered(vec.ty(&ctx), &ctx), "[3 x i32]");
+        assert_eq!(rendered(slice.ty(&ctx), &ctx), "[3 x i32]");
+        assert_eq!(
+            id(vec, &ctx),
+            id(array, &ctx),
+            "one constant, however it was spelled"
+        );
+        assert_eq!(id(slice, &ctx), id(array, &ctx));
+
+        // A `Vec` of fixed-size arrays is fine: its elements' type is static.
+        let rows =
+            Value::from_const(vec![[1i8, 2], [3, 4]], OperandTy::Inferred, &mut ctx).unwrap();
+
+        assert_eq!(rendered(rows.ty(&ctx), &ctx), "[2 x [2 x i8]]");
+    }
+
+    /// An empty collection still has an element type, from `StaticConst` — which is
+    /// what a table with no entries yet, such as a module's function table, needs.
+    #[test]
+    fn an_empty_collection_still_knows_its_element_type() {
+        let mut builder = crate::test_support::fixture();
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let no_funcs: Vec<Global> = vec![];
+        let empty = Value::from_const(no_funcs, OperandTy::Inferred, &mut builder).unwrap();
+
+        assert_eq!(rendered(empty.ty(&builder), &builder), "[0 x ptr]");
+        assert_eq!(
+            pooled(empty, &builder),
+            ConstValue::Array {
+                element_ty: ptr_ty,
+                array: vec![].into(),
+                size: 0,
+            }
+        );
+
+        let a = builder
+            .declare_global_variable("a", Some(i32_ty), None)
+            .unwrap();
+        let table =
+            Value::from_const(vec![Global::from(a)], OperandTy::Inferred, &mut builder).unwrap();
+
+        assert_eq!(rendered(table.ty(&builder), &builder), "[1 x ptr]");
+    }
+
+    /// A `Vec` folds element by element like an array, and its length has to match.
+    #[test]
+    fn a_vec_folds_element_by_element() {
+        let mut ctx = crate::test_support::ctx();
+        let i64_ty = ctx.i64_ty();
+        let wider = ctx.array_ty(i64_ty, 2).unwrap();
+        let longer = ctx.array_ty(i64_ty, 3).unwrap();
+
+        let widened =
+            Value::from_const(vec![1i32, -2], OperandTy::Asserted(wider), &mut ctx).unwrap();
+
+        assert_eq!(
+            pooled(widened, &ctx),
+            ConstValue::Array {
+                element_ty: i64_ty,
+                array: vec![ConstValue::I64(1), ConstValue::I64(-2)].into(),
+                size: 2,
+            }
+        );
+        assert!(matches!(
+            Value::from_const(vec![1i32, 2], OperandTy::Asserted(longer), &mut ctx),
+            Err(TypeError::ConstantCastToProvidedTypeFailed(_, _))
+        ));
     }
 
     /// Equal arrays are one pool entry, and arrays that differ anywhere are not —
