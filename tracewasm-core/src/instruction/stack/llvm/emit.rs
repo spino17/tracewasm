@@ -301,12 +301,16 @@ impl StackInstruction {
                     RegName::Named(format!("table{}_ptr", instr_index)),
                 )?;
 
-                let index_val =
-                    curr_cursor.const_value(table_index.0 as i32, OperandTy::Inferred)?;
                 let i64_ty = curr_cursor.i64_ty();
                 let i32_ty = curr_cursor.i32_ty();
+                let i8_ty = curr_cursor.i8_ty();
+
+                let index_val =
+                    curr_cursor.const_value(table_index.0 as i32, OperandTy::Inferred)?;
                 let table_entry_ty = TableEntry::llvm_ty(&mut curr_cursor);
+
                 let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+                let first_index = curr_cursor.const_value(1i32, OperandTy::Inferred)?;
 
                 let table_entry_ptr_ptr = curr_cursor.build_get_element_ptr(
                     table_ptr,
@@ -329,12 +333,42 @@ impl StackInstruction {
                 let slot = pass_manager.simulated_stack.pop();
                 let optional_u32_ty = OptionalU32::llvm_ty(&mut curr_cursor);
 
-                let func_ref = curr_cursor.build_get_element_ptr(
+                let func_ref_ptr = curr_cursor.build_get_element_ptr(
                     table_entry_ptr,
                     OperandTy::Asserted(optional_u32_ty),
                     &[slot],
                     Some(true),
                     RegName::Named(format!("func_ref{}_ptr", instr_index)),
+                )?;
+
+                let func_ref_val_ptr = curr_cursor.build_get_element_ptr(
+                    func_ref_ptr,
+                    OperandTy::Asserted(optional_u32_ty),
+                    &[zero_index, zero_index],
+                    Some(true),
+                    RegName::Named(format!("func_ref{}_val_ptr", instr_index)),
+                )?;
+
+                let func_ref_val = curr_cursor.build_load(
+                    func_ref_val_ptr,
+                    OperandTy::Asserted(i32_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("func_ref{}_val", instr_index)),
+                )?;
+
+                let func_ref_tag_ptr = curr_cursor.build_get_element_ptr(
+                    func_ref_ptr,
+                    OperandTy::Asserted(optional_u32_ty),
+                    &[zero_index, first_index],
+                    Some(true),
+                    RegName::Named(format!("func_ref{}_tag_ptr", instr_index)),
+                )?;
+
+                let func_ref_tag = curr_cursor.build_load(
+                    func_ref_tag_ptr,
+                    OperandTy::Asserted(i8_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("func_ref{}_tag", instr_index)),
                 )?;
 
                 let func_ty = &module.types[ty_index.0 as usize];
