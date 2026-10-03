@@ -17,29 +17,25 @@ use tracewasm_llvm::{
     },
     value::{FuncSignature, ValueId},
 };
-use wasmparser::ExternalKind::Table;
 
 impl StackInstruction {
-    // A CFG-building pass needs the cursor, the whole instruction stream, the frame
-    // layout, the locals, the runtime pointer and the enclosing function — grouping
-    // them into a context struct would only move the list.
     /// Translates this one instruction into LLVM IR, returning where to carry on.
     ///
     /// The return is `(block, next_index)` rather than nothing, because neither is
     /// implied by the instruction alone: an `if` leaves the cursor in its *then*
     /// block, and a `br` resumes at the enclosing label's `else` or `end` rather than
     /// at the following instruction. The driver in
-    /// [`compile_func`](llvm::WasmInstrLLVMPassManager) does what it is told rather
+    /// [`compile_func`](super::WasmInstrLLVMPassManager) does what it is told rather
     /// than tracking control flow a second time.
     ///
-    /// `instructions` is the whole body, since a control instruction reads the
-    /// operand arity and unwind height off the `end` it names. `locals` is one
-    /// pointer per local, `runtime_ctx_ptr` the instance pointer threaded in as the
-    /// last parameter.
+    /// `runtime_ctx_ptr` is the instance pointer threaded in as every function's last
+    /// parameter. What belongs to the function being lowered — its body, frame layout,
+    /// locals and the module's function table — comes in `func_ctx`; see
+    /// [`FuncContext`].
     ///
-    /// An inherent method rather than part of [`Instruction`]: only the stack
-    /// machine is lowered to LLVM, so the register machine has nothing to implement.
-    #[allow(clippy::too_many_arguments)]
+    /// An inherent method rather than part of
+    /// [`Instruction`](crate::instruction::Instruction): only the stack machine is
+    /// lowered to LLVM, so the register machine has nothing to implement.
     pub fn emit_llvm_ir<'a>(
         &self,
         instr_index: usize,

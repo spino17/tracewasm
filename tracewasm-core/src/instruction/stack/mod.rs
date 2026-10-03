@@ -88,12 +88,10 @@ use crate::{
     instruction::{
         Block, BlockKind, CallerBaseData, FrameLayout, Instruction, UnreachableCheckResult,
         UnreachableTrackingControlStack, check_memory_index, params_and_results_from_blockty,
-        stack::llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager, ctx::RuntimeContext},
     },
     memory::Memory,
     module::{
-        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, Module, TableIndex, TyIndex,
-        ValType,
+        FuncDecl, FuncIndex, FuncType, GlobalIndex, LocalIndex, TableIndex, TyIndex, ValType,
     },
     runtime::{
         I32_TRUNC_HIGH, I32_TRUNC_LOW, I64_TRUNC_HIGH, I64_TRUNC_LOW, Step, U32_TRUNC_HIGH,
@@ -104,21 +102,8 @@ use crate::{
     },
 };
 use rustc_hash::FxHashMap;
-use std::{
-    ops::{BitAnd, BitOr, BitXor, Neg},
-    sync::Arc,
-};
-use tracewasm_llvm::{
-    cfg::{
-        basic_block::BasicBlockId,
-        global::{DefinedFunc, GlobalId, GlobalVar},
-    },
-    instruction::{
-        Access, CastOp, ICond,
-        cursor::{Cursor, OperandTy, RegName},
-    },
-    value::ValueId,
-};
+use std::ops::{BitAnd, BitOr, BitXor, Neg};
+use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId, GlobalVar};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod llvm;
@@ -4210,11 +4195,19 @@ impl Instruction for StackInstruction {
     }
 }
 
+/// What lowering one function to LLVM needs about that function, handed to
+/// [`emit_llvm_ir`](StackInstruction::emit_llvm_ir) for each of its instructions.
 pub struct FuncContext<'a> {
+    /// The function being lowered.
     pub(crate) func: GlobalId<DefinedFunc>,
+    /// Its whole body: a control instruction reads the operand arity and unwind height
+    /// off the `end` it names.
     pub(crate) instructions: &'a [StackInstruction],
+    /// Its frame layout, for the label signatures control instructions need.
     pub(crate) frame_layout: &'a StackFrameLayout,
+    /// One `alloca` pointer per local, parameters first.
     pub(crate) locals: &'a [tracewasm_llvm::value::ValueId],
+    /// `@fn_table`, every function's address by function index, for `call_indirect`.
     pub(crate) func_table: GlobalId<GlobalVar>,
 }
 
