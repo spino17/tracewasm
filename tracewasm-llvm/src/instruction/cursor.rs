@@ -7,28 +7,35 @@ use crate::{
         global::FuncRef,
     },
     error::{
-        AllocaError, CallError, CastError, FBinOpError, FCmpError, GepError, IBinOpError,
-        ICmpError, InstructionError, PhiError, RetError, SelectError, StoreError, SwitchError,
+        AllocaError, CallError, CastError, ExtractInsertValueError, FBinOpError, FCmpError,
+        GepError, IBinOpError, ICmpError, InstructionError, PhiError, RetError, SelectError,
+        StoreError, SwitchError,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands, FBinOp,
-        FBinOpOperands, FCmpOperands, FCond, FNegOperands, GetElementPtrOperands, IBinOp,
-        IBinOpOperands, ICmpOperands, ICond, Instruction, InstructionKind, LoadOperands,
-        PhiInstrHandler, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
-        SwitchOperands, UnconditionalBrOperands,
+        Access, AllocaOperands, CallOperands, CastOp, CastOperands, ConditionalBrOperands,
+        ExtractValueOperands, FBinOp, FBinOpOperands, FCmpOperands, FCond, FNegOperands,
+        GetElementPtrOperands, IBinOp, IBinOpOperands, ICmpOperands, ICond, InsertValueOperands,
+        Instruction, InstructionKind, LoadOperands, PhiInstrHandler, PhiInstruction, RetOperands,
+        SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
     interner::TyId,
-    value::{ConstValue, I1Value, Signedness, Value, ValueKind},
+    value::{ConstValue, I1Value, Signedness, Value, ValueId, ValueKind},
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::ops::{Deref, DerefMut};
 
 /// What to call the register an instruction defines.
 ///
-/// LLVM has two forms and **they draw from the same per-function counter**: a named
-/// local like `%sum`, and an unnamed one like `%3`. That shared counter is why this is
-/// an enum rather than an `Option`: [`Unnamed`](Self::Unnamed) is not the absence of a
-/// name, it is a request for the next number.
+/// LLVM has two forms: a named local like `%sum`, and an unnamed one like `%3`. This
+/// is an enum rather than an `Option` because [`Unnamed`](Self::Unnamed) is not the
+/// absence of a name — it is a request to be numbered, and the two forms are named at
+/// different *times*.
+///
+/// A named register is named here, at construction. An unnamed one is numbered in
+/// [`Builder::build`](crate::cfg::builder::Builder::build), because LLVM numbers by
+/// position in the printed function and a frontend routinely creates a block long
+/// before it fills it — numbering at construction would hand out `%0` to something
+/// printed after `%1`, which `llvm-as` refuses.
 ///
 /// [`From`] is implemented for the string types, so a call site can write
 /// `"sum".into()` rather than naming the variant.
@@ -43,12 +50,17 @@ pub enum RegName {
     /// *unnamed* form, so a numeric name would collide with the numbering rather than
     /// merely need quoting.
     Named(String),
-    /// Take the next unnamed index, which is how LLVM's `%0`, `%1`, … numbering is
-    /// produced.
+    /// Be numbered `%0`, `%1`, … when the graph is built.
     ///
-    /// The counter is per function, and **parameters draw from it first** — so a
-    /// body's first unnamed temporary continues where the parameter list stopped. A
-    /// *named* parameter consumes nothing.
+    /// The number is **not** assigned here. Until
+    /// [`Builder::build`](crate::cfg::builder::Builder::build) runs, the register
+    /// carries a placeholder; `build` then walks every definition in printed order —
+    /// parameters, then each block's phis and instructions — and numbers the unnamed
+    /// ones as it goes.
+    ///
+    /// The counter is per function, and **parameters come first**, so a body's first
+    /// unnamed temporary continues where the parameter list stopped. A *named*
+    /// parameter consumes nothing.
     Unnamed,
 }
 
@@ -122,17 +134,15 @@ impl From<TyId> for OperandTy {
 ///
 /// # Ending a block
 ///
-/// The three terminator builders — [`build_unconditional_br`](Self::build_unconditional_br),
-/// [`build_conditional_br`](Self::build_conditional_br) and [`build_ret`](Self::build_ret) —
+/// The terminator builders — [`build_unconditional_br`](Self::build_unconditional_br),
+/// [`build_conditional_br`](Self::build_conditional_br), [`build_ret`](Self::build_ret),
+/// [`build_switch`](Self::build_switch) and [`build_unreachable`](Self::build_unreachable) —
 /// take `self` **by value**. Once a block is ended, that cursor is gone, and the
 /// compiler enforces it:
 ///
 /// ```compile_fail
-/// # use tracewasm_llvm::cfg::{context::Context, module::{DataLayout, Triple}};
-/// # let ctx = Context::new(
-/// #     Triple::new("arm64".to_string(), "apple".to_string(), "macosx".to_string(), None),
-/// #     DataLayout::default(),
-/// # );
+/// # use tracewasm_llvm::cfg::{context::Context, module::Target};
+/// # let ctx = Context::new(Target::Unspecified);
 /// # let mut builder = ctx.builder();
 /// # let void_ty = builder.void_ty();
 /// # let f = builder.define_function("f".to_string(), &[], void_ty).unwrap();
@@ -148,9 +158,10 @@ impl From<TyId> for OperandTy {
 ///
 /// # Naming
 ///
-/// Builders that define a register take a [`RegName`]. [`RegName::Unnamed`] takes
-/// LLVM's next unnamed number; a [`Named`](RegName::Named) one is used as given,
-/// suffixed if it is already taken. `"x".into()` is the short way to write one.
+/// Builders that define a register take a [`RegName`]. A [`Named`](RegName::Named)
+/// one is used as given, suffixed if it is already taken;
+/// [`Unnamed`](RegName::Unnamed) is numbered later, when the graph is built — see
+/// [`RegName`]. `"x".into()` is the short way to write one.
 ///
 /// # Reaching the context
 ///
@@ -188,48 +199,87 @@ impl<'a> Cursor<'a> {
         self.ctx
     }
 
+    /// Which block this cursor is writing into.
+    ///
+    /// What a phi needs in order to name the predecessor a value arrives from: the
+    /// block a branch leaves is the block the cursor is in when it is emitted.
+    pub fn basic_block(&self) -> BasicBlockId {
+        self.block
+    }
+
     /// Builds a phi node, returning a handle for adding later branches and the register
     /// it defines.
     ///
-    /// The phi's type comes from the **first** branch; every branch given here, and
-    /// every one added later through the handle, is checked against it.
+    /// The phi's type is `ty` when asserted, and otherwise comes from the **first**
+    /// branch; every branch given here, and every one added later through the
+    /// handle, is checked against it.
     ///
     /// # Errors
     ///
-    /// - [`PhiError::PhiInstructionWithNoBranches`] — a phi with no incoming values
-    ///   selects nothing, and there would be no type to give it.
+    /// - [`PhiError::PhiInstructionWithNoBranches`] — no branches and `ty` is
+    ///   [`OperandTy::Inferred`], so there is no type to give the phi. With an
+    ///   asserted `ty`, a phi can start with no branches and get them through the
+    ///   handle.
     /// - [`PhiError::PhiInstructionCannotBeAddedToEntryBasicBlock`] — the entry block
     ///   has no predecessors.
     /// - [`PhiError::PhiInstructionAddError`] — phis come first in a block.
     /// - [`PhiError::BasicBlockAlreadyTerminated`] — the block already ended.
     /// - [`PhiError::PhiInstructionBranchTypeMismatch`] — a branch disagrees with the
-    ///   phi's type.
+    ///   phi's type, including an asserted `ty` that the first branch doesn't have.
+    /// - [`PhiError::PhiBranchValueConflict`] — two branches name the same
+    ///   predecessor with different values.
+    ///
+    /// Every branch is checked before the phi is created, so on a branch error the
+    /// block is left exactly as it was.
     pub fn build_phi(
         &mut self,
-        branches: &[(BasicBlockId, Value)],
+        branches: &[(BasicBlockId, ValueId)],
+        ty: OperandTy,
         reg: RegName,
-    ) -> Result<(PhiInstrHandler, Value), PhiError> {
-        if branches.is_empty() {
-            return Err(PhiError::PhiInstructionWithNoBranches);
+    ) -> Result<(PhiInstrHandler, ValueId), PhiError> {
+        let ref_ty = match ty {
+            OperandTy::Asserted(ty) => ty,
+            OperandTy::Inferred => match branches.first() {
+                Some((_, first)) => first.ty(self.ctx),
+                None => return Err(PhiError::PhiInstructionWithNoBranches),
+            },
+        };
+
+        // Every branch is checked before anything is created, so a refused phi leaves
+        // the block, and the register names, as they were. `add_branch` below makes
+        // the same two checks one branch at a time, too late to undo the phi.
+        let mut seen: FxHashMap<BasicBlockId, ValueId> = FxHashMap::default();
+
+        for &(block, value) in branches {
+            let value_ty = value.ty(self.ctx);
+
+            if value_ty != ref_ty {
+                return Err(PhiError::PhiInstructionBranchTypeMismatch(
+                    self.ctx.display(ref_ty).to_string(),
+                    self.ctx.display(value_ty).to_string(),
+                ));
+            }
+
+            if *seen.entry(block).or_insert(value) != value {
+                return Err(PhiError::PhiBranchValueConflict);
+            }
         }
 
-        let ref_ty = branches[0].1.ty();
         let func_id = self.ctx.get_block(self.block).func_id;
-        let reg_name = self.ctx.name_for_reg(&reg, func_id)?;
-        let val = Value::from_register(reg_name, ref_ty, self.ctx);
+        let val = Value::from_register(&reg, ref_ty, func_id, self.ctx)?;
 
         let phi_id = self.block.add_phi(
             PhiInstruction {
                 branches: vec![],
-                blocks: FxHashSet::default(),
+                blocks: FxHashMap::default(),
                 ref_ty,
-                value: val.clone(),
+                value: val,
             },
             self.ctx,
         )?;
 
         for (branch, val) in branches {
-            phi_id.add_branch((*branch, val.clone()), self.ctx)?;
+            phi_id.add_branch((*branch, *val), self.ctx)?;
         }
 
         Ok((phi_id, val))
@@ -260,7 +310,7 @@ impl<'a> Cursor<'a> {
     /// Builds `br i1 %c, label %t, label %f`, ending the block.
     ///
     /// Consumes the cursor. The condition is an [`I1Value`], so the `i1` requirement
-    /// was already checked by [`Value::into_i1`](crate::value::Value::into_i1).
+    /// was already checked by [`ValueId::try_i1`](crate::value::ValueId::try_i1).
     ///
     /// # Errors
     ///
@@ -295,9 +345,9 @@ impl<'a> Cursor<'a> {
     ///
     /// | `val` | `ty` | result |
     /// |---|---|---|
-    /// | `Some(v)` | `Some(t)` | `v` folded into `t` |
-    /// | `Some(v)` | `None` | type taken from `v` |
-    /// | `None` | `Some(void)` | `ret void` |
+    /// | `Some(v)` | `Asserted(t)` | `v` folded into `t` |
+    /// | `Some(v)` | `Inferred` | type taken from `v` |
+    /// | `None` | `Asserted(void)` | `ret void` |
     ///
     /// # Errors
     ///
@@ -311,17 +361,17 @@ impl<'a> Cursor<'a> {
     ///   a type from.
     /// - [`RetError::ReturnedValueTypeMismatch`] — the value does not fold into `ty`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
-    pub fn build_ret(self, val: Option<&Value>, ty: OperandTy) -> Result<(), InstructionError> {
+    pub fn build_ret(self, val: Option<ValueId>, ty: OperandTy) -> Result<(), InstructionError> {
         let (val, ty) = match (val, ty) {
             (Some(val), OperandTy::Asserted(ty)) => {
                 if ty.is_void(self.ctx) {
                     return Err(RetError::ValueGivenForVoid(
-                        self.ctx.display(val.ty()).to_string(),
+                        self.ctx.display(val.ty(self.ctx)).to_string(),
                     )
                     .into());
                 }
 
-                let val_ty = self.ctx.display(val.ty()).to_string();
+                let val_ty = self.ctx.display(val.ty(self.ctx)).to_string();
 
                 let Some(casted_val) = val.try_cast(ty, Signedness::Signed, self.ctx) else {
                     return Err(RetError::ReturnedValueTypeMismatch(
@@ -334,9 +384,9 @@ impl<'a> Cursor<'a> {
                 (Some(casted_val), ty)
             }
             (Some(val), OperandTy::Inferred) => {
-                let ty = val.ty();
+                let ty = val.ty(self.ctx);
 
-                (Some(val.clone()), ty)
+                (Some(val), ty)
             }
             (None, OperandTy::Asserted(ty)) => {
                 if !ty.is_void(self.ctx) {
@@ -392,7 +442,7 @@ impl<'a> Cursor<'a> {
     /// rather than restated.
     ///
     /// `count` allocates room for several elements: the value, and optionally a type
-    /// to give it. `align` must be a power of two; `None` means the ABI default.
+    /// to give it. The slot gets the type's ABI alignment, from the data layout.
     ///
     /// # Errors
     ///
@@ -401,32 +451,23 @@ impl<'a> Cursor<'a> {
     ///   it, is not an integer.
     /// - [`AllocaError::AllocaCountTypeMismatch`] — the count does not fold into the
     ///   type given for it.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`; leaving
-    ///   `align` off is how the default is asked for.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_alloca(
         &mut self,
         ty: TyId,
-        count: Option<(&Value, OperandTy)>,
-        align: Option<u32>,
+        count: Option<(ValueId, OperandTy)>,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         if !ty.is_first_class(self.ctx) {
             return Err(AllocaError::TypeNotAllocatable(ty.display(self.ctx).to_string()).into());
         }
 
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
-        }
-
-        let mut final_count: Option<Value> = None;
+        let mut final_count: Option<ValueId> = None;
 
         if let Some((count_val, count_expected_ty)) = count {
             if !count_val.is_integer(self.ctx) {
                 return Err(AllocaError::AllocaCountNotAnInteger(
-                    self.ctx.display(count_val.ty()).to_string(),
+                    self.ctx.display(count_val.ty(self.ctx)).to_string(),
                 )
                 .into());
             }
@@ -440,7 +481,7 @@ impl<'a> Cursor<'a> {
                     .into());
                 }
 
-                let count_ty = self.ctx.display(count_val.ty()).to_string();
+                let count_ty = self.ctx.display(count_val.ty(self.ctx)).to_string();
 
                 let Some(casted_val) =
                     count_val.try_cast(count_expected_ty, Signedness::Signed, self.ctx)
@@ -454,7 +495,7 @@ impl<'a> Cursor<'a> {
 
                 casted_val
             } else {
-                count_val.clone()
+                count_val
             };
 
             final_count = Some(final_count_val);
@@ -466,7 +507,6 @@ impl<'a> Cursor<'a> {
             InstructionKind::Alloca(AllocaOperands {
                 ty,
                 count: final_count,
-                align,
             }),
             result_ty,
             self.block,
@@ -478,8 +518,11 @@ impl<'a> Cursor<'a> {
     /// Builds `%x = load <ty>, ptr %p`, returning the loaded value.
     ///
     /// `ty` may be omitted when the pointer can be traced back to what it points at —
-    /// an `alloca` or a `getelementptr`. A pointer that arrived as a function
+    /// an `alloca`, a `getelementptr` (instruction or constant expression), or a global. A pointer that arrived as a function
     /// parameter cannot be, so there the type is required.
+    ///
+    /// `access` says whether `ptr` may be assumed to have the type's ABI alignment;
+    /// see [`Access`].
     ///
     /// # Errors
     ///
@@ -490,25 +533,18 @@ impl<'a> Cursor<'a> {
     ///   disagrees with what the pointer was traced to. Stricter than LLVM, which
     ///   allows a load to reinterpret.
     /// - [`InstructionError::LoadedTypeUnknown`] — no type given and none inferable.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_load(
         &mut self,
-        ptr: &Value,
+        ptr: ValueId,
         ty: OperandTy,
-        align: Option<u32>,
+        access: Access,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(self.ctx).to_string(),
+                ptr.ty(self.ctx).display(self.ctx).to_string(),
             ));
-        }
-
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
         }
 
         let pointee_ty = ptr.try_inferring_pointee_ty(self.block, self.ctx);
@@ -539,8 +575,8 @@ impl<'a> Cursor<'a> {
         add_instruction_to_block_and_get_value(
             InstructionKind::Load(LoadOperands {
                 ty: final_ty,
-                ptr: ptr.clone(),
-                align,
+                ptr,
+                access,
             }),
             final_ty,
             self.block,
@@ -553,7 +589,7 @@ impl<'a> Cursor<'a> {
     ///
     /// Produces no value, so it defines no register. With `ty` given, the value is
     /// folded into it — a constant widens, a register must already match. Without,
-    /// the value keeps its own type.
+    /// the value keeps its own type. `access` is as for [`build_load`](Self::build_load).
     ///
     /// # Errors
     ///
@@ -562,29 +598,22 @@ impl<'a> Cursor<'a> {
     /// - [`StoreError::StoredValueTypeMismatch`] — the value does not fold into `ty`.
     /// - [`StoreError::StoredValueDoesNotMatchPointee`] — the value disagrees with
     ///   what the pointer was traced to. Stricter than LLVM.
-    /// - [`InstructionError::AlignmentNotPowerOfTwo`] — including `0`.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_store(
         &mut self,
-        ptr: &Value,
-        value: &Value,
+        ptr: ValueId,
+        value: ValueId,
         ty: OperandTy,
-        align: Option<u32>,
+        access: Access,
     ) -> Result<(), InstructionError> {
         if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(self.ctx).to_string(),
+                ptr.ty(self.ctx).display(self.ctx).to_string(),
             ));
         }
 
-        if let Some(align) = align
-            && !align.is_power_of_two()
-        {
-            return Err(InstructionError::AlignmentNotPowerOfTwo(align));
-        }
-
         let final_val = if let OperandTy::Asserted(ty) = ty {
-            let value_ty = self.ctx.display(value.ty()).to_string();
+            let value_ty = self.ctx.display(value.ty(self.ctx)).to_string();
 
             let Some(casted_value) = value.try_cast(ty, Signedness::Signed, self.ctx) else {
                 return Err(StoreError::StoredValueTypeMismatch(
@@ -596,14 +625,14 @@ impl<'a> Cursor<'a> {
 
             casted_value
         } else {
-            value.clone()
+            value
         };
 
         if let Some(pointee_ty) = ptr.try_inferring_pointee_ty(self.block, self.ctx)
-            && pointee_ty.ty != final_val.ty()
+            && pointee_ty.ty != final_val.ty(self.ctx)
         {
             return Err(StoreError::StoredValueDoesNotMatchPointee(
-                self.ctx.display(final_val.ty()).to_string(),
+                self.ctx.display(final_val.ty(self.ctx)).to_string(),
                 self.ctx.display(pointee_ty.ty).to_string(),
             )
             .into());
@@ -613,8 +642,8 @@ impl<'a> Cursor<'a> {
             Instruction {
                 kind: InstructionKind::Store(StoreOperands {
                     value: final_val,
-                    ptr: ptr.clone(),
-                    align,
+                    ptr,
+                    access,
                 }),
                 value: None,
             },
@@ -655,25 +684,26 @@ impl<'a> Cursor<'a> {
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
     pub fn build_get_element_ptr(
         &mut self,
-        ptr: &Value,
+        ptr: ValueId,
         source_ty: OperandTy,
-        indices: &[Value],
+        indices: &[ValueId],
         inbounds: Option<bool>,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         let inbounds = inbounds.unwrap_or(false);
 
         if !ptr.is_ptr(self.ctx) {
             return Err(InstructionError::PointerOperandExpected(
-                ptr.ty().display(self.ctx).to_string(),
+                ptr.ty(self.ctx).display(self.ctx).to_string(),
             ));
         }
 
         for index in indices {
             if !index.is_integer(self.ctx) {
-                return Err(
-                    GepError::IndexNotAnInteger(self.ctx.display(index.ty()).to_string()).into(),
-                );
+                return Err(GepError::IndexNotAnInteger(
+                    self.ctx.display(index.ty(self.ctx)).to_string(),
+                )
+                .into());
             }
         }
 
@@ -713,11 +743,11 @@ impl<'a> Cursor<'a> {
 
         add_instruction_to_block_and_get_value(
             InstructionKind::GetElementPtr(GetElementPtrOperands {
-                // The resolved type, not the caller's `Option`: when it was inferred
+                // The resolved type, not the caller's `OperandTy`: when it was inferred
                 // from the pointer, that is the type the instruction has to be emitted
                 // with, and it is the one the walk above validated.
                 source_ty: final_source_ty,
-                ptr: ptr.clone(),
+                ptr,
                 indices: indices.to_vec().into_boxed_slice(),
                 inbounds,
             }),
@@ -742,11 +772,13 @@ impl<'a> Cursor<'a> {
     ///
     /// # Naming the callee
     ///
-    /// The callee is a [`FuncRef`], and the only sources of one are
+    /// The callee is a [`FuncRef`]. For a direct call the only sources of one are
     /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-    /// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call
+    /// [`declare_function`](crate::cfg::builder::Builder::declare_function), so a call
     /// to a function that is not in the module cannot be written: there is no handle
-    /// to pass. A host import is reachable through the second of those, and is checked
+    /// to pass. An indirect call through a pointer
+    /// ([`FuncRef::Pointer`]) carries its own
+    /// signature. A host import is reachable through the second of those, and is checked
     /// exactly as a definition would be.
     ///
     /// A function's own handle exists from the moment it is defined, before any of its
@@ -774,15 +806,11 @@ impl<'a> Cursor<'a> {
     pub fn build_call(
         &mut self,
         func: FuncRef,
-        params: &[(&Value, OperandTy)],
+        params: &[(ValueId, OperandTy)],
         return_ty: OperandTy,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
-        let params: Vec<(Value, OperandTy)> = params
-            .iter()
-            .copied()
-            .map(|(x, y)| (x.clone(), y))
-            .collect();
+    ) -> Result<ValueId, InstructionError> {
+        let params: Vec<(ValueId, OperandTy)> = params.to_vec();
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
@@ -862,13 +890,9 @@ impl<'a> Cursor<'a> {
     pub fn build_void_call(
         &mut self,
         func: FuncRef,
-        params: &[(&Value, OperandTy)],
+        params: &[(ValueId, OperandTy)],
     ) -> Result<(), InstructionError> {
-        let params: Vec<(Value, OperandTy)> = params
-            .iter()
-            .copied()
-            .map(|(x, y)| (x.clone(), y))
-            .collect();
+        let params: Vec<(ValueId, OperandTy)> = params.to_vec();
 
         let (func_name_id, func_sig) = func.name_and_sig(self.ctx)?;
 
@@ -953,16 +977,16 @@ impl<'a> Cursor<'a> {
         &mut self,
         cond: ICond,
         ty: OperandTy,
-        a: &Value,
-        b: &Value,
+        a: ValueId,
+        b: ValueId,
         reg: RegName,
     ) -> Result<I1Value, InstructionError> {
         let (a, b) = if let Some(signedness) = cond.signedness() {
             // Ids are `Copy`, so the operand types survive the move into the cast and
             // are rendered only on the failing path.
-            let (given_a, given_b) = (a.ty(), b.ty());
+            let (given_a, given_b) = (a.ty(self.ctx), b.ty(self.ctx));
 
-            let Some((a, b)) = Value::try_cast_two(a, b, ty, signedness, self.ctx) else {
+            let Some((a, b)) = ValueId::try_cast_two(a, b, ty, signedness, self.ctx) else {
                 return Err(ICmpError::OperandsNotCastable(
                     cond.to_string(),
                     self.ctx.display(given_a).to_string(),
@@ -973,32 +997,32 @@ impl<'a> Cursor<'a> {
 
             (a, b)
         } else {
-            if a.ty() != b.ty() {
+            if a.ty(self.ctx) != b.ty(self.ctx) {
                 return Err(ICmpError::OperandTypesDiffer(
                     cond.to_string(),
-                    self.ctx.display(a.ty()).to_string(),
-                    self.ctx.display(b.ty()).to_string(),
+                    self.ctx.display(a.ty(self.ctx)).to_string(),
+                    self.ctx.display(b.ty(self.ctx)).to_string(),
                 )
                 .into());
             }
 
             if let OperandTy::Asserted(ty) = ty
-                && ty != a.ty()
+                && ty != a.ty(self.ctx)
             {
                 return Err(ICmpError::ProvidedTypeDoesNotMatchOperands(
                     cond.to_string(),
                     self.ctx.display(ty).to_string(),
-                    self.ctx.display(a.ty()).to_string(),
+                    self.ctx.display(a.ty(self.ctx)).to_string(),
                 )
                 .into());
             }
 
-            (a.clone(), b.clone())
+            (a, b)
         };
 
         // Both operands share a type by here: the strict arm asserted it, and the cast
         // returns a pair that agrees. So checking one covers both.
-        let ty = a.ty();
+        let ty = a.ty(self.ctx);
 
         if !ty.is_integer(self.ctx) && !ty.is_ptr(self.ctx) {
             return Err(
@@ -1015,7 +1039,7 @@ impl<'a> Cursor<'a> {
         )?;
 
         let i1val = val
-            .into_i1(self.ctx)
+            .try_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1033,19 +1057,18 @@ impl<'a> Cursor<'a> {
     /// and `ashr`/`lshr` — widen a narrower **constant** to match, zero- or
     /// sign-extending as that operation says.
     ///
-    /// The other seven refuse to widen at all. `add`, `sub`, `mul`, `shl`, `and`, `or`
-    /// and `xor` have a single opcode each because the result bits are the same under
-    /// either reading — which means nothing says how to *widen* an operand, and the
-    /// two choices give different answers. So they require operands that already share
-    /// a type, exactly as `icmp eq` does.
+    /// The other seven — `add`, `sub`, `mul`, `shl`, `and`, `or` and `xor` — have a
+    /// single opcode each because the result bits are the same under either reading.
+    /// They never read their operands as signed or unsigned, so a narrower constant
+    /// widens by keeping the value it was written as: `-1i32` becomes `i64 -1`.
     ///
     /// A differing-width *register* is always refused: widening one needs an
     /// instruction this builder will not insert on the caller's behalf.
     ///
     /// # Errors
     ///
-    /// - [`IBinOpError::OperandsNotCastable`] — a signed operation whose operands
-    ///   have no common type.
+    /// - [`IBinOpError::OperandsNotCastable`] — the operands have no common type: a
+    ///   register of a different width, or a constant that doesn't fit.
     /// - [`IBinOpError::OperandTypeNotInteger`] — floats need the `f`-prefixed
     ///   instructions.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
@@ -1053,15 +1076,15 @@ impl<'a> Cursor<'a> {
         &mut self,
         op: IBinOp,
         ty: OperandTy,
-        a: &Value,
-        b: &Value,
+        a: ValueId,
+        b: ValueId,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         // Ids are `Copy`, so the operand types survive the move into the cast and
         // are rendered only on the failing path.
-        let (given_a, given_b) = (a.ty(), b.ty());
+        let (given_a, given_b) = (a.ty(self.ctx), b.ty(self.ctx));
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, op.signedness(), self.ctx) else {
+        let Some((a, b)) = ValueId::try_cast_two(a, b, ty, op.signedness(), self.ctx) else {
             return Err(IBinOpError::OperandsNotCastable(
                 op.to_string(),
                 self.ctx.display(given_a).to_string(),
@@ -1071,7 +1094,7 @@ impl<'a> Cursor<'a> {
         };
 
         // Both operands share a type by here, so checking one covers both.
-        let ty = a.ty();
+        let ty = a.ty(self.ctx);
 
         if !ty.is_integer(self.ctx) {
             return Err(IBinOpError::OperandTypeNotInteger(
@@ -1117,15 +1140,15 @@ impl<'a> Cursor<'a> {
         &mut self,
         cond: FCond,
         ty: OperandTy,
-        a: &Value,
-        b: &Value,
+        a: ValueId,
+        b: ValueId,
         reg: RegName,
     ) -> Result<I1Value, InstructionError> {
         // Ids are `Copy`, so the operand types survive the move into the cast and are
         // rendered only on the failing path.
-        let (given_a, given_b) = (a.ty(), b.ty());
+        let (given_a, given_b) = (a.ty(self.ctx), b.ty(self.ctx));
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
+        let Some((a, b)) = ValueId::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
         else {
             return Err(FCmpError::OperandsNotCastable(
                 cond.to_string(),
@@ -1136,7 +1159,7 @@ impl<'a> Cursor<'a> {
         };
 
         // Both operands share a type by here, so checking one covers both.
-        let ty = a.ty();
+        let ty = a.ty(self.ctx);
 
         if !ty.is_float(self.ctx) {
             return Err(FCmpError::OperandTypeNotFloat(self.ctx.display(ty).to_string()).into());
@@ -1151,7 +1174,7 @@ impl<'a> Cursor<'a> {
         )?;
 
         let i1val = val
-            .into_i1(self.ctx)
+            .try_i1(self.ctx)
             .expect("the result type passed just above is i1");
 
         Ok(i1val)
@@ -1178,13 +1201,13 @@ impl<'a> Cursor<'a> {
         &mut self,
         op: FBinOp,
         ty: OperandTy,
-        a: &Value,
-        b: &Value,
+        a: ValueId,
+        b: ValueId,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
-        let (given_a, given_b) = (a.ty(), b.ty());
+    ) -> Result<ValueId, InstructionError> {
+        let (given_a, given_b) = (a.ty(self.ctx), b.ty(self.ctx));
 
-        let Some((a, b)) = Value::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
+        let Some((a, b)) = ValueId::try_cast_two(a, b, ty, Signedness::NotApplicable, self.ctx)
         else {
             return Err(FBinOpError::OperandsNotCastable(
                 op.to_string(),
@@ -1194,7 +1217,7 @@ impl<'a> Cursor<'a> {
             .into());
         };
 
-        let ty = a.ty();
+        let ty = a.ty(self.ctx);
 
         if !ty.is_float(self.ctx) {
             return Err(FBinOpError::OperandTypeNotFloat(
@@ -1224,8 +1247,12 @@ impl<'a> Cursor<'a> {
     ///
     /// - [`FBinOpError::OperandTypeNotFloat`] if the operand is not a float.
     /// - [`InstructionError::BasicBlockAlreadyTerminated`] if the block is closed.
-    pub fn build_fneg(&mut self, value: Value, reg: RegName) -> Result<Value, InstructionError> {
-        let ty = value.ty();
+    pub fn build_fneg(
+        &mut self,
+        value: ValueId,
+        reg: RegName,
+    ) -> Result<ValueId, InstructionError> {
+        let ty = value.ty(self.ctx);
 
         if !ty.is_float(self.ctx) {
             return Err(FBinOpError::OperandTypeNotFloat(
@@ -1278,13 +1305,13 @@ impl<'a> Cursor<'a> {
     pub fn build_cast(
         &mut self,
         op: CastOp,
-        value: &Value,
+        value: ValueId,
         src: OperandTy,
         dest: TyId,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         let value = if let OperandTy::Asserted(ty) = src {
-            let given = self.ctx.display(value.ty()).to_string();
+            let given = self.ctx.display(value.ty(self.ctx)).to_string();
 
             let Some(casted_val) = value.try_cast(ty, Signedness::Signed, self.ctx) else {
                 return Err(CastError::OperandNotOfSourceType(
@@ -1297,12 +1324,12 @@ impl<'a> Cursor<'a> {
 
             casted_val
         } else {
-            value.clone()
+            value
         };
 
         // Read off the operand rather than trusting `src`, so the type recorded on the
         // instruction is the one the operand actually has.
-        let src = value.ty();
+        let src = value.ty(self.ctx);
 
         if !op.is_cast_allowed(src, dest, self.ctx) {
             return Err(CastError::ConversionNotAllowed(
@@ -1356,13 +1383,13 @@ impl<'a> Cursor<'a> {
     ///   already ended this block.
     pub fn build_switch(
         self,
-        cond_val: &Value,
+        cond_val: ValueId,
         cond_ty: OperandTy,
         default_label: BasicBlockId,
         cases: &[(ConstValue, BasicBlockId)],
     ) -> Result<(), InstructionError> {
         let cond_val = if let OperandTy::Asserted(ty) = cond_ty {
-            let given = self.ctx.display(cond_val.ty()).to_string();
+            let given = self.ctx.display(cond_val.ty(self.ctx)).to_string();
 
             let Some(casted_val) = cond_val.try_cast(ty, Signedness::Signed, self.ctx) else {
                 return Err(SwitchError::ConditionNotOfAssertedType(
@@ -1374,12 +1401,12 @@ impl<'a> Cursor<'a> {
 
             casted_val
         } else {
-            cond_val.clone()
+            cond_val
         };
 
         // Read off the operand rather than trusting the argument, so the type recorded
         // on the instruction is the one the condition actually has.
-        let cond_ty = cond_val.ty();
+        let cond_ty = cond_val.ty(self.ctx);
 
         if !cond_ty.is_integer(self.ctx) {
             return Err(
@@ -1407,7 +1434,7 @@ impl<'a> Cursor<'a> {
                 );
             }
 
-            case_vals.insert(casted_val);
+            case_vals.insert(casted_val.clone());
             final_cases.push((casted_val, *bb));
         }
 
@@ -1460,15 +1487,15 @@ impl<'a> Cursor<'a> {
         &mut self,
         cond: I1Value,
         arms_ty: OperandTy,
-        true_arm: &Value,
-        false_arm: &Value,
+        true_arm: ValueId,
+        false_arm: ValueId,
         reg: RegName,
-    ) -> Result<Value, InstructionError> {
+    ) -> Result<ValueId, InstructionError> {
         // Ids are `Copy`, so the arm types survive into the failing path.
-        let (given_true, given_false) = (true_arm.ty(), false_arm.ty());
+        let (given_true, given_false) = (true_arm.ty(self.ctx), false_arm.ty(self.ctx));
 
         let Some((true_arm, false_arm)) =
-            Value::try_cast_two(true_arm, false_arm, arms_ty, Signedness::Signed, self.ctx)
+            ValueId::try_cast_two(true_arm, false_arm, arms_ty, Signedness::Signed, self.ctx)
         else {
             return Err(SelectError::ArmsHaveNoCommonType(
                 self.ctx.display(given_true).to_string(),
@@ -1478,7 +1505,7 @@ impl<'a> Cursor<'a> {
         };
 
         // Both arms share a type by here, so reading one covers both.
-        let arms_ty = true_arm.ty();
+        let arms_ty = true_arm.ty(self.ctx);
 
         if !arms_ty.is_first_class(self.ctx) {
             return Err(SelectError::ArmTypeNotSized(self.ctx.display(arms_ty).to_string()).into());
@@ -1529,6 +1556,124 @@ impl<'a> Cursor<'a> {
 
         Ok(())
     }
+
+    /// Builds `%x = extractvalue <agg> %v, <i>, …`, returning the field or element the
+    /// indices lead to.
+    ///
+    /// Each index picks a struct field or an array element, one level down, and the
+    /// result has the type of whatever the last one lands on: for `{ i32, [2 x i64] }`,
+    /// `&[1, 0]` is an `i64`. Indices are plain numbers, as in LLVM, where they are
+    /// literals rather than values.
+    ///
+    /// This is how a multi-value call result is unpacked without going through
+    /// memory.
+    ///
+    /// # Errors
+    ///
+    /// - [`ExtractInsertValueError::NoIndices`] — LLVM requires at least one.
+    /// - [`ExtractInsertValueError::NotAggregate`] — `val`, or a field an earlier
+    ///   index reached, isn't a struct or an array.
+    /// - [`ExtractInsertValueError::IndexOutOfBounds`] — past a struct's last field
+    ///   or an array's last element.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
+    pub fn build_extract_value(
+        &mut self,
+        val: ValueId,
+        indices: &[u32],
+        reg: RegName,
+    ) -> Result<ValueId, InstructionError> {
+        if indices.is_empty() {
+            return Err(ExtractInsertValueError::NoIndices.into());
+        }
+
+        let agg_ty = val.ty(self.ctx);
+        let result_ty = agg_ty.walk_ty_for_extract_or_insert_value(indices, self.ctx)?;
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::ExtractValue(ExtractValueOperands {
+                agg_ty,
+                val,
+                indices: indices.to_vec(),
+            }),
+            result_ty,
+            self.block,
+            reg,
+            self.ctx,
+        )
+    }
+
+    /// Builds `%x = insertvalue <agg> %a, <ty> %v, <i>, …`, returning a copy of the
+    /// aggregate with the field or element the indices lead to replaced by `val`.
+    ///
+    /// The indices are walked as for [`build_extract_value`](Self::build_extract_value),
+    /// and `val` has to have the type of what they lead to. With `ty` asserted, `val`
+    /// is folded into it first — a constant widens, a register must already match.
+    /// The result has the aggregate's type.
+    ///
+    /// # Errors
+    ///
+    /// - [`ExtractInsertValueError::NoIndices`] — LLVM requires at least one.
+    /// - [`ExtractInsertValueError::InsertedValueTypeMismatch`] — `val` doesn't fold
+    ///   into the asserted `ty`.
+    /// - [`ExtractInsertValueError::NotAggregate`] and
+    ///   [`ExtractInsertValueError::IndexOutOfBounds`] — as for `build_extract_value`.
+    /// - [`ExtractInsertValueError::InsertedValueDoesNotMatchField`] — `val`'s type
+    ///   isn't the field's.
+    /// - [`InstructionError::BasicBlockAlreadyTerminated`] — the block already ended.
+    pub fn build_insert_value(
+        &mut self,
+        agg_val: ValueId,
+        val: ValueId,
+        ty: OperandTy,
+        indices: &[u32],
+        reg: RegName,
+    ) -> Result<ValueId, InstructionError> {
+        if indices.is_empty() {
+            return Err(ExtractInsertValueError::NoIndices.into());
+        }
+
+        let final_val = if let OperandTy::Asserted(ty) = ty {
+            let value_ty = self.ctx.display(val.ty(self.ctx)).to_string();
+
+            let Some(casted_val) = val.try_cast(ty, Signedness::Signed, self.ctx) else {
+                return Err(ExtractInsertValueError::InsertedValueTypeMismatch(
+                    value_ty,
+                    ty.display(self.ctx).to_string(),
+                )
+                .into());
+            };
+
+            casted_val
+        } else {
+            val
+        };
+
+        let ty = final_val.ty(self.ctx);
+        let agg_ty = agg_val.ty(self.ctx);
+        let expected_ty = agg_ty.walk_ty_for_extract_or_insert_value(indices, self.ctx)?;
+
+        if expected_ty != ty {
+            return Err(ExtractInsertValueError::InsertedValueDoesNotMatchField(
+                self.ctx.display(ty).to_string(),
+                self.ctx.display(expected_ty).to_string(),
+            )
+            .into());
+        }
+
+        add_instruction_to_block_and_get_value(
+            InstructionKind::InsertValue(InsertValueOperands {
+                agg_ty,
+                agg_val,
+                val: final_val,
+                ty,
+                indices: indices.to_vec(),
+            }),
+            agg_ty,
+            self.block,
+            reg,
+            self.ctx,
+        )
+    }
 }
 
 /// Resolves a call's arguments against the callee's parameter types.
@@ -1542,10 +1687,10 @@ impl<'a> Cursor<'a> {
 /// constant converts, a register must already match.
 fn try_cast_param_and_check_with_func_signature(
     name: String,
-    params: &[(Value, OperandTy)],
+    params: &[(ValueId, OperandTy)],
     expected_param_tys: &[TyId],
     ctx: &mut Context,
-) -> Result<Vec<Value>, CallError> {
+) -> Result<Vec<ValueId>, CallError> {
     if params.len() != expected_param_tys.len() {
         return Err(CallError::ParamCountMismatch {
             name,
@@ -1554,13 +1699,13 @@ fn try_cast_param_and_check_with_func_signature(
         });
     }
 
-    let mut final_params: Vec<Value> = Vec::with_capacity(params.len());
+    let mut final_params: Vec<ValueId> = Vec::with_capacity(params.len());
 
     for (index, ((param_val, param_ty), expected_param_ty)) in
         params.iter().zip(expected_param_tys).enumerate()
     {
         let final_val = if let OperandTy::Asserted(param_ty) = param_ty {
-            let given = ctx.display(param_val.ty()).to_string();
+            let given = ctx.display(param_val.ty(ctx)).to_string();
 
             let Some(casted_val) = param_val.try_cast(*param_ty, Signedness::Signed, ctx) else {
                 return Err(CallError::ParamCastFailed(
@@ -1573,15 +1718,15 @@ fn try_cast_param_and_check_with_func_signature(
 
             casted_val
         } else {
-            param_val.clone()
+            *param_val
         };
 
-        if final_val.ty() != *expected_param_ty {
+        if final_val.ty(ctx) != *expected_param_ty {
             return Err(CallError::ParamTypeMismatch(
                 name,
                 index,
                 ctx.display(*expected_param_ty).to_string(),
-                ctx.display(final_val.ty()).to_string(),
+                ctx.display(final_val.ty(ctx)).to_string(),
             ));
         }
 
@@ -1594,7 +1739,7 @@ fn try_cast_param_and_check_with_func_signature(
 /// Appends an instruction that defines a register, and records where it was defined.
 ///
 /// Shared by every value-producing builder. Recording the definition — block *and*
-/// index — is what later lets [`Value::try_inferring_pointee_ty`](crate::value::Value)
+/// index — is what later lets `ValueId::try_inferring_pointee_ty`
 /// walk back from a pointer to the instruction that produced it. The index alone
 /// would be meaningless, since each block numbers its instructions from zero.
 fn add_instruction_to_block_and_get_value(
@@ -1603,12 +1748,11 @@ fn add_instruction_to_block_and_get_value(
     block: BasicBlockId,
     reg: RegName,
     ctx: &mut Context,
-) -> Result<Value, InstructionError> {
+) -> Result<ValueId, InstructionError> {
     let func_id = ctx.get_block(block).func_id;
-    let reg_name = ctx.name_for_reg(&reg, func_id)?;
-    let val = Value::from_register(reg_name, result_ty, ctx);
+    let val = Value::from_register(&reg, result_ty, func_id, ctx)?;
 
-    let ValueKind::Reg(reg) = val.kind() else {
+    let ValueKind::Reg(reg) = val.kind(ctx) else {
         unreachable!("value is made out of register name just above")
     };
 
@@ -1617,7 +1761,7 @@ fn add_instruction_to_block_and_get_value(
     let instr_index = block.add_instruction(
         Instruction {
             kind,
-            value: Some(val.clone()),
+            value: Some(val),
         },
         ctx,
     )?;
@@ -1634,7 +1778,7 @@ mod tests {
     use super::*;
     use crate::{
         cfg::{builder::Builder, context::Context},
-        test_support::{add_fn, fixture, value},
+        test_support::{add_fn, fixture, reg_val, value},
         value::{ConstExpr, ConstValue, NullPtr, Type},
     };
 
@@ -1664,9 +1808,7 @@ mod tests {
 
         // A non-terminator first, so the block is still open for the branch that
         // follows it — a branch consumes the cursor and closes the block.
-        cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
-            .unwrap();
+        cursor.build_alloca(i32_ty, None, RegName::Unnamed).unwrap();
         cursor.build_unconditional_br(body).unwrap();
 
         let instrs = &builder.blocks.get(entry.raw()).unwrap().instructions;
@@ -1704,9 +1846,6 @@ mod tests {
 
     /// A phi selects between incoming values, so with none there is nothing to
     /// select — and no first branch to take the phi's type from either.
-    ///
-    /// This is the one phi path that does not reach `Value::ty`, so it is the only
-    /// one runnable until that lands.
     #[test]
     fn a_phi_needs_at_least_one_branch() {
         let mut builder = fixture();
@@ -1718,7 +1857,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .build_phi(&[], "result".into())
+            .build_phi(&[], OperandTy::Inferred, "result".into())
             .expect_err("a phi with no branches has no value and no type");
 
         assert!(matches!(err, PhiError::PhiInstructionWithNoBranches));
@@ -1727,6 +1866,112 @@ mod tests {
             builder.blocks.get(body.raw()).unwrap().phis.is_empty(),
             "the refused phi must not have been added"
         );
+    }
+
+    /// An asserted type is the phi's type, so a first branch of another type is
+    /// refused — before the phi is added, so the block is left as it was.
+    #[test]
+    fn a_phi_checks_its_first_branch_against_an_asserted_type() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let v = value(1, &mut builder);
+
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(&[(entry, v)], OperandTy::Asserted(i64_ty), "result".into())
+            .expect_err("an `i32` branch can't feed an `i64` phi");
+
+        assert!(matches!(
+            err,
+            PhiError::PhiInstructionBranchTypeMismatch(ref phi, ref branch)
+                if phi == "i64" && branch == "i32"
+        ));
+        assert!(
+            builder.blocks.get(body.raw()).unwrap().phis.is_empty(),
+            "the refused phi must not have been added"
+        );
+
+        // A matching assertion is accepted, and is the type the phi has.
+        let (_, result) = builder
+            .cursor_at_block(body)
+            .build_phi(&[(entry, v)], OperandTy::Asserted(i32_ty), "result".into())
+            .unwrap();
+
+        assert_eq!(result.ty(&builder), i32_ty);
+    }
+
+    /// Every branch is checked before the phi exists, not just the first: a bad
+    /// later branch leaves no half-built phi behind, and doesn't use up the
+    /// register's name.
+    #[test]
+    fn a_refused_phi_leaves_the_block_and_its_names_untouched() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let left = f.add_basic_block("left".to_string(), &mut builder).unwrap();
+        let right = f
+            .add_basic_block("right".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let one = value(1, &mut builder);
+        let two = value(2, &mut builder);
+        let wide = builder.const_value(3i64, OperandTy::Inferred).unwrap();
+
+        let no_phis = |builder: &Builder| builder.blocks.get(body.raw()).unwrap().phis.is_empty();
+
+        // The third branch has the wrong type.
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (right, wide)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .expect_err("an `i64` branch can't join an `i32` phi");
+
+        assert!(matches!(
+            err,
+            PhiError::PhiInstructionBranchTypeMismatch(ref phi, ref branch)
+                if phi == "i32" && branch == "i64"
+        ));
+        assert!(no_phis(&builder), "no half-built phi is left behind");
+
+        // Two branches name one predecessor with different values.
+        let err = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (entry, two)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .expect_err("one edge carries one value");
+
+        assert!(matches!(err, PhiError::PhiBranchValueConflict));
+        assert!(no_phis(&builder), "no half-built phi is left behind");
+
+        // Neither refusal took the name: a good phi still gets `%result`, not
+        // `%result1`.
+        let (_, result) = builder
+            .cursor_at_block(body)
+            .build_phi(
+                &[(entry, one), (left, two), (entry, one)],
+                OperandTy::Inferred,
+                "result".into(),
+            )
+            .unwrap();
+        let ValueKind::Reg(reg) = builder.get_value(result).kind() else {
+            panic!("a phi defines a register");
+        };
+
+        assert_eq!(builder.str_interner.value(reg.name.0), "result");
     }
 
     /// The entry block has no predecessors, so a phi there has nothing to choose
@@ -1742,7 +1987,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let err = cursor
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("no predecessors to choose between");
 
         assert!(matches!(
@@ -1770,8 +2015,12 @@ mod tests {
         );
         let mut cursor = builder.cursor_at_block(body);
 
-        let (first, _) = cursor.build_phi(&[(entry, v1)], "a".into()).unwrap();
-        let (second, _) = cursor.build_phi(&[(entry, v2)], "b".into()).unwrap();
+        let (first, _) = cursor
+            .build_phi(&[(entry, v1)], OperandTy::Inferred, "a".into())
+            .unwrap();
+        let (second, _) = cursor
+            .build_phi(&[(entry, v2)], OperandTy::Inferred, "b".into())
+            .unwrap();
 
         assert_eq!((first.index, first.block), (0, body));
         assert_eq!((second.index, second.block), (1, body));
@@ -1779,7 +2028,9 @@ mod tests {
         // A different block starts its own numbering, which is why the id has to
         // carry the block to be unambiguous.
         let mut cursor = builder.cursor_at_block(tail);
-        let (elsewhere, _) = cursor.build_phi(&[(entry, v3)], "c".into()).unwrap();
+        let (elsewhere, _) = cursor
+            .build_phi(&[(entry, v3)], OperandTy::Inferred, "c".into())
+            .unwrap();
 
         assert_eq!((elsewhere.index, elsewhere.block), (0, tail));
         assert_ne!(elsewhere.block, first.block);
@@ -1798,10 +2049,12 @@ mod tests {
         let v = value(1, &mut builder);
         let mut cursor = builder.cursor_at_block(body);
 
-        let (_, result) = cursor.build_phi(&[(entry, v)], "merged".into()).unwrap();
+        let (_, result) = cursor
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "merged".into())
+            .unwrap();
 
         assert_eq!(
-            builder.ty_interner.value(result.ty().raw()),
+            builder.ty_interner.value(result.ty(&builder).raw()),
             &Type::I32,
             "an i32 branch makes an i32 phi"
         );
@@ -1824,7 +2077,11 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let err = cursor
-            .build_phi(&[(entry, an_i32), (other, an_i64)], "merged".into())
+            .build_phi(
+                &[(entry, an_i32), (other, an_i64)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .expect_err("the second branch is an i64");
 
         assert!(
@@ -1875,17 +2132,21 @@ mod tests {
 
         assert_eq!(first_ty, second_ty, "`[4 x i32]` is one type, hence one id");
 
-        let a = Value::from_register("a".to_string(), first_ty, &mut builder);
-        let b = Value::from_register("b".to_string(), second_ty, &mut builder);
+        let a = reg_val("a", first_ty, &mut builder);
+        let b = reg_val("b", second_ty, &mut builder);
 
         let mut cursor = builder.cursor_at_block(body);
 
         let (_, merged) = cursor
-            .build_phi(&[(entry, a), (other, b)], "merged".into())
+            .build_phi(
+                &[(entry, a), (other, b)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .expect("both branches are `[4 x i32]`");
 
         assert_eq!(
-            builder.display(merged.ty()).to_string(),
+            builder.display(merged.ty(&builder)).to_string(),
             "[4 x i32]",
             "and the phi carries that type"
         );
@@ -1907,12 +2168,10 @@ mod tests {
 
         // A plain instruction, not a terminator: this is about phis coming *first*,
         // not about the block being closed, which is a separate rule.
-        cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
-            .unwrap();
+        cursor.build_alloca(i32_ty, None, RegName::Unnamed).unwrap();
 
         let err = cursor
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("the block already has an instruction");
 
         assert!(matches!(err, PhiError::PhiInstructionAddError));
@@ -1938,7 +2197,7 @@ mod tests {
 
         for _ in 0..3 {
             cursor
-                .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                .build_alloca(i32_ty, None, RegName::Unnamed)
                 .expect("a block that has not branched still accepts instructions");
         }
 
@@ -1978,7 +2237,7 @@ mod tests {
 
         let cond = Value::from_const(true, OperandTy::Inferred, &mut builder)
             .unwrap()
-            .into_i1(&builder)
+            .try_i1(&builder)
             .unwrap();
 
         builder
@@ -2017,7 +2276,7 @@ mod tests {
         let mut reopened = builder.cursor_at_block(entry);
 
         let err = reopened
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect_err("`entry` already ends in a branch");
 
         assert!(
@@ -2054,7 +2313,7 @@ mod tests {
         let mut reopened = builder.cursor_at_block(body);
 
         let err = reopened
-            .build_phi(&[(entry, v)], "result".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "result".into())
             .expect_err("`body` already ends in a branch");
 
         assert!(
@@ -2102,7 +2361,7 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                .build_alloca(i32_ty, None, RegName::Unnamed)
                 .map(|_| ()),
             "alloca",
         );
@@ -2110,22 +2369,25 @@ mod tests {
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_load(&ptr, i32_ty.into(), None, RegName::Unnamed)
+                .build_load(ptr, i32_ty.into(), Access::Aligned, RegName::Unnamed)
                 .map(|_| ()),
             "load",
         );
 
         terminated(
-            builder
-                .cursor_at_block(entry)
-                .build_store(&ptr, &seven, OperandTy::Inferred, None),
+            builder.cursor_at_block(entry).build_store(
+                ptr,
+                seven,
+                OperandTy::Inferred,
+                Access::Aligned,
+            ),
             "store",
         );
 
         terminated(
             builder
                 .cursor_at_block(entry)
-                .build_get_element_ptr(&ptr, i32_ty.into(), &[zero], None, RegName::Unnamed)
+                .build_get_element_ptr(ptr, i32_ty.into(), &[zero], None, RegName::Unnamed)
                 .map(|_| ()),
             "getelementptr",
         );
@@ -2191,7 +2453,7 @@ mod tests {
 
             assert!(
                 reopened
-                    .build_alloca(i32_ty, None, None, RegName::Unnamed)
+                    .build_alloca(i32_ty, None, RegName::Unnamed)
                     .is_err(),
                 "attempt {attempt} must still be refused"
             );
@@ -2216,11 +2478,11 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         cursor
-            .build_phi(&[(entry, v)], "m".into())
+            .build_phi(&[(entry, v)], OperandTy::Inferred, "m".into())
             .expect("a phi opens the block");
 
         cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect("instructions follow the phi");
 
         cursor
@@ -2276,7 +2538,7 @@ mod tests {
             matches!(
                 builder
                     .cursor_at_block(entry)
-                    .build_ret(Some(&wide), i64_ty.into()),
+                    .build_ret(Some(wide), i64_ty.into()),
                 Err(InstructionError::Ret(RetError::DoesNotMatchFunctionResult(
                     ..
                 )))
@@ -2316,12 +2578,12 @@ mod tests {
 
         builder
             .cursor_at_block(with_ty)
-            .build_ret(Some(&seven), i32_ty.into())
+            .build_ret(Some(seven), i32_ty.into())
             .expect("the type and the value agree");
 
         builder
             .cursor_at_block(inferred)
-            .build_ret(Some(&eight), OperandTy::Inferred)
+            .build_ret(Some(eight), OperandTy::Inferred)
             .expect("with no type given it comes from the value");
 
         let returns_void = builder
@@ -2366,7 +2628,7 @@ mod tests {
         // `ret void` with a value.
         let err = builder
             .cursor_at_block(a)
-            .build_ret(Some(&seven), void_ty.into())
+            .build_ret(Some(seven), void_ty.into())
             .expect_err("`void` takes no value");
 
         assert!(
@@ -2431,7 +2693,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect_err("`entry` already returned");
 
         assert!(
@@ -2468,8 +2730,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
         let base = f
             .nth_param(0, &cursor)
-            .expect("the function has one parameter")
-            .clone();
+            .expect("the function has one parameter");
 
         assert!(
             base.try_inferring_pointee_ty(entry, &mut cursor).is_none(),
@@ -2477,7 +2738,7 @@ mod tests {
         );
 
         cursor
-            .build_load(&base, i32_ty.into(), None, "v".into())
+            .build_load(base, i32_ty.into(), Access::Aligned, "v".into())
             .expect("the explicit type stands when inference declines");
     }
 
@@ -2507,21 +2768,20 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
         let base = f
             .nth_param(0, &cursor)
-            .expect("the function has one parameter")
-            .clone();
+            .expect("the function has one parameter");
 
         for (ty, reg) in [(i32_ty, "a"), (i64_ty, "b"), (f64_ty, "c")] {
             let loaded = cursor
-                .build_load(&base, ty.into(), None, reg.into())
+                .build_load(base, ty.into(), Access::Aligned, reg.into())
                 .unwrap_or_else(|e| panic!("loading through a parameter must work: {e}"));
 
-            assert_eq!(loaded.ty(), ty, "the load has the type it was given");
+            assert_eq!(loaded.ty(&cursor), ty, "the load has the type it was given");
         }
 
         let seven = Value::from_const(7i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         cursor
-            .build_store(&base, &seven, OperandTy::Inferred, None)
+            .build_store(base, seven, OperandTy::Inferred, Access::Aligned)
             .expect("storing through a parameter works for the same reason");
 
         // And a `getelementptr` needs its source type given, since there is none to
@@ -2531,7 +2791,7 @@ mod tests {
         assert!(
             matches!(
                 cursor.build_get_element_ptr(
-                    &base,
+                    base,
                     OperandTy::Inferred,
                     std::slice::from_ref(&zero),
                     None,
@@ -2543,7 +2803,7 @@ mod tests {
         );
 
         cursor
-            .build_get_element_ptr(&base, i32_ty.into(), &[zero], None, "g".into())
+            .build_get_element_ptr(base, i32_ty.into(), &[zero], None, "g".into())
             .expect("and supplying it is enough");
     }
 
@@ -2578,7 +2838,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .build_alloca(i32_ty, None, None, "x".into())
+            .build_alloca(i32_ty, None, "x".into())
             .unwrap();
 
         assert_eq!(
@@ -2621,7 +2881,7 @@ mod tests {
             .build_call(returns_i32.into(), &[], OperandTy::Inferred, "r".into())
             .unwrap();
 
-        assert_eq!(value.ty(), i32_ty, "typed by the callee's result");
+        assert_eq!(value.ty(&cursor), i32_ty, "typed by the callee's result");
 
         // A `void` callee has no value to define, so it belongs to the other builder.
         // That is no longer a check on `reg` — `build_void_call` takes no register
@@ -2758,12 +3018,12 @@ mod tests {
         );
 
         // A register of the wrong width is refused rather than widened.
-        let wide = Value::from_register("w".to_string(), i64_ty, &mut cursor);
+        let wide = reg_val("w", i64_ty, &mut cursor);
 
         let err = cursor
             .build_call(
                 takes_i32.into(),
-                &[(&wide, OperandTy::Inferred)],
+                &[(wide, OperandTy::Inferred)],
                 OperandTy::Inferred,
                 "b".into(),
             )
@@ -2782,7 +3042,7 @@ mod tests {
         let err = cursor
             .build_call(
                 takes_i32.into(),
-                &[(&seven, OperandTy::Inferred)],
+                &[(seven, OperandTy::Inferred)],
                 f64_ty.into(),
                 "c".into(),
             )
@@ -2802,7 +3062,7 @@ mod tests {
             cursor
                 .build_call(
                     takes_i32.into(),
-                    &[(&seven, OperandTy::Inferred)],
+                    &[(seven, OperandTy::Inferred)],
                     i32_ty.into(),
                     "d".into()
                 )
@@ -2846,7 +3106,7 @@ mod tests {
             cursor
                 .build_call(
                     takes_i64.into(),
-                    &[(&seven, i64_ty.into())],
+                    &[(seven, i64_ty.into())],
                     OperandTy::Inferred,
                     "a".into()
                 )
@@ -2859,7 +3119,7 @@ mod tests {
         let err = cursor
             .build_call(
                 takes_i64.into(),
-                &[(&seven, f64_ty.into())],
+                &[(seven, f64_ty.into())],
                 OperandTy::Inferred,
                 "b".into(),
             )
@@ -2875,13 +3135,13 @@ mod tests {
         );
 
         // A register is only checked, never converted.
-        let narrow = Value::from_register("n".to_string(), i32_ty, &mut cursor);
+        let narrow = reg_val("n", i32_ty, &mut cursor);
 
         assert!(
             matches!(
                 cursor.build_call(
                     takes_i64.into(),
-                    &[(&narrow, i64_ty.into())],
+                    &[(narrow, i64_ty.into())],
                     OperandTy::Inferred,
                     "c".into()
                 ),
@@ -2889,6 +3149,336 @@ mod tests {
             ),
             "widening a register needs a real instruction"
         );
+    }
+
+    /// An indirect call goes through a `ptr` register holding the callee's address.
+    /// Anything else is refused with an error: a non-pointer, and a pointer that isn't
+    /// a register (a constant such as `null`, or a global, which is called directly).
+    #[test]
+    fn an_indirect_call_needs_a_ptr_register() {
+        let mut builder = fixture();
+
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let caller = builder
+            .define_function(
+                "caller".to_string(),
+                &[(ptr_ty, "fp".into()), (i32_ty, "n".into())],
+                i32_ty,
+            )
+            .unwrap();
+        let entry = caller
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        let fp = caller.params(&builder)[0];
+        let n = caller.params(&builder)[1];
+        let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
+        let global = builder.global_value(caller);
+        let sig = crate::value::FuncSignature::new(&[i32_ty], i32_ty);
+        let through = |id: ValueId| FuncRef::Pointer {
+            ptr: id,
+            sig: sig.clone(),
+        };
+
+        let not_a_pointer = through(n);
+        let a_constant = through(null);
+        let a_global = through(global);
+        let a_register = through(fp);
+        let mut cursor = builder.cursor_at_block(entry);
+
+        assert!(matches!(
+            cursor.build_call(not_a_pointer, &[(n, OperandTy::Inferred)], OperandTy::Inferred, "r".into()),
+            Err(InstructionError::Call(CallError::IndirectCalleeNotPointer(ref ty))) if ty == "i32"
+        ));
+
+        for callee in [a_constant, a_global] {
+            assert!(matches!(
+                cursor.build_call(
+                    callee,
+                    &[(n, OperandTy::Inferred)],
+                    OperandTy::Inferred,
+                    "r".into()
+                ),
+                Err(InstructionError::Call(CallError::IndirectCalleeNotRegister))
+            ));
+        }
+
+        let r = cursor
+            .build_call(
+                a_register,
+                &[(n, OperandTy::Inferred)],
+                OperandTy::Inferred,
+                "r".into(),
+            )
+            .expect("a `ptr` register is what an indirect call goes through");
+
+        assert_eq!(r.ty(&cursor), i32_ty, "typed by the signature's result");
+    }
+
+    /// An `extractvalue` reads a field or element out of an aggregate, typed by what
+    /// the indices lead to, and is emitted with the aggregate's type and the bare
+    /// indices.
+    #[test]
+    fn extract_value_reads_what_the_indices_lead_to() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let pair_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, pair_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function("f".to_string(), &[(agg_ty, "s".into())], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let first = cursor.build_extract_value(s, &[0], "first".into()).unwrap();
+        let pair = cursor.build_extract_value(s, &[1], "pair".into()).unwrap();
+        let second = cursor
+            .build_extract_value(s, &[1, 0], "second".into())
+            .unwrap();
+
+        assert_eq!(first.ty(&cursor), i32_ty);
+        assert_eq!(pair.ty(&cursor), pair_ty);
+        assert_eq!(
+            second.ty(&cursor),
+            i64_ty,
+            "a path descends one level per index"
+        );
+
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%first = extractvalue { i32, [2 x i64] } %s, 0\n",
+            "%pair = extractvalue { i32, [2 x i64] } %s, 1\n",
+            "%second = extractvalue { i32, [2 x i64] } %s, 1, 0\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
+    /// No indices, indexing past a struct's last field or an array's last element,
+    /// or into something that isn't an aggregate: all refused, as `llvm-as` refuses
+    /// them.
+    #[test]
+    fn extract_value_refuses_indices_that_lead_nowhere() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, i64_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let array_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[
+                    (agg_ty, "s".into()),
+                    (i32_ty, "n".into()),
+                    (array_ty, "a".into()),
+                ],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let a = f.params(&builder)[2];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        assert!(matches!(
+            cursor.build_extract_value(s, &[], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::NoIndices
+            ))
+        ));
+
+        assert!(matches!(
+            cursor.build_extract_value(a, &[2], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::IndexOutOfBounds { ref ty, index: 2, len: 2 }
+            )) if ty == "[2 x i64]"
+        ));
+
+        assert!(matches!(
+            cursor.build_extract_value(s, &[2], RegName::Unnamed),
+            Err(InstructionError::ExtractInsertValue(
+                ExtractInsertValueError::IndexOutOfBounds { ref ty, index: 2, len: 2 }
+            )) if ty == "{ i32, i64 }"
+        ));
+
+        // Not an aggregate at all, and an index that goes past a scalar field.
+        for (val, indices) in [(n, &[0][..]), (s, &[0, 0][..])] {
+            assert!(matches!(
+                cursor.build_extract_value(val, indices, RegName::Unnamed),
+                Err(InstructionError::ExtractInsertValue(
+                    ExtractInsertValueError::NotAggregate(ref ty)
+                )) if ty == "i32"
+            ));
+        }
+    }
+
+    /// An `insertvalue` replaces what the indices lead to and yields the aggregate's
+    /// type. An asserted type lets a narrower constant widen into the field.
+    #[test]
+    fn insert_value_replaces_what_the_indices_lead_to() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let pair_ty = intern(
+            Type::Array {
+                size: 2,
+                element_ty: i64_ty,
+            },
+            &mut builder,
+        );
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, pair_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[(agg_ty, "s".into()), (i32_ty, "n".into())],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let seven = value(7, &mut builder);
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let first = cursor
+            .build_insert_value(s, n, OperandTy::Inferred, &[0], "first".into())
+            .unwrap();
+        let nested = cursor
+            .build_insert_value(first, seven, i64_ty.into(), &[1, 1], "nested".into())
+            .unwrap();
+
+        assert_eq!(first.ty(&cursor), agg_ty, "the result is the aggregate");
+        assert_eq!(nested.ty(&cursor), agg_ty);
+
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%first = insertvalue { i32, [2 x i64] } %s, i32 %n, 0\n",
+            "%nested = insertvalue { i32, [2 x i64] } %first, i64 7, 1, 1\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
+    /// Every way an `insertvalue` can be wrong is refused: no indices, a value that
+    /// doesn't fold into its asserted type, one that doesn't match the field, and
+    /// indices that lead nowhere.
+    #[test]
+    fn insert_value_refuses_what_does_not_fit() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let i64_ty = builder.i64_ty();
+        let agg_ty = intern(
+            Type::Struct {
+                fields: vec![i32_ty, i64_ty].into(),
+                packed: false,
+            },
+            &mut builder,
+        );
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function(
+                "f".to_string(),
+                &[(agg_ty, "s".into()), (i32_ty, "n".into())],
+                void_ty,
+            )
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let s = f.params(&builder)[0];
+        let n = f.params(&builder)[1];
+        let mut cursor = builder.cursor_at_block(entry);
+
+        let err = |r: Result<ValueId, InstructionError>| match r {
+            Err(InstructionError::ExtractInsertValue(e)) => e,
+            other => panic!(
+                "expected an extract/insert error, got {:?}",
+                other.map(|_| ())
+            ),
+        };
+
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[], RegName::Unnamed)),
+            ExtractInsertValueError::NoIndices
+        ));
+
+        // An `i32` register can't be widened by assertion; that needs a real `sext`.
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, i64_ty.into(), &[1], RegName::Unnamed)),
+            ExtractInsertValueError::InsertedValueTypeMismatch(ref from, ref to)
+                if from == "i32" && to == "i64"
+        ));
+
+        // No assertion: the `i32` is checked as-is against the `i64` field.
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[1], RegName::Unnamed)),
+            ExtractInsertValueError::InsertedValueDoesNotMatchField(ref value, ref field)
+                if value == "i32" && field == "i64"
+        ));
+
+        assert!(matches!(
+            err(cursor.build_insert_value(s, n, OperandTy::Inferred, &[2], RegName::Unnamed)),
+            ExtractInsertValueError::IndexOutOfBounds {
+                index: 2,
+                len: 2,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            err(cursor.build_insert_value(n, n, OperandTy::Inferred, &[0], RegName::Unnamed)),
+            ExtractInsertValueError::NotAggregate(ref ty) if ty == "i32"
+        ));
     }
 
     /// A `call` is not a terminator, so the block stays open after one.
@@ -2921,14 +3511,64 @@ mod tests {
         );
 
         cursor
-            .build_alloca(i32_ty, None, None, RegName::Unnamed)
+            .build_alloca(i32_ty, None, RegName::Unnamed)
             .expect("the block is still open");
     }
 
-    /// A phi names one value per *predecessor*, so the same predecessor twice is a
-    /// bug in the caller — and it is a different bug from an entry-block phi.
+    /// One value can arrive from a predecessor along more than one edge, and then the
+    /// phi names that predecessor once per edge.
+    ///
+    /// LLVM counts predecessors by edge: a `switch` with two cases selecting the same
+    /// block holds it in two operand slots, so the verifier reports *"PHINode should
+    /// have one entry for each predecessor"* against a phi that names it only once.
+    /// `br_table 0 0 1` lowers to exactly that, so this is ordinary rather than
+    /// exotic.
     #[test]
-    fn a_phi_takes_each_predecessor_once() {
+    fn a_predecessor_reached_twice_is_named_twice() {
+        let mut builder = fixture();
+        let f = add_fn("f", &mut builder).unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let other = f
+            .add_basic_block("other".to_string(), &mut builder)
+            .unwrap();
+        let body = f.add_basic_block("body".to_string(), &mut builder).unwrap();
+        let (v1, v2) = (value(1, &mut builder), value(2, &mut builder));
+        let mut cursor = builder.cursor_at_block(body);
+
+        let (phi, _) = cursor
+            .build_phi(
+                &[(entry, v1), (other, v2)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
+            .unwrap();
+
+        phi.add_branch((entry, v1), &mut builder)
+            .expect("`entry` reaching this block twice with the same value is legal");
+
+        let stored = &builder.blocks.get(body.raw()).unwrap().phis[phi.index];
+
+        assert_eq!(
+            stored.branches.len(),
+            3,
+            "an entry per edge, so the repeat is written out again"
+        );
+        assert_eq!(
+            stored.blocks.len(),
+            2,
+            "but only two distinct predecessors contribute"
+        );
+    }
+
+    /// Two entries for one predecessor carrying *different* values is the bug the
+    /// repeat check is really for — and it is a different bug from an entry-block phi.
+    ///
+    /// LLVM refuses it too: *"PHI node has multiple entries for the same basic block
+    /// with different incoming values!"*. Only one value arrives along an edge.
+    #[test]
+    fn a_predecessor_cannot_contribute_two_different_values() {
         let mut builder = fixture();
         let f = add_fn("f", &mut builder).unwrap();
         let entry = f
@@ -2946,20 +3586,23 @@ mod tests {
         let mut cursor = builder.cursor_at_block(body);
 
         let (phi, _) = cursor
-            .build_phi(&[(entry, v1), (other, v2)], "merged".into())
+            .build_phi(
+                &[(entry, v1), (other, v2)],
+                OperandTy::Inferred,
+                "merged".into(),
+            )
             .unwrap();
 
         let err = phi
             .add_branch((entry, v3), &mut builder)
-            .expect_err("`entry` is already a predecessor of this phi");
+            .expect_err("`entry` already contributes a different value");
 
         assert!(
-            matches!(err, PhiError::BasicBlockBranchAlreadyInPhiInstruction),
-            "a repeated predecessor is not an entry-block error, got: {err}"
+            matches!(err, PhiError::PhiBranchValueConflict),
+            "a conflicting repeat is not an entry-block error, got: {err}"
         );
 
-        // One incoming value per predecessor, and the two branches it was built
-        // with are the two it has — not four.
+        // The rejected branch left nothing behind.
         let stored = &builder.blocks.get(body.raw()).unwrap().phis[phi.index];
 
         assert_eq!(stored.branches.len(), 2);
@@ -2967,7 +3610,7 @@ mod tests {
     }
 
     /// A block with a pointer-typed value in hand, which every load test needs.
-    fn block_with_ptr(builder: &mut Builder) -> (Cursor<'_>, Value) {
+    fn block_with_ptr(builder: &mut Builder) -> (Cursor<'_>, ValueId) {
         let f = add_fn("f", builder).unwrap();
         let entry = f.add_basic_block("entry".to_string(), builder).unwrap();
         let ptr = builder.const_value(NullPtr, OperandTy::Inferred).unwrap();
@@ -2977,7 +3620,7 @@ mod tests {
 
     /// A `{ i32, double }` slot on the stack, plus the cursor to build against — the
     /// shape every struct-indexing test below needs.
-    fn block_with_struct_slot(builder: &mut Builder) -> (Cursor<'_>, Value, TyId) {
+    fn block_with_struct_slot(builder: &mut Builder) -> (Cursor<'_>, ValueId, TyId) {
         let f = add_fn("f", builder).unwrap();
         let entry = f.add_basic_block("entry".to_string(), builder).unwrap();
 
@@ -2995,7 +3638,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, "s".into())
+            .build_alloca(struct_ty, None, "s".into())
             .expect("a struct is allocatable");
 
         (cursor, slot, struct_ty)
@@ -3003,7 +3646,7 @@ mod tests {
 
     /// A `{ i32, [4 x double] }` slot, for the tests that chain a `getelementptr`
     /// through a nested aggregate. Returns the cursor, the slot, and the two types.
-    fn block_with_nested_slot(builder: &mut Builder) -> (Cursor<'_>, Value, TyId, TyId) {
+    fn block_with_nested_slot(builder: &mut Builder) -> (Cursor<'_>, ValueId, TyId, TyId) {
         let f = add_fn("f", builder).unwrap();
         let entry = f.add_basic_block("entry".to_string(), builder).unwrap();
 
@@ -3029,7 +3672,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(struct_ty, None, None, "s".into())
+            .build_alloca(struct_ty, None, "s".into())
             .expect("a struct is allocatable");
 
         (cursor, slot, array_ty, f64_ty)
@@ -3052,19 +3695,13 @@ mod tests {
 
         // `%f = gep { i32, [4 x double] }, ptr %s, i32 0, i32 1` — the array field.
         let field = cursor
-            .build_get_element_ptr(
-                &slot,
-                OperandTy::Inferred,
-                &[zero.clone(), one],
-                None,
-                "f".into(),
-            )
+            .build_get_element_ptr(slot, OperandTy::Inferred, &[zero, one], None, "f".into())
             .expect("the alloca says what it points to");
 
         // `%e = gep [4 x double], ptr %f, i32 0, i32 2` — with no source type given,
         // so it has to come from the gep above.
         let elem = cursor
-            .build_get_element_ptr(&field, OperandTy::Inferred, &[zero, two], None, "e".into())
+            .build_get_element_ptr(field, OperandTy::Inferred, &[zero, two], None, "e".into())
             .expect("the first gep says what it points to");
 
         let block = cursor.blocks.get(cursor.block.raw()).unwrap();
@@ -3084,13 +3721,13 @@ mod tests {
 
         assert!(
             cursor
-                .build_store(&elem, &a_double, OperandTy::Inferred, None)
+                .build_store(elem, a_double, OperandTy::Inferred, Access::Aligned)
                 .is_ok(),
             "the element is a double"
         );
 
         let err = cursor
-            .build_store(&elem, &an_i32, OperandTy::Inferred, None)
+            .build_store(elem, an_i32, OperandTy::Inferred, Access::Aligned)
             .expect_err("an i32 is not what this points to");
 
         assert!(
@@ -3151,7 +3788,7 @@ mod tests {
 
         // `%n = gep { i32, [4 x double] }, ptr %s, i32 1` — the *next* struct along.
         let next = cursor
-            .build_get_element_ptr(&slot, OperandTy::Inferred, &[one], None, "n".into())
+            .build_get_element_ptr(slot, OperandTy::Inferred, &[one], None, "n".into())
             .expect("a single index is pointer arithmetic over the source type");
 
         let pointee = next
@@ -3190,7 +3827,7 @@ mod tests {
     /// catch. The index sequences the tests below use were checked against `llvm-as`:
     /// `0,1,1,1,2` assembles and one index further is refused, which is what pins the
     /// last level to a scalar.
-    fn block_with_deep_slot(builder: &mut Builder) -> (Cursor<'_>, Value, DeepTys) {
+    fn block_with_deep_slot(builder: &mut Builder) -> (Cursor<'_>, ValueId, DeepTys) {
         let f = add_fn("f", builder).unwrap();
         let entry = f.add_basic_block("entry".to_string(), builder).unwrap();
 
@@ -3235,7 +3872,7 @@ mod tests {
         let mut cursor = builder.cursor_at_block(entry);
 
         let slot = cursor
-            .build_alloca(outer, None, None, "s".into())
+            .build_alloca(outer, None, "s".into())
             .expect("a struct is allocatable");
 
         (
@@ -3255,7 +3892,7 @@ mod tests {
     }
 
     /// A constant `i32` index, which is what a struct index has to be.
-    fn idx(n: i32, ctx: &mut Context) -> Value {
+    fn idx(n: i32, ctx: &mut Context) -> ValueId {
         Value::from_const(n, OperandTy::Inferred, ctx).expect("an i32 constant")
     }
 
@@ -3296,7 +3933,7 @@ mod tests {
             }
 
             let elem = cursor
-                .build_get_element_ptr(&slot, OperandTy::Inferred, &indices, None, RegName::Unnamed)
+                .build_get_element_ptr(slot, OperandTy::Inferred, &indices, None, RegName::Unnamed)
                 .unwrap_or_else(|e| panic!("gep 0,{tail:?} should walk: {e}"));
 
             let pointee = elem
@@ -3315,7 +3952,7 @@ mod tests {
             );
 
             assert_eq!(
-                cursor.display(elem.ty()).to_string(),
+                cursor.display(elem.ty(&cursor)).to_string(),
                 "ptr",
                 "a gep always yields a pointer"
             );
@@ -3340,13 +3977,7 @@ mod tests {
         ];
 
         let err = cursor
-            .build_get_element_ptr(
-                &slot,
-                OperandTy::Inferred,
-                &too_deep,
-                None,
-                RegName::Unnamed,
-            )
+            .build_get_element_ptr(slot, OperandTy::Inferred, &too_deep, None, RegName::Unnamed)
             .expect_err("an i64 has no elements");
 
         assert!(
@@ -3363,7 +3994,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_get_element_ptr(&slot, OperandTy::Inferred, &past_double, None, RegName::Unnamed),
+                cursor.build_get_element_ptr(slot, OperandTy::Inferred, &past_double, None, RegName::Unnamed),
                 Err(InstructionError::Gep(GepError::TypeNotIndexable(t))) if t == "double"
             ),
             "a double has no elements either"
@@ -3386,21 +4017,21 @@ mod tests {
         ];
 
         let elem = cursor
-            .build_get_element_ptr(&slot, OperandTy::Inferred, deep, None, "e".into())
+            .build_get_element_ptr(slot, OperandTy::Inferred, deep, None, "e".into())
             .expect("the walk reaches the i64");
 
         let loaded = cursor
-            .build_load(&elem, tys.i64.into(), None, "v".into())
+            .build_load(elem, tys.i64.into(), Access::Aligned, "v".into())
             .expect("an i64 is loadable");
 
-        assert_eq!(cursor.display(loaded.ty()).to_string(), "i64");
-        assert_eq!(loaded.ty(), tys.i64);
+        assert_eq!(cursor.display(loaded.ty(&cursor)).to_string(), "i64");
+        assert_eq!(loaded.ty(&cursor), tys.i64);
 
         // Storing the loaded value straight back is the round trip, and the pointee
         // check has to accept it.
         assert!(
             cursor
-                .build_store(&elem, &loaded, OperandTy::Inferred, None)
+                .build_store(elem, loaded, OperandTy::Inferred, Access::Aligned)
                 .is_ok(),
             "what was loaded from a slot must store back into it"
         );
@@ -3418,12 +4049,12 @@ mod tests {
         let ptr_field = vec![idx(0, &mut cursor), idx(2, &mut cursor)];
 
         let ptr_field = cursor
-            .build_get_element_ptr(&slot, OperandTy::Inferred, &ptr_field, None, "p".into())
+            .build_get_element_ptr(slot, OperandTy::Inferred, &ptr_field, None, "p".into())
             .expect("field 2 is the pointer");
 
         // `%q = load ptr, ptr %p` — a pointer whose pointee nothing records.
         let loaded_ptr = cursor
-            .build_load(&ptr_field, tys.ptr.into(), None, "q".into())
+            .build_load(ptr_field, tys.ptr.into(), Access::Aligned, "q".into())
             .expect("a ptr is loadable");
 
         assert!(
@@ -3437,7 +4068,7 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &loaded_ptr,
+                loaded_ptr,
                 OperandTy::Inferred,
                 &indices,
                 None,
@@ -3455,7 +4086,7 @@ mod tests {
         let indices = vec![idx(0, &mut cursor), idx(1, &mut cursor)];
 
         let elem = cursor
-            .build_get_element_ptr(&loaded_ptr, tys.inner.into(), &indices, None, "r".into())
+            .build_get_element_ptr(loaded_ptr, tys.inner.into(), &indices, None, "r".into())
             .expect("with the source type given there is nothing to infer");
 
         let pointee = elem
@@ -3483,7 +4114,7 @@ mod tests {
         let zero = value(0, &mut cursor);
 
         let err = cursor
-            .build_get_element_ptr(&not_a_ptr, i32_ty.into(), &[zero], None, RegName::Unnamed)
+            .build_get_element_ptr(not_a_ptr, i32_ty.into(), &[zero], None, RegName::Unnamed)
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -3502,7 +4133,7 @@ mod tests {
         let a_float = Value::from_const(1.0f32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_get_element_ptr(&ptr, i32_ty.into(), &[a_float], None, RegName::Unnamed)
+            .build_get_element_ptr(ptr, i32_ty.into(), &[a_float], None, RegName::Unnamed)
             .expect_err("a float is not an index");
 
         assert!(
@@ -3521,7 +4152,7 @@ mod tests {
         let zero = value(0, &mut cursor);
 
         let err = cursor
-            .build_get_element_ptr(&ptr, OperandTy::Inferred, &[zero], None, RegName::Unnamed)
+            .build_get_element_ptr(ptr, OperandTy::Inferred, &[zero], None, RegName::Unnamed)
             .expect_err("null says nothing about its pointee");
 
         assert!(
@@ -3541,7 +4172,7 @@ mod tests {
         let zero = value(0, &mut cursor);
 
         let err = cursor
-            .build_get_element_ptr(&slot, i32_ty.into(), &[zero], None, RegName::Unnamed)
+            .build_get_element_ptr(slot, i32_ty.into(), &[zero], None, RegName::Unnamed)
             .expect_err("the slot holds a struct, not an i32");
 
         assert!(
@@ -3555,7 +4186,8 @@ mod tests {
     }
 
     /// Omitting the source type is allowed when the pointer says what it points to —
-    /// and the *inferred* type is what the instruction is emitted with, not `None`.
+    /// and the *inferred* type is what the instruction is emitted with, not
+    /// `OperandTy::Inferred`.
     #[test]
     fn a_gep_emits_the_inferred_source_type() {
         let mut builder = fixture();
@@ -3565,11 +4197,11 @@ mod tests {
         let field = Value::from_const(1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let elem = cursor
-            .build_get_element_ptr(&slot, OperandTy::Inferred, &[zero, field], None, "f".into())
+            .build_get_element_ptr(slot, OperandTy::Inferred, &[zero, field], None, "f".into())
             .expect("the pointee is inferable from the alloca");
 
         assert_eq!(
-            cursor.display(elem.ty()).to_string(),
+            cursor.display(elem.ty(&cursor)).to_string(),
             "ptr",
             "a gep yields a pointer"
         );
@@ -3588,7 +4220,7 @@ mod tests {
 
         assert_eq!(
             *source_ty, struct_ty,
-            "the resolved type is emitted, not the caller's `None`"
+            "the resolved type is emitted, not the caller's `OperandTy::Inferred`"
         );
     }
 
@@ -3607,9 +4239,9 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &slot,
+                slot,
                 OperandTy::Inferred,
-                &[zero.clone(), wide],
+                &[zero, wide],
                 None,
                 RegName::Unnamed,
             )
@@ -3624,12 +4256,12 @@ mod tests {
         );
 
         // A register is refused for the same reason: the field has to be known now.
-        let reg = Value::from_register("n".to_string(), i32_ty, &mut cursor);
+        let reg = reg_val("n", i32_ty, &mut cursor);
 
         assert!(
             matches!(
                 cursor.build_get_element_ptr(
-                    &slot,
+                    slot,
                     OperandTy::Inferred,
                     &[zero, reg],
                     None,
@@ -3656,9 +4288,9 @@ mod tests {
 
         let err = cursor
             .build_get_element_ptr(
-                &slot,
+                slot,
                 OperandTy::Inferred,
-                &[zero.clone(), past_end],
+                &[zero, past_end],
                 None,
                 RegName::Unnamed,
             )
@@ -3676,7 +4308,7 @@ mod tests {
         assert!(
             matches!(
                 cursor.build_get_element_ptr(
-                    &slot,
+                    slot,
                     OperandTy::Inferred,
                     &[zero, negative],
                     None,
@@ -3700,14 +4332,14 @@ mod tests {
 
         let i32_ty = cursor.i32_ty();
 
-        let slot = cursor.build_alloca(i32_ty, None, None, "p".into()).unwrap();
+        let slot = cursor.build_alloca(i32_ty, None, "p".into()).unwrap();
 
         let zero = value(0, &mut cursor);
         let one = Value::from_const(1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
             .build_get_element_ptr(
-                &slot,
+                slot,
                 OperandTy::Inferred,
                 &[zero, one],
                 None,
@@ -3734,10 +4366,10 @@ mod tests {
 
         let i32_ty = cursor.i32_ty();
         let i64_ty = cursor.i64_ty();
-        let reg = Value::from_register("v".to_string(), i32_ty, &mut cursor);
+        let reg = reg_val("v", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_store(&ptr, &reg, i64_ty.into(), None)
+            .build_store(ptr, reg, i64_ty.into(), Access::Aligned)
             .expect_err("an i32 register is not an i64");
 
         assert!(
@@ -3758,7 +4390,7 @@ mod tests {
         let seven = Value::from_const(7i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         cursor
-            .build_store(&ptr, &seven, i64_ty.into(), None)
+            .build_store(ptr, seven, i64_ty.into(), Access::Aligned)
             .expect("an i32 constant stores as an i64");
 
         let block = cursor.blocks.get(cursor.block.raw()).unwrap();
@@ -3770,9 +4402,9 @@ mod tests {
 
         // The *stored* value is the widened one — a store of the original `i32`
         // would be a different instruction than the caller asked for.
-        assert_eq!(cursor.display(value.ty()).to_string(), "i64");
+        assert_eq!(cursor.display(value.ty(&cursor)).to_string(), "i64");
 
-        let ValueKind::ConstExpr(ConstExpr::Const(id)) = value.kind() else {
+        let ValueKind::ConstExpr(ConstExpr::Const(id)) = value.kind(&cursor) else {
             panic!("expected a constant")
         };
 
@@ -3792,7 +4424,7 @@ mod tests {
         let void_ty = cursor.void_ty();
 
         let err = cursor
-            .build_alloca(void_ty, None, None, RegName::Unnamed)
+            .build_alloca(void_ty, None, RegName::Unnamed)
             .expect_err("`void` has no size");
 
         assert!(
@@ -3819,11 +4451,11 @@ mod tests {
         );
 
         let slot = cursor
-            .build_alloca(array_ty, None, None, "buf".into())
+            .build_alloca(array_ty, None, "buf".into())
             .expect("`[4 x i32]` is sized");
 
         assert_eq!(
-            builder.display(slot.ty()).to_string(),
+            builder.display(slot.ty(&builder)).to_string(),
             "ptr",
             "an alloca yields a pointer, not the allocated type"
         );
@@ -3843,8 +4475,7 @@ mod tests {
         let err = cursor
             .build_alloca(
                 i32_ty,
-                Some((&a_float, OperandTy::Inferred)),
-                None,
+                Some((a_float, OperandTy::Inferred)),
                 RegName::Unnamed,
             )
             .expect_err("a float is not a count");
@@ -3860,12 +4491,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_alloca(
-                    i32_ty,
-                    Some((&an_int, f64_ty.into())),
-                    None,
-                    RegName::Unnamed
-                ),
+                cursor.build_alloca(i32_ty, Some((an_int, f64_ty.into())), RegName::Unnamed),
                 Err(InstructionError::Alloca(
                     AllocaError::AllocaCountNotAnInteger(_)
                 ))
@@ -3886,12 +4512,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_alloca(
-                    i32_ty,
-                    Some((&one, OperandTy::Inferred)),
-                    None,
-                    RegName::Unnamed
-                )
+                .build_alloca(i32_ty, Some((one, OperandTy::Inferred)), RegName::Unnamed)
                 .is_ok(),
             "`alloca i32, i1 %c` is valid LLVM"
         );
@@ -3906,10 +4527,10 @@ mod tests {
 
         let i32_ty = cursor.i32_ty();
         let i64_ty = cursor.i64_ty();
-        let n = Value::from_register("n".to_string(), i32_ty, &mut cursor);
+        let n = reg_val("n", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_alloca(i32_ty, Some((&n, i64_ty.into())), None, RegName::Unnamed)
+            .build_alloca(i32_ty, Some((n, i64_ty.into())), RegName::Unnamed)
             .expect_err("an i32 register is not an i64 count");
 
         assert!(
@@ -3946,23 +4567,23 @@ mod tests {
         let f64_ty = in_entry.f64_ty();
 
         in_entry
-            .build_load(&ptr, i32_ty.into(), None, "a".into())
+            .build_load(ptr, i32_ty.into(), Access::Aligned, "a".into())
             .unwrap();
 
         let second = in_entry
-            .build_load(&ptr, i64_ty.into(), None, "b".into())
+            .build_load(ptr, i64_ty.into(), Access::Aligned, "b".into())
             .unwrap();
 
         let mut in_body = builder.cursor_at_block(body);
 
         let third = in_body
-            .build_load(&ptr, f64_ty.into(), None, "c".into())
+            .build_load(ptr, f64_ty.into(), Access::Aligned, "c".into())
             .unwrap();
 
         let func_id = builder.get_block(entry).func_id;
 
-        let def_of = |val: &Value, ctx: &Context| {
-            let ValueKind::Reg(reg) = val.kind() else {
+        let def_of = |val: &ValueId, ctx: &Context| {
+            let ValueKind::Reg(reg) = val.kind(ctx) else {
                 panic!("a load defines a register")
             };
 
@@ -4014,10 +4635,13 @@ mod tests {
         let i32_ty = cursor.i32_ty();
 
         let loaded = cursor
-            .build_load(&ptr, i32_ty.into(), None, "x".into())
+            .build_load(ptr, i32_ty.into(), Access::Aligned, "x".into())
             .expect("loading an i32 through a ptr is fine");
 
-        assert_eq!(builder.ty_interner.value(loaded.ty().raw()), &Type::I32);
+        assert_eq!(
+            builder.ty_interner.value(loaded.ty(&builder).raw()),
+            &Type::I32
+        );
     }
 
     /// The instruction records the register it defines, which is what an emitter
@@ -4030,7 +4654,7 @@ mod tests {
         let i64_ty = cursor.i64_ty();
 
         cursor
-            .build_load(&ptr, i64_ty.into(), None, "x".into())
+            .build_load(ptr, i64_ty.into(), Access::Aligned, "x".into())
             .unwrap();
 
         let block = cursor.blocks.get(cursor.block.raw()).unwrap();
@@ -4058,7 +4682,7 @@ mod tests {
         let i32_ty = cursor.i32_ty();
 
         let err = cursor
-            .build_load(&not_a_ptr, i32_ty.into(), None, "x".into())
+            .build_load(not_a_ptr, i32_ty.into(), Access::Aligned, "x".into())
             .expect_err("an i32 is not an address");
 
         assert!(
@@ -4089,7 +4713,7 @@ mod tests {
         let void_ty = cursor.void_ty();
 
         let err = cursor
-            .build_load(&ptr, void_ty.into(), None, RegName::Unnamed)
+            .build_load(ptr, void_ty.into(), Access::Aligned, RegName::Unnamed)
             .expect_err("`void` has no size");
 
         assert!(
@@ -4124,58 +4748,56 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_load(&ptr, id.into(), None, RegName::Unnamed)
+                    .build_load(ptr, id.into(), Access::Aligned, RegName::Unnamed)
                     .is_ok(),
                 "`{spelled}` is loadable"
             );
         }
     }
 
-    /// An explicit alignment must be a power of two. The cases below are the ones
-    /// `llvm-as` accepts and rejects — note `1` is valid (it is `2^0`) and `0` is
-    /// not, which an even-number test gets backwards in both directions.
+    /// An aligned access leaves the alignment to the data layout and an unaligned one
+    /// promises nothing: there is no number to get wrong, so both are always accepted,
+    /// and each is emitted as it says.
     #[test]
-    fn an_explicit_alignment_must_be_a_power_of_two() {
+    fn a_load_and_store_are_emitted_with_the_access_they_were_given() {
         let mut builder = fixture();
-        let (mut cursor, ptr) = block_with_ptr(&mut builder);
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+        let void_ty = builder.void_ty();
+        let f = builder
+            .define_function("f".to_string(), &[(ptr_ty, "p".into())], void_ty)
+            .unwrap();
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+        let p = f.params(&builder)[0];
+        let mut cursor = builder.cursor_at_block(entry);
 
-        let i32_ty = cursor.i32_ty();
+        let a = cursor
+            .build_load(p, i32_ty.into(), Access::Aligned, "a".into())
+            .unwrap();
+        let u = cursor
+            .build_load(p, i32_ty.into(), Access::Unaligned, "u".into())
+            .unwrap();
 
-        for align in [1, 2, 4, 8, 16, 4096] {
-            assert!(
-                cursor
-                    .build_load(&ptr, i32_ty.into(), Some(align), RegName::Unnamed)
-                    .is_ok(),
-                "align {align} is a power of two"
-            );
+        cursor
+            .build_store(p, a, OperandTy::Inferred, Access::Aligned)
+            .unwrap();
+        cursor
+            .build_store(p, u, OperandTy::Inferred, Access::Unaligned)
+            .unwrap();
+        cursor.build_ret(None, void_ty.into()).unwrap();
+
+        let ir = crate::cfg::emit::IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "%a = load i32, ptr %p\n",
+            "%u = load i32, ptr %p, align 1\n",
+            "store i32 %a, ptr %p\n",
+            "store i32 %u, ptr %p, align 1\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
         }
-
-        for align in [0, 3, 6, 10, 12] {
-            let err = cursor
-                .build_load(&ptr, i32_ty.into(), Some(align), RegName::Unnamed)
-                .expect_err("not a power of two");
-
-            assert!(
-                matches!(&err, InstructionError::AlignmentNotPowerOfTwo(a) if *a == align),
-                "expected an alignment error for {align}, got: {err}"
-            );
-        }
-    }
-
-    /// Omitting the alignment is how the ABI default is asked for, and is always
-    /// allowed.
-    #[test]
-    fn an_omitted_alignment_is_allowed() {
-        let mut builder = fixture();
-        let (mut cursor, ptr) = block_with_ptr(&mut builder);
-
-        let i32_ty = cursor.i32_ty();
-
-        assert!(
-            cursor
-                .build_load(&ptr, i32_ty.into(), None, RegName::Unnamed)
-                .is_ok()
-        );
     }
 
     /// A block plus the cursor writing into it, for the `icmp` tests below — which
@@ -4201,12 +4823,14 @@ mod tests {
             panic!("the last instruction is not an icmp");
         };
 
-        let read = |v: &Value| match v.kind() {
-            ValueKind::ConstExpr(ConstExpr::Const(id)) => *ctx.const_interner.value(id.raw()),
+        let read = |v: ValueId| match v.kind(ctx) {
+            ValueKind::ConstExpr(ConstExpr::Const(id)) => {
+                ctx.const_interner.value(id.raw()).clone()
+            }
             other => panic!("operand is not a constant: {other:?}"),
         };
 
-        (read(&operands.a), read(&operands.b))
+        (read(operands.a), read(operands.b))
     }
 
     /// The type an `icmp` settled on for its operands.
@@ -4242,7 +4866,7 @@ mod tests {
         let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let result = cursor
-            .build_icmp(ICond::Ult, OperandTy::Inferred, &wide, &narrow, "c".into())
+            .build_icmp(ICond::Ult, OperandTy::Inferred, wide, narrow, "c".into())
             .expect("an i32 constant widens into an i64 comparison");
 
         assert_eq!(
@@ -4254,7 +4878,10 @@ mod tests {
             "the narrower operand must be zero-extended, not sign-extended",
         );
 
-        assert!(result.ty.is_i1(&builder), "an icmp produces an i1");
+        assert!(
+            result.id().ty(&builder).is_i1(&builder),
+            "an icmp produces an i1"
+        );
         assert_eq!(
             icmp_ty(block, &builder),
             i64_ty,
@@ -4273,7 +4900,7 @@ mod tests {
         let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         cursor
-            .build_icmp(ICond::Slt, OperandTy::Inferred, &wide, &narrow, "c".into())
+            .build_icmp(ICond::Slt, OperandTy::Inferred, wide, narrow, "c".into())
             .expect("an i32 constant widens into an i64 comparison");
 
         assert_eq!(
@@ -4297,7 +4924,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
             let err = cursor
-                .build_icmp(cond, OperandTy::Inferred, &wide, &narrow, RegName::Unnamed)
+                .build_icmp(cond, OperandTy::Inferred, wide, narrow, RegName::Unnamed)
                 .expect_err("eq/ne must not widen");
 
             assert!(
@@ -4326,8 +4953,8 @@ mod tests {
                 .build_icmp(
                     ICond::Ult,
                     OperandTy::Inferred,
-                    &wide,
-                    &narrow,
+                    wide,
+                    narrow,
                     RegName::Unnamed
                 )
                 .is_ok(),
@@ -4347,7 +4974,7 @@ mod tests {
         let b = Value::from_const(2i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Eq, i64_ty.into(), &a, &b, RegName::Unnamed)
+            .build_icmp(ICond::Eq, i64_ty.into(), a, b, RegName::Unnamed)
             .expect_err("i32 operands are not i64, and eq will not widen them");
 
         assert!(
@@ -4373,7 +5000,7 @@ mod tests {
 
         assert!(
             cursor
-                .build_icmp(ICond::Eq, i32_ty.into(), &a, &b, RegName::Unnamed)
+                .build_icmp(ICond::Eq, i32_ty.into(), a, b, RegName::Unnamed)
                 .is_ok(),
         );
     }
@@ -4388,11 +5015,11 @@ mod tests {
 
         let i32_ty = cursor.i32_ty();
         let i64_ty = cursor.i64_ty();
-        let a = Value::from_register("a".to_string(), i64_ty, &mut cursor);
-        let b = Value::from_register("b".to_string(), i32_ty, &mut cursor);
+        let a = reg_val("a", i64_ty, &mut cursor);
+        let b = reg_val("b", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_icmp(ICond::Ult, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+            .build_icmp(ICond::Ult, OperandTy::Inferred, a, b, RegName::Unnamed)
             .expect_err("a register cannot be widened by folding");
 
         assert!(
@@ -4417,7 +5044,7 @@ mod tests {
         let b = Value::from_const(1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Slt, i8_ty.into(), &a, &b, RegName::Unnamed)
+            .build_icmp(ICond::Slt, i8_ty.into(), a, b, RegName::Unnamed)
             .expect_err("300 does not fit an i8");
 
         assert!(
@@ -4440,7 +5067,7 @@ mod tests {
         let b = Value::from_const(2.0f64, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_icmp(ICond::Eq, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+            .build_icmp(ICond::Eq, OperandTy::Inferred, a, b, RegName::Unnamed)
             .expect_err("floats are not comparable with icmp");
 
         assert!(
@@ -4465,7 +5092,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_icmp(cond, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_icmp(cond, OperandTy::Inferred, a, b, RegName::Unnamed)
                     .is_ok(),
                 "`icmp {cond} ptr` is valid LLVM",
             );
@@ -4484,10 +5111,13 @@ mod tests {
         let narrow = Value::from_const(0.5f32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let result = cursor
-            .build_fcmp(FCond::Olt, OperandTy::Inferred, &wide, &narrow, "c".into())
+            .build_fcmp(FCond::Olt, OperandTy::Inferred, wide, narrow, "c".into())
             .expect("an f32 constant widens into an f64 comparison");
 
-        assert!(result.ty.is_i1(&builder), "an fcmp produces an i1");
+        assert!(
+            result.id().ty(&builder).is_i1(&builder),
+            "an fcmp produces an i1"
+        );
 
         let instr = builder
             .blocks
@@ -4502,8 +5132,8 @@ mod tests {
         };
 
         assert_eq!(operands.ty, f64_ty, "the comparison is at the wider type");
-        assert_eq!(operands.a.ty(), f64_ty);
-        assert_eq!(operands.b.ty(), f64_ty);
+        assert_eq!(operands.a.ty(&builder), f64_ty);
+        assert_eq!(operands.b.ty(&builder), f64_ty);
     }
 
     /// Integers are not comparable with `fcmp` — that is what `icmp` is for, and
@@ -4517,7 +5147,7 @@ mod tests {
         let b = Value::from_const(2i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+            .build_fcmp(FCond::Oeq, OperandTy::Inferred, a, b, RegName::Unnamed)
             .expect_err("integers are not comparable with fcmp");
 
         assert!(
@@ -4541,7 +5171,7 @@ mod tests {
         let b = Value::from_const(2i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+            .build_fcmp(FCond::Oeq, OperandTy::Inferred, a, b, RegName::Unnamed)
             .expect_err("nothing bridges the integer and float families");
 
         assert!(
@@ -4571,7 +5201,7 @@ mod tests {
         let b = Value::from_const(2i32, OperandTy::Inferred, &mut cursor).unwrap();
 
         let err = cursor
-            .build_fcmp(FCond::Oeq, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+            .build_fcmp(FCond::Oeq, OperandTy::Inferred, a, b, RegName::Unnamed)
             .expect_err("integers are not comparable with fcmp");
 
         assert!(
@@ -4593,11 +5223,11 @@ mod tests {
 
         let f32_ty = cursor.f32_ty();
         let f64_ty = cursor.f64_ty();
-        let a = Value::from_register("a".to_string(), f64_ty, &mut cursor);
-        let b = Value::from_register("b".to_string(), f32_ty, &mut cursor);
+        let a = reg_val("a", f64_ty, &mut cursor);
+        let b = reg_val("b", f32_ty, &mut cursor);
 
         assert!(matches!(
-            cursor.build_fcmp(FCond::Ogt, OperandTy::Inferred, &a, &b, RegName::Unnamed),
+            cursor.build_fcmp(FCond::Ogt, OperandTy::Inferred, a, b, RegName::Unnamed),
             Err(InstructionError::FCmp(FCmpError::OperandsNotCastable(..)))
         ),);
     }
@@ -4632,7 +5262,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_fcmp(cond, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_fcmp(cond, OperandTy::Inferred, a, b, RegName::Unnamed)
                     .is_ok(),
                 "`fcmp {cond}` is valid LLVM",
             );
@@ -4656,7 +5286,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
             cursor
-                .build_ibinop(op, OperandTy::Inferred, &wide, &narrow, "r".into())
+                .build_ibinop(op, OperandTy::Inferred, wide, narrow, "r".into())
                 .expect("a signed operation may widen a constant");
 
             let instr = builder
@@ -4671,7 +5301,7 @@ mod tests {
                 panic!("not an ibinop");
             };
 
-            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind() else {
+            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind(&builder) else {
                 panic!("the right operand is not a constant");
             };
 
@@ -4683,9 +5313,6 @@ mod tests {
         }
     }
 
-    /// The seven operations with no signedness refuse to widen, because nothing says
-    /// which way to fill the new bits and the two answers differ.
-    ///
     /// An operation that never reads its operands widens a narrower literal by
     /// **value**, so `-1i32` arrives as `i64 -1`.
     ///
@@ -4712,7 +5339,7 @@ mod tests {
             let narrow = Value::from_const(-1i32, OperandTy::Inferred, &mut cursor).unwrap();
 
             cursor
-                .build_ibinop(op, OperandTy::Inferred, &wide, &narrow, RegName::Unnamed)
+                .build_ibinop(op, OperandTy::Inferred, wide, narrow, RegName::Unnamed)
                 .expect("a literal widens to meet the other operand");
 
             let instr = cursor
@@ -4727,7 +5354,7 @@ mod tests {
                 panic!("not an ibinop");
             };
 
-            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind() else {
+            let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.b.kind(&cursor) else {
                 panic!("the right operand is not a literal");
             };
 
@@ -4739,8 +5366,7 @@ mod tests {
         }
     }
 
-    /// Matching operands are fine for those same operations — the refusal is about
-    /// widening, not about the operation.
+    /// Matching operands need no widening at all, for those same operations.
     #[test]
     fn a_signedness_free_operation_accepts_matching_operands() {
         let mut builder = fixture();
@@ -4751,11 +5377,11 @@ mod tests {
         let b = Value::from_const(-1i64, OperandTy::Inferred, &mut cursor).unwrap();
 
         let result = cursor
-            .build_ibinop(IBinOp::Add, OperandTy::Inferred, &a, &b, "r".into())
+            .build_ibinop(IBinOp::Add, OperandTy::Inferred, a, b, "r".into())
             .expect("two i64s need no widening");
 
         assert_eq!(
-            result.ty(),
+            result.ty(&cursor),
             i64_ty,
             "arithmetic yields the operand type, not an i1",
         );
@@ -4772,7 +5398,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_ibinop(IBinOp::Add, OperandTy::Inferred, &f, &g, RegName::Unnamed),
+                cursor.build_ibinop(IBinOp::Add, OperandTy::Inferred, f, g, RegName::Unnamed),
                 Err(InstructionError::IBinOp(
                     IBinOpError::OperandTypeNotInteger(..)
                 ))
@@ -4785,7 +5411,7 @@ mod tests {
 
         assert!(
             matches!(
-                cursor.build_fbinop(FBinOp::FAdd, OperandTy::Inferred, &i, &j, RegName::Unnamed),
+                cursor.build_fbinop(FBinOp::FAdd, OperandTy::Inferred, i, j, RegName::Unnamed),
                 Err(InstructionError::FBinOp(FBinOpError::OperandTypeNotFloat(
                     ..
                 )))
@@ -4808,7 +5434,7 @@ mod tests {
             .build_fneg(v, "n".into())
             .expect("a double may be negated");
 
-        assert_eq!(result.ty(), f64_ty);
+        assert_eq!(result.ty(&cursor), f64_ty);
 
         let instr = builder
             .blocks
@@ -4867,7 +5493,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_ibinop(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_ibinop(op, OperandTy::Inferred, a, b, RegName::Unnamed)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );
@@ -4892,7 +5518,7 @@ mod tests {
 
             assert!(
                 cursor
-                    .build_fbinop(op, OperandTy::Inferred, &a, &b, RegName::Unnamed)
+                    .build_fbinop(op, OperandTy::Inferred, a, b, RegName::Unnamed)
                     .is_ok(),
                 "`{op}` is valid LLVM",
             );
@@ -4994,10 +5620,14 @@ mod tests {
         let v = cursor.const_value(7i8, OperandTy::Inferred).unwrap();
 
         let out = cursor
-            .build_cast(CastOp::Sext, &v, OperandTy::Inferred, i32_ty, "s".into())
+            .build_cast(CastOp::Sext, v, OperandTy::Inferred, i32_ty, "s".into())
             .expect("i8 sign-extends to i32");
 
-        assert_eq!(out.ty(), i32_ty, "the result has the destination type");
+        assert_eq!(
+            out.ty(&cursor),
+            i32_ty,
+            "the result has the destination type"
+        );
 
         let instr = cursor
             .blocks
@@ -5013,7 +5643,7 @@ mod tests {
 
         assert_eq!(operands.src_ty, i8_ty);
         assert_eq!(operands.dest_ty, i32_ty);
-        assert_eq!(operands.value.ty(), operands.src_ty, "the two agree");
+        assert_eq!(operands.value.ty(&cursor), operands.src_ty, "the two agree");
     }
 
     /// A disallowed pairing is an error naming both types, not a silent
@@ -5028,7 +5658,7 @@ mod tests {
         let v = cursor.const_value(1i32, OperandTy::Inferred).unwrap();
 
         let err = cursor
-            .build_cast(CastOp::Zext, &v, OperandTy::Inferred, i32_ty, "z".into())
+            .build_cast(CastOp::Zext, v, OperandTy::Inferred, i32_ty, "z".into())
             .expect_err("zext needs a wider destination");
 
         assert!(
@@ -5051,10 +5681,10 @@ mod tests {
         let mut cursor = cursor;
 
         // A register cannot be retyped — only a literal folds.
-        let reg = Value::from_register("r".to_string(), i32_ty, &mut cursor);
+        let reg = reg_val("r", i32_ty, &mut cursor);
 
         let err = cursor
-            .build_cast(CastOp::Sext, &reg, f64_ty.into(), i64_ty, "s".into())
+            .build_cast(CastOp::Sext, reg, f64_ty.into(), i64_ty, "s".into())
             .expect_err("an i32 register is not a double");
 
         assert!(
@@ -5086,7 +5716,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .build_switch(&x, OperandTy::Inferred, d, &[])
+            .build_switch(x, OperandTy::Inferred, d, &[])
             .expect("an empty case list is just a jump");
 
         assert!(
@@ -5098,7 +5728,7 @@ mod tests {
 
         assert!(
             matches!(
-                again.build_alloca(i32_ty, None, None, RegName::Unnamed),
+                again.build_alloca(i32_ty, None, RegName::Unnamed),
                 Err(InstructionError::BasicBlockAlreadyTerminated(_))
             ),
             "nothing may follow a terminator, whichever cursor asks"
@@ -5124,7 +5754,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_switch(&x, OperandTy::Inferred, d, &[])
+            .build_switch(x, OperandTy::Inferred, d, &[])
             .expect_err("a double cannot be switched on");
 
         assert!(
@@ -5162,7 +5792,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_switch(&x, OperandTy::Inferred, d, &[(narrow, a), (wide, b)])
+            .build_switch(x, OperandTy::Inferred, d, &[(narrow, a), (wide, b)])
             .expect_err("both cases fold to `i32 1`");
 
         assert!(
@@ -5192,7 +5822,7 @@ mod tests {
 
         let err = builder
             .cursor_at_block(entry)
-            .build_switch(&x, i8_ty.into(), d, &[(too_big, a)])
+            .build_switch(x, i8_ty.into(), d, &[(too_big, a)])
             .expect_err("300 does not fit an i8");
 
         assert!(
@@ -5216,14 +5846,18 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let out = cursor
-            .build_select(c, OperandTy::Inferred, &t, &f, "s".into())
+            .build_select(c, OperandTy::Inferred, t, f, "s".into())
             .expect("two i32 arms agree");
 
-        assert_eq!(out.ty(), i32_ty, "the result has the arms' type, not i1");
+        assert_eq!(
+            out.ty(&cursor),
+            i32_ty,
+            "the result has the arms' type, not i1"
+        );
     }
 
     /// Aggregates and pointers are fine — `llvm-as` assembles
@@ -5240,16 +5874,16 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         // A struct is a fine arm type.
-        let a = Value::from_register("a".to_string(), struct_ty, &mut cursor);
-        let b = Value::from_register("b".to_string(), struct_ty, &mut cursor);
+        let a = reg_val("a", struct_ty, &mut cursor);
+        let b = reg_val("b", struct_ty, &mut cursor);
 
         assert!(
             cursor
-                .build_select(c, OperandTy::Inferred, &a, &b, "s".into())
+                .build_select(c, OperandTy::Inferred, a, b, "s".into())
                 .is_ok(),
         );
 
@@ -5257,13 +5891,13 @@ mod tests {
         let c2 = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
-        let v1 = Value::from_register("v1".to_string(), void_ty, &mut cursor);
-        let v2 = Value::from_register("v2".to_string(), void_ty, &mut cursor);
+        let v1 = reg_val("v1", void_ty, &mut cursor);
+        let v2 = reg_val("v2", void_ty, &mut cursor);
 
         let err = cursor
-            .build_select(c2, OperandTy::Inferred, &v1, &v2, "v".into())
+            .build_select(c2, OperandTy::Inferred, v1, v2, "v".into())
             .expect_err("a select must yield something");
 
         assert!(
@@ -5287,16 +5921,16 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let i64_ty = cursor.i64_ty();
 
         let out = cursor
-            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
+            .build_select(c, OperandTy::Inferred, wide, narrow, "s".into())
             .expect("the narrower literal widens to meet the other arm");
 
-        assert_eq!(out.ty(), i64_ty);
+        assert_eq!(out.ty(&cursor), i64_ty);
 
         let instr = cursor
             .blocks
@@ -5310,7 +5944,7 @@ mod tests {
             panic!("not a select");
         };
 
-        let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.false_arm.kind() else {
+        let ValueKind::ConstExpr(ConstExpr::Const(id)) = operands.false_arm.kind(&cursor) else {
             panic!("the false arm is not a literal");
         };
 
@@ -5335,14 +5969,14 @@ mod tests {
         let c = cursor
             .const_value(true, OperandTy::Inferred)
             .unwrap()
-            .into_i1(&cursor)
+            .try_i1(&cursor)
             .unwrap();
 
         let out = cursor
-            .build_select(c, OperandTy::Inferred, &wide, &narrow, "s".into())
+            .build_select(c, OperandTy::Inferred, wide, narrow, "s".into())
             .expect("an f32 literal widens into an f64 select exactly");
 
-        assert_eq!(out.ty(), f64_ty);
+        assert_eq!(out.ty(&cursor), f64_ty);
     }
 
     /// `unreachable` is a terminator, so it closes its block — and the failure is
@@ -5396,13 +6030,13 @@ mod tests {
         let b = Value::from_const(2i64, OperandTy::Inferred, &mut cursor).unwrap();
 
         let result = cursor
-            .build_icmp(ICond::Sgt, OperandTy::Inferred, &a, &b, "cmp".into())
+            .build_icmp(ICond::Sgt, OperandTy::Inferred, a, b, "cmp".into())
             .unwrap();
 
-        assert!(result.ty.is_i1(&builder));
+        assert!(result.id().ty(&builder).is_i1(&builder));
 
-        let as_value: Value = result.into();
+        let as_value: ValueId = result.into();
 
-        assert!(matches!(as_value.kind(), ValueKind::Reg(_)));
+        assert!(matches!(as_value.kind(&builder), ValueKind::Reg(_)));
     }
 }

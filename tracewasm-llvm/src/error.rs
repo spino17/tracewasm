@@ -1,7 +1,7 @@
 //! What the builders return when they refuse to build something.
 //!
 //! The errors are layered so that each builder returns the narrowest type that can
-//! describe its failures — [`Cursor::build_alloca`](crate::instruction::cursor::Cursor)
+//! describe its failures — [`Cursor::build_alloca`](crate::instruction::cursor::Cursor::build_alloca)
 //! yields an [`InstructionError`], not a catch-all — and every layer converts upward
 //! through `#[from]`, so `?` composes without hand-written matches.
 //!
@@ -23,6 +23,7 @@
 //!     ├── SwitchError
 //!     ├── SelectError
 //!     ├── PhiError ── ContextError
+//!     ├── ExtractInsertValueError
 //!     └── ContextError
 //! ```
 //!
@@ -40,8 +41,11 @@ use tracewasm_utils::error::TracewasmUtilsError;
 
 /// Anything that can go wrong while building a module.
 ///
-/// The top of the hierarchy: every other error in this module converts into it, so a
-/// caller that does not care which layer failed can use this one type throughout.
+/// The top of the hierarchy. [`TypeError`], [`TracewasmUtilsError`] and
+/// [`InstructionError`] convert into it directly, and the per-instruction errors reach
+/// it through `InstructionError`; `#[from]` doesn't chain, so a
+/// [`ContextError`] or a per-instruction error needs converting to
+/// `InstructionError` first.
 #[derive(Error, Debug)]
 pub enum BuildError {
     /// A value could not be given the type it was asked for.
@@ -63,9 +67,10 @@ pub enum TypeError {
     /// A conditional branch takes an `i1`, and this value is not one.
     #[error("value of type `{0}` cannot be converted into i1 value")]
     ValueToI1ValueFailed(String),
-    /// A constant could not be folded into the requested type. Widths convert freely
-    /// among integers and among floats; crossing between them, or reaching a pointer,
-    /// needs a real instruction.
+    /// A constant could not be folded into the requested type. Integers convert
+    /// among widths when the value fits, `float` widens to `double`, and `double`
+    /// narrows to `float` only when exact; crossing between integers and floats, or
+    /// reaching a pointer, needs a real instruction.
     #[error("constant with type `{0}` failed to be casted as `{1}`")]
     ConstantCastToProvidedTypeFailed(String, String),
     /// An aggregate was given a member that has no size.
@@ -149,8 +154,8 @@ pub enum ContextError {
 /// An instruction could not be built.
 ///
 /// The variants here are the checks shared across instructions; the per-instruction
-/// ones live in [`AllocaError`], [`StoreError`], [`RetError`], [`GepError`] and
-/// [`PhiError`], each reachable through a `#[from]` arm.
+/// ones live in their own enums below ([`AllocaError`], [`CallError`], [`PhiError`]
+/// and so on), each reachable through a `#[from]` arm.
 #[derive(Error, Debug)]
 pub enum InstructionError {
     /// `load` and `store` address memory through a pointer, so the operand naming
@@ -178,10 +183,6 @@ pub enum InstructionError {
          pointer operand"
     )]
     LoadedTypeUnknown,
-    /// An explicit alignment must be a power of two. `0` is not one — leaving the
-    /// alignment off is how the ABI default is asked for.
-    #[error("alignment must be a power of two, but got `{0}`")]
-    AlignmentNotPowerOfTwo(u32),
     /// The block already ends in a terminator, so nothing may follow. Consuming the
     /// cursor prevents this for the cursor that branched; this catches a *second*
     /// cursor opened at the same block, which the type system cannot see.
@@ -229,6 +230,9 @@ pub enum InstructionError {
     /// A name could not be issued for the register the instruction defines.
     #[error("{0}")]
     Context(#[from] ContextError),
+    /// See [`ExtractInsertValueError`].
+    #[error("{0}")]
+    ExtractInsertValue(#[from] ExtractInsertValueError),
 }
 
 /// An `alloca` could not be built.
@@ -278,16 +282,24 @@ pub enum RetError {
 /// A `call` could not be built.
 #[derive(Error, Debug)]
 pub enum CallError {
-    /// No function of that name has been added to the module.
+    /// The callee's handle names a function this module does not have.
     ///
-    /// The table holds only what
-    /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-    /// [`declare_function`](crate::cfg::builder::Builder::declare_function) have
-    /// registered *so far*, so this also covers a **forward call** — one to a
-    /// function that will be added later — even though LLVM makes every function in
-    /// a module mutually visible. A host import is fine once declared.
+    /// Calls name their callee by handle, not by string, and a handle only exists
+    /// once its function is defined or declared, so this can only happen when the
+    /// handle came from a different [`Context`](crate::cfg::context::Context).
     #[error("no function named `{0}` has been added to this module")]
     FunctionNotFound(String),
+    /// An indirect call's callee ([`FuncRef::Pointer`](crate::cfg::global::FuncRef::Pointer))
+    /// isn't a pointer. Holds its type.
+    #[error("an indirect call's callee has type `{0}`, not `ptr`")]
+    IndirectCalleeNotPointer(String),
+    /// An indirect call's callee is a pointer but not a register: a constant such as
+    /// `null`, or a global. An indirect call goes through a register holding the
+    /// address; a global function is called directly, through its
+    /// [`Defined`](crate::cfg::global::FuncRef::Defined) or
+    /// [`Declared`](crate::cfg::global::FuncRef::Declared) handle.
+    #[error("an indirect call's callee must be a register holding a function's address")]
+    IndirectCalleeNotRegister,
     /// The callee takes a different number of arguments.
     #[error("`{name}` takes `{expected}` argument(s), but `{given}` were given")]
     ParamCountMismatch {
@@ -551,12 +563,15 @@ pub enum PhiError {
     /// The entry block has no predecessors, so a phi there selects on nothing.
     #[error("phi instructions cannot be added to the first basic block of the function")]
     PhiInstructionCannotBeAddedToEntryBasicBlock,
-    /// A phi names one value per predecessor, so the same predecessor cannot appear
-    /// twice.
-    #[error("basic block branch already in phi instruction")]
-    BasicBlockBranchAlreadyInPhiInstruction,
-    /// A phi with no incoming values selects nothing, and its type is whatever its
-    /// first branch says — so with none there is no type to give it either.
+    /// A predecessor was named twice with two different values.
+    ///
+    /// Naming it twice is itself fine — LLVM counts predecessors by edge, and a
+    /// `switch` with two cases selecting one block reaches it along two — but one
+    /// value arrives along an edge, so the entries have to agree.
+    #[error("a phi's entries for the same predecessor must all carry the same value")]
+    PhiBranchValueConflict,
+    /// No branches were given and no type was asserted, so there is nothing to type
+    /// the phi by. With an asserted type, a phi can start empty.
     #[error("a phi instruction needs at least one branch")]
     PhiInstructionWithNoBranches,
     /// A phi is typed once and every incoming value has to have that type — the
@@ -569,6 +584,43 @@ pub enum PhiError {
     /// A name could not be issued for the register the phi defines.
     #[error("{0}")]
     Context(#[from] ContextError),
+}
+
+/// An `extractvalue` or `insertvalue` could not be built: its indices don't lead
+/// anywhere inside the aggregate, or the inserted value doesn't fit where they lead.
+///
+/// Indices are plain `u32`s, as in LLVM, where they're literals rather than values —
+/// so a negative or non-integer index can't be written in the first place.
+#[derive(Error, Debug)]
+pub enum ExtractInsertValueError {
+    /// No indices. LLVM requires at least one: `extractvalue {i32} %x` doesn't parse.
+    #[error("an `extractvalue` or `insertvalue` needs at least one index")]
+    NoIndices,
+    /// The inserted value could not be folded into the type asserted for it. A
+    /// constant widens; a register has to match. Holds the value's type and the
+    /// asserted one.
+    #[error("a value of type `{0}` cannot be inserted as `{1}`")]
+    InsertedValueTypeMismatch(String, String),
+    /// The inserted value's type differs from the field or element the indices lead
+    /// to. Holds the value's type and the field's.
+    #[error("a value of type `{0}` cannot be inserted into a field of type `{1}`")]
+    InsertedValueDoesNotMatchField(String, String),
+    /// An index would descend into a type that isn't a struct or an array — the
+    /// operand's own type, or a field reached by the indices before it. Holds that
+    /// type.
+    #[error("a value of type `{0}` is not a struct or an array, so it can't be indexed into")]
+    NotAggregate(String),
+    /// An index is past the last field of a struct or the last element of an array.
+    /// `llvm-as` refuses it too, with "invalid indices for extractvalue".
+    #[error("index `{index}` is out of bounds for `{ty}`, which has {len} element(s)")]
+    IndexOutOfBounds {
+        /// The struct or array being indexed.
+        ty: String,
+        /// The index given.
+        index: u32,
+        /// How many fields or elements it has.
+        len: u64,
+    },
 }
 
 /// A `getelementptr` could not be built.
@@ -630,4 +682,20 @@ pub enum GepError {
     /// anything to descend into.
     #[error("a value of type `{0}` cannot be indexed into")]
     TypeNotIndexable(String),
+}
+
+/// A target triple or data layout string could not be parsed.
+///
+/// Returned by the `FromStr` impls of [`Triple`](crate::cfg::module::Triple) and
+/// [`DataLayout`](crate::cfg::module::DataLayout).
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum TargetParseError {
+    /// Fewer than three `-`-separated parts, or an empty one.
+    #[error("`{0}` is not a target triple: expected `arch-vendor-os[-env]`")]
+    Triple(String),
+    /// A data layout specification that is malformed, or of a kind this crate
+    /// doesn't model. It's refused rather than dropped, since dropping it would
+    /// describe a different machine.
+    #[error("`{0}` is not a data layout specification this crate models")]
+    DataLayoutSpec(String),
 }

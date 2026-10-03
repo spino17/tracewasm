@@ -6,10 +6,23 @@ use std::{
     marker::PhantomData,
 };
 
+/// A position in an [`Interner`], tagged with what it points at.
+///
+/// `T` is a marker only — never stored, never inspected. It is there so that an id
+/// from one pool cannot be used against another: two pools may both hand out `3`,
+/// and `InternedId<Ty, u32>` and `InternedId<Str, u32>` being distinct types is what
+/// keeps that from compiling.
+///
+/// `C` is the width, and therefore the cap. Choosing `u16` says a pool holds at most
+/// `u16::MAX` values — see [`Capacity`].
 #[derive(Debug)]
 pub struct InternedId<T, C>(C, PhantomData<T>);
 
 impl<T, C: Capacity> InternedId<T, C> {
+    /// The underlying position, for a caller that has to store or compare it as a
+    /// number — an instruction encoding it into a field, say. Going the other way is
+    /// deliberately not offered: a bare number carries no proof it came from the
+    /// right pool.
     pub fn raw(&self) -> C {
         self.0
     }
@@ -44,11 +57,21 @@ impl<T, C: Capacity> Clone for InternedId<T, C> {
 
 impl<T, C: Capacity> Copy for InternedId<T, C> {}
 
+/// How wide an [`InternedId`] is, and so how much a pool may hold.
+///
+/// Implemented for the unsigned integers. The width is a choice the *pool* makes:
+/// the register machine packs ids into instructions it keeps under 16 bytes, so a
+/// narrower id there is what keeps an instruction small — and the cap that comes
+/// with it is enforced by [`Interner::try_intern`] rather than discovered on
+/// overflow.
 pub trait Capacity: Clone + Copy + PartialEq + Eq + Hash {
+    /// The largest number of values a pool of this width may hold.
     fn val() -> u64;
 
+    /// Narrows a position to this width. Only called after the cap has been checked.
     fn from_usize(val: usize) -> Self;
 
+    /// Widens a position back, for indexing.
     fn to_usize(&self) -> usize;
 }
 
@@ -94,7 +117,16 @@ impl Capacity for u64 {
     }
 }
 
+/// A deduplicating pool: equal values are stored once and share an id.
+///
+/// Two equal values get the same [`InternedId`], which is what makes comparing them
+/// an integer comparison rather than a structural one — the reason types and
+/// constants are interned rather than held inline.
+///
+/// Insertion order is preserved, so [`into_values`](Self::into_values) hands back a
+/// vector an id indexes directly.
 pub struct Interner<T, C> {
+    /// Every distinct value, in the order first seen. An id is a position here.
     values: Vec<T>,
     reverse_map: FxHashMap<T, InternedId<T, C>>,
     phantom: PhantomData<C>,
@@ -111,6 +143,8 @@ impl<T, C> Default for Interner<T, C> {
 }
 
 impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
+    /// An empty pool. Same as [`Default`], for the call sites that read better
+    /// naming the type.
     pub fn new() -> Self {
         Interner {
             values: Vec::default(),
@@ -161,10 +195,15 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         self.try_intern(val).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// The value behind an id.
+    ///
+    /// Infallible by construction: the only source of an `InternedId<T, C>` is this
+    /// pool, and nothing is ever removed from it.
     pub fn value(&self, id: InternedId<T, C>) -> &T {
         &self.values[id.0.to_usize()]
     }
 
+    /// How many distinct values have been interned.
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -174,10 +213,15 @@ impl<T: Clone + PartialEq + Eq + Hash, C: Capacity> Interner<T, C> {
         self.values.is_empty()
     }
 
+    /// Consumes the pool, handing back its values in id order.
+    ///
+    /// For the point where the pool is done being filled and becomes a plain table —
+    /// a lowering pass finishing a body, say.
     pub fn into_values(self) -> Vec<T> {
         self.values
     }
 
+    /// The values in id order, without consuming the pool.
     pub fn values(&self) -> &[T] {
         &self.values
     }

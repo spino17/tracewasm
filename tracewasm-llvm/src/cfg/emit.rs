@@ -10,20 +10,21 @@ use crate::{
         walk::CfgVisitor,
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands, SwitchOperands,
-        UnconditionalBrOperands,
+        Access, AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands,
+        ExtractValueOperands, FBinOpOperands, FCmpOperands, FNegOperands, GetElementPtrOperands,
+        IBinOpOperands, ICmpOperands, InsertValueOperands, LoadOperands, PhiInstruction,
+        RetOperands, SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
-    value::{ConstExpr, ConstValue, FuncSignature, I1Value, Value, ValueKind},
+    value::{ConstExpr, ConstValue, FuncSignature, I1Value, ValueId, ValueKind},
 };
 use anyhow::bail;
 
 /// Renders a [`ControlFlowGraph`] as textual `.ll`.
 ///
 /// A [`CfgVisitor`] that appends to a string as it walks. The output is what
-/// `llvm-as` accepts: the crate's own test builds a module using every instruction
-/// and checks that `llvm-as` both parses **and** verifies it.
+/// `llvm-as` accepts: the crate's own test builds a module using every instruction and
+/// compares it against IR that was checked by hand with `llvm-as` ("parsed and
+/// verified"). The tests don't run `llvm-as` themselves.
 ///
 /// Nothing is validated here — a block without a terminator, or a phi missing an
 /// entry for a predecessor, is emitted as-is and reported by `llvm-as`.
@@ -39,8 +40,8 @@ impl IREmitter {
     ///
     /// If the graph contains something the emitter cannot spell. Currently that is
     /// only a constant expression other than
-    /// [`GetElementPtr`](crate::value::ConstExpr::GetElementPtr), since the others
-    /// carry no operands — refused rather than written as a placeholder `llvm-as`
+    /// [`GetElementPtr`](crate::value::ConstExpr::GetElementPtr) or
+    /// [`Const`](crate::value::ConstExpr::Const), since the others carry no operands — refused rather than written as a placeholder `llvm-as`
     /// could not parse.
     pub fn emit(cfg: ControlFlowGraph) -> Result<String, anyhow::Error> {
         let mut emitter = IREmitter {
@@ -83,25 +84,20 @@ impl IREmitter {
 
     /// A register's `%name`, the literal a constant is spelled as, or a constant
     /// expression written inline.
-    fn operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
-        Self::operand_kind(value.kind(), ctx)
+    fn operand(value: ValueId, ctx: &Context) -> Result<String, anyhow::Error> {
+        Self::operand_kind(value.kind(ctx), ctx)
     }
 
     /// [`operand`](Self::operand) for a bare [`ValueKind`].
     ///
-    /// Split out for [`I1Value`](crate::value::I1Value), which carries a kind without
-    /// a whole [`Value`] to hand over — so a branch condition renders through exactly
-    /// the same arms as every other operand rather than a parallel copy of them.
+    /// Split out for [`I1Value`], which narrows a [`ValueId`] rather than being
+    /// one — so a branch
+    /// condition renders through exactly the same arms as every other operand rather
+    /// than a parallel copy of them.
     fn operand_kind(kind: &ValueKind, ctx: &Context) -> Result<String, anyhow::Error> {
         match kind {
             ValueKind::Reg(reg) => Ok(format!("%{}", ctx.str_interner.value(reg.name.0))),
             ValueKind::ConstExpr(expr) => Self::const_expr(expr, ctx),
-            // A global is referred to by name, whatever it names — a variable, a
-            // defined function, a declaration. Its *value* is the address, which is
-            // why `Value::from_global` types it `ptr`.
-            ValueKind::Global(global) => {
-                Ok(format!("@{}", ctx.str_interner.value(global.name().0)))
-            }
         }
     }
 
@@ -117,7 +113,7 @@ impl IREmitter {
                 let mut indices = vec![];
 
                 for index in operands.indices.iter() {
-                    indices.push(Self::typed_operand(index, ctx)?);
+                    indices.push(Self::typed_operand(*index, ctx)?);
                 }
 
                 let indices = if indices.is_empty() {
@@ -130,13 +126,14 @@ impl IREmitter {
                     "getelementptr {}({}, {}{})",
                     if operands.inbounds { "inbounds " } else { "" },
                     ctx.display(operands.source_ty),
-                    Self::typed_operand(&operands.ptr, ctx)?,
+                    Self::typed_operand(operands.ptr, ctx)?,
                     indices
                 ))
             }
-            ConstExpr::Const(const_id) => {
-                Ok(Self::constant(ctx.const_interner.value(const_id.raw())))
-            }
+            ConstExpr::Const(const_id) => Ok(Self::constant(
+                ctx.const_interner.value(const_id.raw()),
+                ctx,
+            )),
             // These four carry no operands to render — `PtrToInt` and `IntToPtr` have
             // no fields at all, and `BitCast`/`Trunc` name only a target type with no
             // value to convert. Refusing is honest: a placeholder would put text into
@@ -146,10 +143,10 @@ impl IREmitter {
     }
 
     /// `<type> <operand>`, the form an operand takes almost everywhere in LLVM.
-    fn typed_operand(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
+    fn typed_operand(value: ValueId, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!(
             "{} {}",
-            ctx.display(value.ty()),
+            ctx.display(value.ty(ctx)),
             Self::operand(value, ctx)?
         ))
     }
@@ -161,7 +158,10 @@ impl IREmitter {
     /// type", while `double 0.1` is fine. The hex form is exact by construction, so it
     /// sidesteps the distinction — and for a `float` the digits are the f32 value
     /// widened to f64, which is the encoding LLVM reads back.
-    fn constant(value: &ConstValue) -> String {
+    ///
+    /// An array is written element by element, each with its type:
+    /// `[i32 1, i32 2]`, and `[]` when empty.
+    fn constant(value: &ConstValue, ctx: &Context) -> String {
         match value {
             ConstValue::I1(v) => {
                 if *v == 0 {
@@ -178,6 +178,26 @@ impl IREmitter {
                 format!("0x{:016X}", (v.into_inner() as f64).to_bits())
             }
             ConstValue::Double(v) => format!("0x{:016X}", v.into_inner().to_bits()),
+            ConstValue::Array {
+                element_ty, array, ..
+            } => {
+                let elements: Vec<String> = array
+                    .iter()
+                    .map(|element| {
+                        format!(
+                            "{} {}",
+                            ctx.display(*element_ty),
+                            Self::constant(element, ctx)
+                        )
+                    })
+                    .collect();
+
+                format!("[{}]", elements.join(", "))
+            }
+            // A global is referred to by name, whatever it names — a variable, a
+            // defined function, a declaration. Its *value* is the address, which is
+            // why it's typed `ptr`.
+            ConstValue::Global(global) => format!("@{}", ctx.str_interner.value(global.name().0)),
             ConstValue::NullPtr => "null".to_string(),
         }
     }
@@ -195,15 +215,16 @@ impl IREmitter {
     }
 
     /// The `%x = ` prefix for an instruction that defines a register.
-    fn assignment(value: &Value, ctx: &Context) -> Result<String, anyhow::Error> {
+    fn assignment(value: ValueId, ctx: &Context) -> Result<String, anyhow::Error> {
         Ok(format!("{} = ", Self::operand(value, ctx)?))
     }
 
-    /// `, align N`, or nothing when the ABI default is wanted.
-    fn alignment(align: Option<u32>) -> String {
-        match align {
-            Some(align) => format!(", align {align}"),
-            None => String::new(),
+    /// Nothing for an aligned access, which leaves LLVM to take the ABI alignment
+    /// from the data layout; `, align 1` for one that promises nothing.
+    fn access(access: Access) -> &'static str {
+        match access {
+            Access::Aligned => "",
+            Access::Unaligned => ", align 1",
         }
     }
 }
@@ -215,9 +236,8 @@ impl CfgVisitor for IREmitter {
     fn visit_cfg(&mut self, cfg: &ControlFlowGraph) -> Result<Self::OkType, Self::ErrType> {
         self.unset_indentation();
 
-        // An unset data layout is the empty string, and an empty
-        // `target datalayout = ""` line is not what "unset" means. A structured
-        // `Triple` is always present, so that guard is belt-and-braces.
+        // Whatever the `Target` left unset is the empty string, and an empty
+        // `target datalayout = ""` line is not what "unset" means: it gets no line.
         if !cfg.context.module.data_layout.is_empty() {
             self.push_line(&format!(
                 "target datalayout = \"{}\"",
@@ -320,7 +340,7 @@ impl CfgVisitor for IREmitter {
         let mut params = vec![];
 
         for param in &func.params {
-            params.push(Self::typed_operand(param, ctx)?);
+            params.push(Self::typed_operand(*param, ctx)?);
         }
 
         let name = ctx.str_interner.value(func.name.0);
@@ -360,14 +380,14 @@ impl CfgVisitor for IREmitter {
         for (block, value) in &instr.branches {
             branches.push(format!(
                 "[ {}, {} ]",
-                Self::operand(value, ctx)?,
+                Self::operand(*value, ctx)?,
                 Self::label(*block, ctx)
             ));
         }
 
         self.push_line(&format!(
             "{}phi {} {}",
-            Self::assignment(&instr.value, ctx)?,
+            Self::assignment(instr.value, ctx)?,
             ctx.display(instr.ref_ty),
             branches.join(", ")
         ));
@@ -380,12 +400,11 @@ impl CfgVisitor for IREmitter {
         operands: &RetOperands,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
-        // `ret void` carries no operand; every other result is `ret <ty> <val>`, and
-        // the type comes from the instruction rather than the value so a `void`
-        // return still spells its type.
+        // `ret <ty> <val>` takes the type from the value itself; only `ret void`,
+        // which has no value, spells the instruction's type.
         match &operands.value {
             Some(value) => {
-                self.push_line(&format!("ret {}", Self::typed_operand(value, ctx)?));
+                self.push_line(&format!("ret {}", Self::typed_operand(*value, ctx)?));
             }
             None => {
                 self.push_line(&format!("ret {}", ctx.display(operands.ty)));
@@ -412,7 +431,7 @@ impl CfgVisitor for IREmitter {
     ) -> Result<Self::OkType, Self::ErrType> {
         // The condition is an `I1Value`, so the `i1` is known without asking the pool
         // and only the operand itself has to be rendered.
-        let cond = Self::operand_kind(&operands.cond.kind, ctx)?;
+        let cond = Self::operand_kind(operands.cond.id().kind(ctx), ctx)?;
 
         self.push_line(&format!(
             "br i1 {}, label {}, label {}",
@@ -427,20 +446,19 @@ impl CfgVisitor for IREmitter {
     fn visit_alloca(
         &mut self,
         operands: &AllocaOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         let count = match &operands.count {
-            Some(count) => format!(", {}", Self::typed_operand(count, ctx)?),
+            Some(count) => format!(", {}", Self::typed_operand(*count, ctx)?),
             None => String::new(),
         };
 
         self.push_line(&format!(
-            "{}alloca {}{}{}",
+            "{}alloca {}{}",
             Self::assignment(value, ctx)?,
             ctx.display(operands.ty),
             count,
-            Self::alignment(operands.align)
         ));
 
         Ok(())
@@ -449,15 +467,15 @@ impl CfgVisitor for IREmitter {
     fn visit_load(
         &mut self,
         operands: &LoadOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         self.push_line(&format!(
             "{}load {}, {}{}",
             Self::assignment(value, ctx)?,
             ctx.display(operands.ty),
-            Self::typed_operand(&operands.ptr, ctx)?,
-            Self::alignment(operands.align)
+            Self::typed_operand(operands.ptr, ctx)?,
+            Self::access(operands.access)
         ));
 
         Ok(())
@@ -470,9 +488,9 @@ impl CfgVisitor for IREmitter {
     ) -> Result<Self::OkType, Self::ErrType> {
         self.push_line(&format!(
             "store {}, {}{}",
-            Self::typed_operand(&operands.value, ctx)?,
-            Self::typed_operand(&operands.ptr, ctx)?,
-            Self::alignment(operands.align)
+            Self::typed_operand(operands.value, ctx)?,
+            Self::typed_operand(operands.ptr, ctx)?,
+            Self::access(operands.access)
         ));
 
         Ok(())
@@ -481,13 +499,13 @@ impl CfgVisitor for IREmitter {
     fn visit_get_element_ptr(
         &mut self,
         operands: &GetElementPtrOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         let mut indices = vec![];
 
         for index in operands.indices.iter() {
-            indices.push(Self::typed_operand(index, ctx)?);
+            indices.push(Self::typed_operand(*index, ctx)?);
         }
 
         // Every index is a separate trailing operand, and an empty list is legal:
@@ -503,7 +521,7 @@ impl CfgVisitor for IREmitter {
             Self::assignment(value, ctx)?,
             if operands.inbounds { "inbounds " } else { "" },
             ctx.display(operands.source_ty),
-            Self::typed_operand(&operands.ptr, ctx)?,
+            Self::typed_operand(operands.ptr, ctx)?,
             indices
         ));
 
@@ -513,13 +531,13 @@ impl CfgVisitor for IREmitter {
     fn visit_call(
         &mut self,
         operands: &CallOperands,
-        value: Option<&Value>,
+        value: Option<ValueId>,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         let mut args = vec![];
 
         for param in &operands.params {
-            args.push(Self::typed_operand(param, ctx)?);
+            args.push(Self::typed_operand(*param, ctx)?);
         }
 
         // Only the return type is written, not the whole function type — the long
@@ -568,11 +586,11 @@ impl CfgVisitor for IREmitter {
         // for the same reason a branch condition does.
         self.push_line(&format!(
             "{} = icmp {} {} {}, {}",
-            Self::operand_kind(&value.kind, ctx)?,
+            Self::operand_kind(value.id().kind(ctx), ctx)?,
             operands.cond,
             ctx.display(operands.ty),
-            Self::operand(&operands.a, ctx)?,
-            Self::operand(&operands.b, ctx)?
+            Self::operand(operands.a, ctx)?,
+            Self::operand(operands.b, ctx)?
         ));
 
         Ok(())
@@ -581,7 +599,7 @@ impl CfgVisitor for IREmitter {
     fn visit_ibinop(
         &mut self,
         operands: &IBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // `<reg> = <op> <ty> <a>, <b>` — the type once, then two untyped operands, the
@@ -592,8 +610,8 @@ impl CfgVisitor for IREmitter {
             Self::assignment(value, ctx)?,
             operands.op,
             ctx.display(operands.ty),
-            Self::operand(&operands.a, ctx)?,
-            Self::operand(&operands.b, ctx)?
+            Self::operand(operands.a, ctx)?,
+            Self::operand(operands.b, ctx)?
         ));
 
         Ok(())
@@ -608,11 +626,11 @@ impl CfgVisitor for IREmitter {
         // Same shape as `icmp`: the type once, then two untyped operands.
         self.push_line(&format!(
             "{} = fcmp {} {} {}, {}",
-            Self::operand_kind(&value.kind, ctx)?,
+            Self::operand_kind(value.id().kind(ctx), ctx)?,
             operands.cond,
             ctx.display(operands.ty),
-            Self::operand(&operands.a, ctx)?,
-            Self::operand(&operands.b, ctx)?
+            Self::operand(operands.a, ctx)?,
+            Self::operand(operands.b, ctx)?
         ));
 
         Ok(())
@@ -621,7 +639,7 @@ impl CfgVisitor for IREmitter {
     fn visit_fbinop(
         &mut self,
         operands: &FBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         self.push_line(&format!(
@@ -629,8 +647,8 @@ impl CfgVisitor for IREmitter {
             Self::assignment(value, ctx)?,
             operands.op,
             ctx.display(operands.ty),
-            Self::operand(&operands.a, ctx)?,
-            Self::operand(&operands.b, ctx)?
+            Self::operand(operands.a, ctx)?,
+            Self::operand(operands.b, ctx)?
         ));
 
         Ok(())
@@ -639,7 +657,7 @@ impl CfgVisitor for IREmitter {
     fn visit_fneg(
         &mut self,
         operands: &FNegOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // One operand and no comma: `llvm-as` reads anything after one as metadata.
@@ -647,7 +665,7 @@ impl CfgVisitor for IREmitter {
             "{}fneg {} {}",
             Self::assignment(value, ctx)?,
             ctx.display(operands.ty),
-            Self::operand(&operands.value, ctx)?
+            Self::operand(operands.value, ctx)?
         ));
 
         Ok(())
@@ -656,7 +674,7 @@ impl CfgVisitor for IREmitter {
     fn visit_cast(
         &mut self,
         operands: &CastOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // `<reg> = <op> <src> <operand> to <dest>` — the source type is spelled out
@@ -666,7 +684,7 @@ impl CfgVisitor for IREmitter {
             Self::assignment(value, ctx)?,
             operands.op,
             ctx.display(operands.src_ty),
-            Self::operand(&operands.value, ctx)?,
+            Self::operand(operands.value, ctx)?,
             ctx.display(operands.dest_ty)
         ));
 
@@ -684,7 +702,7 @@ impl CfgVisitor for IREmitter {
         let mut out = format!(
             "switch {} {}, label {} [\n",
             ctx.display(operands.cond_ty),
-            Self::operand(&operands.cond_value, ctx)?,
+            Self::operand(operands.cond_value, ctx)?,
             Self::label(operands.default_label, ctx)
         );
 
@@ -692,7 +710,7 @@ impl CfgVisitor for IREmitter {
             out.push_str(&format!(
                 "        {} {}, label {}\n",
                 ctx.display(operands.cond_ty),
-                Self::constant(case),
+                Self::constant(case, ctx),
                 Self::label(*label, ctx)
             ));
         }
@@ -707,18 +725,66 @@ impl CfgVisitor for IREmitter {
     fn visit_select(
         &mut self,
         operands: &SelectOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType> {
         // The arm type is written before *each* arm, which is what LLVM reads.
         self.push_line(&format!(
             "{}select i1 {}, {} {}, {} {}",
             Self::assignment(value, ctx)?,
-            Self::operand_kind(&operands.cond.kind, ctx)?,
+            Self::operand_kind(operands.cond.id().kind(ctx), ctx)?,
             ctx.display(operands.arms_ty),
-            Self::operand(&operands.true_arm, ctx)?,
+            Self::operand(operands.true_arm, ctx)?,
             ctx.display(operands.arms_ty),
-            Self::operand(&operands.false_arm, ctx)?
+            Self::operand(operands.false_arm, ctx)?
+        ));
+
+        Ok(())
+    }
+
+    fn visit_extract_value(
+        &mut self,
+        operands: &ExtractValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // The typed operand spells the aggregate's type; the indices are bare
+        // literals, comma-separated after it.
+        let indices: String = operands
+            .indices
+            .iter()
+            .map(|index| format!(", {index}"))
+            .collect();
+
+        self.push_line(&format!(
+            "{}extractvalue {}{}",
+            Self::assignment(value, ctx)?,
+            Self::typed_operand(operands.val, ctx)?,
+            indices
+        ));
+
+        Ok(())
+    }
+
+    fn visit_insert_value(
+        &mut self,
+        operands: &InsertValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType> {
+        // Both operands are typed; the indices follow as bare literals.
+        let indices: String = operands
+            .indices
+            .iter()
+            .map(|index| format!(", {index}"))
+            .collect();
+
+        self.push_line(&format!(
+            "{}insertvalue {}, {}{}",
+            Self::assignment(value, ctx)?,
+            Self::typed_operand(operands.agg_val, ctx)?,
+            Self::typed_operand(operands.val, ctx)?,
+            indices
         ));
 
         Ok(())
@@ -748,7 +814,7 @@ impl CfgVisitor for IREmitter {
 mod tests {
     use super::*;
     use crate::{
-        cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Triple},
+        cfg::module::{DataLayout, DataLayoutSpec, Endianness, Mangling, Target, Triple},
         error::ContextError,
         instruction::{
             CastOp, FBinOp, FCond, GetElementPtrOperands, IBinOp, ICond,
@@ -756,7 +822,7 @@ mod tests {
         },
         interner::TyId,
         test_support::fixture,
-        value::{ConstExpr, FuncSignature, NullPtr, Type},
+        value::{ConstExpr, FuncSignature, NullPtr, Type, Value},
     };
 
     /// Every instruction the builder can produce, in one module, compared against the
@@ -806,12 +872,11 @@ mod tests {
 
         let passed = helper
             .nth_param(0, &builder)
-            .expect("helper takes one parameter")
-            .clone();
+            .expect("helper takes one parameter");
 
         builder
             .cursor_at_block(helper_entry)
-            .build_ret(Some(&passed), i32_ty.into())
+            .build_ret(Some(passed), i32_ty.into())
             .unwrap();
 
         let noop = builder
@@ -843,9 +908,7 @@ mod tests {
 
         let mut in_entry = builder.cursor_at_block(entry);
 
-        let slot = in_entry
-            .build_alloca(struct_ty, None, Some(8), "s".into())
-            .unwrap();
+        let slot = in_entry.build_alloca(struct_ty, None, "s".into()).unwrap();
 
         let count = in_entry.const_value(4i32, OperandTy::Inferred).unwrap();
         let zero = in_entry.const_value(0i32, OperandTy::Inferred).unwrap();
@@ -853,17 +916,12 @@ mod tests {
         let two = in_entry.const_value(2i32, OperandTy::Inferred).unwrap();
 
         in_entry
-            .build_alloca(
-                i64_ty,
-                Some((&count, OperandTy::Inferred)),
-                None,
-                RegName::Unnamed,
-            )
+            .build_alloca(i64_ty, Some((count, OperandTy::Inferred)), RegName::Unnamed)
             .unwrap();
 
         let elem = in_entry
             .build_get_element_ptr(
-                &slot,
+                slot,
                 OperandTy::Inferred,
                 &[zero, one, two],
                 Some(true),
@@ -872,45 +930,42 @@ mod tests {
             .unwrap();
 
         let loaded = in_entry
-            .build_load(&elem, f64_ty.into(), Some(8), "d".into())
+            .build_load(elem, f64_ty.into(), Access::Aligned, "d".into())
             .unwrap();
 
+        // Stored back unaligned, so both spellings of an access are pinned.
         in_entry
-            .build_store(&elem, &loaded, OperandTy::Inferred, Some(8))
+            .build_store(elem, loaded, OperandTy::Inferred, Access::Unaligned)
             .unwrap();
 
         // `0.1f32` is the case that forces the hex encoding: `float 0.1` is refused by
         // `llvm-as` with "floating point constant invalid for type".
         let a_float = in_entry.const_value(0.1f32, OperandTy::Inferred).unwrap();
 
-        let float_slot = in_entry
-            .build_alloca(f32_ty, None, None, "fs".into())
-            .unwrap();
+        let float_slot = in_entry.build_alloca(f32_ty, None, "fs".into()).unwrap();
 
         in_entry
-            .build_store(&float_slot, &a_float, OperandTy::Inferred, None)
+            .build_store(float_slot, a_float, OperandTy::Inferred, Access::Aligned)
             .unwrap();
 
         let null = in_entry.const_value(NullPtr, OperandTy::Inferred).unwrap();
 
-        let ptr_slot = in_entry
-            .build_alloca(ptr_ty, None, None, "np".into())
-            .unwrap();
+        let ptr_slot = in_entry.build_alloca(ptr_ty, None, "np".into()).unwrap();
 
         in_entry
-            .build_store(&ptr_slot, &null, OperandTy::Inferred, None)
+            .build_store(ptr_slot, null, OperandTy::Inferred, Access::Aligned)
             .unwrap();
         in_entry.build_unconditional_br(body).unwrap();
 
         let mut in_body = builder.cursor_at_block(body);
 
-        let (phi_handler, phi) = in_body.build_phi(&[(entry, loaded)], "m".into()).unwrap();
+        let (phi_handler, phi) = in_body
+            .build_phi(&[(entry, loaded)], OperandTy::Inferred, "m".into())
+            .unwrap();
 
         // `body` reaches itself, so that edge needs its own incoming value — LLVM
         // requires one phi entry per predecessor.
-        phi_handler
-            .add_branch((body, phi.clone()), &mut in_body)
-            .unwrap();
+        phi_handler.add_branch((body, phi), &mut in_body).unwrap();
 
         // The branch condition comes from a real comparison rather than a literal, so
         // the `icmp` line and the `i1` it feeds are both covered here.
@@ -918,15 +973,14 @@ mod tests {
 
         let counter = f
             .nth_param(0, &in_body)
-            .expect("main takes an i32 first parameter")
-            .clone();
+            .expect("main takes an i32 first parameter");
 
         let cond = in_body
             .build_icmp(
                 ICond::Ult,
                 OperandTy::Inferred,
-                &counter,
-                &limit,
+                counter,
+                limit,
                 "cmp".into(),
             )
             .unwrap();
@@ -935,8 +989,8 @@ mod tests {
             .build_icmp(
                 ICond::Ult,
                 OperandTy::Inferred,
-                &counter,
-                &limit,
+                counter,
+                limit,
                 "cmp2".into(),
             )
             .unwrap();
@@ -947,7 +1001,7 @@ mod tests {
         let half = in_body.const_value(0.5f64, OperandTy::Inferred).unwrap();
 
         in_body
-            .build_fcmp(FCond::Ord, OperandTy::Inferred, &phi, &half, "fcmp".into())
+            .build_fcmp(FCond::Ord, OperandTy::Inferred, phi, half, "fcmp".into())
             .unwrap();
 
         // One of each binary-op shape, so all three emitters are assembled: an
@@ -958,8 +1012,8 @@ mod tests {
             .build_ibinop(
                 IBinOp::Add,
                 OperandTy::Inferred,
-                &counter,
-                &step,
+                counter,
+                step,
                 "next".into(),
             )
             .unwrap();
@@ -968,8 +1022,8 @@ mod tests {
             .build_fbinop(
                 FBinOp::FMul,
                 OperandTy::Inferred,
-                &phi,
-                &half,
+                phi,
+                half,
                 "scaled".into(),
             )
             .unwrap();
@@ -982,13 +1036,7 @@ mod tests {
         let one_i32 = in_body.const_value(1i32, OperandTy::Inferred).unwrap();
 
         in_body
-            .build_select(
-                cond2,
-                OperandTy::Inferred,
-                &one_i32,
-                &zero_i32,
-                "pick".into(),
-            )
+            .build_select(cond2, OperandTy::Inferred, one_i32, zero_i32, "pick".into())
             .unwrap();
 
         // A conversion, so `visit_cast` is assembled too. `sitofp` crosses the two
@@ -996,7 +1044,7 @@ mod tests {
         let widened = in_body
             .build_cast(
                 CastOp::Sitofp,
-                &counter,
+                counter,
                 OperandTy::Inferred,
                 f64_ty,
                 "wide".into(),
@@ -1006,7 +1054,7 @@ mod tests {
         in_body
             .build_cast(
                 CastOp::Fptrunc,
-                &widened,
+                widened,
                 OperandTy::Inferred,
                 f32_ty,
                 "narrow".into(),
@@ -1023,7 +1071,7 @@ mod tests {
         let answer = in_exit
             .build_call(
                 helper.into(),
-                &[(&seven, OperandTy::Inferred)],
+                &[(seven, OperandTy::Inferred)],
                 i32_ty.into(),
                 "c".into(),
             )
@@ -1034,7 +1082,7 @@ mod tests {
             "a void call defines nothing"
         );
 
-        in_exit.build_ret(Some(&answer), i32_ty.into()).unwrap();
+        in_exit.build_ret(Some(answer), i32_ty.into()).unwrap();
 
         let ir = IREmitter::emit(builder.build()).unwrap();
 
@@ -1053,11 +1101,11 @@ mod tests {
             "\n",
             "define i32 @main(i32 %n, ptr %0) {\n",
             "entry:\n",
-            "    %s = alloca { i32, [4 x double] }, align 8\n",
+            "    %s = alloca { i32, [4 x double] }\n",
             "    %1 = alloca i64, i32 4\n",
             "    %e = getelementptr inbounds { i32, [4 x double] }, ptr %s, i32 0, i32 1, i32 2\n",
-            "    %d = load double, ptr %e, align 8\n",
-            "    store double %d, ptr %e, align 8\n",
+            "    %d = load double, ptr %e\n",
+            "    store double %d, ptr %e, align 1\n",
             "    %fs = alloca float\n",
             "    store float 0x3FB99999A0000000, ptr %fs\n",
             "    %np = alloca ptr\n",
@@ -1112,7 +1160,7 @@ mod tests {
 
         builder
             .cursor_at_block(entry)
-            .build_switch(&x, OperandTy::Inferred, d, &[(one, a), (two, b)])
+            .build_switch(x, OperandTy::Inferred, d, &[(one, a), (two, b)])
             .unwrap();
 
         for block in [d, a, b] {
@@ -1218,7 +1266,7 @@ mod tests {
         let result = cursor
             .build_call(
                 host_add.into(),
-                &[(&seven, OperandTy::Inferred), (&half, OperandTy::Inferred)],
+                &[(seven, OperandTy::Inferred), (half, OperandTy::Inferred)],
                 OperandTy::Inferred,
                 "r".into(),
             )
@@ -1226,7 +1274,7 @@ mod tests {
 
         cursor.build_void_call(host_noop.into(), &[]).unwrap();
 
-        cursor.build_ret(Some(&result), i32_ty.into()).unwrap();
+        cursor.build_ret(Some(result), i32_ty.into()).unwrap();
 
         let ir = IREmitter::emit(builder.build()).unwrap();
 
@@ -1287,7 +1335,7 @@ mod tests {
         let i32_ty = builder.i32_ty();
         let ptr_ty = builder.ptr_ty();
 
-        // A constant gep is the one initializer `ConstExpr` can express today.
+        // A constant gep: an initializer that is a constant expression, not a literal.
         let null = Value::from_const(NullPtr, OperandTy::Inferred, &mut builder).unwrap();
         let zero = Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap();
 
@@ -1338,19 +1386,27 @@ mod tests {
             .unwrap();
         let mut cursor = builder.cursor_at_block(entry);
 
-        let address = Value::from_global(counter, &mut cursor);
+        let address = cursor.global_value(counter);
 
-        assert_eq!(address.ty(), ptr_ty, "a global's value is its address");
+        assert_eq!(
+            address.ty(&cursor),
+            ptr_ty,
+            "a global's value is its address"
+        );
 
         // Its pointee is recoverable, so the load needs no explicit type.
         let loaded = cursor
-            .build_load(&address, OperandTy::Inferred, None, "v".into())
+            .build_load(address, OperandTy::Inferred, Access::Aligned, "v".into())
             .expect("the global says what it points at");
 
-        assert_eq!(loaded.ty(), i32_ty, "inferred from the global's type");
+        assert_eq!(
+            loaded.ty(&cursor),
+            i32_ty,
+            "inferred from the global's type"
+        );
 
         cursor
-            .build_store(&address, &loaded, OperandTy::Inferred, None)
+            .build_store(address, loaded, OperandTy::Inferred, Access::Aligned)
             .unwrap();
 
         cursor.build_ret(None, void_ty.into()).unwrap();
@@ -1431,7 +1487,7 @@ mod tests {
 
         let seven = Value::from_const(7i32, OperandTy::Inferred, &mut builder).unwrap();
 
-        let ValueKind::ConstExpr(init) = seven.kind() else {
+        let ValueKind::ConstExpr(init) = seven.kind(&builder).clone() else {
             panic!("a constant is a constant expression")
         };
 
@@ -1452,6 +1508,153 @@ mod tests {
         );
     }
 
+    /// A global's address is a constant, so it can sit in an array literal: an
+    /// initializer of `[N x ptr]`, each element written `ptr @name`. The same global
+    /// taken twice is one pool entry.
+    #[test]
+    fn an_array_of_global_addresses_is_a_constant_initializer() {
+        let mut builder = fixture();
+
+        let seven = Value::from_const(7i32, OperandTy::Inferred, &mut builder).unwrap();
+        let ValueKind::ConstExpr(seven) = seven.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+        let a = builder
+            .declare_global_variable("a".to_string(), None, Some(seven.clone()))
+            .unwrap();
+        let c = builder
+            .declare_global_variable("c".to_string(), None, Some(seven))
+            .unwrap();
+
+        let first = builder.global_value(a);
+        let again = builder.global_value(a);
+
+        assert!(
+            matches!(
+                (first.kind(&builder), again.kind(&builder)),
+                (ValueKind::ConstExpr(ConstExpr::Const(x)), ValueKind::ConstExpr(ConstExpr::Const(y)))
+                    if x == y
+            ),
+            "one global is one pool entry"
+        );
+
+        let table = Value::from_const([a, c, a], OperandTy::Inferred, &mut builder).unwrap();
+        let ValueKind::ConstExpr(table) = table.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+
+        builder
+            .declare_global_variable("table".to_string(), None, Some(table))
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(
+            ir.contains("@table = global [3 x ptr] [ptr @a, ptr @c, ptr @a]\n"),
+            "{ir}"
+        );
+    }
+
+    /// Globals of different kinds mix in one array through the tag-erased `Global`:
+    /// a variable, a defined function and a declared one are all a `ptr @name`.
+    /// `From` erases the tag, and naming the variant does the same.
+    #[test]
+    fn an_array_can_mix_kinds_of_global() {
+        let mut builder = fixture();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
+
+        let a = builder
+            .declare_global_variable("a".to_string(), Some(i32_ty), None)
+            .unwrap();
+        let f = builder
+            .define_function("f".to_string(), &[], void_ty)
+            .unwrap();
+        let d = builder
+            .declare_function("d".to_string(), &[], void_ty)
+            .unwrap();
+
+        let entry = f
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        builder
+            .cursor_at_block(entry)
+            .build_ret(None, void_ty.into())
+            .unwrap();
+
+        use crate::cfg::global::Global;
+
+        let table = Value::from_const(
+            [Global::from(a), f.into(), Global::DeclaredFunc(d)],
+            OperandTy::Inferred,
+            &mut builder,
+        )
+        .unwrap();
+
+        assert_eq!(builder.display(table.ty(&builder)).to_string(), "[3 x ptr]");
+
+        let ValueKind::ConstExpr(table) = table.kind(&builder).clone() else {
+            panic!("a constant is a constant expression")
+        };
+
+        builder
+            .declare_global_variable("table".to_string(), None, Some(table))
+            .unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(
+            ir.contains("@table = global [3 x ptr] [ptr @a, ptr @f, ptr @d]\n"),
+            "{ir}"
+        );
+    }
+
+    /// An array literal initializer is written element by element, each with its
+    /// type — including an empty array and a nested one.
+    #[test]
+    fn array_literals_are_emitted_element_by_element() {
+        let mut builder = fixture();
+
+        for (name, value) in [
+            (
+                "a",
+                Value::from_const([1i32, -2, 3], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "e",
+                Value::from_const([0i32; 0], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "n",
+                Value::from_const([[1i8, 2], [3, 4]], OperandTy::Inferred, &mut builder),
+            ),
+            (
+                "f",
+                Value::from_const([1.5f32, 0.1], OperandTy::Inferred, &mut builder),
+            ),
+        ] {
+            let ValueKind::ConstExpr(init) = value.unwrap().kind(&builder).clone() else {
+                panic!("a constant is a constant expression")
+            };
+
+            builder
+                .declare_global_variable(name.to_string(), None, Some(init))
+                .unwrap();
+        }
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        for line in [
+            "@a = global [3 x i32] [i32 1, i32 -2, i32 3]\n",
+            "@e = global [0 x i32] []\n",
+            "@n = global [2 x [2 x i8]] [[2 x i8] [i8 1, i8 2], [2 x i8] [i8 3, i8 4]]\n",
+            "@f = global [2 x float] [float 0x3FF8000000000000, float 0x3FB99999A0000000]\n",
+        ] {
+            assert!(ir.contains(line), "missing {line:?} in:\n{ir}");
+        }
+    }
+
     /// Given both, they have to agree — and **exactly**. `llvm-as` refuses
     /// `@g = global i32 true` with "constant expression type mismatch" even though an
     /// `i1` is an integer, and `@g = global double 0` with "integer constant must
@@ -1463,15 +1666,16 @@ mod tests {
         let i32_ty = builder.i32_ty();
         let f64_ty = builder.f64_ty();
 
-        let const_of = |v: &Value| {
-            let ValueKind::ConstExpr(expr) = v.kind() else {
+        let const_of = |v: ValueId, ctx: &Context| {
+            let ValueKind::ConstExpr(expr) = v.kind(ctx) else {
                 panic!("a constant is a constant expression")
             };
 
             expr.clone()
         };
 
-        let a_bool = const_of(&Value::from_const(true, OperandTy::Inferred, &mut builder).unwrap());
+        let a_bool = Value::from_const(true, OperandTy::Inferred, &mut builder).unwrap();
+        let a_bool = const_of(a_bool, &builder);
 
         let err = builder
             .declare_global_variable("a".to_string(), Some(i32_ty), Some(a_bool))
@@ -1487,7 +1691,8 @@ mod tests {
         );
 
         // An integer does not initialise a float either, in either direction.
-        let an_int = const_of(&Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap());
+        let an_int = Value::from_const(0i32, OperandTy::Inferred, &mut builder).unwrap();
+        let an_int = const_of(an_int, &builder);
 
         assert!(
             matches!(
@@ -1498,7 +1703,8 @@ mod tests {
         );
 
         // The matching case still goes through.
-        let an_i32 = const_of(&Value::from_const(1i32, OperandTy::Inferred, &mut builder).unwrap());
+        let an_i32 = Value::from_const(1i32, OperandTy::Inferred, &mut builder).unwrap();
+        let an_i32 = const_of(an_i32, &builder);
 
         assert!(
             builder
@@ -1636,15 +1842,15 @@ mod tests {
         );
 
         assert_eq!(
-            const_gep.ty(),
+            const_gep.ty(&cursor),
             ptr_ty,
             "a constant gep is a pointer, like the instruction"
         );
 
-        let slot = cursor.build_alloca(ptr_ty, None, None, "s".into()).unwrap();
+        let slot = cursor.build_alloca(ptr_ty, None, "s".into()).unwrap();
 
         cursor
-            .build_store(&slot, &const_gep, OperandTy::Inferred, None)
+            .build_store(slot, const_gep, OperandTy::Inferred, Access::Aligned)
             .expect("a constant expression is a valid store value");
 
         cursor.build_ret(None, void_ty.into()).unwrap();
@@ -1711,13 +1917,15 @@ mod tests {
     /// number.
     #[test]
     fn a_float_constant_is_encoded_as_its_widened_bits() {
+        let ctx = crate::test_support::ctx();
+
         assert_eq!(
-            IREmitter::constant(&ConstValue::Float(0.1f32.into())),
+            IREmitter::constant(&ConstValue::Float(0.1f32.into()), &ctx),
             "0x3FB99999A0000000"
         );
 
         assert_eq!(
-            IREmitter::constant(&ConstValue::Double(0.1f64.into())),
+            IREmitter::constant(&ConstValue::Double(0.1f64.into()), &ctx),
             "0x3FB999999999999A",
             "the same decimal is a different constant at double width"
         );
@@ -1725,30 +1933,29 @@ mod tests {
         // The one place the two agree, so a test that only used `1.0` would not tell
         // the encodings apart.
         assert_eq!(
-            IREmitter::constant(&ConstValue::Float(1.0f32.into())),
-            IREmitter::constant(&ConstValue::Double(1.0f64.into()))
+            IREmitter::constant(&ConstValue::Float(1.0f32.into()), &ctx),
+            IREmitter::constant(&ConstValue::Double(1.0f64.into()), &ctx)
         );
     }
 
     /// `i1` renders as `true`/`false`, and a null pointer as `null`.
     #[test]
     fn scalar_constants_render_as_llvm_spells_them() {
-        assert_eq!(IREmitter::constant(&ConstValue::I1(1)), "true");
-        assert_eq!(IREmitter::constant(&ConstValue::I1(0)), "false");
-        assert_eq!(IREmitter::constant(&ConstValue::I32(-7)), "-7");
+        let ctx = crate::test_support::ctx();
+
+        assert_eq!(IREmitter::constant(&ConstValue::I1(1), &ctx), "true");
+        assert_eq!(IREmitter::constant(&ConstValue::I1(0), &ctx), "false");
+        assert_eq!(IREmitter::constant(&ConstValue::I32(-7), &ctx), "-7");
         assert_eq!(
-            IREmitter::constant(&ConstValue::I64(1 << 40)),
+            IREmitter::constant(&ConstValue::I64(1 << 40), &ctx),
             "1099511627776"
         );
-        assert_eq!(IREmitter::constant(&ConstValue::NullPtr), "null");
+        assert_eq!(IREmitter::constant(&ConstValue::NullPtr, &ctx), "null");
     }
 
     /// An unset data layout is omitted rather than written as an empty string —
-    /// `target datalayout = ""` is not what "unset" means.
-    ///
-    /// Note that a [`Triple`](crate::cfg::module::Triple) is always present now that
-    /// it is structured, so a module with no functions still emits its `target
-    /// triple` line and the blank separator after it.
+    /// `target datalayout = ""` is not what "unset" means. A [`Target::Triple`] still
+    /// emits its `target triple` line, and the blank separator after it.
     #[test]
     fn an_unset_data_layout_emits_no_datalayout_line() {
         let ctx = crate::test_support::ctx();
@@ -1765,22 +1972,31 @@ mod tests {
         );
     }
 
+    /// With [`Target::Unspecified`] there is nothing to write: no `target` lines, and
+    /// no blank separator either.
+    #[test]
+    fn an_unspecified_target_emits_no_target_lines() {
+        let ir = IREmitter::emit(Context::new(Target::Unspecified).builder().build()).unwrap();
+
+        assert_eq!(ir, "");
+    }
+
     /// And a layout that *is* set gets its own line, ahead of the triple.
     #[test]
     fn a_set_data_layout_is_emitted_before_the_triple() {
-        let ctx = Context::new(
-            Triple::new(
+        let ctx = Context::new(Target::Full {
+            triple: Triple::new(
                 "arm64".to_string(),
                 "apple".to_string(),
                 "macosx".to_string(),
                 None,
             ),
-            DataLayout::new(vec![
+            data_layout: DataLayout::new(vec![
                 DataLayoutSpec::Endianness(Endianness::Little),
                 DataLayoutSpec::Mangling(Mangling::MachO),
                 DataLayoutSpec::StackAlignment(128),
             ]),
-        );
+        });
 
         let ir = IREmitter::emit(ctx.builder().build()).unwrap();
 
@@ -1792,5 +2008,49 @@ mod tests {
                 "\n",
             )
         );
+    }
+
+    /// An indirect call spells its callee as the register, `%fp`, with the result
+    /// type from the signature it carries.
+    #[test]
+    fn an_indirect_call_is_emitted_through_its_register() {
+        let mut builder = fixture();
+
+        let i32_ty = builder.i32_ty();
+        let ptr_ty = builder.ptr_ty();
+
+        let caller = builder
+            .define_function(
+                "caller".to_string(),
+                &[(ptr_ty, "fp".into()), (i32_ty, "n".into())],
+                i32_ty,
+            )
+            .unwrap();
+        let entry = caller
+            .add_basic_block("entry".to_string(), &mut builder)
+            .unwrap();
+
+        let fp = caller.params(&builder)[0];
+        let n = caller.params(&builder)[1];
+        let callee = crate::cfg::global::FuncRef::Pointer {
+            ptr: fp,
+            sig: FuncSignature::new(&[i32_ty], i32_ty),
+        };
+
+        let mut cursor = builder.cursor_at_block(entry);
+        let r = cursor
+            .build_call(
+                callee,
+                &[(n, OperandTy::Inferred)],
+                OperandTy::Inferred,
+                "r".into(),
+            )
+            .unwrap();
+
+        cursor.build_ret(Some(r), OperandTy::Inferred).unwrap();
+
+        let ir = IREmitter::emit(builder.build()).unwrap();
+
+        assert!(ir.contains("%r = call i32 %fp(i32 %n)"), "{ir}");
     }
 }

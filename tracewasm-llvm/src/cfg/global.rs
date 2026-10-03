@@ -2,7 +2,7 @@ use crate::{
     cfg::{context::Context, function::FuncId},
     error::CallError,
     interner::{StrId, TyId},
-    value::{ConstExpr, FuncSignature, Type, Value, ValueKind},
+    value::{ConstExpr, FuncSignature, Type, ValueId, ValueKind},
 };
 use std::{fmt::Display, hash::Hash};
 
@@ -42,7 +42,12 @@ pub enum Linkage {
 }
 
 impl Linkage {
+    // Neither predicate has a caller yet. They are the two linkage rules `llvm-as`
+    // enforces, written down here ready for `declare_global_variable` to check —
+    // until it does, this crate is *looser* than LLVM on both, which its own docs
+    // call a bug rather than a choice.
     /// Whether this linkage means "defined elsewhere", so no initializer is allowed.
+    #[allow(dead_code, reason = "no caller yet — see the note above")]
     pub(crate) fn is_declaration(&self) -> bool {
         matches!(self, Linkage::External | Linkage::ExternWeak)
     }
@@ -52,6 +57,7 @@ impl Linkage {
     /// LLVM requires a local symbol to have default visibility — `llvm-as` refuses
     /// `@g = internal hidden global i32 0` with "symbol with local linkage must have
     /// default visibility".
+    #[allow(dead_code, reason = "no caller yet — see the note above")]
     pub(crate) fn is_local(&self) -> bool {
         matches!(self, Linkage::Internal | Linkage::Private)
     }
@@ -161,9 +167,9 @@ impl GlobalEntity for GlobalVar {
 
 /// Anything a module names with an `@`, with its tag erased.
 ///
-/// This is what a [`Value`](crate::value::Value) holds once a global is used as an
-/// operand — by then the distinction no longer matters, since all three are addresses
-/// and all three render as `@name`.
+/// This is what a [`ConstValue::Global`](crate::value::ConstValue::Global) holds once a
+/// global is used as an operand — by then the distinction no longer matters, since all
+/// three are addresses and all three render as `@name`.
 #[derive(Debug, Clone, Copy)]
 pub enum Global {
     /// A global variable.
@@ -194,6 +200,12 @@ impl Global {
 pub struct GlobalId<T: GlobalEntity> {
     pub(crate) name: StrId,
     pub(crate) tag: T,
+}
+
+impl<T: GlobalEntity> From<GlobalId<T>> for Global {
+    fn from(value: GlobalId<T>) -> Self {
+        T::to_global(value)
+    }
 }
 
 /// A global variable's own data: what it holds, and what it starts as.
@@ -245,17 +257,18 @@ impl GlobalData {
 
 /// A callable function, however the module came by it.
 ///
-/// A call names its callee with one of these rather than with a string, and the only
-/// sources of one are
+/// A call names its callee with one of these rather than with a string. For a direct
+/// call the only sources are
 /// [`define_function`](crate::cfg::builder::Builder::define_function) and
-/// [`declare_function`](crate::cfg::builder::Builder::declare_function). So a call to
-/// a function the module does not have cannot be written — there is no handle to pass
-/// — and the signature behind it is guaranteed to be on record.
+/// [`declare_function`](crate::cfg::builder::Builder::declare_function), so a direct
+/// call to a function the module does not have cannot be written — there is no handle
+/// to pass — and the signature behind it is guaranteed to be on record. An indirect
+/// call ([`Pointer`](Self::Pointer)) carries its own signature instead.
 ///
-/// The two are separate at every other point in the API, because only a definition has
-/// blocks to add. They come together here because a call does not care: it needs a
-/// name and a signature, and both kinds have those. `From` is implemented for each, so
-/// a call site can write `f.into()`.
+/// Definitions and declarations are separate at every other point in the API, because
+/// only a definition has blocks to add. They come together here because a call does not
+/// care: it needs a name and a signature, and both kinds have those. `From` is
+/// implemented for each, so a call site can write `f.into()`.
 #[derive(Clone)]
 pub enum FuncRef {
     /// A function this module defines.
@@ -263,13 +276,36 @@ pub enum FuncRef {
     /// A function this module declares but does not define — a host import, or
     /// anything else resolved at link time.
     Declared(GlobalId<DeclaredFunc>),
+    /// An indirect call through a register holding a function's address, emitted as
+    /// `call <ret> %name(...)`.
+    ///
+    /// Nothing ties the pointer to a function, so the signature is taken on trust
+    /// rather than looked up.
     Pointer {
-        ptr: Value,
+        /// The callee's address. Must be a `ptr`-typed register; anything else is
+        /// refused by [`name_and_sig`](FuncRef::name_and_sig).
+        ptr: ValueId,
+        /// The signature the call is checked against: arity, argument types and
+        /// result. It is the caller's claim about what `ptr` points at; a wrong one
+        /// gives IR whose behaviour is undefined at run time.
         sig: FuncSignature,
     },
 }
 
 impl FuncRef {
+    /// The callee's name and signature, for a `call` to check itself against.
+    ///
+    /// Read out together because a call needs both. The signature is borrowed from
+    /// the module's globals (or from the [`Pointer`](Self::Pointer) itself); a caller
+    /// that goes on to intern types copies it first.
+    ///
+    /// # Errors
+    ///
+    /// - [`CallError::FunctionNotFound`] if the handle names a function this module
+    ///   does not have, which can only happen across contexts.
+    /// - [`CallError::IndirectCalleeNotPointer`] if a [`Pointer`](Self::Pointer)'s
+    ///   `ptr` isn't `ptr`-typed.
+    /// - [`CallError::IndirectCalleeNotRegister`] if it is, but isn't a register.
     pub fn name_and_sig<'a, 'b: 'a>(
         &'b self,
         ctx: &'a Context,
@@ -278,9 +314,8 @@ impl FuncRef {
             FuncRef::Declared(func) => {
                 let name = func.name;
 
-                // The signature is read out by value before anything below borrows `ctx`
-                // mutably: casting an argument interns into the type pool, which a live
-                // borrow of the function table would forbid.
+                // Borrowed from `ctx.module.globals`; a caller that interns types
+                // afterwards (casting arguments does) copies the signature first.
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),
@@ -298,9 +333,8 @@ impl FuncRef {
             FuncRef::Defined(func) => {
                 let name = func.name;
 
-                // The signature is read out by value before anything below borrows `ctx`
-                // mutably: casting an argument interns into the type pool, which a live
-                // borrow of the function table would forbid.
+                // Borrowed from `ctx.module.globals`; a caller that interns types
+                // afterwards (casting arguments does) copies the signature first.
                 let Some(global) = ctx.module.globals.get(&name) else {
                     return Err(CallError::FunctionNotFound(
                         ctx.str_interner.value(name.0).to_string(),
@@ -317,11 +351,13 @@ impl FuncRef {
             }
             FuncRef::Pointer { ptr, sig } => {
                 if !ptr.is_ptr(ctx) {
-                    todo!() // RAISE ERROR
+                    return Err(CallError::IndirectCalleeNotPointer(
+                        ctx.display(ptr.ty(ctx)).to_string(),
+                    ));
                 }
 
-                let ValueKind::Reg(reg) = ptr.kind() else {
-                    todo!() // RAISE ERROR
+                let ValueKind::Reg(reg) = ptr.kind(ctx) else {
+                    return Err(CallError::IndirectCalleeNotRegister);
                 };
 
                 let name = reg.name;
@@ -344,12 +380,20 @@ impl From<GlobalId<DeclaredFunc>> for FuncRef {
     }
 }
 
+/// A callee's name, and which sigil it is written with.
+///
+/// LLVM spells a module-level function `@f` and a local `%f`, so the two cannot be
+/// one string — the emitter has to know which prefix to put back.
 pub enum FuncName {
+    /// A function-local name, written `%f`.
     Local(StrId),
+    /// A module-level name, written `@f`.
     Global(StrId),
 }
 
 impl FuncName {
+    /// The interned name, without its sigil — for a caller that wants the text and
+    /// not the spelling.
     pub fn str(&self) -> StrId {
         match self {
             FuncName::Global(s) => *s,

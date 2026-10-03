@@ -1,5 +1,10 @@
 use thiserror::Error;
 
+/// What can go wrong in this crate.
+///
+/// One case so far: a pool asked to hold more distinct values than its id width can
+/// address. Whether that is an error or a panic is the caller's call — see
+/// [`try_intern`](crate::interner::Interner::try_intern).
 #[derive(Error, Debug)]
 pub enum TracewasmUtilsError {
     #[error("too many unique interned values: reached {needed}, over the limit of {limit}")]

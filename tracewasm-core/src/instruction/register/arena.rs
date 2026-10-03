@@ -8,7 +8,7 @@
 //! one.
 //!
 //! There is no dedup and no removal — one entry per instruction that needs one, in
-//! emission order. Unlike [`interner`](super::interner), which exists to make a
+//! emission order. Unlike [`Interner`](tracewasm_utils::interner::Interner), which exists to make a
 //! 16-bit id safe by collapsing repeats, an entry here is one instruction's own
 //! operands and has nothing to share with anything else.
 

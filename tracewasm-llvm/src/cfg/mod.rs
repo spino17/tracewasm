@@ -5,8 +5,9 @@
 //! - [`context::Context`] owns the storage — arenas for blocks and functions, the
 //!   interner pools, and the register bookkeeping.
 //! - [`builder::Builder`] owns the module's own contents and hands out cursors.
-//! - [`function::FuncId`] and [`basic_block::BasicBlockId`] are handles into the
-//!   arenas; both carry their own methods, so `f.add_basic_block(..)` reads like a
+//! - [`global::GlobalId`] (for a defined function, `GlobalId<DefinedFunc>`) and
+//!   [`basic_block::BasicBlockId`] are handles into the arenas; both carry their
+//!   own methods, so `f.add_basic_block(..)` reads like a
 //!   method on the function even though the storage lives in the context.
 //! - [`walk::CfgVisitor`] traverses a finished graph, and [`emit::IREmitter`] is the
 //!   implementation that renders it as text.

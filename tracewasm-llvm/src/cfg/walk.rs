@@ -9,12 +9,12 @@ use crate::{
         global::{GlobalKind, GlobalVariable, Linkage, Visibility},
     },
     instruction::{
-        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, FBinOpOperands,
-        FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands, ICmpOperands,
-        InstructionKind, LoadOperands, PhiInstruction, RetOperands, SelectOperands, StoreOperands,
-        SwitchOperands, UnconditionalBrOperands,
+        AllocaOperands, CallOperands, CastOperands, ConditionalBrOperands, ExtractValueOperands,
+        FBinOpOperands, FCmpOperands, FNegOperands, GetElementPtrOperands, IBinOpOperands,
+        ICmpOperands, InsertValueOperands, InstructionKind, LoadOperands, PhiInstruction,
+        RetOperands, SelectOperands, StoreOperands, SwitchOperands, UnconditionalBrOperands,
     },
-    value::{FuncSignature, I1Value, Value},
+    value::{FuncSignature, I1Value, ValueId},
 };
 
 /// Walks a [`ControlFlowGraph`], visiting each construct in emission order.
@@ -32,6 +32,7 @@ use crate::{
 ///
 /// ```text
 /// visit_cfg
+///   visit_global_variable   for each global variable
 ///   visit_imported_func     for each declaration
 ///   visit_func              for each defined function
 ///     visit_basic_block     for each block
@@ -45,9 +46,11 @@ use crate::{
 /// The `post_*` hooks default to returning `OkType::default()`, so an implementation
 /// only overrides the ones it needs.
 pub trait CfgVisitor {
-    /// What each visit returns. Collected and handed to the `post_*` hooks, so a
-    /// visitor that accumulates results can use them; an emitter that writes as it
-    /// goes uses `()`.
+    /// What each visit returns. The module-level results (global variables,
+    /// declarations, functions) are collected and handed to
+    /// [`post_module_visit`](Self::post_module_visit); what `visit_func` and
+    /// `visit_basic_block` return is not passed on. An emitter that writes as it goes
+    /// uses `()`.
     type OkType: Default;
 
     /// How a visit fails. The walk stops at the first error.
@@ -85,7 +88,7 @@ pub trait CfgVisitor {
     fn visit_load(
         &mut self,
         operands: &LoadOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -100,7 +103,7 @@ pub trait CfgVisitor {
     fn visit_alloca(
         &mut self,
         operands: &AllocaOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -108,7 +111,7 @@ pub trait CfgVisitor {
     fn visit_get_element_ptr(
         &mut self,
         operands: &GetElementPtrOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -120,7 +123,7 @@ pub trait CfgVisitor {
     fn visit_call(
         &mut self,
         operands: &CallOperands,
-        value: Option<&Value>,
+        value: Option<ValueId>,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -141,7 +144,7 @@ pub trait CfgVisitor {
     fn visit_ibinop(
         &mut self,
         operands: &IBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -160,7 +163,7 @@ pub trait CfgVisitor {
     fn visit_fbinop(
         &mut self,
         operands: &FBinOpOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -170,7 +173,7 @@ pub trait CfgVisitor {
     fn visit_fneg(
         &mut self,
         operands: &FNegOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -178,7 +181,7 @@ pub trait CfgVisitor {
     fn visit_cast(
         &mut self,
         operands: &CastOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
@@ -193,13 +196,30 @@ pub trait CfgVisitor {
     fn visit_select(
         &mut self,
         operands: &SelectOperands,
-        value: &Value,
+        value: ValueId,
         ctx: &Context,
     ) -> Result<Self::OkType, Self::ErrType>;
 
     /// Visits an `unreachable`. A terminator with no operands, so nothing is passed
     /// but the context.
     fn visit_unreachable(&mut self, ctx: &Context) -> Result<Self::OkType, Self::ErrType>;
+
+    /// Visits an `extractvalue`. The result has the type of the field or element the
+    /// indices lead to.
+    fn visit_extract_value(
+        &mut self,
+        operands: &ExtractValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
+
+    /// Visits an `insertvalue`. The result has the aggregate's type.
+    fn visit_insert_value(
+        &mut self,
+        operands: &InsertValueOperands,
+        value: ValueId,
+        ctx: &Context,
+    ) -> Result<Self::OkType, Self::ErrType>;
 
     /// Visits a block, before its phis and instructions.
     fn visit_basic_block(
@@ -278,33 +298,39 @@ pub trait CfgVisitor {
                     self.visit_conditional_br(operands, ctx)?
                 }
                 InstructionKind::Alloca(operands) => {
-                    self.visit_alloca(operands, val.unwrap(), ctx)?
+                    self.visit_alloca(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::Load(operands) => self.visit_load(operands, val.unwrap(), ctx)?,
+                InstructionKind::Load(operands) => self.visit_load(operands, *val.unwrap(), ctx)?,
                 InstructionKind::Store(operands) => self.visit_store(operands, ctx)?,
                 InstructionKind::GetElementPtr(operands) => {
-                    self.visit_get_element_ptr(operands, val.unwrap(), ctx)?
+                    self.visit_get_element_ptr(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::Call(operands) => self.visit_call(operands, val, ctx)?,
+                InstructionKind::Call(operands) => self.visit_call(operands, val.copied(), ctx)?,
                 InstructionKind::ICmp(operands) => {
-                    self.visit_icmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                    self.visit_icmp(operands, &val.unwrap().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::IBinOp(operands) => {
-                    self.visit_ibinop(operands, val.unwrap(), ctx)?
+                    self.visit_ibinop(operands, *val.unwrap(), ctx)?
                 }
                 InstructionKind::FCmp(operands) => {
-                    self.visit_fcmp(operands, &val.unwrap().clone().into_i1(ctx).unwrap(), ctx)?
+                    self.visit_fcmp(operands, &val.unwrap().try_i1(ctx).unwrap(), ctx)?
                 }
                 InstructionKind::FBinOp(operands) => {
-                    self.visit_fbinop(operands, val.unwrap(), ctx)?
+                    self.visit_fbinop(operands, *val.unwrap(), ctx)?
                 }
-                InstructionKind::FNeg(operands) => self.visit_fneg(operands, val.unwrap(), ctx)?,
-                InstructionKind::Cast(operands) => self.visit_cast(operands, val.unwrap(), ctx)?,
+                InstructionKind::FNeg(operands) => self.visit_fneg(operands, *val.unwrap(), ctx)?,
+                InstructionKind::Cast(operands) => self.visit_cast(operands, *val.unwrap(), ctx)?,
                 InstructionKind::Switch(operands) => self.visit_switch(operands, ctx)?,
                 InstructionKind::Select(operands) => {
-                    self.visit_select(operands, val.unwrap(), ctx)?
+                    self.visit_select(operands, *val.unwrap(), ctx)?
                 }
                 InstructionKind::Unreachable => self.visit_unreachable(ctx)?,
+                InstructionKind::ExtractValue(operands) => {
+                    self.visit_extract_value(operands, *val.unwrap(), ctx)?
+                }
+                InstructionKind::InsertValue(operands) => {
+                    self.visit_insert_value(operands, *val.unwrap(), ctx)?
+                }
             });
         }
 
@@ -418,7 +444,8 @@ pub trait CfgVisitor {
         Ok(Self::OkType::default())
     }
 
-    /// Runs after every declaration and every function, with what each returned.
+    /// Runs after every global variable, declaration and function, with what each
+    /// returned.
     /// Its return value is what [`walk_cfg`](Self::walk_cfg) yields.
     fn post_module_visit(
         &mut self,

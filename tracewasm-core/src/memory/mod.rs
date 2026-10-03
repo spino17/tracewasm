@@ -4,7 +4,9 @@ use crate::{
     error::{MemoryAccessKind, MemoryError},
     module::WASM_MEMORY_PAGE_SIZE,
 };
+
 pub mod linear;
+pub mod mmap;
 
 /// Read/write access to a linear memory, without the ability to resize it.
 ///
