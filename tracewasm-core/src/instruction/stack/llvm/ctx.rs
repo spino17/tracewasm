@@ -250,6 +250,14 @@ pub struct OptionalU32 {
 }
 
 impl OptionalU32 {
+    pub fn llvm_ty(ctx: &mut Context) -> TyId {
+        let fields: Vec<TyId> = vec![ctx.i32_ty(), ctx.i8_ty()];
+
+        ctx.struct_ty(&fields, false).unwrap()
+    }
+}
+
+impl OptionalU32 {
     /// A null reference. `val` is not meaningful.
     pub const TAG_NULL: u8 = 0;
     /// A function reference; `val` is its index.

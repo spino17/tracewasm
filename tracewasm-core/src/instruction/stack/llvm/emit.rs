@@ -1,7 +1,10 @@
 use crate::{
     instruction::stack::{
         FuncContext, StackInstruction,
-        llvm::{IfCtx, LabelKind, WasmInstrLLVMPassManager, ctx::RuntimeContext},
+        llvm::{
+            IfCtx, LabelKind, WasmInstrLLVMPassManager,
+            ctx::{OptionalU32, RuntimeContext, TableEntry},
+        },
     },
     module::{Module, ValType},
 };
@@ -14,6 +17,7 @@ use tracewasm_llvm::{
     },
     value::ValueId,
 };
+use wasmparser::ExternalKind::Table;
 
 impl StackInstruction {
     // A CFG-building pass needs the cursor, the whole instruction stream, the frame
@@ -288,9 +292,57 @@ impl StackInstruction {
                 }
             }
             StackInstruction::CallIndirect {
-                ty_index: _,
-                table_index: _,
-            } => todo!(),
+                ty_index,
+                table_index,
+            } => {
+                let table_ptr = RuntimeContext::table_ptr(
+                    runtime_ctx_ptr,
+                    &mut curr_cursor,
+                    RegName::Named(format!("table{}_ptr", instr_index)),
+                )?;
+
+                let index_val =
+                    curr_cursor.const_value(table_index.0 as i32, OperandTy::Inferred)?;
+                let i64_ty = curr_cursor.i64_ty();
+                let i32_ty = curr_cursor.i32_ty();
+                let table_entry_ty = TableEntry::llvm_ty(&mut curr_cursor);
+                let zero_index = curr_cursor.const_value(0i32, OperandTy::Inferred)?;
+
+                let table_entry_ptr_ptr = curr_cursor.build_get_element_ptr(
+                    table_ptr,
+                    OperandTy::Asserted(table_entry_ty),
+                    &[index_val, zero_index],
+                    Some(true),
+                    RegName::Named(format!(
+                        "table_entry{}_{}_ptr_ptr",
+                        instr_index, table_index.0,
+                    )),
+                )?;
+
+                let table_entry_ptr = curr_cursor.build_load(
+                    table_entry_ptr_ptr,
+                    OperandTy::Inferred,
+                    Access::Aligned,
+                    RegName::Named(format!("table_entry{}_{}_ptr", instr_index, table_index.0)),
+                )?;
+
+                let slot = pass_manager.simulated_stack.pop();
+                let optional_u32_ty = OptionalU32::llvm_ty(&mut curr_cursor);
+
+                let func_ref = curr_cursor.build_get_element_ptr(
+                    table_entry_ptr,
+                    OperandTy::Asserted(optional_u32_ty),
+                    &[slot],
+                    Some(true),
+                    RegName::Named(format!("func_ref{}_ptr", instr_index)),
+                )?;
+
+                let func_ty = &module.types[ty_index.0 as usize];
+                let params = &func_ty.params;
+                let results = &func_ty.results;
+
+                todo!()
+            }
             StackInstruction::Block { end_index } => {
                 pass_manager.control_stack.enter_label(
                     LabelKind::Block,
