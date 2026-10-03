@@ -10,12 +10,12 @@ use crate::{
 };
 use std::sync::Arc;
 use tracewasm_llvm::{
-    cfg::basic_block::BasicBlockId,
+    cfg::{basic_block::BasicBlockId, global::FuncRef},
     instruction::{
         Access, CastOp, ICond,
         cursor::{Cursor, OperandTy, RegName},
     },
-    value::ValueId,
+    value::{FuncSignature, ValueId},
 };
 use wasmparser::ExternalKind::Table;
 
@@ -301,9 +301,9 @@ impl StackInstruction {
                     RegName::Named(format!("table{}_ptr", instr_index)),
                 )?;
 
-                let i64_ty = curr_cursor.i64_ty();
                 let i32_ty = curr_cursor.i32_ty();
                 let i8_ty = curr_cursor.i8_ty();
+                let ptr_ty = curr_cursor.ptr_ty();
 
                 let index_val =
                     curr_cursor.const_value(table_index.0 as i32, OperandTy::Inferred)?;
@@ -333,6 +333,11 @@ impl StackInstruction {
                 let slot = pass_manager.simulated_stack.pop();
                 let optional_u32_ty = OptionalU32::llvm_ty(&mut curr_cursor);
 
+                // TODO: bounds-check `slot` before this GEP. Load the entry's `table_len`
+                // (GEP `[table_index, 1]`, next to the `table_ptr` above) and branch to a
+                // trap block unless `icmp ult slot, table_len` — unsigned, as wasm reads
+                // the index. `inbounds` past the end is poison, so the slot GEP and the
+                // `val`/`tag` loads below must sit in the in-bounds branch.
                 let func_ref_ptr = curr_cursor.build_get_element_ptr(
                     table_entry_ptr,
                     OperandTy::Asserted(optional_u32_ty),
@@ -372,8 +377,92 @@ impl StackInstruction {
                 )?;
 
                 let func_ty = &module.types[ty_index.0 as usize];
-                let params = &func_ty.params;
-                let results = &func_ty.results;
+                let callee_params = &func_ty.params;
+                let callee_results = &func_ty.results;
+                // TODO: null-check the slot: trap if `func_ref_tag` is
+                // `OptionalU32::TAG_NULL` (0). The `fn_table` GEP and load below must sit in
+                // the non-null branch: a null slot's `val` is 0, which is out of bounds when
+                // the module has no functions (`fn_table` is `[0 x ptr]`).
+                let func_table = curr_cursor.global_value(func_ctx.func_table);
+
+                let func_ptr = curr_cursor.build_get_element_ptr(
+                    func_table,
+                    OperandTy::Inferred,
+                    &[zero_index, func_ref_val],
+                    Some(true),
+                    RegName::Named(format!("func{}_ptr", instr_index)),
+                )?;
+
+                let func = curr_cursor.build_load(
+                    func_ptr,
+                    OperandTy::Asserted(ptr_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("func{}", instr_index)),
+                )?;
+
+                let (llvm_params, llvm_result) =
+                    WasmInstrLLVMPassManager::llvm_signature_from_wasm(
+                        callee_params,
+                        callee_results,
+                        &mut curr_cursor,
+                    )?;
+
+                let sig = FuncSignature::new(&llvm_params, llvm_result);
+                let is_void = sig.result.is_void(&curr_cursor);
+                // TODO: check the callee's signature before calling: trap unless its type
+                // matches `ty_index`. `sig` is only what this `call_indirect` *expects* — the
+                // pointer carries no type, and calling through a mismatched signature is
+                // undefined behaviour in LLVM, where wasm requires a trap. Needs each
+                // function's type at run time: e.g. a `fn_type_table` of canonical type ids
+                // (`[N x i32]`, built beside `fn_table` in `compile`), compared with
+                // `icmp eq` against the canonical id of `ty_index`. Canonical, because wasm
+                // matches function types structurally, not by index.
+                //
+                // TODO: once the three checks above exist, the straight-line code becomes
+                // blocks: entry → in_bounds → non_null → call, each check branching to one
+                // shared trap block (`unreachable`), and the `call` block returned as the
+                // continuation.
+                let callee_func_ref = FuncRef::Pointer { ptr: func, sig };
+
+                let mut params: Vec<(ValueId, OperandTy)> = pass_manager
+                    .simulated_stack
+                    .pops_and_reverse(callee_params.len() as u32)
+                    .iter()
+                    .map(|x| (*x, OperandTy::Inferred))
+                    .collect();
+
+                params.push((runtime_ctx_ptr, OperandTy::Inferred));
+
+                if is_void {
+                    curr_cursor.build_void_call(callee_func_ref, &params)?;
+
+                    return Ok((curr_cursor.basic_block(), instr_index + 1));
+                }
+
+                let result = curr_cursor.build_call(
+                    callee_func_ref,
+                    &params,
+                    OperandTy::Inferred,
+                    RegName::Named(format!("indirect_func{}_result", instr_index)),
+                )?;
+
+                let results_count = callee_results.len();
+
+                if results_count == 1 {
+                    pass_manager.simulated_stack.push(result);
+
+                    return Ok((curr_cursor.basic_block(), instr_index + 1));
+                }
+
+                for i in 0..results_count {
+                    let field_val = curr_cursor.build_extract_value(
+                        result,
+                        &[i as u32],
+                        RegName::Named(format!("indirect_func{}_result_{}", instr_index, i)),
+                    )?;
+
+                    pass_manager.simulated_stack.push(field_val);
+                }
 
                 todo!()
             }
