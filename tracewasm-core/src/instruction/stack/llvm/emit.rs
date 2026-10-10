@@ -13,7 +13,7 @@ use tracewasm_llvm::{
     cfg::{basic_block::BasicBlockId, builder::Builder, global::FuncRef},
     instruction::{
         Access, CastOp, ICond,
-        cursor::{Cursor, OperandTy, RegName},
+        cursor::{OperandTy, RegName},
     },
     value::{FuncSignature, ValueId},
 };
@@ -294,6 +294,14 @@ impl StackInstruction {
                 ty_index,
                 table_index,
             } => {
+                // Three checks stand between the slot and the call, each ending its block
+                // with a branch: on to the next block if it passes, to the function's trap
+                // block if it fails. What each block may touch is what the check before it
+                // made safe, so the order is fixed:
+                //
+                //   entry      slot < table_len?           → in_bounds
+                //   in_bounds  slot's tag non-null?         → non_null
+                //   non_null   callee's type == ty_index's? → sig_ok, where the call is
                 let table_ptr = RuntimeContext::table_ptr(
                     runtime_ctx_ptr,
                     &mut curr_cursor,
@@ -301,6 +309,7 @@ impl StackInstruction {
                 )?;
 
                 let i32_ty = curr_cursor.i32_ty();
+                let i64_ty = curr_cursor.i64_ty();
                 let i8_ty = curr_cursor.i8_ty();
                 let ptr_ty = curr_cursor.ptr_ty();
 
@@ -329,31 +338,61 @@ impl StackInstruction {
                     RegName::Named(format!("table_entry{}_{}_ptr", instr_index, table_index.0)),
                 )?;
 
-                let slot = pass_manager.simulated_stack.pop();
-
-                let next_block = func_ctx
-                    .func
-                    .add_basic_block("call_indirect_slot_check_pass", &mut curr_cursor)?;
-
-                let is_true = curr_cursor.build_icmp(
-                    ICond::Eq,
-                    OperandTy::Inferred,
-                    slot,
-                    zero_index,
-                    RegName::Unnamed,
+                let table_len_ptr = curr_cursor.build_get_element_ptr(
+                    table_ptr,
+                    OperandTy::Asserted(table_entry_ty),
+                    &[index_val, first_index],
+                    Some(true),
+                    RegName::Named(format!(
+                        "table_entry{}_{}_len_ptr",
+                        instr_index, table_index.0,
+                    )),
                 )?;
 
-                curr_cursor.build_conditional_br(is_true, next_block, func_ctx.func_trap_block)?;
+                let table_len = curr_cursor.build_load(
+                    table_len_ptr,
+                    OperandTy::Asserted(i32_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("table_entry{}_{}_len", instr_index, table_index.0)),
+                )?;
 
-                curr_cursor = builder.cursor_at_block(next_block);
+                let slot = pass_manager.simulated_stack.pop();
+
+                // Unsigned, as wasm reads the index: a negative `i32` is a large slot,
+                // not one before the start.
+                let in_bounds = curr_cursor.build_icmp(
+                    ICond::Ult,
+                    OperandTy::Inferred,
+                    slot,
+                    table_len,
+                    RegName::Named(format!("call_indirect{}_is_in_bounds", instr_index)),
+                )?;
+
+                let in_bounds_block = func_ctx.func.add_basic_block(
+                    format!("call_indirect{}_in_bounds", instr_index),
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_conditional_br(
+                    in_bounds,
+                    in_bounds_block,
+                    func_ctx.func_trap_block,
+                )?;
+
+                curr_cursor = builder.cursor_at_block(in_bounds_block);
 
                 let optional_u32_ty = OptionalU32::llvm_ty(&mut curr_cursor);
 
-                // TODO: bounds-check `slot` before this GEP. Load the entry's `table_len`
-                // (GEP `[table_index, 1]`, next to the `table_ptr` above) and branch to a
-                // trap block unless `icmp ult slot, table_len` — unsigned, as wasm reads
-                // the index. `inbounds` past the end is poison, so the slot GEP and the
-                // `val`/`tag` loads below must sit in the in-bounds branch.
+                // Widened before indexing: `getelementptr` sign-extends an `i32` index,
+                // which would read a slot at or past 2^31 as negative.
+                let slot = curr_cursor.build_cast(
+                    CastOp::Zext,
+                    slot,
+                    OperandTy::Inferred,
+                    i64_ty,
+                    RegName::Named(format!("call_indirect{}_slot", instr_index)),
+                )?;
+
                 let func_ref_ptr = curr_cursor.build_get_element_ptr(
                     table_entry_ptr,
                     OperandTy::Asserted(optional_u32_ty),
@@ -392,13 +431,82 @@ impl StackInstruction {
                     RegName::Named(format!("func_ref{}_tag", instr_index)),
                 )?;
 
+                let tag_null =
+                    curr_cursor.const_value(OptionalU32::TAG_NULL as i8, OperandTy::Inferred)?;
+
+                let non_null = curr_cursor.build_icmp(
+                    ICond::Ne,
+                    OperandTy::Inferred,
+                    func_ref_tag,
+                    tag_null,
+                    RegName::Named(format!("call_indirect{}_is_non_null", instr_index)),
+                )?;
+
+                let non_null_block = func_ctx.func.add_basic_block(
+                    format!("call_indirect{}_non_null", instr_index),
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_conditional_br(
+                    non_null,
+                    non_null_block,
+                    func_ctx.func_trap_block,
+                )?;
+
+                // Only now is `func_ref_val` a function index: a null slot's `val` is 0,
+                // which is past the end of `@fn_table` when the module has no functions.
+                curr_cursor = builder.cursor_at_block(non_null_block);
+
+                // The pointer carries no type, and calling through the wrong signature is
+                // undefined behaviour in LLVM where wasm requires a trap — so the callee's
+                // type is looked up by its index and compared. Both sides are canonical
+                // ids, since wasm matches function types structurally, not by index.
+                let func_type_table = curr_cursor.global_value(func_ctx.func_type_table);
+
+                let callee_ty_id_ptr = curr_cursor.build_get_element_ptr(
+                    func_type_table,
+                    OperandTy::Inferred,
+                    &[zero_index, func_ref_val],
+                    Some(true),
+                    RegName::Named(format!("func{}_ty_id_ptr", instr_index)),
+                )?;
+
+                let callee_ty_id = curr_cursor.build_load(
+                    callee_ty_id_ptr,
+                    OperandTy::Asserted(i32_ty),
+                    Access::Aligned,
+                    RegName::Named(format!("func{}_ty_id", instr_index)),
+                )?;
+
+                let expected_ty_id = curr_cursor.const_value(
+                    pass_manager.canonical_func_ty_ids[ty_index.0 as usize] as i32,
+                    OperandTy::Inferred,
+                )?;
+
+                let sig_matches = curr_cursor.build_icmp(
+                    ICond::Eq,
+                    OperandTy::Inferred,
+                    callee_ty_id,
+                    expected_ty_id,
+                    RegName::Named(format!("call_indirect{}_sig_matches", instr_index)),
+                )?;
+
+                let sig_ok_block = func_ctx.func.add_basic_block(
+                    format!("call_indirect{}_sig_ok", instr_index),
+                    &mut curr_cursor,
+                )?;
+
+                curr_cursor.build_conditional_br(
+                    sig_matches,
+                    sig_ok_block,
+                    func_ctx.func_trap_block,
+                )?;
+
+                curr_cursor = builder.cursor_at_block(sig_ok_block);
+
                 let func_ty = &module.types[ty_index.0 as usize];
                 let callee_params = &func_ty.params;
                 let callee_results = &func_ty.results;
-                // TODO: null-check the slot: trap if `func_ref_tag` is
-                // `OptionalU32::TAG_NULL` (0). The `fn_table` GEP and load below must sit in
-                // the non-null branch: a null slot's `val` is 0, which is out of bounds when
-                // the module has no functions (`fn_table` is `[0 x ptr]`).
                 let func_table = curr_cursor.global_value(func_ctx.func_table);
 
                 let func_ptr = curr_cursor.build_get_element_ptr(
@@ -425,19 +533,6 @@ impl StackInstruction {
 
                 let sig = FuncSignature::new(&llvm_params, llvm_result);
                 let is_void = sig.result.is_void(&curr_cursor);
-                // TODO: check the callee's signature before calling: trap unless its type
-                // matches `ty_index`. `sig` is only what this `call_indirect` *expects* — the
-                // pointer carries no type, and calling through a mismatched signature is
-                // undefined behaviour in LLVM, where wasm requires a trap. Needs each
-                // function's type at run time: e.g. a `fn_type_table` of canonical type ids
-                // (`[N x i32]`, built beside `fn_table` in `compile`), compared with
-                // `icmp eq` against the canonical id of `ty_index`. Canonical, because wasm
-                // matches function types structurally, not by index.
-                //
-                // TODO: once the three checks above exist, the straight-line code becomes
-                // blocks: entry → in_bounds → non_null → call, each check branching to one
-                // shared trap block (`unreachable`), and the `call` block returned as the
-                // continuation.
                 let callee_func_ref = FuncRef::Pointer { ptr: func, sig };
 
                 let mut params: Vec<(ValueId, OperandTy)> = pass_manager
@@ -479,8 +574,6 @@ impl StackInstruction {
 
                     pass_manager.simulated_stack.push(field_val);
                 }
-
-                todo!()
             }
             StackInstruction::Block { end_index } => {
                 pass_manager.control_stack.enter_label(
@@ -498,8 +591,9 @@ impl StackInstruction {
                     .add_basic_block(format!("block{}_end", instr_index), &mut curr_cursor)?;
 
                 let label_sig = func_ctx.frame_layout
-            .label_instr_index_to_signature
-            .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32))
+                    .expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 pass_manager.instr_index_to_basic_block.new_end(
                     *end_index,
@@ -528,8 +622,9 @@ impl StackInstruction {
                     .add_basic_block(format!("loop{}_end", instr_index), &mut curr_cursor)?;
 
                 let label_sig = func_ctx.frame_layout
-            .label_instr_index_to_signature
-            .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32))
+                    .expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 let param_types = &label_sig.params;
                 let params_count = param_types.len() as u32;
@@ -565,8 +660,9 @@ impl StackInstruction {
                 curr_cursor.build_unconditional_br(loop_block)?;
 
                 let (phi_vals, _) = pass_manager
-            .instr_index_to_basic_block
-            .loop_phi_vals_and_block(instr_index as u32).expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+                    .instr_index_to_basic_block
+                    .loop_phi_vals_and_block(instr_index as u32)
+                    .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                 for i in 0..params_count {
                     pass_manager.simulated_stack.stack[(start_index + i) as usize] =
@@ -594,8 +690,9 @@ impl StackInstruction {
                 );
 
                 let label_sig = func_ctx.frame_layout
-            .label_instr_index_to_signature
-            .get(&(instr_index as u32)).expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
+                    .label_instr_index_to_signature
+                    .get(&(instr_index as u32))
+                    .expect("hitting this means tracking of label instr index to its signature mapping while lowering is incorrect");
 
                 let results_ty = &label_sig.results;
 
@@ -910,9 +1007,9 @@ impl StackInstruction {
                     (else_block, curr_label_else_index as usize + 1)
                 } else {
                     let (phi_vals, end_block) = pass_manager
-                .instr_index_to_basic_block
-                .end_phi_vals_and_block(curr_label_end_index as u32)
-                .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
+                        .instr_index_to_basic_block
+                        .end_phi_vals_and_block(curr_label_end_index as u32)
+                        .expect("hitting this means logic for tracking target index of labels in lowering is incorrect");
 
                     for val in phi_vals {
                         pass_manager.simulated_stack.push(*val);

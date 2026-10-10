@@ -4212,6 +4212,9 @@ pub struct FuncContext<'a> {
     pub(crate) locals: &'a [tracewasm_llvm::value::ValueId],
     /// `@fn_table`, every function's address by function index, for `call_indirect`.
     pub(crate) func_table: GlobalId<GlobalVar>,
+    /// `@fn_type_table`, every function's canonical type id by function index, which
+    /// `call_indirect` checks the callee against before calling it.
+    pub(crate) func_type_table: GlobalId<GlobalVar>,
     pub(crate) func_trap_block: BasicBlockId,
 }
 

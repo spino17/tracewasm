@@ -543,6 +543,11 @@ pub struct WasmInstrLLVMPassManager {
     pub(crate) instr_index_to_basic_block: InstrIndexToBasicBlockMap,
     pub(crate) simulated_stack: SimulatedStack,
     pub(crate) control_stack: ControlStack,
+    /// Each type index's canonical id: the first type index with the same params and
+    /// results. `call_indirect` compares these rather than type indices, because wasm
+    /// matches function types structurally — two identical types declared twice are
+    /// still the same type.
+    pub(crate) canonical_func_ty_ids: Vec<u32>,
 }
 
 impl WasmInstrLLVMPassManager {
@@ -582,6 +587,19 @@ impl WasmInstrLLVMPassManager {
         let func_decls = &module.func_decls;
         let imported_func_count = module.imported_func_count; // this many functions will be declared! rest are defined!
         let mut funcs: Vec<tracewasm_llvm::cfg::global::Global> = vec![];
+
+        let mut first_ty_index_by_shape: FxHashMap<(&[ValType], &[ValType]), u32> =
+            FxHashMap::default();
+
+        self.canonical_func_ty_ids = ty_decls
+            .iter()
+            .enumerate()
+            .map(|(ty_index, ty)| {
+                *first_ty_index_by_shape
+                    .entry((&ty.params, &ty.results))
+                    .or_insert(ty_index as u32)
+            })
+            .collect();
 
         // Signatures first, bodies second. A body may call any function — one declared
         // later in the index space, or itself — and the callee's handle has to exist
@@ -636,12 +654,35 @@ impl WasmInstrLLVMPassManager {
             Some(func_table_initializer),
         )?;
 
+        // Beside `@fn_table` and indexed the same way, so `call_indirect` can check a
+        // callee's type before calling through its pointer, which carries none.
+        let func_ty_ids: Vec<i32> = func_decls
+            .iter()
+            .map(|func_decl| self.canonical_func_ty_ids[func_decl.ty.0 as usize] as i32)
+            .collect();
+
+        let func_type_table_initializer =
+            ConstExpr::new_const(func_ty_ids, OperandTy::Inferred, &mut builder)?;
+
+        let func_type_table = builder.declare_global_variable(
+            "fn_type_table".to_string(),
+            None,
+            Some(func_type_table_initializer),
+        )?;
+
         for func_index in (imported_func_count as usize)..func_decls.len() {
             let func_index = FuncIndex(func_index as u32);
             // Copied out rather than borrowed: `compile_func` takes `&mut self`.
             let func = self.defined_funcs[&func_index];
 
-            self.compile_func(func_index, func, func_table, module, &mut builder)?;
+            self.compile_func(
+                func_index,
+                func,
+                func_table,
+                func_type_table,
+                module,
+                &mut builder,
+            )?;
         }
 
         Ok(builder.build())
@@ -662,6 +703,7 @@ impl WasmInstrLLVMPassManager {
         func_index: FuncIndex,
         func: GlobalId<DefinedFunc>,
         func_table: GlobalId<GlobalVar>,
+        func_type_table: GlobalId<GlobalVar>,
         module: &Arc<Module<crate::Stack>>,
         builder: &mut Builder,
     ) -> Result<(), anyhow::Error> {
@@ -755,6 +797,7 @@ impl WasmInstrLLVMPassManager {
                 frame_layout,
                 locals: &locals,
                 func_table,
+                func_type_table,
                 func_trap_block: trap,
             };
 
@@ -1031,24 +1074,36 @@ mod tests {
         let func_table = builder
             .declare_global_variable("fn_table".to_string(), None, Some(func_table_initializer))
             .unwrap();
+        let no_func_ty_ids: Vec<i32> = vec![];
+        let func_type_table_initializer =
+            ConstExpr::new_const(no_func_ty_ids, OperandTy::Inferred, builder).unwrap();
+        let func_type_table = builder
+            .declare_global_variable(
+                "fn_type_table".to_string(),
+                None,
+                Some(func_type_table_initializer),
+            )
+            .unwrap();
+        // Nothing under test can trap, so nothing branches here; it only has to exist.
+        let trap = func.add_basic_block("trap", builder).unwrap();
 
         // Index-driven, like `compile_func`: an arm returns where to resume, which is
         // not always the next instruction.
         while index < instructions.len() {
-            let cursor = builder.cursor_at_block(block);
-
             let func_ctx = FuncContext {
                 func,
                 instructions,
                 frame_layout,
                 locals: &[],
                 func_table,
+                func_type_table,
+                func_trap_block: trap,
             };
 
             // No locals: these cases are about control flow, and none of the operators
             // under test reads a local slot.
             let (next_block, next_index) = instructions[index]
-                .emit_llvm_ir(index, cursor, null_ptr, &module, pass, func_ctx)
+                .emit_llvm_ir(index, block, builder, null_ptr, &module, pass, func_ctx)
                 .unwrap();
 
             between(pass, builder, index);
@@ -1308,5 +1363,119 @@ mod tests {
             ir.contains(&format!("ret i32 {reg}")),
             "expected the returned value to be {reg}\n{ir}"
         );
+    }
+}
+
+#[cfg(test)]
+mod call_indirect_tests {
+    use super::*;
+    use tracewasm_llvm::cfg::emit::IREmitter;
+
+    fn ir_for(wat: &str) -> String {
+        let bytes = wat::parse_str(wat).unwrap();
+        let module = Module::<crate::Stack>::compile(&bytes).unwrap();
+
+        IREmitter::emit(module.build_cfg().unwrap()).unwrap()
+    }
+
+    /// `$a` and `$b` are the same type declared twice, and the call names `$b` while
+    /// the callee was declared with `$a` — which wasm must accept. The callee returns
+    /// two values, so the multi-value path runs to the end of the arm.
+    const PAIR_THROUGH_TABLE: &str = r#"
+        (module
+          (type $a (func (param i32) (result i32 i32)))
+          (type $b (func (param i32) (result i32 i32)))
+          (table 2 funcref)
+          (elem (i32.const 1) $pair)
+          (func $pair (type $a) local.get 0 local.get 0)
+          (func (param i32 i32) (result i32 i32)
+            local.get 0
+            local.get 1
+            call_indirect (type $b)))
+    "#;
+
+    /// Each check ends its block in a branch that either moves on or traps, in the
+    /// order that makes the next block's loads safe, and the call is only reached
+    /// once all three have passed.
+    #[test]
+    fn each_check_either_moves_on_or_traps_before_the_call() {
+        let ir = ir_for(PAIR_THROUGH_TABLE);
+
+        let checks = [
+            "br i1 %call_indirect2_is_in_bounds, label %call_indirect2_in_bounds, label %trap",
+            "br i1 %call_indirect2_is_non_null, label %call_indirect2_non_null, label %trap",
+            "br i1 %call_indirect2_sig_matches, label %call_indirect2_sig_ok, label %trap",
+        ];
+
+        let positions: Vec<usize> = checks
+            .iter()
+            .map(|check| ir.find(check).unwrap_or_else(|| panic!("{check}\n{ir}")))
+            .collect();
+
+        assert!(positions.is_sorted(), "checks out of order\n{ir}");
+
+        // Unsigned: a negative `i32` slot is a large one, not one before the start.
+        assert!(
+            ir.contains("icmp ult i32 %local1_val, %table_entry2_0_len"),
+            "{ir}"
+        );
+
+        let sig_ok = ir.find("call_indirect2_sig_ok:").expect("the call's block");
+        let call = ir
+            .find("call { i32, i32 } %func2(")
+            .expect("the indirect call");
+
+        assert!(sig_ok < call, "the call sits after the last check\n{ir}");
+    }
+
+    /// Wasm matches function types structurally, so the expected id is the
+    /// canonical one — `$b` checks against `$a`'s id, which is what `$pair` has.
+    #[test]
+    fn identical_types_declared_twice_share_a_canonical_id() {
+        let ir = ir_for(PAIR_THROUGH_TABLE);
+
+        // `$pair` is type 0; the caller's own type is index 2 and canonical to itself.
+        assert!(
+            ir.contains("@fn_type_table = global [2 x i32] [i32 0, i32 2]"),
+            "{ir}"
+        );
+        assert!(ir.contains("icmp eq i32 %func2_ty_id, 0"), "{ir}");
+    }
+
+    /// Labels and registers share one namespace in LLVM, so a check's `i1` named
+    /// after the block it branches to would not assemble.
+    #[test]
+    fn no_register_is_named_after_a_block() {
+        let ir = ir_for(PAIR_THROUGH_TABLE);
+
+        for label in ir.lines().filter_map(|line| line.strip_suffix(':')) {
+            assert!(
+                !ir.contains(&format!("%{label} =")),
+                "`{label}` is both a block and a register\n{ir}"
+            );
+        }
+    }
+
+    /// Every name the arm creates carries its instruction index, so a second
+    /// `call_indirect` in the same function cannot collide with the first.
+    #[test]
+    fn two_call_indirects_in_one_function_get_their_own_blocks() {
+        let ir = ir_for(
+            r#"
+            (module
+              (type $t (func (param i32) (result i32)))
+              (table 1 funcref)
+              (elem (i32.const 0) $id)
+              (func $id (type $t) local.get 0)
+              (func (param i32 i32) (result i32)
+                local.get 0
+                local.get 1
+                call_indirect (type $t)
+                local.get 1
+                call_indirect (type $t)))
+            "#,
+        );
+
+        assert_eq!(ir.matches("_sig_ok:").count(), 2, "{ir}");
     }
 }
