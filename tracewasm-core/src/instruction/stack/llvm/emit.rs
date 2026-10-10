@@ -10,7 +10,7 @@ use crate::{
 };
 use std::sync::Arc;
 use tracewasm_llvm::{
-    cfg::{basic_block::BasicBlockId, global::FuncRef},
+    cfg::{basic_block::BasicBlockId, builder::Builder, global::FuncRef},
     instruction::{
         Access, CastOp, ICond,
         cursor::{Cursor, OperandTy, RegName},
@@ -39,12 +39,15 @@ impl StackInstruction {
     pub fn emit_llvm_ir<'a>(
         &self,
         instr_index: usize,
-        mut curr_cursor: Cursor<'a>,
+        curr_block: BasicBlockId,
+        builder: &mut Builder,
         runtime_ctx_ptr: tracewasm_llvm::value::ValueId,
         module: &Arc<Module<crate::Stack>>,
         pass_manager: &mut WasmInstrLLVMPassManager,
         func_ctx: FuncContext<'_>,
     ) -> Result<(BasicBlockId, usize), anyhow::Error> {
+        let mut curr_cursor = builder.cursor_at_block(curr_block);
+
         match self {
             StackInstruction::LocalGet { index } => {
                 let index = index.0 as usize;
@@ -327,6 +330,23 @@ impl StackInstruction {
                 )?;
 
                 let slot = pass_manager.simulated_stack.pop();
+
+                let next_block = func_ctx
+                    .func
+                    .add_basic_block("call_indirect_slot_check_pass", &mut curr_cursor)?;
+
+                let is_true = curr_cursor.build_icmp(
+                    ICond::Eq,
+                    OperandTy::Inferred,
+                    slot,
+                    zero_index,
+                    RegName::Unnamed,
+                )?;
+
+                curr_cursor.build_conditional_br(is_true, next_block, func_ctx.func_trap_block)?;
+
+                curr_cursor = builder.cursor_at_block(next_block);
+
                 let optional_u32_ty = OptionalU32::llvm_ty(&mut curr_cursor);
 
                 // TODO: bounds-check `slot` before this GEP. Load the entry's `table_len`

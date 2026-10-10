@@ -103,7 +103,10 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use std::ops::{BitAnd, BitOr, BitXor, Neg};
-use tracewasm_llvm::cfg::global::{DefinedFunc, GlobalId, GlobalVar};
+use tracewasm_llvm::cfg::{
+    basic_block::BasicBlockId,
+    global::{DefinedFunc, GlobalId, GlobalVar},
+};
 use wasmparser::{BlockType, Operator, OperatorsReader};
 
 pub mod llvm;
@@ -4209,6 +4212,7 @@ pub struct FuncContext<'a> {
     pub(crate) locals: &'a [tracewasm_llvm::value::ValueId],
     /// `@fn_table`, every function's address by function index, for `call_indirect`.
     pub(crate) func_table: GlobalId<GlobalVar>,
+    pub(crate) func_trap_block: BasicBlockId,
 }
 
 impl StackInstruction {

@@ -64,6 +64,7 @@ use tracewasm_llvm::{
     cfg::{
         ControlFlowGraph,
         basic_block::BasicBlockId,
+        builder::Builder,
         context::Context,
         global::{DeclaredFunc, DefinedFunc, FuncRef, GlobalId, GlobalVar},
         module::Target,
@@ -662,7 +663,7 @@ impl WasmInstrLLVMPassManager {
         func: GlobalId<DefinedFunc>,
         func_table: GlobalId<GlobalVar>,
         module: &Arc<Module<crate::Stack>>,
-        ctx: &mut Context,
+        builder: &mut Builder,
     ) -> Result<(), anyhow::Error> {
         debug_assert!(func_index.0 >= module.imported_func_count);
 
@@ -677,14 +678,15 @@ impl WasmInstrLLVMPassManager {
         let results_ty = &func_ty.results;
         let results_count = results_ty.len();
 
-        let entry = func.add_basic_block("entry", ctx)?;
-        let params = func.params(ctx).to_vec();
+        let entry = func.add_basic_block("entry", builder)?;
+        let trap = func.add_basic_block("trap", builder)?; // TODO: fill this with call to externally linked function
+        let params = func.params(builder).to_vec();
 
         let runtime_ctx_ptr = *params
             .last()
             .expect("the context is always a function param");
 
-        let mut entry_cursor = ctx.cursor_at_block(entry);
+        let mut entry_cursor = builder.cursor_at_block(entry);
         let mut locals = vec![];
 
         for (counter, (i, local_ty)) in local_types.iter().enumerate().enumerate() {
@@ -720,7 +722,7 @@ impl WasmInstrLLVMPassManager {
             entry_cursor.build_store(ptr, val, OperandTy::Inferred, Access::Aligned)?;
         }
 
-        let func_end = func.add_basic_block("end", ctx)?;
+        let func_end = func.add_basic_block("end", builder)?;
         // The body's last instruction is the function's own `end`. It has no opening
         // instruction to enter the label from — `block`/`loop`/`if` each push theirs
         // when emitted — so the implicit outermost label is pushed here instead, and
@@ -731,13 +733,13 @@ impl WasmInstrLLVMPassManager {
             func_end_instr_index as u32,
             results_ty,
             func_end,
-            ctx,
+            builder,
         )?;
 
         self.control_stack
             .enter_label(LabelKind::Func, 0, func_end_instr_index);
 
-        let mut cursor = ctx.cursor_at_block(entry);
+        let mut curr_block = entry;
         let mut index = 0;
 
         loop {
@@ -753,16 +755,29 @@ impl WasmInstrLLVMPassManager {
                 frame_layout,
                 locals: &locals,
                 func_table,
+                func_trap_block: trap,
             };
 
-            let (next_block, next_instr_index) =
-                instr.emit_llvm_ir(index, cursor, runtime_ctx_ptr, module, self, func_ctx)?;
+            let (next_block, next_instr_index) = instr.emit_llvm_ir(
+                index,
+                curr_block,
+                builder,
+                runtime_ctx_ptr,
+                module,
+                self,
+                func_ctx,
+            )?;
 
+            curr_block = next_block;
             index = next_instr_index;
-            cursor = ctx.cursor_at_block(next_block);
         }
 
-        self.build_func_return(func, func_end_instr_index as u32, results_count as u32, ctx)?;
+        self.build_func_return(
+            func,
+            func_end_instr_index as u32,
+            results_count as u32,
+            builder,
+        )?;
 
         Ok(())
     }
