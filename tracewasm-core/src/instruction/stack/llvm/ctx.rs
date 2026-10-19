@@ -1,5 +1,4 @@
 use crate::{
-    instance::Instance,
     memory::mmap::MmapMemory,
     module::FuncIndex,
     runtime::value::{TableVal, Val},

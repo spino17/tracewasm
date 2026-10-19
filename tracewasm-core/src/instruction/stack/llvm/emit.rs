@@ -36,7 +36,8 @@ impl StackInstruction {
     /// An inherent method rather than part of
     /// [`Instruction`](crate::instruction::Instruction): only the stack machine is
     /// lowered to LLVM, so the register machine has nothing to implement.
-    pub fn emit_llvm_ir<'a>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_llvm_ir(
         &self,
         instr_index: usize,
         curr_block: BasicBlockId,
