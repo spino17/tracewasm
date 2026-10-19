@@ -49,7 +49,7 @@
 //! phi placement right twice.
 
 use crate::{
-    instruction::stack::FuncContext,
+    instruction::stack::{FuncContext, llvm::ctx::TrapCode},
     module::{FuncIndex, Module, ValType},
     runtime::stack::Stack,
 };
@@ -548,9 +548,26 @@ pub struct WasmInstrLLVMPassManager {
     /// matches function types structurally — two identical types declared twice are
     /// still the same type.
     pub(crate) canonical_func_ty_ids: Vec<u32>,
+    /// `@tracewasm_trap`, declared once per module and called from every function's
+    /// trap block. `None` only until [`compile`](Self::compile) declares it.
+    pub(crate) trap_func: Option<GlobalId<DeclaredFunc>>,
+    /// Every branch into the current function's trap block so far, with the code
+    /// that branch traps with. Taken when the trap block is filled, at the end of the
+    /// function — see [`record_trap_edge`](Self::record_trap_edge).
+    pub(crate) trap_edges: Vec<(BasicBlockId, TrapCode)>,
 }
 
 impl WasmInstrLLVMPassManager {
+    /// Notes that `from` branches to the function's trap block, failing with `code`.
+    ///
+    /// Every check that can fail calls this alongside its conditional branch. A
+    /// function has one trap block, and the phi there picks the code by which block
+    /// control came from — so a branch into it that is not recorded leaves the phi
+    /// short a predecessor, which `llvm-as` rejects.
+    pub(crate) fn record_trap_edge(&mut self, from: BasicBlockId, code: TrapCode) {
+        self.trap_edges.push((from, code));
+    }
+
     pub fn get_func(&self, func_index: &FuncIndex) -> Option<FuncRef> {
         match self.defined_funcs.get(func_index) {
             Some(func) => Some(FuncRef::Defined(*func)),
@@ -670,6 +687,14 @@ impl WasmInstrLLVMPassManager {
             Some(func_type_table_initializer),
         )?;
 
+        // Not in `@fn_table`: it is not a wasm function, and has no wasm index.
+        let ptr_ty = builder.ptr_ty();
+        let i32_ty = builder.i32_ty();
+        let void_ty = builder.void_ty();
+
+        self.trap_func =
+            Some(builder.declare_function(TrapCode::TRAP_FUNC_NAME, &[ptr_ty, i32_ty], void_ty)?);
+
         for func_index in (imported_func_count as usize)..func_decls.len() {
             let func_index = FuncIndex(func_index as u32);
             // Copied out rather than borrowed: `compile_func` takes `&mut self`.
@@ -721,7 +746,7 @@ impl WasmInstrLLVMPassManager {
         let results_count = results_ty.len();
 
         let entry = func.add_basic_block("entry", builder)?;
-        let trap = func.add_basic_block("trap", builder)?; // TODO: fill this with call to externally linked function
+        let trap = func.add_basic_block("trap", builder)?;
         let params = func.params(builder).to_vec();
 
         let runtime_ctx_ptr = *params
@@ -821,6 +846,67 @@ impl WasmInstrLLVMPassManager {
             results_count as u32,
             builder,
         )?;
+
+        self.build_func_trap(trap, runtime_ctx_ptr, builder)?;
+
+        Ok(())
+    }
+
+    /// Fills the function's trap block, once every check in the body has been emitted.
+    ///
+    /// Last for the same reason as the `ret`: only now are all the branches into it
+    /// known. One trap block serves every check, so which trap it was is a phi over
+    /// the blocks that branched here, each contributing its own [`TrapCode`]; the
+    /// block then calls `@tracewasm_trap` with it.
+    ///
+    /// A body with no checks leaves the block with no predecessors. It still needs a
+    /// terminator, and gets a bare `unreachable` — true of a block nothing reaches, and
+    /// a phi cannot be written with no incoming values.
+    fn build_func_trap(
+        &mut self,
+        trap: BasicBlockId,
+        runtime_ctx_ptr: ValueId,
+        builder: &mut Builder,
+    ) -> Result<(), anyhow::Error> {
+        let edges = std::mem::take(&mut self.trap_edges);
+        let mut cursor = builder.cursor_at_block(trap);
+
+        if edges.is_empty() {
+            cursor.build_unreachable()?;
+
+            return Ok(());
+        }
+
+        let i32_ty = cursor.i32_ty();
+        let mut incoming = vec![];
+
+        for (from, code) in edges {
+            let code = cursor.const_value(code as u32 as i32, OperandTy::Asserted(i32_ty))?;
+
+            incoming.push((from, code));
+        }
+
+        let (_, code) = cursor.build_phi(
+            &incoming,
+            OperandTy::Asserted(i32_ty),
+            RegName::Named("trap_code".to_string()),
+        )?;
+
+        let trap_func = self
+            .trap_func
+            .expect("`compile` declares the trap function before emitting any body");
+
+        cursor.build_void_call(
+            FuncRef::Declared(trap_func),
+            &[
+                (runtime_ctx_ptr, OperandTy::Inferred),
+                (code, OperandTy::Inferred),
+            ],
+        )?;
+
+        // The call never returns, and saying so lets LLVM treat every trap edge as a
+        // dead end rather than a path that rejoins the function.
+        cursor.build_unreachable()?;
 
         Ok(())
     }
@@ -1454,6 +1540,54 @@ mod call_indirect_tests {
                 "`{label}` is both a block and a register\n{ir}"
             );
         }
+    }
+
+    /// One trap block serves all three checks, so it learns which one failed from
+    /// a phi over the blocks that branched in, each with its own [`TrapCode`], and
+    /// hands that code to `@tracewasm_trap`.
+    ///
+    /// The whole module was checked with `llvm-as`, and with `opt -O2`, which keeps
+    /// all three checks: the call followed by `unreachable` is a dead end, not a
+    /// path LLVM may assume away.
+    #[test]
+    fn the_trap_block_calls_out_with_the_failing_checks_code() {
+        let ir = ir_for(PAIR_THROUGH_TABLE);
+
+        assert!(
+            ir.contains("declare void @tracewasm_trap(ptr, i32)"),
+            "{ir}"
+        );
+
+        let phi = format!(
+            "%trap_code = phi i32 [ {}, %entry ], [ {}, %call_indirect2_in_bounds ], [ {}, %call_indirect2_non_null ]",
+            TrapCode::TableOutOfBounds as u32,
+            TrapCode::NullTableElement as u32,
+            TrapCode::IndirectCallTypeMismatch as u32,
+        );
+
+        assert!(
+            ir.contains(&format!(
+                "{phi}\n    call void @tracewasm_trap(ptr %param2, i32 %trap_code)\n    unreachable"
+            )),
+            "{ir}"
+        );
+    }
+
+    /// A body with no checks has nothing to branch into its trap block, and a phi
+    /// cannot be written without incoming values — but the block still needs a
+    /// terminator for the IR to assemble.
+    #[test]
+    fn a_trap_block_nothing_reaches_is_just_unreachable() {
+        let ir = ir_for(PAIR_THROUGH_TABLE);
+
+        // `$pair` has no `call_indirect`, so its trap block has no predecessors.
+        let pair = ir
+            .split("define ")
+            .find(|func| func.contains("@fn0("))
+            .expect("`$pair` is fn0");
+
+        assert!(pair.contains("trap:\n    unreachable\n"), "{pair}");
+        assert!(!pair.contains("@tracewasm_trap"), "{pair}");
     }
 
     /// Every name the arm creates carries its instruction index, so a second

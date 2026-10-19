@@ -155,6 +155,85 @@ impl<'a> RuntimeContext<'a> {
     }
 }
 
+/// Why generated code trapped, as the `i32` it hands [`tracewasm_trap`].
+///
+/// Each check branches to its function's one trap block, where a phi picks the code
+/// of whichever check failed. The discriminants are the values the generated code
+/// passes, so they are part of the contract between the two sides and must not be
+/// renumbered.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapCode {
+    /// `call_indirect` with a slot past the table's end.
+    TableOutOfBounds = 0,
+    /// `call_indirect` through a null slot.
+    NullTableElement = 1,
+    /// `call_indirect` to a function whose type is not the one expected.
+    IndirectCallTypeMismatch = 2,
+    /// The `unreachable` instruction.
+    Unreachable = 3,
+    /// Integer division or remainder by zero.
+    IntegerDivideByZero = 4,
+    /// A signed division whose quotient does not fit (`MIN / -1`), or a float
+    /// truncated to an integer it is out of range for.
+    IntegerOverflow = 5,
+    /// A NaN truncated to an integer.
+    InvalidConversionToInteger = 6,
+    /// A memory access, `memory.copy`/`fill`/`init` range, or data segment range
+    /// running past the end.
+    MemoryOutOfBounds = 7,
+}
+
+impl TrapCode {
+    /// The symbol generated code calls to trap, declared in every compiled module.
+    pub const TRAP_FUNC_NAME: &'static str = "tracewasm_trap";
+
+    /// The code generated code passed, or `None` for a value it never passes.
+    pub fn from_u32(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => TrapCode::TableOutOfBounds,
+            1 => TrapCode::NullTableElement,
+            2 => TrapCode::IndirectCallTypeMismatch,
+            3 => TrapCode::Unreachable,
+            4 => TrapCode::IntegerDivideByZero,
+            5 => TrapCode::IntegerOverflow,
+            6 => TrapCode::InvalidConversionToInteger,
+            7 => TrapCode::MemoryOutOfBounds,
+            _ => return None,
+        })
+    }
+
+    /// The spec's wording for this trap, which the spec tests match on.
+    pub fn message(&self) -> &'static str {
+        match self {
+            TrapCode::TableOutOfBounds => "undefined element",
+            TrapCode::NullTableElement => "uninitialized element",
+            TrapCode::IndirectCallTypeMismatch => "indirect call type mismatch",
+            TrapCode::Unreachable => "unreachable",
+            TrapCode::IntegerDivideByZero => "integer divide by zero",
+            TrapCode::IntegerOverflow => "integer overflow",
+            TrapCode::InvalidConversionToInteger => "invalid conversion to integer",
+            TrapCode::MemoryOutOfBounds => "out of bounds memory access",
+        }
+    }
+}
+
+/// What generated code calls when a check fails, linked in under
+/// [`TrapCode::TRAP_FUNC_NAME`].
+///
+/// It must not return: the call is followed by `unreachable`, so returning would
+/// be undefined behaviour. For now it aborts with the trap's message. Handing the
+/// trap back to the host as an error needs it to unwind into
+/// [`RuntimeInstance::call`] instead, which needs the JIT to register unwind info.
+pub extern "C" fn tracewasm_trap(_ctx: *mut RuntimeContext, code: u32) -> ! {
+    match TrapCode::from_u32(code) {
+        Some(trap) => eprintln!("wasm trap: {}", trap.message()),
+        None => eprintln!("wasm trap: unknown trap code {code}"),
+    }
+
+    std::process::abort()
+}
+
 /// One global's slot: eight bytes, untyped.
 ///
 /// Nothing records *which* type a slot holds, because every reader already knows by
@@ -402,6 +481,28 @@ mod tests {
 
         assert_eq!(GlobalVal::from(Val::F32(f32_nan)).bits(), 0x7fc0_beef);
         assert_eq!(GlobalVal::from(Val::F32(-0.0)).bits(), 0x8000_0000);
+    }
+
+    /// The code generated code passes is the discriminant, and reads back as the
+    /// same trap — the two sides only share the number.
+    #[test]
+    fn a_trap_code_survives_the_trip_through_its_number() {
+        let codes = [
+            TrapCode::TableOutOfBounds,
+            TrapCode::NullTableElement,
+            TrapCode::IndirectCallTypeMismatch,
+            TrapCode::Unreachable,
+            TrapCode::IntegerDivideByZero,
+            TrapCode::IntegerOverflow,
+            TrapCode::InvalidConversionToInteger,
+            TrapCode::MemoryOutOfBounds,
+        ];
+
+        for code in codes {
+            assert_eq!(TrapCode::from_u32(code as u32), Some(code));
+        }
+
+        assert_eq!(TrapCode::from_u32(codes.len() as u32), None);
     }
 
     /// A table slot, both ways round.

@@ -3,7 +3,7 @@ use crate::{
         FuncContext, StackInstruction,
         llvm::{
             IfCtx, LabelKind, WasmInstrLLVMPassManager,
-            ctx::{OptionalU32, RuntimeContext, TableEntry},
+            ctx::{OptionalU32, RuntimeContext, TableEntry, TrapCode},
         },
     },
     module::{Module, ValType},
@@ -373,6 +373,9 @@ impl StackInstruction {
                     &mut curr_cursor,
                 )?;
 
+                pass_manager
+                    .record_trap_edge(curr_cursor.basic_block(), TrapCode::TableOutOfBounds);
+
                 curr_cursor.build_conditional_br(
                     in_bounds,
                     in_bounds_block,
@@ -447,6 +450,9 @@ impl StackInstruction {
                     &mut curr_cursor,
                 )?;
 
+                pass_manager
+                    .record_trap_edge(curr_cursor.basic_block(), TrapCode::NullTableElement);
+
                 curr_cursor.build_conditional_br(
                     non_null,
                     non_null_block,
@@ -495,6 +501,11 @@ impl StackInstruction {
                     format!("call_indirect{}_sig_ok", instr_index),
                     &mut curr_cursor,
                 )?;
+
+                pass_manager.record_trap_edge(
+                    curr_cursor.basic_block(),
+                    TrapCode::IndirectCallTypeMismatch,
+                );
 
                 curr_cursor.build_conditional_br(
                     sig_matches,
