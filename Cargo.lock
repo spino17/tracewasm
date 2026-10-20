@@ -536,6 +536,7 @@ dependencies = [
  "bytemuck",
  "gimli",
  "id-arena",
+ "llvm-sys",
  "ordered-float",
  "phf",
  "rustc-demangle",

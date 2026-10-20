@@ -81,6 +81,9 @@ use tracewasm_llvm::{
 pub mod ctx;
 pub mod emit;
 
+#[cfg(all(test, feature = "jit"))]
+mod jit_harness;
+
 /// One open label's `end`: the block control lands in, and the phis waiting there.
 ///
 /// The three vectors are parallel and in the label's own result order, deepest first.

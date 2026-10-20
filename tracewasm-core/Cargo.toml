@@ -20,5 +20,13 @@ ordered-float = { workspace = true }
 tracewasm-llvm = { path = "../tracewasm-llvm" }
 tracewasm-utils = { path = "../tracewasm-utils" }
 
+# Only for the JIT lowering harness, which needs `LLVMCodeGenOptLevel` to start a JIT.
+llvm-sys = { version = "221.0.0", optional = true }
+
 [dev-dependencies]
 wat = "1.254.0"
+
+[features]
+# Runs lowered code in-process under the JIT. Links libLLVM, so it stays opt-in:
+# `cargo test -p tracewasm-core --features jit --lib jit_harness`.
+jit = ["tracewasm-llvm/jit", "dep:llvm-sys"]
